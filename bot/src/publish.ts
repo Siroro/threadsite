@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import os from "node:os";
@@ -95,7 +94,7 @@ async function checkScriptSyntax(absolute: string, label: string): Promise<void>
  */
 async function validateInlineScripts(root: string): Promise<void> {
   const checks: Array<{ extension: ".js" | ".mjs" | ".json"; body: string; label: string }> = [];
-  for (const html of await listHtmlFiles(root)) {
+  for (const html of await listFiles(root, /\.html?$/i)) {
     const rel = `site/${path.relative(root, html).replaceAll(path.sep, "/")}`;
     const source = await fs.readFile(html, "utf8");
     let index = 0;
@@ -141,7 +140,7 @@ async function validateInlineScripts(root: string): Promise<void> {
  * already relative.
  */
 async function validateAssetReferences(root: string): Promise<void> {
-  for (const html of await listHtmlFiles(root)) {
+  for (const html of await listFiles(root, /\.html?$/i)) {
     const rel = `site/${path.relative(root, html).replaceAll(path.sep, "/")}`;
     const source = await fs.readFile(html, "utf8");
     const references: Array<{ kind: string; url: string; enforceRelative: boolean }> = [];
@@ -198,8 +197,17 @@ function tagAttr(attrs: string, name: string): string {
  * checks are off (DOM APIs return nullable types everywhere and generated code
  * rarely guards them), TS2307 diagnostics for non-relative imports are dropped
  * because CDN/import-map dependencies like `three` have no local node_modules
- * to resolve against, and TS2339 diagnostics on DOM base-type receivers are
- * dropped because un-narrowed DOM lookups are idiomatic here.
+ * to resolve against, TS2339 diagnostics on DOM base-type receivers are
+ * dropped because un-narrowed DOM lookups are idiomatic here, legacy
+ * vendor-prefixed lookups on `window` (`window.webkitAudioContext`) are
+ * dropped because tsc's DOM lib does not carry them, diagnostics caused by
+ * string-literal inference (TS2367 comparisons and TS2322 assignments whose
+ * target type is a string literal — frozen constant maps pin singleton types
+ * onto plain status variables) are dropped because the strings are ordinary
+ * values at runtime, and TS2554 in the surplus-argument direction is dropped
+ * because JavaScript ignores extra call arguments. Everything else — undefined
+ * variables, genuinely wrong types, too-few arguments, misspelled imports —
+ * fails the turn.
  *
  * Vendored code is never type-checked: inference over a minified bundle (a
  * vendored three.js yields hundreds of bogus diagnostics) also poisons call
@@ -383,7 +391,14 @@ function significantDiagnostics(raw: string): string {
 }
 
 function isIgnoredDiagnostic(header: string): boolean {
-  return isUnresolvedExternalImport(header) || isVendoredFileDiagnostic(header) || isDomBaseTypeDiagnostic(header);
+  return (
+    isUnresolvedExternalImport(header) ||
+    isVendoredFileDiagnostic(header) ||
+    isDomBaseTypeDiagnostic(header) ||
+    isLegacyWindowPropertyDiagnostic(header) ||
+    isStringLiteralInferenceDiagnostic(header) ||
+    isSurplusArgumentDiagnostic(header)
+  );
 }
 
 /** Matches TS2307 lines for bare package imports (`three`), not relative paths (`./foo`). */
@@ -415,6 +430,54 @@ function isVendoredFileDiagnostic(line: string): boolean {
 function isDomBaseTypeDiagnostic(line: string): boolean {
   return /error TS2339: Property '[^']+' does not exist on type '(?:Element|HTMLElement|SVGElement|EventTarget|Node|ChildNode)'\.$/
     .test(line);
+}
+
+/**
+ * TS2339/TS2551 property lookups on `window`/`globalThis`. Legacy
+ * vendor-prefixed APIs (`window.webkitAudioContext`,
+ * `window.mozRequestAnimationFrame`) are absent from tsc's DOM lib even though
+ * Safari/old-Chrome support them, so the idiomatic
+ * `window.AudioContext || window.webkitAudioContext` fallback pattern flags;
+ * reading window globals defined by other scripts flags the same way. The
+ * browser resolves these dynamically at runtime.
+ */
+function isLegacyWindowPropertyDiagnostic(line: string): boolean {
+  return /error TS25(?:39|51): Property '[^']+' does not exist on type '(?:Window|globalThis)/.test(line);
+}
+
+/**
+ * Diagnostics caused by non-widening string-literal inference in untyped JS.
+ * Frozen constant maps (`Object.freeze({ MENU: "menu", PLAY: "playing" })`) and
+ * other literal-preserving sources pin singleton types onto plain variables,
+ * so the idiomatic state-machine pattern — copy a constant into a `let`, later
+ * assign or compare a different status — fails with TS2322/TS2367 even though
+ * the strings are ordinary values at runtime. (The harness's own NET_STATUS
+ * map is JSDoc-typed to string for exactly this reason; games still define
+ * their own maps.) Only assignments whose target type is a string literal
+ * (or a union led by one) are dropped — every other mismatched-type assignment
+ * still fails — and TS2367 (a dead-branch heuristic, never browser-fatal) is
+ * dropped outright.
+ */
+function isStringLiteralInferenceDiagnostic(line: string): boolean {
+  return (
+    /error TS2367: This comparison appears to be unintentional/.test(line) ||
+    /error TS2322: Type '[^']*' is not assignable to type '"/.test(line)
+  );
+}
+
+/**
+ * TS2554 in the surplus-argument direction: more arguments passed than the
+ * callee declares. JavaScript ignores extra arguments at runtime, and
+ * generated game code routinely passes an event or status object to a helper
+ * declared without parameters. The dangerous direction — too few arguments,
+ * which surfaces as `undefined` inside the callee — still fails, so only
+ * diagnostics whose `got` count exceeds the declared maximum are dropped.
+ */
+function isSurplusArgumentDiagnostic(line: string): boolean {
+  const match = line.match(/error TS2554: Expected (?:(\d+)-(\d+)|at most (\d+)|(\d+)) arguments?, but got (\d+)/);
+  if (!match) return false;
+  const expectedMax = Math.max(Number(match[1] ?? match[3] ?? match[4] ?? 0), Number(match[2] ?? 0));
+  return Number(match[5]) > expectedMax;
 }
 
 /**
@@ -517,72 +580,99 @@ export async function publishSite(siteDir: string, siteSlug: string): Promise<vo
   }
 }
 
+/** Local asset file types whose references get versioned query strings. */
+const CACHEABLE_ASSET_RE = /\.(?:css|js|mjs)$/i;
+
 /**
- * Rewrite local CSS/JS references in published HTML with content-hash query
- * strings (style.css?v=a1b2c3) so a fresh deploy always busts browser/CDN
+ * Relative import/export specifiers that point at cacheable assets:
+ * `import "./x.js"`, `import { a } from "./x.js"`, `import("./x.mjs")`,
+ * `export * from "./y.js"`. Recreated per pass because the regex is global.
+ */
+function relativeAssetImportRe(): RegExp {
+  return /((?:\bfrom|\bimport)\s*\(?\s*)(["'])(\.{1,2}\/[^"']*\.(?:m?js|css))\2/gi;
+}
+
+/**
+ * Rewrite local asset references in published HTML and JS with content-hash
+ * query strings (game.js?v=a1b2c3) so a fresh deploy always busts browser/CDN
  * caches, while unchanged files keep their URLs and stay cached. Only relative
  * same-site references are touched; remote URLs and non-asset links pass
- * through untouched. Runs on the staging copy, so the workspace source and the
- * git history stay clean.
+ * through untouched. ES module import specifiers inside published JS files are
+ * rewritten too: index.html may load main.js?v=…, but main.js imports
+ * "./game.js" verbatim, so without this a returning visitor's browser keeps
+ * serving its cached game.js (and everything game.js imports) until that
+ * URL's Cache-Control expires, never asking for the redeployed files.
+ * All version hashes are computed from the original file bytes before any
+ * rewriting starts, so a file's version never depends on rewrite order or on
+ * its own rewritten content. Runs on the staging copy, so the workspace
+ * source and the git history stay clean.
  */
 async function versionAssetReferences(stagingRoot: string): Promise<void> {
-  const htmlFiles = await listHtmlFiles(stagingRoot);
-  for (const html of htmlFiles) {
+  const hashes = await hashCacheableAssets(stagingRoot);
+  const version = (rawUrl: string, resolveDir: string): string | undefined => {
+    const [reference, ...rest] = rawUrl.split("#");
+    const hashFragment = rest.length ? `#${rest.join("#")}` : "";
+    const [pathPart, ...queryRest] = reference.split("?");
+    const existingQuery = queryRest.length ? `?${queryRest.join("?")}` : "";
+    if (!CACHEABLE_ASSET_RE.test(pathPart)) return undefined;
+    // Only relative references resolve against this site; absolute paths,
+    // remote URLs, and protocol-relative URLs are left alone.
+    if (/^(?:[a-z]+:)?\/\//i.test(pathPart) || pathPart.startsWith("/") || pathPart.startsWith("data:")) return undefined;
+
+    const resolved = path.resolve(resolveDir, decodeURIComponent(pathPart));
+    if (!resolved.startsWith(`${stagingRoot}${path.sep}`)) return undefined;
+    // A reference the rewriter cannot resolve (dangling href, a "./x.js"
+    // mentioned in a comment) passes through unversioned rather than failing
+    // the publish.
+    const hash = hashes.get(resolved);
+    return hash ? `${pathPart}${existingQuery || `?v=${hash}`}${hashFragment}` : undefined;
+  };
+
+  for (const html of await listFiles(stagingRoot, /\.html?$/i)) {
     const original = await fs.readFile(html, "utf8");
-    const hashCache = new Map<string, string>();
     let rewritten = original.replace(
       /(\b(?:src|href)\s*=\s*)(["'])([^"']+)\2/gi,
       (match, attribute: string, quote: string, url: string) => {
-        const versioned = versionUrl(url, stagingRoot, path.dirname(html), hashCache);
+        const versioned = version(url, path.dirname(html));
         return versioned ? `${attribute}${quote}${versioned}${quote}` : match;
       },
     );
     // ES module imports inside inline <script type="module"> blocks.
-    rewritten = rewritten.replace(
-      /(from\s+|import\s*\(\s*|import\s+)(["'])(\.{1,2}\/[^"']+\.js)\2/gi,
-      (match, prefix: string, quote: string, url: string) => {
-        const versioned = versionUrl(url, stagingRoot, path.dirname(html), hashCache);
-        return versioned ? `${prefix}${quote}${versioned}${quote}` : match;
-      },
-    );
+    rewritten = rewritten.replace(relativeAssetImportRe(), (match, prefix: string, quote: string, url: string) => {
+      const versioned = version(url, path.dirname(html));
+      return versioned ? `${prefix}${quote}${versioned}${quote}` : match;
+    });
     if (rewritten !== original) await fs.writeFile(html, rewritten, "utf8");
+  }
+
+  for (const script of await listFiles(stagingRoot, /\.(?:js|mjs)$/i)) {
+    const original = await fs.readFile(script, "utf8");
+    const rewritten = original.replace(relativeAssetImportRe(), (match, prefix: string, quote: string, url: string) => {
+      const versioned = version(url, path.dirname(script));
+      return versioned ? `${prefix}${quote}${versioned}${quote}` : match;
+    });
+    if (rewritten !== original) await fs.writeFile(script, rewritten, "utf8");
   }
 }
 
-function versionUrl(
-  rawUrl: string,
-  stagingRoot: string,
-  htmlDir: string,
-  hashCache: Map<string, string>,
-): string | undefined {
-  const [reference, ...rest] = rawUrl.split("#");
-  const hashFragment = rest.length ? `#${rest.join("#")}` : "";
-  const [pathPart, ...queryRest] = reference.split("?");
-  const existingQuery = queryRest.length ? `?${queryRest.join("?")}` : "";
-  if (!/\.(css|js|mjs)$/i.test(pathPart)) return undefined;
-  // Only relative references resolve against this site; absolute paths,
-  // remote URLs, and protocol-relative URLs are left alone.
-  if (/^(?:[a-z]+:)?\/\//i.test(pathPart) || pathPart.startsWith("/") || pathPart.startsWith("data:")) return undefined;
-
-  const resolved = path.resolve(htmlDir, decodeURIComponent(pathPart));
-  if (!resolved.startsWith(`${stagingRoot}${path.sep}`)) return undefined;
-  const cached = hashCache.get(resolved);
-  if (cached) return `${pathPart}${existingQuery || `?v=${cached}`}${hashFragment}`;
-  const content = fsSync.readFileSync(resolved);
-  if (!content.length) return undefined;
-  const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 10);
-  hashCache.set(resolved, hash);
-  return `${pathPart}${existingQuery || `?v=${hash}`}${hashFragment}`;
+/** Content hash (10 hex chars) for every non-empty cacheable asset, by absolute path. */
+async function hashCacheableAssets(stagingRoot: string): Promise<Map<string, string>> {
+  const hashes = new Map<string, string>();
+  for (const file of await listFiles(stagingRoot, CACHEABLE_ASSET_RE)) {
+    const content = await fs.readFile(file);
+    if (content.length) hashes.set(file, crypto.createHash("sha256").update(content).digest("hex").slice(0, 10));
+  }
+  return hashes;
 }
 
-async function listHtmlFiles(root: string): Promise<string[]> {
+async function listFiles(root: string, namePattern: RegExp): Promise<string[]> {
   const out: string[] = [];
   async function walk(dir: string): Promise<void> {
     for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
       if (entry.name.startsWith(".")) continue;
       const absolute = path.join(dir, entry.name);
       if (entry.isDirectory()) await walk(absolute);
-      else if (/\.html?$/i.test(entry.name)) out.push(absolute);
+      else if (namePattern.test(entry.name)) out.push(absolute);
     }
   }
   await walk(root);

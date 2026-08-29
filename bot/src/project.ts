@@ -4,7 +4,7 @@ import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
 import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, ensureGitRepository, ensureLocalBaseline, restoreWorkingTree, undoLastCommit, workingTreeStats } from "./git.js";
 import { ensureMultiplayerFiles, multiplayerContext } from "./multiplayer.js";
-import { OpenCodeHarness, addUsage, type PromptResult, type TurnUsage } from "./opencode.js";
+import { OpenCodeHarness, addUsage, errorUsage, type PromptResult, type TurnUsage } from "./opencode.js";
 import { publishIndex, publishSite, siteUrl, validateSite } from "./publish.js";
 import { Store } from "./store.js";
 import { initialProjectInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, repairInstruction } from "./templates.js";
@@ -18,7 +18,8 @@ import { errorText, parseModel, safeChild, slugify, truncate, withTimeout } from
 export interface MutationResult {
   project: ProjectRecord;
   agentSummary: string;
-  commit: string;
+  /** Commit created by this turn; undefined when committing itself failed (see deliveryError). */
+  commit?: string;
   /** Files changed by the commit itself (vs. total files in site/). */
   commitFiles: number;
   /** Lines added and removed by the commit. */
@@ -30,6 +31,10 @@ export interface MutationResult {
   durationMs: number;
   /** Token/context usage of the turn, when the agent service reported it. */
   usage?: TurnUsage;
+  /** Validation errors that kept the turn unpublished; the work is committed. */
+  validationError?: string;
+  /** Commit/publish pipeline failure after the agent finished; see commit for how far it got. */
+  deliveryError?: string;
 }
 
 export interface RevertResult {
@@ -160,7 +165,9 @@ export class ProjectService {
         });
       }
       const title = generated?.title;
-      if (title) {
+      // Applied only after the build actually ships: a turn that failed
+      // validation or delivery keeps its slug name (see titlePromise above).
+      if (title && !result.validationError && !result.deliveryError && result.commit) {
         // Adopt the AI title end-to-end: Discord thread name, Forgejo repo,
         // published directory, README, and index. The thread-id suffix is kept
         // on the new slug so identities stay unique and stable.
@@ -240,10 +247,12 @@ export class ProjectService {
     if (!prompt.trim()) throw new Error("Prompt is empty.");
     if (prompt.length > config.maxPromptChars) throw new Error(`Prompt exceeds MAX_PROMPT_CHARS (${config.maxPromptChars}).`);
 
+    // Hoisted so the failure ledger in the catch can see what the turn spent
+    // even when a later stage (repair, validation tail, store) throws.
+    let usage: TurnUsage | undefined;
+    const turnStartedAt = Date.now();
     try {
       let agentSummary: string;
-      let usage: TurnUsage | undefined;
-      const turnStartedAt = Date.now();
       const projectKind = project.projectKind ?? "site";
       // The workspace path never changes across patchProject updates below.
       const workspacePath = project.workspacePath;
@@ -329,10 +338,34 @@ export class ProjectService {
         }
         throw error;
       }
-      return await this.completeTurn({
+      const result = await this.completeTurn({
         project, prompt, initial, projectKind, multiplayer, agentSummary, author, onProgress, usage, startedAt: turnStartedAt,
       });
+      // Ledger every finished turn here — published or not — so a turn records
+      // exactly once; thrown failures record in the catch below.
+      await this.usageLog.record({
+        threadId,
+        project: project.displayName,
+        kind: projectKind,
+        durationMs: Date.now() - turnStartedAt,
+        usage: result.usage,
+        fallbackModel: this.store.getModel(),
+        failed: Boolean(result.validationError || result.deliveryError || !result.commit),
+      });
+      return result;
     } catch (error) {
+      // A failed run still spent its tokens: ledger whatever was observed —
+      // the hoisted total plus anything the failing prompt attached to the
+      // error itself — before marking the project errored.
+      await this.usageLog.record({
+        threadId,
+        project: project.displayName,
+        kind: project.projectKind ?? "site",
+        durationMs: Date.now() - turnStartedAt,
+        usage: addUsage(usage, errorUsage(error)),
+        fallbackModel: this.store.getModel(),
+        failed: true,
+      });
       // The failed attempt still landed its prompt (and possibly partial work)
       // in the session, so it counts as activity for the idle-reset rule even
       // though no fresh usage reading could be observed.
@@ -351,6 +384,14 @@ export class ProjectService {
    * Everything after a successful agent prompt: restore harness-owned files,
    * validate (with one repair attempt), commit, publish, and clear the
    * pending-turn marker. Shared by normal turns and restart recovery.
+   *
+   * The agent's finished work is never thrown away. A validation failure
+   * commits the work without publishing it (the live site keeps the last
+   * validated version), and a metadata/commit/publish failure is captured in
+   * the result instead of failing the turn — the result carries the outcome
+   * (`validationError` / `deliveryError` / optional `commit`) so the thread
+   * sees the agent's summary plus a follow-up message with the errors. Only a
+   * store failure rethrows; the caller's catch marks the project errored.
    */
   private async completeTurn(input: {
     project: ProjectRecord;
@@ -379,85 +420,133 @@ export class ProjectService {
 
     await restoreHarnessFiles();
     emit(input.onProgress, "🧪 Validating static output");
-    let stats;
+    let stats: { files: number; bytes: number } | undefined;
+    let validationError: string | undefined;
     try {
       stats = await validateSite(siteDir);
     } catch (error) {
-      // One repair attempt: feed the validation error back to the same agent
-      // session, which can see the files it just wrote, then re-validate.
-      if (!/JavaScript (?:syntax|type-check) error|Broken local reference/i.test(errorText(error))) throw error;
-      log("warn", "project.validation_javascript_retry", { threadId, error: errorText(error) });
-      emit(input.onProgress, "🔧 JavaScript validation errors found — asking the agent to repair them");
-      const repaired = await this.opencode.prompt(
-        workspacePath,
-        project.sessionId,
-        repairInstruction(errorText(error)),
-        this.store.getModel(),
-        input.onProgress,
-        "sitebuilder",
-        this.store.getEffort(),
-      );
-      agentSummary = repaired.text;
-      usage = addUsage(usage, repaired.usage);
-      emit(input.onProgress, "🧪 Re-validating after the repair");
-      await restoreHarnessFiles();
-      stats = await validateSite(siteDir);
+      const firstError = errorText(error);
+      if (!/JavaScript (?:syntax|type-check) error|Broken local reference/i.test(firstError)) {
+        // Structural problems (missing index.html, dotfiles, blocked file
+        // types, size caps) get no repair round-trip; they commit unpublished,
+        // exactly like a failed repair.
+        validationError = firstError;
+      } else {
+        // One repair attempt: feed the validation error back to the same agent
+        // session, which can see the files it just wrote, then re-validate.
+        log("warn", "project.validation_javascript_retry", { threadId, error: firstError });
+        emit(input.onProgress, "🔧 JavaScript validation errors found — asking the agent to repair them");
+        try {
+          const repaired = await this.opencode.prompt(
+            workspacePath,
+            project.sessionId,
+            repairInstruction(firstError),
+            this.store.getModel(),
+            input.onProgress,
+            "sitebuilder",
+            this.store.getEffort(),
+          );
+          agentSummary = repaired.text;
+          usage = addUsage(usage, repaired.usage);
+          emit(input.onProgress, "🧪 Re-validating after the repair");
+          await restoreHarnessFiles();
+          try {
+            stats = await validateSite(siteDir);
+          } catch (reValidationError) {
+            validationError = errorText(reValidationError);
+          }
+        } catch (repairError) {
+          // The repair round-trip itself failed (agent/provider trouble); the
+          // original validation errors still stand and the original summary is
+          // kept — commit the work unpublished like any failed validation.
+          logError("project.repair_prompt_failed", repairError, { threadId });
+          validationError = `${firstError}\n\nThe automatic repair pass could not run: ${errorText(repairError)}`;
+        }
+      }
     }
-    emit(input.onProgress, "📝 Updating project metadata");
-    await this.writeReadme(project);
-    emit(input.onProgress, "⬆️ Committing and pushing to Forgejo");
-    const commitStats = await commitAndPush(
-      workspacePath,
-      commitSubjectFor(input.prompt, input.initial, input.projectKind),
-      this.forgejo,
-      input.author,
-    );
-    emit(input.onProgress, "🚀 Publishing to Apache");
-    await publishSite(siteDir, project.siteSlug);
+
+    let deliveryError: string | undefined;
+    let commitStats: Awaited<ReturnType<typeof commitAndPush>> | undefined;
+
+    if (validationError) {
+      emit(input.onProgress, "⚠️ Validation failed — committing the work without publishing it");
+    } else {
+      emit(input.onProgress, "📝 Updating project metadata");
+    }
+    try {
+      await this.writeReadme(project);
+    } catch (error) {
+      deliveryError = `Updating project metadata failed: ${errorText(error)}`;
+    }
+    if (!deliveryError) {
+      emit(input.onProgress, "⬆️ Committing and pushing to Forgejo");
+      // A validated turn that only fails later keeps a clean subject; a turn
+      // that never validated says so in git history.
+      const subject = validationError
+        ? `${commitSubjectFor(input.prompt, input.initial, input.projectKind)} — failed validation, not published`
+        : commitSubjectFor(input.prompt, input.initial, input.projectKind);
+      try {
+        commitStats = await commitAndPush(workspacePath, subject, this.forgejo, input.author);
+      } catch (error) {
+        deliveryError = `Committing and pushing to Forgejo failed: ${errorText(error)}`;
+        logError("project.commit_failed", error, { threadId });
+      }
+    }
+    if (commitStats && !validationError && !deliveryError) {
+      emit(input.onProgress, "🚀 Publishing to Apache");
+      try {
+        await publishSite(siteDir, project.siteSlug);
+      } catch (error) {
+        deliveryError = `Publishing to the web server failed: ${errorText(error)}`;
+        logError("project.publish_failed", error, { threadId });
+      }
+    }
+
+    const published = Boolean(commitStats) && !validationError && !deliveryError;
     project = await this.store.patchProject(threadId, {
-      status: "ready",
-      lastError: undefined,
-      lastCommit: commitStats.commit,
+      status: published ? "ready" : "error",
+      lastError: published ? undefined : truncate(validationError || deliveryError || "the turn did not publish", 1000),
+      ...(commitStats ? { lastCommit: commitStats.commit } : {}),
       pendingTurn: undefined,
       // Record when the session was last used and how full its context window
       // ended; the next turn's lifecycle check reads both.
       lastTurnAt: new Date().toISOString(),
       ...(usage?.contextTokens ? { lastTurnUsage: { contextTokens: usage.contextTokens, contextLimit: usage.contextLimit } } : {}),
     });
-    emit(input.onProgress, "🗂️ Refreshing the public gallery");
-    await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
-    log("info", "project.published", {
-      threadId,
-      commit: commitStats.commit,
-      files: stats.files,
-      bytes: stats.bytes,
-      commitFiles: commitStats.files,
-      additions: commitStats.additions,
-      deletions: commitStats.deletions,
-      projectKind: input.projectKind,
-    });
-    // Tokenomics ledger for /site-admin usage. Covers every completed turn —
-    // initial builds, mutations, validation-repair passes, and restart
-    // recovery. Failed turns are not recorded: their partial usage is not
-    // observable once the prompt throws.
-    await this.usageLog.record({
-      threadId,
-      project: project.displayName,
-      kind: input.projectKind,
-      durationMs: Date.now() - input.startedAt,
-      usage,
-      fallbackModel: this.store.getModel(),
-    });
+
+    if (published) {
+      emit(input.onProgress, "🗂️ Refreshing the public gallery");
+      // The site is live at this point; a stale gallery index must not fail
+      // the turn — the next successful publish refreshes it again.
+      await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo))
+        .catch((error) => log("warn", "project.index_refresh_failed", { threadId, error: errorText(error) }));
+      log("info", "project.published", {
+        threadId,
+        commit: commitStats!.commit,
+        files: stats?.files ?? 0,
+        bytes: stats?.bytes ?? 0,
+        commitFiles: commitStats!.files,
+        additions: commitStats!.additions,
+        deletions: commitStats!.deletions,
+        projectKind: input.projectKind,
+      });
+    } else if (validationError) {
+      log("warn", "project.validation_failed_committed", { threadId, commit: commitStats?.commit, error: truncate(validationError, 400) });
+    } else {
+      log("warn", "project.delivery_failed", { threadId, commit: commitStats?.commit, error: truncate(deliveryError || "unknown", 400) });
+    }
+
     return {
       project,
       agentSummary,
       usage,
       durationMs: Date.now() - input.startedAt,
-      commit: commitStats.commit,
-      commitFiles: commitStats.files,
-      additions: commitStats.additions,
-      deletions: commitStats.deletions,
-      ...stats,
+      ...(commitStats
+        ? { commit: commitStats.commit, commitFiles: commitStats.files, additions: commitStats.additions, deletions: commitStats.deletions }
+        : { commitFiles: 0, additions: 0, deletions: 0 }),
+      ...(stats ?? { files: 0, bytes: 0 }),
+      ...(validationError ? { validationError } : {}),
+      ...(deliveryError ? { deliveryError } : {}),
     };
   }
 
@@ -476,6 +565,8 @@ export class ProjectService {
     if (!project || !pending) throw new Error("This thread has no interrupted turn to recover.");
     const projectKind = project.projectKind ?? "site";
     const turnStartedAt = Date.now();
+    // Hoisted for the failure ledger in the catch, mirroring mutate().
+    let usage: TurnUsage | undefined;
     log("info", "project.recovery_started", { threadId, initial: pending.initial, startedAt: pending.startedAt });
 
     try {
@@ -485,7 +576,6 @@ export class ProjectService {
       await this.waitForIdleTurn(project.workspacePath, project.sessionId);
 
       let agentSummary: string;
-      let usage: TurnUsage | undefined;
       if (await this.turnCompletedSince(project.workspacePath, project.sessionId, pending.startedAt)) {
         // The turn finished on the agent side while the bot was down; only the
         // commit/publish tail was lost. Token usage was not observable then.
@@ -523,9 +613,27 @@ export class ProjectService {
         usage,
         startedAt: turnStartedAt,
       });
-      log("info", "project.recovery_completed", { threadId, commit: result.commit });
+      await this.usageLog.record({
+        threadId,
+        project: project.displayName,
+        kind: projectKind,
+        durationMs: Date.now() - turnStartedAt,
+        usage: result.usage,
+        fallbackModel: this.store.getModel(),
+        failed: Boolean(result.validationError || result.deliveryError || !result.commit),
+      });
+      log("info", "project.recovery_completed", { threadId, commit: result.commit, published: !result.validationError && !result.deliveryError });
       return result;
     } catch (error) {
+      await this.usageLog.record({
+        threadId,
+        project: project.displayName,
+        kind: projectKind,
+        durationMs: Date.now() - turnStartedAt,
+        usage: addUsage(usage, errorUsage(error)),
+        fallbackModel: this.store.getModel(),
+        failed: true,
+      });
       await this.store.patchProject(threadId, {
         status: "error",
         lastError: truncate(errorText(error), 1000),
@@ -601,16 +709,30 @@ export class ProjectService {
     if (sawBusy) throw new Error("The interrupted agent turn kept running past the recovery window; recovery gave up waiting for it.");
   }
 
-  /** Whether an assistant message completed after the given timestamp. */
+  /**
+   * Whether the turn that was in flight ran to completion on the agent side
+   * while the bot was down. True only when the session's newest message is
+   * that turn's terminal assistant response — an interrupted turn's
+   * intermediate tool-call steps also complete with timestamps seconds into
+   * the turn, so "some assistant message completed" is not evidence the turn
+   * finished. Mirrors findTerminalAssistant's terminal-message predicate.
+   */
   private async turnCompletedSince(workspacePath: string, sessionId: string, sinceIso: string): Promise<boolean> {
     const since = Date.parse(sinceIso);
     if (!Number.isFinite(since)) return false;
     try {
       const messages = await this.opencode.listMessages(workspacePath, sessionId, 100);
-      return messages.some((message) => {
-        const info = message.info;
-        return Boolean(info?.id && info.role === "assistant" && !info.error && (info.time?.completed ?? 0) > since - 2_000);
-      });
+      const newest = [...messages].sort((a, b) => (b.info?.time?.created ?? 0) - (a.info?.time?.created ?? 0))[0];
+      const info = newest?.info;
+      return Boolean(
+        info?.id &&
+          info.role === "assistant" &&
+          !info.error &&
+          (!info.agent || info.agent === "sitebuilder") &&
+          info.finish &&
+          info.finish !== "tool-calls" &&
+          (info.time?.completed ?? 0) > since - 2_000,
+      );
     } catch {
       return false;
     }

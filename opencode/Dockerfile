@@ -6,8 +6,10 @@ RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" \
 
 # LSP servers and formatter used by the opencode.json lsp/formatter sections.
 # Installed globally so they resolve in every workspace regardless of whether
-# the generated site has its own package.json.
-RUN npm install -g typescript-language-server typescript \
+# the generated site has its own package.json. typescript stays pinned to 5.x:
+# typescript-language-server needs the classic tsserver/JS API, which the
+# native TypeScript 7 package no longer ships.
+RUN npm install -g typescript-language-server "typescript@5.9.3" \
     vscode-langservers-extracted prettier
 
 # unzip for extracting downloaded asset archives (tar/gzip ship with the base image).

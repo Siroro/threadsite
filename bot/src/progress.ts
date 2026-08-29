@@ -1,6 +1,7 @@
 import type { Message } from "discord.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
+import { MAX_DISCORD_MESSAGE_CHARS } from "./util.js";
 
 export interface ProgressUpdate {
   text: string;
@@ -16,7 +17,6 @@ export type ProgressCallback = (update: ProgressUpdate) => void | Promise<void>;
 
 const MAX_SUMMARY_CHARS = 180;
 const HISTORY_LINES = 3;
-const MAX_RENDER_CHARS = 1990;
 
 export class DiscordProgress {
   private readonly started = Date.now();
@@ -103,7 +103,7 @@ export class DiscordProgress {
       [head, ...[...history, this.latest].map((line) => `• ${singleLine(line)}`)].join("\n");
     let history = this.history;
     let body = withHistory(history);
-    while (body.length + (this.thought ? this.thought.length + 8 : 0) + (this.stats ? this.stats.length + 4 : 0) + (this.changes ? this.changes.length + 4 : 0) > MAX_RENDER_CHARS && history.length) {
+    while (body.length + (this.thought ? this.thought.length + 8 : 0) + (this.stats ? this.stats.length + 4 : 0) + (this.changes ? this.changes.length + 4 : 0) > MAX_DISCORD_MESSAGE_CHARS && history.length) {
       history = history.slice(1);
       body = withHistory(history);
     }
@@ -111,7 +111,7 @@ export class DiscordProgress {
     if (this.thought) lines.push(`> 💭 ${this.thought}`);
     if (this.stats) lines.push(`-# ${this.stats}`);
     if (this.changes) lines.push(`-# ${this.changes}`);
-    return lines.join("\n").slice(0, MAX_RENDER_CHARS);
+    return lines.join("\n").slice(0, MAX_DISCORD_MESSAGE_CHARS);
   }
 }
 

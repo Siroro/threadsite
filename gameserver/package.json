@@ -9,6 +9,6 @@
     "test:client": "node client-smoke-test.mjs"
   },
   "dependencies": {
-    "ws": "8.18.3"
+    "ws": "8.21.3"
   }
 }

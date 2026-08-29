@@ -143,6 +143,15 @@ export interface PromptResult {
   usage: TurnUsage;
 }
 
+/**
+ * Usage a failed prompt had already observed before it threw, attached to the
+ * error by OpenCodeHarness.prompt so callers can ledger failed turns. Undefined
+ * for errors from calls that never entered prompt (or accumulated nothing).
+ */
+export function errorUsage(error: unknown): TurnUsage | undefined {
+  return (error as { turnUsage?: TurnUsage } | undefined)?.turnUsage;
+}
+
 export class OpenCodeHarness {
   private readonly client = createOpencodeClient({
     baseUrl: config.opencodeUrl,
@@ -288,7 +297,7 @@ export class OpenCodeHarness {
           emit(onProgress, { text: "✅ Recovered the completed agent turn" });
           return { text: recovered, usage: usageOf(turn) };
         } catch (recoveryError) {
-          const enriched = enrichProviderError(recoveryError, model);
+          const enriched = enrichProviderError(recoveryError, model, usageOf(turn));
           logError("opencode.prompt_recovery_failed", enriched, {
             sessionId,
             model: model || "default",
@@ -300,7 +309,7 @@ export class OpenCodeHarness {
         }
       }
 
-      const enriched = enrichProviderError(error, model);
+      const enriched = enrichProviderError(error, model, usageOf(turn));
       logError("opencode.prompt_failed", enriched, {
         sessionId,
         model: model || "default",
@@ -1076,7 +1085,7 @@ function toolLabel(tool: string): string {
   return tool.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function enrichProviderError(error: unknown, model?: string): Error {
+function enrichProviderError(error: unknown, model?: string, usage?: TurnUsage): Error {
   if (error instanceof Error && (error as any).providerHint) return error;
 
   const text = diagnosticText(error);
@@ -1093,6 +1102,9 @@ function enrichProviderError(error: unknown, model?: string): Error {
   const enriched = new Error(`${hint}${model ? ` for ${model}` : ""}: ${errorText(error)}`, { cause: error });
   (enriched as any).providerHint = hint;
   (enriched as any).model = model;
+  // The event stream usually observed real model steps before the failure;
+  // keep them so the failed turn can still be ledgered (errorUsage).
+  if (usage) (enriched as any).turnUsage = usage;
   if ((error as any)?.details !== undefined) (enriched as any).recoveryDetails = (error as any).details;
   if ((error as any)?.mayStillBeRunning) (enriched as any).mayStillBeRunning = true;
   return enriched;

@@ -6,6 +6,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   PermissionFlagsBits,
   REST,
   Routes,
@@ -27,8 +28,8 @@ import { ProjectService, type MutationResult } from "./project.js";
 import { Store } from "./store.js";
 import { projectKindLabel } from "./templates.js";
 import type { ProjectKind, ProjectRecord } from "./types.js";
-import { UsageLog } from "./usage.js";
-import { commitAuthorIdentity, errorText, slugify, stripSummaryPreamble, truncate } from "./util.js";
+import { UsageLog, type UsageTotal } from "./usage.js";
+import { commitAuthorIdentity, errorText, formatCost, formatTokens, MAX_DISCORD_MESSAGE_CHARS, slugify, stripSummaryPreamble, truncate } from "./util.js";
 
 // Stray async failures must log instead of killing the process: an unhandled
 // rejection is process-fatal on Node 22 and would take every in-flight thread
@@ -102,11 +103,13 @@ async function recoverInterruptedTurns(): Promise<void> {
         const result = await projects.recoverTurn(project.threadId, progress?.callback);
         progress?.close();
         const isGame = result.project.projectKind === "game-2d" || result.project.projectKind === "game-3d";
-        await deliver(
-          `♻️ Recovered the interrupted turn after a restart · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})\n` +
-          `${turnStatsText(result)}\n` +
-          `\n# [${isGame ? "PLAY GAME" : "OPEN SITE"}](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`,
-        );
+        if (result.validationError || result.deliveryError || !result.commit) {
+          await deliver(finishedWithErrorsMessageText(result));
+          await sendOutcomeFollowUp(thread, result, { operation: "restart-recovery", guildId: project.guildId });
+        } else {
+          await deliver(successMessageText(result, isGame, undefined,
+            `♻️ Recovered the interrupted turn after a restart · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})`));
+        }
       } catch (error) {
         progress?.close();
         const incident = await reportFailure(error, {
@@ -137,7 +140,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
       const text = `❌ ${truncate(errorText(error), 1800)}`;
       if (interaction.deferred || interaction.replied) await interaction.editReply(text).catch(() => undefined);
-      else await interaction.reply({ content: text, ephemeral: true }).catch(() => undefined);
+      else await interaction.reply({ content: text, flags: MessageFlags.Ephemeral }).catch(() => undefined);
     }
     return;
   }
@@ -156,7 +159,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // Slash command replies here are ephemeral, so the invoking user can safely receive the useful detail.
     const text = `❌ ${truncate(errorText(error), 1800)}`;
     if (interaction.deferred || interaction.replied) await interaction.editReply(text).catch(() => undefined);
-    else await interaction.reply({ content: text, ephemeral: true }).catch(() => undefined);
+    else await interaction.reply({ content: text, flags: MessageFlags.Ephemeral }).catch(() => undefined);
   }
 });
 
@@ -188,13 +191,16 @@ client.on(Events.MessageCreate, async (message) => {
         status.id,
       );
       progress.close();
-      const summary = agentSummaryText(result.agentSummary);
-      await setStatusMessage(
-        status,
-        `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})${summary}\n` +
-        `${turnStatsText(result)}\n` +
-        `\n# [${isGame ? "PLAY GAME" : "OPEN SITE"}](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`,
-      );
+      if (result.validationError || result.deliveryError || !result.commit) {
+        await setStatusMessage(status, finishedWithErrorsMessageText(result));
+        await sendOutcomeFollowUp(message.channel, result, {
+          operation: "thread-update",
+          guildId: message.guildId,
+          requesterId: message.author.id,
+        });
+      } else {
+        await setStatusMessage(status, successMessageText(result, isGame));
+      }
     } catch (error) {
       progress.close();
       const incident = await reportFailure(error, {
@@ -257,7 +263,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
   if (sub === "start") {
     const prompt = interaction.options.getString("prompt", true).trim();
     const requestedName = interaction.options.getString("name")?.trim();
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const { thread, created } = await resolveOrCreateThread(interaction, requestedName || prompt);
     if (store.getProject(thread.id)) throw new Error("That thread already has a site. Just reply in the thread to mutate it.");
@@ -281,14 +287,22 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
           ? (title) => applyAiThreadTitle(thread, title)
           : undefined);
         progress.close();
-        const summary = agentSummaryText(result.agentSummary);
-        await setStatusMessage(
-          status,
-          `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})${summary}\n` +
-          `${turnStatsText(result)}\n` +
-          `\nFrom now on, **every normal message in this thread edits this same site**.\n` +
-          `# [OPEN SITE](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`,
-        );
+        if (result.validationError || result.deliveryError || !result.commit) {
+          await setStatusMessage(
+            status,
+            finishedWithErrorsMessageText(result, "From now on, **every normal message in this thread edits this same site**."),
+          );
+          await sendOutcomeFollowUp(thread, result, {
+            operation: "initial-site-build",
+            guildId: interaction.guildId,
+            requesterId: interaction.user.id,
+          });
+        } else {
+          await setStatusMessage(
+            status,
+            successMessageText(result, false, "From now on, **every normal message in this thread edits this same site**."),
+          );
+        }
       } catch (error) {
         progress.close();
         const project = store.getProject(thread.id);
@@ -318,27 +332,29 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
   if (!project) throw new Error("This thread has no site. Use /site start first.");
 
   if (sub === "info") {
+    const usage = await usageLog.threadTotal(project.threadId);
     await interaction.reply({
       content:
         `**${project.displayName}** — ${project.status}\n` +
         `[open site](${projects.siteLink(project)}) · [source](${projects.repoLink(project)})\n` +
         `Type: ${projectKindLabel(project.projectKind)}\n` +
-        `Model: \`${store.getModel() || "the model default"}\` · Effort: \`${store.getEffort() || "auto"}\`` +
+        `Model: \`${store.getModel() || "the model default"}\` · Effort: \`${store.getEffort() || "auto"}\`\n` +
+        threadUsageText(usage, isAdmin(interaction)) +
         (project.lastError && config.errorReportUserIds.has(interaction.user.id) ? `\nLast private error summary: ${truncate(project.lastError, 900)}` : ""),
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
   if (sub === "republish") {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const updated = await projects.enqueue(project.threadId, () => projects.republish(project.threadId));
     await interaction.editReply(`Republished [${updated.displayName}](${projects.siteLink(updated)}) without calling the model.`);
     return;
   }
 
   if (sub === "compact") {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const result = await projects.enqueue(project.threadId, () => projects.compact(project.threadId));
     await interaction.editReply(
       `🧠 Compaction started with \`${result.model}\`. Older session context is being summarized; ` +
@@ -348,7 +364,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
   }
 
   if (sub === "reset") {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     await projects.enqueue(project.threadId, () => projects.resetSession(project.threadId));
     await interaction.editReply(
       "🔄 Agent session dropped. The next message in this thread starts a fresh conversation — " +
@@ -379,7 +395,7 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
   const projectKind: ProjectKind = dimension === "3d" ? "game-3d" : "game-2d";
   const prompt = interaction.options.getString("prompt", true).trim();
   const requestedName = interaction.options.getString("name")?.trim();
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const { thread, created } = await resolveOrCreateThread(interaction, requestedName || prompt, "game");
   if (store.getProject(thread.id)) throw new Error("That thread already has a project. Use a fresh thread for /makegam, then reply normally to mutate the game.");
@@ -404,13 +420,16 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
         ? (title) => applyAiThreadTitle(thread, title)
         : undefined);
       progress.close();
-      const summary = agentSummaryText(result.agentSummary);
-      await setStatusMessage(
-        status,
-        `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})${summary}\n` +
-        `${turnStatsText(result)}\n` +
-        `\n# [PLAY GAME](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`,
-      );
+      if (result.validationError || result.deliveryError || !result.commit) {
+        await setStatusMessage(status, finishedWithErrorsMessageText(result));
+        await sendOutcomeFollowUp(thread, result, {
+          operation: `initial-${dimension}-game-build`,
+          guildId: interaction.guildId,
+          requesterId: interaction.user.id,
+        });
+      } else {
+        await setStatusMessage(status, successMessageText(result, true));
+      }
     } catch (error) {
       progress.close();
       const project = store.getProject(thread.id);
@@ -438,7 +457,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
   if (!interaction.inGuild()) throw new Error("Admin commands can only be used in a server.");
   if (!isAdmin(interaction)) throw new Error("You need Manage Server (or an allowlisted admin user ID) to use this command.");
   const sub = interaction.options.getSubcommand();
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   if (sub === "status") {
     await interaction.editReply(
@@ -520,11 +539,50 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
   }
 }
 
+// Final success message: status line, agent summary, stats, then the play/open
+// and git links. The summary gets whatever budget the fixed parts leave free;
+// a fixed 1600-char allowance let long project names and URLs push the whole
+// message past Discord's 2000-char edit cap and lose the turn report. Recovery
+// passes a ♻️ head override; its summary then shows whether the turn was
+// continued by the agent or had already finished on the agent side.
+function successMessageText(result: MutationResult, isGame: boolean, note?: string, headOverride?: string): string {
+  const head = headOverride ?? `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${commitStatsText(result)}`;
+  const stats = turnStatsText(result);
+  const noteLine = note ? `\n${note}\n` : "\n";
+  const links = `# [${isGame ? "PLAY GAME" : "OPEN SITE"}](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`;
+  const budget = MAX_DISCORD_MESSAGE_CHARS - head.length - stats.length - noteLine.length - links.length - 1;
+  return `${head}${agentSummaryText(result.agentSummary, budget)}\n${stats}${noteLine}${links}`;
+}
+
+// Final message for a turn whose agent finished but whose work did not ship
+// cleanly: validation failed (committed, not published), publishing failed
+// (committed, not live), or the commit itself failed (edits kept in the
+// workspace). The agent's summary still leads; the error detail follows in a
+// separate thread message (sendOutcomeFollowUp).
+function finishedWithErrorsMessageText(result: MutationResult, note?: string): string {
+  const head = !result.commit
+    ? `⚠️ **${result.project.displayName}** — the agent finished, but committing failed · edits preserved in the workspace`
+    : result.validationError
+      ? `⚠️ **${result.project.displayName}** · validation failed — committed \`${result.commit}\`, not published · ${commitStatsText(result)}`
+      : `⚠️ **${result.project.displayName}** · committed \`${result.commit}\`, but publishing failed — not live · ${commitStatsText(result)}`;
+  const stats = turnStatsText(result);
+  const noteLine = note ? `\n${note}\n` : "\n";
+  const links = `[git](<${projects.repoLink(result.project)}>)`;
+  const budget = MAX_DISCORD_MESSAGE_CHARS - head.length - stats.length - noteLine.length - links.length - 1;
+  return `${head}${agentSummaryText(result.agentSummary, budget)}\n${stats}${noteLine}${links}`;
+}
+
+/** `12 files changed (+300/−20)` — shared by the success and outcome heads. */
+function commitStatsText(result: MutationResult): string {
+  return `${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})`;
+}
+
 // Final-message summary block: agent text minus the meta opener ("Implemented a
-// complete 3D browser game in site/…"), ready to paste under the status line.
-function agentSummaryText(raw: string | undefined): string {
+// complete 3D browser game in site/…"), squeezed into the given character budget.
+function agentSummaryText(raw: string | undefined, budget: number): string {
+  if (budget < 80) return "";
   const stripped = raw ? stripSummaryPreamble(raw) : "";
-  return stripped ? `\n${truncate(stripped, 1600)}` : "";
+  return stripped ? `\n${truncate(stripped, budget - 1)}` : "";
 }
 
 // Final-message subtext: how long the turn took plus its cumulative token
@@ -532,6 +590,59 @@ function agentSummaryText(raw: string | undefined): string {
 function turnStatsText(result: MutationResult): string {
   const usage = result.usage ? formatTurnUsage(result.usage) : "";
   return `-# ⏱️ ${formatElapsed(result.durationMs)}${usage ? ` · 🧠 ${usage}` : ""}`;
+}
+
+/**
+ * Follow-up thread message with the errors behind a finished-but-unshipped
+ * turn: validation errors verbatim, and — for commit/publish pipeline
+ * failures, which are operational — an incident reference for the private
+ * error report. Best-effort delivery; the outcome message already went out.
+ */
+async function sendOutcomeFollowUp(
+  channel: { send: (options: { content: string }) => Promise<unknown> } | undefined,
+  result: MutationResult,
+  context: { operation: string; guildId?: string | null; requesterId?: string },
+): Promise<void> {
+  if (!channel) return;
+  const blocks: string[] = [];
+  if (result.validationError) {
+    blocks.push(
+      `⚠️ **Validation errors**${result.commit ? ` — the work is committed as \`${result.commit}\` but **not published**; the live version is unchanged` : " — and the work could not be committed"}.\n`
+        + `${truncate(result.validationError, 900)}\n`
+        + "Reply in this thread to have the agent fix these errors.",
+    );
+  }
+  if (!result.commit || result.deliveryError) {
+    const incident = await reportFailure(new Error(result.deliveryError ?? "Committing the finished work failed"), {
+      operation: context.operation,
+      guildId: context.guildId,
+      threadId: result.project.threadId,
+      requesterId: context.requesterId,
+      project: result.project,
+      model: store.getModel() || "the model default",
+    });
+    blocks.push(!result.commit
+      ? `❌ Committing the finished work failed · reference \`${incident.id}\`.\n${truncate(result.deliveryError ?? "", 600)}\nThe agent's edits are preserved in the workspace — reply in this thread to try again.`
+      : `❌ Publishing failed after commit \`${result.commit}\` · reference \`${incident.id}\`.\n${truncate(result.deliveryError ?? "", 600)}\nThe live site keeps the previous version — try \`/site republish\` once the server issue is resolved.`);
+  }
+  if (!blocks.length) return;
+  await channel.send({ content: truncate(blocks.join("\n\n"), MAX_DISCORD_MESSAGE_CHARS) }).catch(() => undefined);
+}
+
+// /site info usage block: the thread's lifetime ledgered usage. Token counts
+// are public; the spend figure stays admin-only, matching /site-admin usage.
+function threadUsageText(total: UsageTotal, includeCost: boolean): string {
+  if (!total.turns) return "Usage: none recorded yet";
+  const cached = total.cacheTokens > 0 ? ` (${formatTokens(total.cacheTokens)} cached)` : "";
+  const cost = includeCost ? ` · ${formatCost(total.cost)}` : "";
+  const failed = total.failedTurns > 0 ? ` · ${total.failedTurns} failed` : "";
+  const models = [...total.models.values()]
+    .sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens))
+    .slice(0, 3)
+    .map((model) => `\`${model.model}\` (${model.turns})`);
+  const more = total.models.size - models.length;
+  return `Usage: ${total.turns} model turns${failed} · in ${formatTokens(total.inputTokens)}${cached} · out ${formatTokens(total.outputTokens)} tok${cost}\n`
+    + `Models: ${models.join(" · ")}${more > 0 ? ` · +${more} more` : ""}`;
 }
 
 function isAdmin(interaction: ChatInputCommandInteraction): boolean {
@@ -587,13 +698,15 @@ function failureEditsRow(): ActionRowBuilder<ButtonBuilder> {
  * Publish a final outcome on a turn's live status message. The user may have
  * deleted that message mid-turn (Discord 10008 Unknown Message) — deliver the
  * outcome as a fresh thread message instead of failing the whole turn report.
+ * Content is hard-capped under Discord's 2000-char limit so no assembly bug
+ * above this point can make the delivery itself fail.
  */
 async function setStatusMessage(
   status: Message,
   content: string,
   components?: ActionRowBuilder<ButtonBuilder>[],
 ): Promise<void> {
-  const payload = { content, ...(components ? { components } : {}) };
+  const payload = { content: truncate(content, MAX_DISCORD_MESSAGE_CHARS), ...(components ? { components } : {}) };
   try {
     await status.edit(payload);
   } catch (error) {
@@ -623,7 +736,7 @@ async function handleFailureButton(interaction: ButtonInteraction): Promise<void
     throw new Error("This button only works inside a project thread.");
   }
   const action = interaction.customId === "threadsite:rollback" ? "rollback" : "keep";
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   if (await projects.agentBusy(interaction.channel.id)) {
     throw new Error("An agent turn is currently running in this thread. Wait for it to finish before deciding.");
   }
