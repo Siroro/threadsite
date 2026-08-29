@@ -6,10 +6,10 @@ import { formatCost, formatTokens, truncate } from "./util.js";
 
 /**
  * Append-only token/cost ledger behind `/site-admin usage`: one JSONL line per
- * completed agent turn (initial, mutation, repair, restart-recovery) and per AI
- * thread-title prompt. A separate file from state.json so day-by-day history
- * survives without growing the store, and so a corrupt line costs one entry,
- * not the whole bot state.
+ * agent turn — completed or failed, initial, mutation, repair, restart-recovery
+ * — and per AI thread-title prompt. A separate file from state.json so
+ * day-by-day history survives without growing the store, and so a corrupt line
+ * costs one entry, not the whole bot state.
  */
 export interface UsageEntry {
   v: 1;
@@ -20,6 +20,8 @@ export interface UsageEntry {
   project: string;
   kind: string;
   durationMs?: number;
+  /** Present when the turn failed; failed turns still consumed tokens. */
+  failed?: true;
   inputTokens: number;
   outputTokens: number;
   cacheTokens: number;
@@ -29,12 +31,15 @@ export interface UsageEntry {
 
 interface UsageTotal {
   turns: number;
+  failedTurns: number;
   inputTokens: number;
   outputTokens: number;
   cacheTokens: number;
   cost: number;
   models: Map<string, ModelUsage & { turns: number }>;
 }
+
+export type { UsageTotal };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -46,7 +51,7 @@ function localDateKey(date: Date): string {
 }
 
 function emptyTotal(): UsageTotal {
-  return { turns: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, models: new Map() };
+  return { turns: 0, failedTurns: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, models: new Map() };
 }
 
 function addToTotal(
@@ -57,10 +62,15 @@ function addToTotal(
     cacheTokens: number;
     cost: number;
     turns?: number;
+    /** Pre-aggregated failed-turn count, when folding a whole day/blob in. */
+    failedTurns?: number;
+    /** Single-entry failure marker (a raw ledger line). */
+    failed?: boolean;
     models?: Array<ModelUsage & { turns?: number }>;
   },
 ): void {
   total.turns += entry.turns ?? 1;
+  total.failedTurns += entry.failedTurns ?? (entry.failed ? 1 : 0);
   total.inputTokens += entry.inputTokens;
   total.outputTokens += entry.outputTokens;
   total.cacheTokens += entry.cacheTokens;
@@ -89,10 +99,11 @@ export class UsageLog {
   constructor(private readonly file: string) {}
 
   /**
-   * Persist one completed usage record. Best-effort: a ledger failure is logged
-   * and never fails the turn it describes. Turns whose usage could not be
-   * observed (e.g. recovered after finishing while the bot was down) still
-   * record a zero-token entry so day turn counts stay truthful.
+   * Persist one usage record, completed or failed. Best-effort: a ledger
+   * failure is logged and never fails the turn it describes. Turns whose usage
+   * could not be observed (e.g. recovered after finishing while the bot was
+   * down, or dropped before the first model step) still record a zero-token
+   * entry so day turn counts stay truthful.
    */
   async record(input: {
     label?: "turn" | "title";
@@ -100,6 +111,8 @@ export class UsageLog {
     project: string;
     kind: string;
     durationMs?: number;
+    /** True when the turn threw or failed validation; its tokens were still spent. */
+    failed?: boolean;
     usage?: TurnUsage;
     /** Model to attribute tokens to when the turn reported no per-model breakdown. */
     fallbackModel?: string;
@@ -121,6 +134,7 @@ export class UsageLog {
       project: input.project,
       kind: input.kind,
       ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
+      ...(input.failed ? { failed: true as const } : {}),
       inputTokens,
       outputTokens,
       cacheTokens,
@@ -135,6 +149,18 @@ export class UsageLog {
     }
   }
 
+  /** Lifetime ledgered usage for one thread (completed + failed turns and title prompts). */
+  async threadTotal(threadId: string): Promise<UsageTotal & { lastTs?: string }> {
+    const total = emptyTotal();
+    let lastTs: string | undefined;
+    for (const entry of await this.readEntries()) {
+      if (entry.threadId !== threadId) continue;
+      addToTotal(total, entry);
+      if (!lastTs || entry.ts > lastTs) lastTs = entry.ts;
+    }
+    return { ...total, lastTs };
+  }
+
   /** Render the `/site-admin usage` report covering the last `days` local days (today included). */
   async renderReport(days: number): Promise<string> {
     const dayTotals = await this.summarize(days);
@@ -143,16 +169,17 @@ export class UsageLog {
 
     if (!dayTotals.length) {
       return `📊 No recorded model usage in the last ${days} day${days === 1 ? "" : "s"}. `
-        + "Usage is ledgered per completed turn, so history builds up from now on.";
+        + "Usage is ledgered per turn (completed or failed), so history builds up from now on.";
     }
 
     const todayKey = localDateKey(new Date());
     const dayLines = dayTotals.map((day) => {
       const date = day.date === todayKey ? `Today · ${day.date}` : day.date;
-      return `**${date}** — ${day.turns} turn${day.turns === 1 ? "" : "s"} · ${figuresLine(day)}`;
+      const failed = day.failedTurns > 0 ? ` (${day.failedTurns} failed)` : "";
+      return `**${date}** — ${day.turns} turn${day.turns === 1 ? "" : "s"}${failed} · ${figuresLine(day)}`;
     });
     if (!dayTotals.some((day) => day.date === todayKey)) {
-      dayLines.unshift(`**Today · ${todayKey}** — no completed turns yet`);
+      dayLines.unshift(`**Today · ${todayKey}** — no turns yet`);
     }
 
     const modelLines = [...total.models.values()]
@@ -164,7 +191,7 @@ export class UsageLog {
     const hiddenModels = modelLines.length - shownModels.length;
 
     const footer =
-      `**${days}-day total** — ${total.turns} turn${total.turns === 1 ? "" : "s"} · ${figuresLine(total)}\n\n`
+      `**${days}-day total** — ${total.turns} turn${total.turns === 1 ? "" : "s"}${total.failedTurns > 0 ? ` (${total.failedTurns} failed)` : ""} · ${figuresLine(total)}\n\n`
       + `**Models**\n${shownModels.join("\n")}${hiddenModels > 0 ? `\n+${hiddenModels} more model${hiddenModels === 1 ? "" : "s"}` : ""}`
       + (total.cost === 0 && (total.inputTokens || total.outputTokens) > 0
         ? "\n-# Costs show $0 because the provider's pricing is not reported for these models."

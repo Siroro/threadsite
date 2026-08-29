@@ -88,7 +88,7 @@ This repository is maintained by the ThreadSite Discord harness. The published d
 
 - Every JavaScript file under \`site/\` — and every inline \`<script>\` block in your HTML — must parse (\`node --check\`; \`type="module"\` blocks are parsed as ES modules).
 - \`<script type="importmap">\` content must be valid JSON.
-- Authored JavaScript is type-checked with tsc (lenient: implicit \`any\` is allowed, unresolvable bare CDN imports are ignored, and member access on base-typed DOM lookups such as \`querySelector\` results or \`event.target\` is not flagged — no narrowing or casts needed for those). Undefined variables and genuinely wrong types fail the turn. Vendored library files under \`site/assets/\` are never type-checked and imports from them are treated as \`any\` — but a named import the vendored module does not actually export still fails, so use the library's real export names.
+- Authored JavaScript is type-checked with tsc (lenient: implicit \`any\` is allowed, unresolvable bare CDN imports are ignored, and member access on base-typed DOM lookups such as \`querySelector\` results or \`event.target\` is not flagged — no narrowing or casts needed for those. Also not flagged: legacy vendor-prefixed lookups on \`window\` such as \`window.webkitAudioContext\`, reassigning or comparing a status variable across the values of a frozen constant map, and passing more arguments than a function declares — JavaScript ignores surplus arguments at runtime). Undefined variables, genuinely wrong types, and calling a function with too few arguments fail the turn. Vendored library files under \`site/assets/\` are never type-checked and imports from them are treated as \`any\` — but a named import the vendored module does not actually export still fails, so use the library's real export names.
 - Every local \`<script src>\` and stylesheet \`<link href>\` must point at a file that exists inside \`site/\`. Root-absolute URLs like \`/js/main.js\` are rejected — the site is served under a path prefix, so use relative paths only.
 - Every literal \`getElementById("...")\` / \`querySelector("#...")\` id must exist somewhere in the site HTML or be created by the JavaScript.
 - No dotfiles, symlinks, or server-executable file types anywhere under \`site/\`.
@@ -98,7 +98,7 @@ This repository is maintained by the ThreadSite Discord harness. The published d
 You never deploy, commit, or publish anything yourself. The moment your reply ends, the bot's deploy pipeline runs automatically:
 
 1. Harness-owned files (\`site/js/threadsite-net.js\`, \`site/js/net-config.js\`, this \`AGENTS.md\`) are restored to their canonical versions — editing them is always undone.
-2. \`site/\` is validated with the checks above; JavaScript errors get exactly one automatic repair round-trip back to you before the turn fails.
+2. \`site/\` is validated with the checks above; JavaScript errors get exactly one automatic repair round-trip back to you. Work that still fails validation is committed to git but **not published** — the errors are posted in the thread and the next reply must fix them. A validated turn that only fails to publish later still counts as good work; \`/site republish\` ships it.
 3. The accepted \`site/\` tree is committed to the project's git repository, authored by the Discord user who requested the change.
 4. That exact directory is published as static HTML to the site's public URL (local asset URLs gain content-hash version strings for cache busting), and the Discord thread receives the link.
 

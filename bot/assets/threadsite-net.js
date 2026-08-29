@@ -73,6 +73,14 @@
 
 export const PROTOCOL_VERSION = 3;
 
+/**
+ * @type {{CONNECTING: string, ONLINE: string, RECONNECTING: string, DEGRADED: string, CLOSED: string}}
+ */
+// The JSDoc type is load-bearing for the publish type-check gate: Object.freeze
+// preserves each value's literal type, so authored code copying a constant
+// (`let status = NET_STATUS.CONNECTING`) would be pinned to that singleton
+// string and fail validation on assigning or comparing another status. Typed
+// as plain strings, copies widen to `string` like any other string value.
 export const NET_STATUS = Object.freeze({
   CONNECTING: "connecting",
   ONLINE: "online",

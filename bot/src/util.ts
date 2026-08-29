@@ -1,6 +1,9 @@
 import path from "node:path";
 import type { CommitAuthor } from "./types.js";
 
+/** Discord rejects message content over 2000 chars; ThreadSite renders stay under it. */
+export const MAX_DISCORD_MESSAGE_CHARS = 1990;
+
 export function slugify(input: string, fallback = "site"): string {
   const value = input
     .normalize("NFKD")

@@ -53,9 +53,9 @@ This is still user-generated HTML/JS. **Serve generated sites from a separate or
 
 ## Stack
 
-- Node 22 + discord.js bot
+- Node 24 + discord.js bot
 - OpenCode agent server (the internal `opencode` service) + `@opencode-ai/sdk`
-- One shared Node 22 + `ws` multiplayer relay for all games (multi-tenant, in-memory)
+- One shared Node 24 + `ws` multiplayer relay for all games (multi-tenant, in-memory)
 - Forgejo 15 LTS by default (SQLite, no separate database needed)
 - Your existing Apache static directory, or an optional bundled `httpd:2.4-alpine` profile
 
@@ -389,6 +389,20 @@ A minimal separate-origin vhost is included at `apache/threadsite-vhost.conf.exa
 ```
 
 `AllowOverride None` is recommended even though ThreadSite rejects dotfiles. Do not enable PHP/CGI handlers in this vhost.
+
+Add cache headers so republished sites reach returning visitors immediately (full copy with comments in the example file): HTML always revalidates, assets carrying the `?v=<hash>` ThreadSite appends on publish cache immutably, and any asset requested without a version revalidates instead of pinning an old copy for the cache lifetime.
+
+```apache
+<FilesMatch "\.(?:css|js|mjs)$">
+    Header set Cache-Control "public, max-age=31536000, immutable" "expr=%{QUERY_STRING} =~ /^v=[0-9a-f]{10}$/"
+    Header set Cache-Control "no-cache" "expr=%{QUERY_STRING} !~ /^v=/"
+</FilesMatch>
+<FilesMatch "\.html?$">
+    Header set Cache-Control "no-cache"
+</FilesMatch>
+```
+
+If Cloudflare or another CDN fronts the sites hostname, set its **Browser Cache TTL** to **Respect Existing Headers** — a fixed CDN default (four hours) overrides the origin's revalidation policy and visitors keep stale assets for hours after a republish, `?v=` busting notwithstanding.
 
 If Apache runs as a non-root user, it only needs read access to generated files. The bot container writes the bind-mounted directory; the published files use ordinary readable modes inherited from the generated workspace.
 
