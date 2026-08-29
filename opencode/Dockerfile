@@ -10,8 +10,14 @@ RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" \
 RUN npm install -g typescript-language-server typescript \
     vscode-langservers-extracted prettier
 
+# unzip for extracting downloaded asset archives (tar/gzip ship with the base image).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY opencode.json /opt/threadsite/opencode.base.json
 COPY start.mjs /opt/threadsite/start.mjs
+COPY surplus-adapter.mjs /opt/threadsite/surplus-adapter.mjs
 COPY tools/asset_download.ts /root/.config/opencode/tools/asset_download.ts
 COPY tools/js_syntax_check.ts /root/.config/opencode/tools/js_syntax_check.ts
 COPY tools/project_notes.ts /root/.config/opencode/tools/project_notes.ts

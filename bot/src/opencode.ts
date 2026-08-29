@@ -3,7 +3,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk";
 import { config } from "./config.js";
 import { log, logError, serializeError } from "./logger.js";
 import type { ProgressCallback } from "./progress.js";
-import { cleanThreadTitle, errorText, parseModel, truncate } from "./util.js";
+import { cleanThreadTitle, errorText, formatTokens, parseModel, truncate } from "./util.js";
 
 // Sent to a session whose turn was killed by an agent-service restart. The
 // workspace keeps the turn's partial edits, so this must continue, not restart.
@@ -97,6 +97,24 @@ interface TurnState {
   model?: { providerID: string; modelID: string };
   /** Subagent sessions (task-tool children of the root session) seen this turn. */
   childSessions: Set<string>;
+  /** messageID -> "providerID/modelID" for assistant messages seen this turn (root and subagent children). */
+  messageModels: Map<string, string>;
+  /** Per-model token/cost totals; steps whose model was never observed land in "unknown". */
+  modelUsage: Map<string, { inputTokens: number; outputTokens: number; cacheTokens: number; cost: number }>;
+}
+
+/** Token/context/cost accounting attributed to one model within a turn. */
+export interface ModelUsage {
+  /** "providerID/modelID", or "unknown" when the model was never observed. */
+  model: string;
+  /** Input+cache tokens billed. */
+  inputTokens: number;
+  /** Output+reasoning tokens produced. */
+  outputTokens: number;
+  /** Portion of inputTokens served from the provider's prompt cache. */
+  cacheTokens: number;
+  /** Provider-reported USD cost, when pricing is known. */
+  cost: number;
 }
 
 /** Token/context accounting for one agent turn, accumulated from OpenCode events. */
@@ -113,6 +131,10 @@ export interface TurnUsage {
   contextLimit?: number;
   /** Compactions that fired during this turn. */
   compactions: number;
+  /** Provider-reported USD cost across the turn; 0 when pricing is unknown. */
+  cost: number;
+  /** Per-model token/cost breakdown across every step of the turn. */
+  models: ModelUsage[];
 }
 
 /** Result of one completed prompt: the assistant text plus its turn usage. */
@@ -215,6 +237,8 @@ export class OpenCodeHarness {
       baselineCompactions: snapshot.compactions,
       model: parsed ? { providerID: parsed.providerID, modelID: parsed.modelID } : undefined,
       childSessions: new Set<string>(),
+      messageModels: new Map(),
+      modelUsage: new Map(),
     };
     if (turn.model) void this.applyContextLimit(turn, onProgress);
     let stream = await this.startEventStream(directory, sessionId, onProgress, turn).catch((error) => {
@@ -339,7 +363,7 @@ export class OpenCodeHarness {
     log("info", "opencode.session_compact_requested", { sessionId, model: `${providerID}/${modelID}` });
   }
 
-  async generateTitle(directory: string, requestText: string, model?: string): Promise<string | undefined> {
+  async generateTitle(directory: string, requestText: string, model?: string): Promise<{ title?: string; usage: TurnUsage }> {
     const sessionId = await this.createSession(directory, "ThreadSite thread title");
     try {
       const instruction =
@@ -347,7 +371,7 @@ export class OpenCodeHarness {
         "naming the website or game described by this request. Reply with only the title.\n\nREQUEST:\n" +
         truncate(requestText, 1200);
       const raw = await this.prompt(directory, sessionId, instruction, model, undefined, "titler");
-      return cleanThreadTitle(raw.text);
+      return { title: cleanThreadTitle(raw.text), usage: raw.usage };
     } finally {
       await this.client.session.delete({ path: { id: sessionId }, query: { directory } } as any)
         .catch((error: unknown) => log("debug", "opencode.title_session_delete_failed", { sessionId, error: String(error) }));
@@ -713,10 +737,13 @@ export class OpenCodeHarness {
     if (event?.type === "message.updated") {
       // Track assistant message IDs so streaming text parts can be attributed to the
       // model's output rather than the echoed user prompt.
-      if (properties.info?.role === "assistant" && properties.info?.id) {
+      if (properties.info?.role === "assistant" && properties.info.id) {
         turn.assistantMessageIds.add(String(properties.info.id));
         const providerID = properties.info.providerID;
         const modelID = properties.info.modelID;
+        if (providerID && modelID) {
+          turn.messageModels.set(String(properties.info.id), `${providerID}/${modelID}`);
+        }
         if (providerID && modelID && (turn.model?.providerID !== providerID || turn.model?.modelID !== modelID)) {
           turn.model = { providerID, modelID };
           void this.applyContextLimit(turn, onProgress);
@@ -781,15 +808,11 @@ export class OpenCodeHarness {
     if (!part) return;
 
     if (part.type === "step-finish") {
-      const tokens = part.tokens ?? {};
-      turn.outputTokens += Number(tokens.output ?? 0) + Number(tokens.reasoning ?? 0);
+      const step = stepFigures(part);
+      accumulateStep(turn, step, part.messageID);
       // Every step re-processes the full context, so billed input accumulates
       // per step while the context display only wants the newest window size.
-      const stepInput = Number(tokens.input ?? 0) + Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
-      turn.inputTokens += stepInput;
-      turn.cacheTokens += Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
-      turn.contextTokens = stepInput;
-      turn.cost += Number(part.cost ?? 0);
+      turn.contextTokens = step.inputTokens;
       const stats = composeStats(turn);
       if (stats) emit(onProgress, { kind: "stats", text: stats });
       return;
@@ -833,6 +856,14 @@ export class OpenCodeHarness {
   ): void {
     const label = "🤖 Subagent";
 
+    if (event?.type === "message.updated") {
+      const info = properties.info;
+      if (info?.role === "assistant" && info.id && info.providerID && info.modelID) {
+        turn.messageModels.set(String(info.id), `${info.providerID}/${info.modelID}`);
+      }
+      return;
+    }
+
     if (event?.type === "session.status") {
       const type = properties.status?.type;
       if (type === "busy") emit(onProgress, { text: `${label} is working` });
@@ -845,11 +876,7 @@ export class OpenCodeHarness {
     if (!part) return;
 
     if (part.type === "step-finish") {
-      const tokens = part.tokens ?? {};
-      turn.outputTokens += Number(tokens.output ?? 0) + Number(tokens.reasoning ?? 0);
-      turn.inputTokens += Number(tokens.input ?? 0) + Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
-      turn.cacheTokens += Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
-      turn.cost += Number(part.cost ?? 0);
+      accumulateStep(turn, stepFigures(part), part.messageID);
       const stats = composeStats(turn);
       if (stats) emit(onProgress, { kind: "stats", text: stats });
       return;
@@ -906,10 +933,35 @@ function extractText(parts: Array<{ type?: string; text?: string }> | undefined)
     .trim();
 }
 
-function formatTokens(count: number): string {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`.replace(/\.0$/, "");
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`.replace(/\.0$/, "");
-  return String(count);
+/** Token/cost figures of one step-finish part, before attribution. */
+function stepFigures(part: any): { inputTokens: number; outputTokens: number; cacheTokens: number; cost: number } {
+  const tokens = part.tokens ?? {};
+  return {
+    outputTokens: Number(tokens.output ?? 0) + Number(tokens.reasoning ?? 0),
+    inputTokens: Number(tokens.input ?? 0) + Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0),
+    cacheTokens: Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0),
+    cost: Number(part.cost ?? 0),
+  };
+}
+
+/** Fold one model step into the turn's scalar totals and its per-model bucket. */
+function accumulateStep(
+  turn: TurnState,
+  step: { inputTokens: number; outputTokens: number; cacheTokens: number; cost: number },
+  messageId: unknown,
+): void {
+  turn.outputTokens += step.outputTokens;
+  turn.inputTokens += step.inputTokens;
+  turn.cacheTokens += step.cacheTokens;
+  turn.cost += step.cost;
+  const key = (typeof messageId === "string" ? turn.messageModels.get(messageId) : undefined)
+    ?? (turn.model ? `${turn.model.providerID}/${turn.model.modelID}` : "unknown");
+  const bucket = turn.modelUsage.get(key) ?? { inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0 };
+  bucket.inputTokens += step.inputTokens;
+  bucket.outputTokens += step.outputTokens;
+  bucket.cacheTokens += step.cacheTokens;
+  bucket.cost += step.cost;
+  turn.modelUsage.set(key, bucket);
 }
 
 function composeStats(turn: TurnState): string {
@@ -926,10 +978,14 @@ function usageOf(turn: TurnState): TurnUsage {
     contextTokens: turn.contextTokens,
     contextLimit: turn.contextLimit,
     compactions: turn.compactions - turn.baselineCompactions,
+    cost: turn.cost,
+    models: [...turn.modelUsage.entries()]
+      .map(([model, usage]) => ({ model, ...usage }))
+      .sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens)),
   };
 }
 
-/** Public turn-usage line: current context size, cumulative billed tokens, cache share. */
+/** Public turn-usage line: current context size, cumulative billed tokens, cache share, cost. */
 export function formatTurnUsage(usage: TurnUsage): string {
   const parts: string[] = [];
   if (usage.contextTokens > 0) {
@@ -944,6 +1000,8 @@ export function formatTurnUsage(usage: TurnUsage): string {
     const cached = usage.cacheTokens > 0 ? ` (${formatTokens(usage.cacheTokens)} cached)` : "";
     parts.push(`in ${formatTokens(usage.inputTokens)}${cached} · out ${formatTokens(usage.outputTokens)} tok`);
   }
+  // Cost is deliberately absent: token counts are fine to show publicly, but
+  // spend data is admin-only (/site-admin usage).
   if (usage.compactions > 0) parts.push(`compacted ${usage.compactions}×`);
   return parts.join(" · ");
 }
@@ -960,7 +1018,24 @@ export function addUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): Tu
     contextTokens: b.contextTokens || a.contextTokens,
     contextLimit: b.contextLimit ?? a.contextLimit,
     compactions: a.compactions + b.compactions,
+    cost: a.cost + b.cost,
+    models: mergeModelUsage([...(a.models ?? []), ...(b.models ?? [])]),
   };
+}
+
+/** Sum per-model usage lists, keeping a stable cost-descending order. */
+export function mergeModelUsage(entries: ModelUsage[]): ModelUsage[] {
+  const merged = new Map<string, ModelUsage>();
+  for (const entry of entries) {
+    const current = merged.get(entry.model)
+      ?? { model: entry.model, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0 };
+    current.inputTokens += entry.inputTokens;
+    current.outputTokens += entry.outputTokens;
+    current.cacheTokens += entry.cacheTokens;
+    current.cost += entry.cost;
+    merged.set(entry.model, current);
+  }
+  return [...merged.values()].sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens));
 }
 
 function emit(callback: ProgressCallback | undefined, update: { text: string; detail?: string; kind?: "activity" | "thought" | "stats" }): void {

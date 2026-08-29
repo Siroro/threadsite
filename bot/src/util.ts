@@ -67,6 +67,21 @@ export function truncate(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
 }
 
+/** Compact token counts for Discord: 1234 -> "1.2k", 1250000 -> "1.3M". */
+export function formatTokens(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`.replace(/\.0$/, "");
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`.replace(/\.0$/, "");
+  return String(count);
+}
+
+/** USD cost with enough precision for both sub-cent per-turn amounts and large totals. */
+export function formatCost(cost: number): string {
+  if (!Number.isFinite(cost) || cost <= 0) return "$0";
+  if (cost < 0.01) return `$${cost.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+  if (cost < 1000) return `$${cost.toFixed(2)}`;
+  return `$${Math.round(cost).toLocaleString("en-US")}`;
+}
+
 /**
  * Drop leading summary sentences that merely restate the deliverable
  * ("Implemented a complete static 3D browser game in site/…") so final Discord

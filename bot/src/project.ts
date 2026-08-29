@@ -9,6 +9,7 @@ import { publishIndex, publishSite, siteUrl, validateSite } from "./publish.js";
 import { Store } from "./store.js";
 import { initialProjectInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, repairInstruction } from "./templates.js";
 import type { CommitAuthor, MultiplayerContext, ProjectKind, ProjectRecord } from "./types.js";
+import { UsageLog } from "./usage.js";
 import type { ProgressCallback } from "./progress.js";
 import type { WorkingTreeStats } from "./git.js";
 import { log, logError, serializeError } from "./logger.js";
@@ -47,6 +48,7 @@ export class ProjectService {
     readonly store: Store,
     readonly opencode: OpenCodeHarness,
     readonly forgejo: ForgejoClient,
+    readonly usageLog: UsageLog,
   ) {}
 
   enqueue<T>(threadId: string, work: () => Promise<T>): Promise<T> {
@@ -145,7 +147,19 @@ export class ProjectService {
     let result = await this.mutate(input.threadId, input.initialPrompt, true, onProgress, input.initiator, input.statusMessageId);
 
     if (titlePromise && onTitle) {
-      const title = await withTimeout(titlePromise, 90_000);
+      const generated = await withTimeout(titlePromise, 90_000);
+      if (generated) {
+        // The titler prompt is real model usage; ledger it separately from the build turn.
+        await this.usageLog.record({
+          label: "title",
+          threadId: input.threadId,
+          project: input.displayName,
+          kind: projectKind,
+          usage: generated.usage,
+          fallbackModel: this.store.getModel(),
+        });
+      }
+      const title = generated?.title;
       if (title) {
         // Adopt the AI title end-to-end: Discord thread name, Forgejo repo,
         // published directory, README, and index. The thread-id suffix is kept
@@ -255,6 +269,14 @@ export class ProjectService {
         ? initialProjectInstruction(projectKind, prompt, notes)
         : mutationInstruction(projectKind, prompt, notes);
 
+      // Session context lifecycle before the prompt: a long-idle thread starts
+      // a fresh session, a heavy previous turn compacts first. Initial turns
+      // just created their session, so they always skip this.
+      if (!initial) {
+        const lifecycle = await this.applySessionLifecycle(project, onProgress);
+        if (lifecycle) project = lifecycle;
+      }
+
       const turnBaseline = await captureWorkingTreeSnapshot(workspacePath);
       let stopChangesTimer = () => {};
       const updateChanges = () => {
@@ -311,7 +333,15 @@ export class ProjectService {
         project, prompt, initial, projectKind, multiplayer, agentSummary, author, onProgress, usage, startedAt: turnStartedAt,
       });
     } catch (error) {
-      await this.store.patchProject(threadId, { status: "error", lastError: truncate(errorText(error), 1000), pendingTurn: undefined });
+      // The failed attempt still landed its prompt (and possibly partial work)
+      // in the session, so it counts as activity for the idle-reset rule even
+      // though no fresh usage reading could be observed.
+      await this.store.patchProject(threadId, {
+        status: "error",
+        lastError: truncate(errorText(error), 1000),
+        pendingTurn: undefined,
+        lastTurnAt: new Date().toISOString(),
+      });
       logError("project.mutation_failed", error, { threadId, initial, model: this.store.getModel() || "default" });
       throw error;
     }
@@ -389,6 +419,10 @@ export class ProjectService {
       lastError: undefined,
       lastCommit: commitStats.commit,
       pendingTurn: undefined,
+      // Record when the session was last used and how full its context window
+      // ended; the next turn's lifecycle check reads both.
+      lastTurnAt: new Date().toISOString(),
+      ...(usage?.contextTokens ? { lastTurnUsage: { contextTokens: usage.contextTokens, contextLimit: usage.contextLimit } } : {}),
     });
     emit(input.onProgress, "🗂️ Refreshing the public gallery");
     await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
@@ -401,6 +435,18 @@ export class ProjectService {
       additions: commitStats.additions,
       deletions: commitStats.deletions,
       projectKind: input.projectKind,
+    });
+    // Tokenomics ledger for /site-admin usage. Covers every completed turn —
+    // initial builds, mutations, validation-repair passes, and restart
+    // recovery. Failed turns are not recorded: their partial usage is not
+    // observable once the prompt throws.
+    await this.usageLog.record({
+      threadId,
+      project: project.displayName,
+      kind: input.projectKind,
+      durationMs: Date.now() - input.startedAt,
+      usage,
+      fallbackModel: this.store.getModel(),
     });
     return {
       project,
@@ -480,7 +526,12 @@ export class ProjectService {
       log("info", "project.recovery_completed", { threadId, commit: result.commit });
       return result;
     } catch (error) {
-      await this.store.patchProject(threadId, { status: "error", lastError: truncate(errorText(error), 1000), pendingTurn: undefined });
+      await this.store.patchProject(threadId, {
+        status: "error",
+        lastError: truncate(errorText(error), 1000),
+        pendingTurn: undefined,
+        lastTurnAt: new Date().toISOString(),
+      });
       logError("project.recovery_failed", error, { threadId });
       throw error;
     }
@@ -565,6 +616,69 @@ export class ProjectService {
     }
   }
 
+  /**
+   * Session context lifecycle, applied before every non-initial turn:
+   *
+   * - A thread idle longer than SESSION_IDLE_RESET_MS starts a fresh session.
+   *   By then the provider's prompt cache is cold anyway and the old
+   *   conversation is mostly stale turn-by-turn detail; the workspace, git
+   *   history, and PROJECT_NOTES.md carry everything durable, and the
+   *   mutation instruction already tells the agent to inspect before editing.
+   * - A session whose previous turn ended above SESSION_CONTEXT_COMPACT_THRESHOLD
+   *   of its context window is compacted now, at the turn boundary, so the
+   *   next turn starts on a summarized window instead of paying for a near-full
+   *   one (or triggering a mid-turn auto-compaction).
+   *
+   * Returns the patched project when the session changed, else undefined.
+   */
+  private async applySessionLifecycle(project: ProjectRecord, onProgress?: ProgressCallback): Promise<ProjectRecord | undefined> {
+    const threadId = project.threadId;
+
+    if (config.sessionIdleResetMs > 0 && project.lastTurnAt) {
+      const idleMs = Date.now() - Date.parse(project.lastTurnAt);
+      if (Number.isFinite(idleMs) && idleMs > config.sessionIdleResetMs) {
+        emit(onProgress, "🧹 Previous context expired — starting a fresh agent session");
+        const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
+        const patched = await this.store.patchProject(threadId, { sessionId, lastTurnUsage: undefined });
+        log("info", "project.session_auto_reset", {
+          threadId,
+          oldSessionId: project.sessionId,
+          sessionId,
+          idleMs,
+          idleResetMs: config.sessionIdleResetMs,
+        });
+        return patched;
+      }
+    }
+
+    const usage = project.lastTurnUsage;
+    const threshold = config.sessionCompactThreshold;
+    if (threshold <= 0 || !usage?.contextLimit || usage.contextTokens <= 0) return undefined;
+    if (usage.contextTokens <= threshold * usage.contextLimit) return undefined;
+
+    const percent = Math.round((usage.contextTokens / usage.contextLimit) * 100);
+    emit(onProgress, `🧹 Context was ${percent}% full after the last turn — compacting before this one`);
+    try {
+      const model = (await this.opencode.lastAssistantModel(project.workspacePath, project.sessionId))
+        ?? parseModel(this.store.getModel());
+      if (!model) {
+        log("warn", "project.session_auto_compact_skipped", { threadId, reason: "no model known for the session" });
+        return undefined;
+      }
+      await this.opencode.compactSession(project.workspacePath, project.sessionId, model.providerID, model.modelID);
+      // Drop the stale reading so a later failed turn cannot re-compact an
+      // already-compacted session.
+      const patched = await this.store.patchProject(threadId, { lastTurnUsage: undefined });
+      log("info", "project.session_auto_compacted", { threadId, percent, model: `${model.providerID}/${model.modelID}` });
+      return patched;
+    } catch (error) {
+      // Not fatal: the turn proceeds on the full window and OpenCode's own
+      // auto-compaction (relative to SURPLUS_CONTEXT_CAP) remains the safety net.
+      log("warn", "project.session_auto_compact_failed", { threadId, error: serializeError(error) });
+      return undefined;
+    }
+  }
+
   /** Drop the current agent session and start a fresh one on the next message. */
   async resetSession(threadId: string): Promise<ProjectRecord> {
     const project = this.store.getProject(threadId);
@@ -573,7 +687,10 @@ export class ProjectService {
       throw new Error("A model turn is still running in this thread. Wait for it to finish before resetting.");
     }
     const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
-    const updated = await this.store.patchProject(threadId, { sessionId });
+    // The new session has no turns yet, so it can be neither stale nor due for
+    // compaction; clearing both keeps the lifecycle rules from acting on the
+    // previous session's history.
+    const updated = await this.store.patchProject(threadId, { sessionId, lastTurnUsage: undefined, lastTurnAt: undefined });
     log("info", "project.session_reset", { threadId, oldSessionId: project.sessionId, sessionId });
     return updated;
   }

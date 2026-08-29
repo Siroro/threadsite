@@ -63,6 +63,14 @@ export const adminCommand = new SlashCommandBuilder()
     .setName("status")
     .setDescription("Show the active model and agent status"))
   .addSubcommand((sub) => sub
+    .setName("usage")
+    .setDescription("Show daily token usage, cost, and which models were used")
+    .addIntegerOption((option) => option
+      .setName("days")
+      .setDescription("How many days back to include, today included (default 7, max 30)")
+      .setMinValue(1)
+      .setMaxValue(30)))
+  .addSubcommand((sub) => sub
     .setName("model")
     .setDescription("Change the model used on every future Discord mutation")
     .addStringOption((option) => option

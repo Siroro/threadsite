@@ -31,6 +31,19 @@ export interface ProjectRecord {
   /** Short hash of the commit belonging to the last accepted turn; used by /site revert. */
   lastCommit?: string;
   /**
+   * When the last agent turn ran (success or failure). A non-initial turn
+   * whose session has been idle longer than SESSION_IDLE_RESET_MS starts a
+   * fresh session instead of re-reading a stale, cache-cold context.
+   */
+  lastTurnAt?: string;
+  /**
+   * Context window usage observed at the end of the last successful turn.
+   * When it exceeded SESSION_CONTEXT_COMPACT_THRESHOLD of the window, the
+   * next turn compacts the session first, at the turn boundary, instead of
+   * paying for a near-full window or a mid-turn auto-compaction.
+   */
+  lastTurnUsage?: { contextTokens: number; contextLimit?: number };
+  /**
    * Present while a turn is in flight so a bot restart can recover it: the
    * interrupted request is continued, then validated, committed, and published.
    * Cleared on every terminal outcome.

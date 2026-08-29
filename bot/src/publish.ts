@@ -196,63 +196,194 @@ function tagAttr(attrs: string, name: string): string {
 /**
  * Check authored browser JavaScript with tsc. Deliberately lenient: strict null
  * checks are off (DOM APIs return nullable types everywhere and generated code
- * rarely guards them), TS2307 diagnostics for non-relative imports are
- * dropped because CDN/import-map dependencies like `three` have no local
- * node_modules to resolve against, and TS2339 diagnostics on DOM base-type
- * receivers are dropped because un-narrowed DOM lookups are idiomatic here.
+ * rarely guards them), TS2307 diagnostics for non-relative imports are dropped
+ * because CDN/import-map dependencies like `three` have no local node_modules
+ * to resolve against, and TS2339 diagnostics on DOM base-type receivers are
+ * dropped because un-narrowed DOM lookups are idiomatic here.
+ *
+ * Vendored code is never type-checked: inference over a minified bundle (a
+ * vendored three.js yields hundreds of bogus diagnostics) also poisons call
+ * sites in authored code that uses it. The check instead runs against a temp
+ * mirror of the site's scripts in which every vendored library under `assets/`
+ * is replaced by a `.d.ts` stub re-declaring its real export names as `any`.
+ * Authored imports still resolve — a misspelled export name fails, which the
+ * agent can act on — while the vendored implementation stays out of the tsc
+ * program entirely, the same trust model as bare CDN imports. The
+ * harness-owned relay client keeps its real types for authored call sites but
+ * is not an input and its own diagnostics are filtered. Vendored files are
+ * still syntax-checked by the `node --check` pass over the real tree, so a
+ * truncated download still fails the turn.
  */
 async function validateScriptTypes(root: string, scripts: string[]): Promise<void> {
-  const authoredScripts = scripts.filter((script) =>
-    path.relative(root, script).replaceAll(path.sep, "/") !== "js/threadsite-net.js",
-  );
-  if (!authoredScripts.length) return;
+  const authored = scripts.filter((script) => !isVendoredScript(root, script));
+  if (!authored.length) return;
 
   const typeScriptCli = path.join(process.cwd(), "node_modules", "typescript", "bin", "tsc");
   const typeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-types-"));
-  const args = [
-    typeScriptCli,
-    "--noEmit",
-    "--allowJs",
-    "--checkJs",
-    "--noImplicitAny",
-    "false",
-    "--target",
-    "ES2022",
-    "--module",
-    "ESNext",
-    "--moduleResolution",
-    "Bundler",
-    "--lib",
-    "ES2022,DOM,DOM.Iterable",
-    "--skipLibCheck",
-    "--typeRoots",
-    typeRoot,
-    ...authoredScripts,
-  ];
-  let result: { stdout?: string; stderr?: string };
-  let processError: unknown;
+  const mirrorRoot = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-scripts-"));
   try {
-    result = await execFileAsync(process.execPath, args, { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
-  } catch (error) {
-    processError = error;
-    result = error as { stdout?: string; stderr?: string };
+    const inputs: string[] = [];
+    for (const script of scripts) {
+      const relative = path.relative(root, script).replaceAll(path.sep, "/");
+      const source = await fs.readFile(script, "utf8");
+      const mirrored = path.join(mirrorRoot, ...relative.split("/"));
+      await fs.mkdir(path.dirname(mirrored), { recursive: true });
+      if (isVendoredLibrary(relative)) {
+        // The implementation is deliberately not mirrored: for every import
+        // style (./x.js, ./x, ./x.mjs) tsc resolves to the sibling stub.
+        await fs.writeFile(stubPath(mirrored), vendorStub(source), "utf8");
+      } else {
+        await fs.writeFile(mirrored, source, "utf8");
+        if (relative !== "js/threadsite-net.js") inputs.push(relative);
+      }
+    }
+
+    const args = [
+      typeScriptCli,
+      "--noEmit",
+      "--allowJs",
+      "--checkJs",
+      "--noImplicitAny",
+      "false",
+      // Default: on for this module/resolution combo. It would let
+      // `import lib from` pass against stubbed (and declared) modules that
+      // have no default export — a browser-fatal mistake worth failing.
+      "--allowSyntheticDefaultImports",
+      "false",
+      "--target",
+      "ES2022",
+      "--module",
+      "ESNext",
+      "--moduleResolution",
+      "Bundler",
+      "--lib",
+      "ES2022,DOM,DOM.Iterable",
+      "--skipLibCheck",
+      "--typeRoots",
+      typeRoot,
+      ...inputs,
+    ];
+    let result: { stdout?: string; stderr?: string };
+    let processError: unknown;
+    try {
+      // tsc runs with the mirror as cwd so diagnostics carry clean
+      // site-relative paths (js/main.js(3,10)) instead of temp absolute ones.
+      result = await execFileAsync(process.execPath, args, {
+        cwd: mirrorRoot,
+        timeout: 30_000,
+        maxBuffer: 8 * 1024 * 1024,
+      });
+    } catch (error) {
+      processError = error;
+      result = error as { stdout?: string; stderr?: string };
+    }
+    const raw = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+    // tsc quotes resolved module paths inside some messages; keep the temp
+    // mirror invisible so errors read as site-relative paths.
+    const mirrorPosix = mirrorRoot.replaceAll(path.sep, "/");
+    const significant = significantDiagnostics(raw)
+      .replaceAll(`${mirrorPosix}/`, "")
+      .replaceAll(`${mirrorRoot}${path.sep}`, "");
+    if (significant) throw new Error(`JavaScript type-check error:\n${significant}`);
+    if (processError && !raw) throw new Error(`JavaScript type-checker failed: ${String(processError)}`);
   } finally {
     await fs.rm(typeRoot, { recursive: true, force: true });
+    await fs.rm(mirrorRoot, { recursive: true, force: true });
   }
-  const raw = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-  const significant = raw
-    .split("\n")
-    .filter(
-      (line) =>
-        !isUnresolvedExternalImport(line) &&
-        !isVendoredClientDiagnostic(line) &&
-        !isDomBaseTypeDiagnostic(line),
-    )
-    .join("\n")
-    .trim();
-  if (significant) throw new Error(`JavaScript type-check error:\n${significant}`);
-  if (processError && !raw) throw new Error(`JavaScript type-checker failed: ${String(processError)}`);
-  await validateElementIds(root, authoredScripts);
+  await validateElementIds(root, authored);
+}
+
+/** Scripts excluded from the type-check inputs: vendored libraries and the harness-owned client. */
+function isVendoredScript(root: string, file: string): boolean {
+  const relative = path.relative(root, file).replaceAll(path.sep, "/");
+  return isVendoredLibrary(relative) || relative === "js/threadsite-net.js";
+}
+
+/** Downloaded vendor/library files live below `assets/` per the AGENTS.md contract. */
+function isVendoredLibrary(relative: string): boolean {
+  return relative.startsWith("assets/");
+}
+
+/** Sibling declaration path that tsc prefers over a `.js`/`.mjs` module file. */
+function stubPath(mirrored: string): string {
+  return mirrored.endsWith(".mjs") ? `${mirrored.slice(0, -4)}.d.mts` : `${mirrored.slice(0, -3)}.d.ts`;
+}
+
+/**
+ * A `.d.ts` stand-in for a vendored module: its real export names, parsed from
+ * the source, re-declared as `any`. Namespace, named, and default imports all
+ * resolve without the implementation entering the tsc program. `export … from`
+ * re-exports are copied through so chunked bundles lead to their own stubs. A
+ * module with no detectable ESM exports (CommonJS-style bundle) gets an
+ * `export = any` shape instead. The default export is only declared when the
+ * source has one, so a browser-fatal `import lib from` still fails the gate.
+ */
+function vendorStub(source: string): string {
+  const header = "// ThreadSite vendored-module stub: exports are any; the implementation is never type-checked.";
+  const names = new Set<string>();
+  const reExports = new Set<string>();
+  let hasDefault = /\bexport\s+default\b/.test(source);
+
+  for (const match of source.matchAll(/\bexport\s*\{[^}]*\}\s*from\s*(["'])([^"']*)\1/g)) {
+    reExports.add(match[0].trim());
+  }
+  for (const match of source.matchAll(/\bexport\s*\*(?:\s+as\s+\w+)?\s*from\s*(["'])([^"']*)\1/g)) {
+    reExports.add(match[0].trim());
+  }
+  for (const [, clause = ""] of source.matchAll(/\bexport\s*\{([^}]*)\}(?!\s*from)/g)) {
+    for (const piece of clause.split(",")) {
+      const item = piece.trim();
+      if (!item) continue;
+      const nameMatch = item.match(/^(?:(\w+)\s+as\s+)?(?:"([^"]+)"|'([^']+)'|(\w+))$/);
+      if (!nameMatch) continue;
+      const exported = nameMatch[4] ?? nameMatch[2] ?? nameMatch[3] ?? nameMatch[1];
+      if (exported === "default") hasDefault = true;
+      else if (/^[A-Za-z_$][\w$]*$/.test(exported)) names.add(exported);
+    }
+  }
+  for (const match of source.matchAll(/\bexport\s+(?:async\s+)?(?:const|let|var|function\s*\*?|class)\s+([A-Za-z_$][\w$]*)/g)) {
+    names.add(match[1]);
+  }
+
+  if (!names.size && !reExports.size && !hasDefault) {
+    return `${header}\ndeclare const threadsiteVendorModule: any;\nexport = threadsiteVendorModule;\n`;
+  }
+  const lines = [header];
+  for (const name of [...names].sort()) lines.push(`export declare const ${name}: any;`);
+  if (hasDefault) lines.push("declare const threadsiteVendorDefault: any;", "export default threadsiteVendorDefault;");
+  lines.push(...reExports);
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * tsc diagnostics can span multiple lines (indented detail under the header),
+ * so filtering line-by-line would orphan those detail lines. Output is grouped
+ * instead: an unindented `file(line,col): error TSxxxx:` (or global
+ * `error TSxxxx:`) header opens a block, following indented lines belong to
+ * it, and lenience rules drop whole blocks. The trailing `Found N errors.`
+ * count is pre-filter and dropped.
+ */
+function significantDiagnostics(raw: string): string {
+  const kept: string[] = [];
+  let dropping = false;
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^\s/.test(line)) {
+      if (!dropping && line.trim()) kept.push(line);
+    } else if (!line.trim() || /^Found \d+ errors?\b/.test(line)) {
+      continue;
+    } else if (/error TS\d+:/.test(line)) {
+      dropping = isIgnoredDiagnostic(line);
+      if (!dropping) kept.push(line);
+    } else {
+      dropping = false;
+      kept.push(line);
+    }
+  }
+  return kept.join("\n").trim();
+}
+
+function isIgnoredDiagnostic(header: string): boolean {
+  return isUnresolvedExternalImport(header) || isVendoredFileDiagnostic(header) || isDomBaseTypeDiagnostic(header);
 }
 
 /** Matches TS2307 lines for bare package imports (`three`), not relative paths (`./foo`). */
@@ -262,13 +393,14 @@ function isUnresolvedExternalImport(line: string): boolean {
 }
 
 /**
- * Diagnostics from the vendored relay client. It is excluded from the tsc input
- * list above, but tsc still follows relative imports into it — without this
- * filter, harness-owned code could fail a game's turn. Its syntax is already
- * covered by the node --check pass, which includes it.
+ * Diagnostics from vendored files: the relay client (kept real in the mirror
+ * for authored call-site types, but never an input) and, as defense in depth,
+ * anything under `assets/` — the stubs normally keep vendored implementations
+ * out of the tsc program entirely. Its syntax is already covered by the
+ * `node --check` pass, which includes it.
  */
-function isVendoredClientDiagnostic(line: string): boolean {
-  return /[\\/]js[\\/]threadsite-net\.js\(/.test(line);
+function isVendoredFileDiagnostic(line: string): boolean {
+  return /(?:^|[\\/])(?:assets[\\/][^(]*|js[\\/]threadsite-net\.js)\(/.test(line);
 }
 
 /**
@@ -320,7 +452,7 @@ async function validateElementIds(root: string, scripts: string[]): Promise<void
 
   const missing = lookups.filter(({ id }) => !knownIds.has(id));
   if (missing.length) {
-    const lines = missing.map(({ file, id }) => `- js/${file}: getElementById/querySelector references missing id "${id}"`);
+    const lines = missing.map(({ file, id }) => `- ${file}: getElementById/querySelector references missing id "${id}"`);
     throw new Error(
       `JavaScript type-check error:\nElement ID mismatch: some DOM lookups reference ids that do not exist in the site HTML or are never created by the JS. Fix the id names in the JS or add the elements to the HTML.\n${lines.join("\n")}`,
     );

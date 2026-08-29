@@ -45,6 +45,7 @@ services:
       SURPLUS_BASE_URL: ${SURPLUS_BASE_URL:-https://api.surplusintelligence.ai/v1}
       SURPLUS_MODELS: ${SURPLUS_MODELS:-}
       SURPLUS_CONTEXT_CAP: ${SURPLUS_CONTEXT_CAP:-}
+      SURPLUS_PROXY_PORT: ${SURPLUS_PROXY_PORT:-18098}
     volumes:
       - ./data/workspaces:/workspace
       - opencode-data:/opencode-data
