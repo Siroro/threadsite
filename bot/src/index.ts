@@ -27,6 +27,7 @@ import { ProjectService, type MutationResult } from "./project.js";
 import { Store } from "./store.js";
 import { projectKindLabel } from "./templates.js";
 import type { ProjectKind, ProjectRecord } from "./types.js";
+import { UsageLog } from "./usage.js";
 import { commitAuthorIdentity, errorText, slugify, stripSummaryPreamble, truncate } from "./util.js";
 
 // Stray async failures must log instead of killing the process: an unhandled
@@ -42,7 +43,8 @@ process.on("uncaughtException", (error) => {
 const store = await Store.open(config.stateFile, config.defaultModel);
 const opencode = new OpenCodeHarness();
 const forgejo = new ForgejoClient();
-const projects = new ProjectService(store, opencode, forgejo);
+const usageLog = new UsageLog(config.usageLogFile);
+const projects = new ProjectService(store, opencode, forgejo, usageLog);
 
 await registerCommands();
 
@@ -452,6 +454,12 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
       `Private error recipients: ${config.errorReportUserIds.size}\n` +
       `Bot log: \`${getLogFile()}\``,
     );
+    return;
+  }
+
+  if (sub === "usage") {
+    const days = interaction.options.getInteger("days") ?? 7;
+    await interaction.editReply(await usageLog.renderReport(days));
     return;
   }
 

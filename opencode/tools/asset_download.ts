@@ -77,7 +77,9 @@ async function fetchPublicAsset(
         redirect: "manual",
         signal: controller.signal,
         headers: {
-          "User-Agent": "ThreadSite-AssetFetcher/2.0 (+static-web-builder)",
+          // Asset CDNs such as static.poly.pizza return 403 to non-browser user
+          // agents, so present as a browser with the fetcher token appended.
+          "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 ThreadSite-AssetFetcher/2.0",
           Accept: "*/*",
         },
       });

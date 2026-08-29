@@ -24,6 +24,24 @@ function boolEnv(name: string, fallback: boolean): boolean {
   return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
 }
 
+/** Milliseconds; 0 explicitly disables whatever the setting controls. */
+function msEnv(name: string, fallback: number): number {
+  const raw = env(name);
+  if (!raw) return fallback;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 0) throw new Error(`${name} must be a non-negative integer (0 disables)`);
+  return value;
+}
+
+/** Fraction between 0 and 1; 0 explicitly disables whatever the setting controls. */
+function fractionEnv(name: string, fallback: number): number {
+  const raw = env(name);
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value > 1) throw new Error(`${name} must be a number between 0 and 1 (0 disables)`);
+  return value;
+}
+
 const adminUserIds = new Set(env("DISCORD_ADMIN_USER_IDS").split(",").map((x) => x.trim()).filter(Boolean));
 const errorReportIdsRaw = env("DISCORD_ERROR_REPORT_USER_IDS");
 const errorReportUserIds = new Set((errorReportIdsRaw || [...adminUserIds].join(",")).split(",").map((x) => x.trim()).filter(Boolean));
@@ -44,6 +62,15 @@ export const config = {
   opencodeReconcileTimeoutMs: intEnv("OPENCODE_RECONCILE_TIMEOUT_MS", 30 * 60 * 1000),
   opencodeReconcilePollMs: intEnv("OPENCODE_RECONCILE_POLL_MS", 1500),
 
+  // Session context lifecycle. Idle sessions lose their provider prompt cache
+  // and carry stale conversation state, so past SESSION_IDLE_RESET_MS the next
+  // message starts a fresh session (workspace/git/PROJECT_NOTES.md keep the
+  // durable state). A turn that ended above SESSION_CONTEXT_COMPACT_THRESHOLD
+  // of the context window compacts the session before the next turn starts.
+  // Either rule can be disabled with 0.
+  sessionIdleResetMs: msEnv("SESSION_IDLE_RESET_MS", 2 * 60 * 60 * 1000),
+  sessionCompactThreshold: fractionEnv("SESSION_CONTEXT_COMPACT_THRESHOLD", 0.5),
+
   forgejoPublicUrl: env("FORGEJO_PUBLIC_URL", "http://localhost:3000").replace(/\/$/, ""),
   forgejoInternalUrl: env("FORGEJO_INTERNAL_URL", "http://forgejo:3000").replace(/\/$/, ""),
   forgejoOwner: env("FORGEJO_OWNER", "sitebot"),
@@ -54,6 +81,8 @@ export const config = {
   workspaceRoot: path.resolve(env("WORKSPACE_ROOT", "/workspace")),
   publishRoot: path.resolve(env("PUBLISH_ROOT", "/srv/sites")),
   stateFile: path.resolve(env("STATE_FILE", "/data/state.json")),
+  // Append-only JSONL token/cost ledger backing /site-admin usage.
+  usageLogFile: path.resolve(env("USAGE_LOG_FILE", "/data/usage-log.jsonl")),
   publicSitesBaseUrl: env("PUBLIC_SITES_BASE_URL", "http://localhost:8080").replace(/\/$/, ""),
   publicIndexEnabled: boolEnv("PUBLIC_INDEX_ENABLED", true),
 

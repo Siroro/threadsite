@@ -79,7 +79,7 @@ This repository is maintained by the ThreadSite Discord harness. The published d
 
 ## Verification tools available to you
 
-- You have a shell with **node** and a few utilities (ls, cat, grep, head/tail, wc, file, which, prettier, mkdir/cp/mv) for verification only: syntax checks, quick one-liners, scratch scripts, and small logic tests. Everything else — git, npm/npx, curl/wget, rm, package managers — is blocked by policy. The published deliverable stays a build-free static site regardless.
+- You have a shell with **node** and a few utilities (ls, cat, grep, head/tail, wc, file, which, echo, prettier, mkdir/cp/mv, plus unzip/tar to unpack downloaded asset archives) for verification only: syntax checks, quick one-liners, scratch scripts, and small logic tests. Everything else — git, npm/npx, curl/wget, rm, package managers — is blocked by policy. The published deliverable stays a build-free static site regardless.
 - Keep any scratch verification files in \`/tmp\` — anything inside the workspace gets committed to git, and anything inside \`site/\` additionally gets published.
 - \`js_syntax_check\` runs \`node --check\` over files or directories under \`site/\` — use it after editing JavaScript.
 - Language servers (TypeScript, HTML, CSS, JSON) are attached; heeding their diagnostics prevents validation failures later.
@@ -88,7 +88,7 @@ This repository is maintained by the ThreadSite Discord harness. The published d
 
 - Every JavaScript file under \`site/\` — and every inline \`<script>\` block in your HTML — must parse (\`node --check\`; \`type="module"\` blocks are parsed as ES modules).
 - \`<script type="importmap">\` content must be valid JSON.
-- Authored JavaScript is type-checked with tsc (lenient: implicit \`any\` is allowed, unresolvable bare CDN imports are ignored, and member access on base-typed DOM lookups such as \`querySelector\` results or \`event.target\` is not flagged — no narrowing or casts needed for those). Undefined variables and genuinely wrong types fail the turn.
+- Authored JavaScript is type-checked with tsc (lenient: implicit \`any\` is allowed, unresolvable bare CDN imports are ignored, and member access on base-typed DOM lookups such as \`querySelector\` results or \`event.target\` is not flagged — no narrowing or casts needed for those). Undefined variables and genuinely wrong types fail the turn. Vendored library files under \`site/assets/\` are never type-checked and imports from them are treated as \`any\` — but a named import the vendored module does not actually export still fails, so use the library's real export names.
 - Every local \`<script src>\` and stylesheet \`<link href>\` must point at a file that exists inside \`site/\`. Root-absolute URLs like \`/js/main.js\` are rejected — the site is served under a path prefix, so use relative paths only.
 - Every literal \`getElementById("...")\` / \`querySelector("#...")\` id must exist somewhere in the site HTML or be created by the JavaScript.
 - No dotfiles, symlinks, or server-executable file types anywhere under \`site/\`.
@@ -111,6 +111,7 @@ You have a web search tool and a guarded \`asset_download\` tool that can save a
 - Use **websearch** when current information, visual references, documentation, factual details, or real media could materially improve the result. Do not search merely to appear busy.
 - For assets, data, and browser-side vendor files, search reputable sources first. For visual/audio/media, prefer official assets, public-domain/CC0 material, or assets with clearly permissive reuse terms.
 - When you find a suitable direct file URL, use **asset_download** to store it below \`site/assets/\` instead of relying on fragile hotlinks. This can include media, JSON/data, shaders, WASM, or pinned browser-side vendor/library files when local vendoring makes the static deliverable more reliable.
+- Asset packs distributed as archives (ZIP/TAR): download the archive with \`asset_download\` into \`site/assets/\`, extract it there with \`unzip\` or \`tar\`, and remove the archive file afterward — everything under \`site/\` counts against the published size budget.
 - Pass \`source_page\` and \`license_note\` to \`asset_download\` when known. Never invent a license or attribution. If reuse terms are unclear, prefer procedural/CSS/SVG art or another clearly reusable source.
 - \`asset_download\` records provenance in \`ASSET_SOURCES.json\`; the harness owns that file.
 - Do not embed huge base64 blobs in source code when a normal local asset file is appropriate.
