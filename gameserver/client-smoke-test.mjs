@@ -63,7 +63,10 @@ let gotP = null;
 guest.onPlayerState = (ps) => { gotP = ps; };
 host.publishPlayerState({ x: 5, y: 6, anim: "run" });
 await sleep(200);
-assert.deepEqual(gotP, { from: host.id, state: { x: 5, y: 6, anim: "run" } });
+assert.equal(gotP.from, host.id);
+assert.equal(gotP.cid, host.cid);
+assert.deepEqual(gotP.state, { x: 5, y: 6, anim: "run" });
+assert.ok(typeof gotP.ts === "number");
 assert.deepEqual(guest.peerState(host.id), { x: 5, y: 6, anim: "run" });
 console.log("publishPlayerState -> onPlayerState OK");
 
@@ -98,6 +101,125 @@ await sleep(300);
 assert.equal(guest.hostId, guest.id);
 assert.equal(guest.isHost, true);
 console.log("client-side host migration OK");
+
+// v3: publishPlayerState throttling — per-frame calls coalesce to ~pstateHz,
+// and only the newest state is actually sent.
+let pstateCount = 0;
+guest.onPlayerState = () => { pstateCount += 1; };
+const sender = await ThreadSiteNet.connect({
+  game: "client-test-game-01",
+  url: "ws://127.0.0.1:8090/ws",
+  room: host.room,
+  name: "Throttler",
+  pstateHz: 10,
+});
+for (let i = 0; i < 50; i += 1) sender.publishPlayerState({ i });
+sender.flushPlayerState();
+await sleep(350);
+// 50 per-frame calls: ~1 immediate flush + ~3 timer ticks at 10 Hz, never 50.
+assert.ok(pstateCount >= 1 && pstateCount <= 10, `throttled to ${pstateCount} sends, not 50`);
+assert.deepEqual(guest.peerState(sender.cid), { i: 49 }, "newest state wins");
+console.log("publishPlayerState throttling OK:", pstateCount, "sends for 50 calls");
+
+// v3: sequenced events + gap recovery. The receiving side sees consecutive
+// seqs, detects a simulated gap, requests a resend, and never double-delivers.
+const seqCollector = [];
+const gapVictim = await ThreadSiteNet.connect({
+  game: "client-test-game-01",
+  url: "ws://127.0.0.1:8090/ws",
+  room: host.room,
+  name: "GapVictim",
+  onEvent: (ev) => { if (ev.type === "tick") seqCollector.push(ev.seq); },
+});
+sender.send("tick", null); // seq 1
+sender.send("tick", null); // seq 2
+sender.send("tick", null); // seq 3
+sender.send("tick", null); // seq 4
+await sleep(300);
+assert.deepEqual(seqCollector, [1, 2, 3, 4], "no spurious gaps in clean delivery");
+assert.equal(gapVictim.dropped, 0);
+assert.equal(gapVictim.duplicates, 0);
+console.log("clean sequenced delivery OK");
+
+// True gap: swallow one frame on the wire and confirm automatic recovery.
+// (Patch the raw socket's send so the relay — and therefore the receiver —
+// genuinely never sees seq 6's first delivery. The library's own resend goes
+// through the same patched send, so only swallow the frame once; the resend
+// (marked r:1) must be allowed through.)
+const realSend = sender._ws.send.bind(sender._ws);
+let swallowed = false;
+sender._ws.send = (data) => {
+  const frame = JSON.parse(data);
+  const isTarget = frame.t === "event" && frame.e === "gap-tick" && frame.seq === 6 && frame.r !== 1;
+  if (isTarget && !swallowed) {
+    swallowed = true;
+    return; // dropped on the wire
+  }
+  realSend(data);
+};
+const gapCollector = [];
+gapVictim.onEvent = (ev) => { if (ev.type === "gap-tick") gapCollector.push(ev.seq); };
+sender.send("gap-tick", null); // seq 5
+sender.send("gap-tick", null); // seq 6 — dropped on the wire
+sender.send("gap-tick", null); // seq 7
+await sleep(150);
+assert.ok(gapCollector.includes(5) && gapCollector.includes(7), "later events delivered around the gap");
+assert.ok(gapVictim.dropped >= 1, "drop counted");
+await sleep(700); // resend-req travels; sender answers from its buffer
+assert.ok(gapCollector.includes(6), `gap-tick seq 6 recovered: [${gapCollector.join(",")}]`);
+assert.equal(gapCollector.filter((s) => s === 6).length, 1, "recovered event delivered exactly once");
+assert.equal(gapVictim.duplicates, 0, "no duplicate deliveries");
+sender._ws.send = realSend;
+gapVictim.onEvent = null;
+console.log("automatic gap recovery OK: recovered seq 6, no duplicates");
+
+// v3: frame size guard fails loudly instead of getting the socket killed.
+assert.throws(
+  () => sender.publishState({ blob: "x".repeat(80 * 1024) }),
+  (error) => error.code === "frame_too_large",
+);
+assert.equal(sender.status, "online", "connection survives an oversized attempt");
+console.log("frame size guard OK");
+
+// v3: offline outbox — events sent while the socket is down are queued and
+// flushed in order once reconnected.
+const outboxPeer = await ThreadSiteNet.connect({
+  game: "client-test-game-01",
+  url: "ws://127.0.0.1:8090/ws",
+  room: host.room,
+  name: "Outbox",
+});
+const outboxEvents = [];
+gapVictim.onEvent = (ev) => { if (ev.type === "offline-msg") outboxEvents.push(ev.seq); };
+outboxPeer._ws.close(); // simulated drop
+await sleep(300);
+assert.equal(outboxPeer.status, "reconnecting");
+outboxPeer.send("offline-msg", { n: 1 });
+outboxPeer.send("offline-msg", { n: 2 });
+assert.ok(outboxPeer.queued >= 2, "frames queued while offline");
+await sleep(4000); // reconnect backoff + flush
+assert.equal(outboxPeer.status, "online");
+assert.ok(outboxEvents.length >= 2, "queued events delivered after reconnect");
+console.log("offline outbox OK:", outboxEvents.length, "events replayed");
+
+// v3: server clock — pongs carry relay time, so serverNow() tracks it.
+outboxPeer.ping();
+await sleep(300);
+assert.equal(typeof outboxPeer.rtt, "number");
+assert.equal(typeof outboxPeer.serverTimeOffset, "number");
+const skew = Math.abs(outboxPeer.serverNow() - Date.now());
+assert.ok(skew < 2000, `serverNow() within 2s of local clock (skew ${skew}ms)`);
+console.log("server clock sync OK: rtt", outboxPeer.rtt, "ms");
+
+// v3: staleness bookkeeping — peerLastSeen/isStale reflect inbound traffic.
+assert.ok(gapVictim.peerLastSeen(outboxPeer.id) !== null);
+assert.equal(gapVictim.isStale(outboxPeer.id, 5000), false);
+assert.equal(gapVictim.isStale(outboxPeer.id, -1), true, "isStale true past the age cutoff");
+console.log("staleness tracking OK");
+
+outboxPeer.close();
+gapVictim.close();
+sender.close();
 
 // An unexpected socket drop (bypassing close()) reconnects into the SAME room
 // code instead of hosting a new one — simulate by closing the raw socket

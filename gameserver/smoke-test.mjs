@@ -52,12 +52,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 0. health endpoints
 const health = await (await fetch(`${BASE}/health`)).json();
 assert.equal(health.ok, true);
-assert.equal(health.protocol, 2);
+assert.equal(health.protocol, 3);
 console.log("health OK:", JSON.stringify(health));
 
 // 1. host creates a room in game A
 const host = await connect();
-host.send({ t: "join", v: 1, game: "capy-courier-ab12cd", create: true, name: "Ana" });
+host.send({ t: "join", v: 3, game: "capy-courier-ab12cd", create: true, name: "Ana" });
 const welcome = await host.next((f) => f.t === "welcome", "host welcome");
 assert.equal(welcome.you.startsWith("p-"), true);
 assert.equal(welcome.host, welcome.you);
@@ -69,7 +69,7 @@ console.log("host joined room", room);
 
 // 2. guest joins by code
 const guest = await connect();
-guest.send({ t: "join", v: 1, game: "capy-courier-ab12cd", room, name: "Bo" });
+guest.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room, name: "Bo" });
 const guestWelcome = await guest.next((f) => f.t === "welcome", "guest welcome");
 assert.equal(guestWelcome.room, room);
 assert.equal(guestWelcome.host, welcome.you);
@@ -80,7 +80,7 @@ console.log("guest joined; host sees roster");
 
 // 3. tenant isolation: same code in game B is a *different* room (auto-created with create:true)
 const other = await connect();
-other.send({ t: "join", v: 1, game: "hover-yard-998877", room, create: true, name: "Zed" });
+other.send({ t: "join", v: 3, game: "hover-yard-998877", room, create: true, name: "Zed" });
 const otherWelcome = await other.next((f) => f.t === "welcome", "other-game welcome");
 assert.equal(otherWelcome.room, room);
 assert.equal(otherWelcome.peers.length, 0); // empty: different tenant
@@ -112,7 +112,7 @@ console.log("event broadcast + targeting OK");
 
 // 6. late joiner receives newest snapshot in welcome
 const late = await connect();
-late.send({ t: "join", v: 1, game: "capy-courier-ab12cd", room });
+late.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room });
 const lateWelcome = await late.next((f) => f.t === "welcome", "late welcome");
 assert.equal(lateWelcome.s.s.tick, 42);
 assert.equal(lateWelcome.peers.length, 2);
@@ -123,18 +123,21 @@ const lateGuest = lateWelcome.peers.find((p) => p.id === guestWelcome.you);
 assert.equal(lateGuest.s, null);
 console.log("late-join snapshot + peer states OK");
 
-// 7. state-req goes to the host
+// 7. state-req goes to the host (v3: the relay also answers from its cache
+// immediately, so expect the cached copy first and the host's fresh one after)
 late.send({ t: "state-req" });
 const hostReq = await host.next((f) => f.t === "state-req", "state-req at host");
 assert.equal(hostReq.from, lateWelcome.you);
+const cachedAnswer = await late.next((f) => f.t === "state", "cached state-req answer");
+assert.equal(cachedAnswer.s.tick, 42);
 host.send({ t: "state", s: { tick: 43 } });
-const lateState = await late.next((f) => f.t === "state", "refreshed state at late joiner");
+const lateState = await late.next((f) => f.t === "state" && f.s.tick === 43, "refreshed state at late joiner");
 assert.equal(lateState.s.tick, 43);
-console.log("state-req OK");
+console.log("state-req OK (cache answer + host refresh)");
 
 // 8. join by unknown code without create => room_not_found
 const stray = await connect();
-stray.send({ t: "join", v: 1, game: "capy-courier-ab12cd", room: "ZZZZZ" });
+stray.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room: "ZZZZZ" });
 const strayError = await stray.next((f) => f.t === "error", "room_not_found");
 assert.equal(strayError.code, "room_not_found");
 stray.close();
@@ -144,29 +147,90 @@ console.log("room_not_found OK");
 host.send({ t: "ping", ts: 12345 });
 const pong = await host.next((f) => f.t === "pong", "pong");
 assert.equal(pong.ts, 12345);
+assert.ok(typeof pong.sts === "number", "pong carries server time");
 console.log("ping/pong OK");
+
+// 9b. v3: events are stamped with the relay receive time and echoed cid
+guest.send({ t: "event", e: "stamped", d: { v: 1 }, seq: 7 });
+const stampedEvent = await host.next((f) => f.t === "event" && f.e === "stamped", "stamped event");
+assert.equal(stampedEvent.seq, 7);
+assert.ok(typeof stampedEvent.ts === "number", "event carries relay ts");
+assert.equal(stampedEvent.cid, guestWelcome.cid, "event carries stable cid");
+console.log("event seq/ts/cid stamping OK");
+
+// 9c. v3: state-req is answered from the relay cache even when the host
+// never implements onStateRequest (a common desync source in v2 games).
+const cacheless = await connect();
+cacheless.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room });
+const cachelessWelcome = await cacheless.next((f) => f.t === "welcome", "cacheless welcome");
+cacheless.send({ t: "state-req" });
+const cachedState = await cacheless.next((f) => f.t === "state", "cached state answer");
+assert.equal(cachedState.s.tick, 43, "cache answers even before the host replies");
+assert.ok(typeof cachedState.ts === "number", "cached state carries ts");
+// the host still gets the forward and can answer with something fresher
+const hostReq2 = await host.next((f) => f.t === "state-req" && f.from === cachelessWelcome.you, "state-req forward");
+assert.ok(hostReq2);
+cacheless.close();
+console.log("state-req cache fallback OK");
+
+// 9d. v3: resend-req is forwarded to the original sender
+guest.send({ t: "resend-req", to: welcome.you, after: 0, before: 5 });
+const resendForward = await host.next((f) => f.t === "resend-req", "resend-req forward");
+assert.equal(resendForward.from, guestWelcome.you);
+assert.equal(resendForward.after, 0);
+assert.equal(resendForward.before, 5);
+// malformed resend-req is rejected
+guest.send({ t: "resend-req", to: welcome.you, after: 9, before: 2 });
+const badResend = await guest.next((f) => f.t === "error" && f.code === "bad_frame", "bad resend-req");
+assert.ok(badResend);
+console.log("resend-req forwarding OK");
+
+// 9e. v3: old protocol versions are rejected outright
+const oldClient = await connect();
+oldClient.send({ t: "join", v: 2, game: "capy-courier-ab12cd", room });
+const versionError = await oldClient.next((f) => f.t === "error" && f.code === "bad_version", "bad_version");
+assert.ok(versionError.message.includes("v3"), "error names the supported version");
+oldClient.close();
+console.log("protocol version enforcement OK");
+
+// 9f. v3: retained player state survives disconnect and is reclaimed by cid
+guest.send({ t: "pstate", s: { x: 9, y: 9, hp: 3 } });
+await host.next((f) => f.t === "pstate" && f.s.hp === 3, "pstate before drop");
+guest.close();
+await host.next((f) => f.t === "peer-leave" && f.id === guestWelcome.you, "guest leave");
+// reconnect with the SAME cid: the retained state must come back in welcome
+const returning = await connect();
+returning.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room, name: "Bo", cid: guestWelcome.cid });
+const returnWelcome = await returning.next((f) => f.t === "welcome", "returning welcome");
+assert.equal(returnWelcome.cid, guestWelcome.cid, "cid honored on rejoin");
+const observer = await connect();
+observer.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room });
+const observerWelcome = await observer.next((f) => f.t === "welcome", "observer welcome");
+const boEntry = observerWelcome.peers.find((p) => p.cid === guestWelcome.cid);
+assert.ok(boEntry, "reconnected player appears under their cid");
+assert.deepEqual(boEntry.s, { x: 9, y: 9, hp: 3 }, "retained player state reclaimed after reconnect");
+observer.close();
+console.log("cid retention across reconnect OK");
 
 // 10. host leaves => host migration announced to remaining peers
 host.close();
-const migrationAtGuest = await guest.next((f) => f.t === "peer-leave", "peer-leave at guest");
-assert.equal(migrationAtGuest.id, welcome.you);
-assert.equal(migrationAtGuest.host, guestWelcome.you);
-const migrationAtLate = await late.next((f) => f.t === "peer-leave", "peer-leave at late");
-assert.equal(migrationAtLate.host, guestWelcome.you);
-console.log("host migration OK ->", migrationAtGuest.host);
+const migrationAtLate = await late.next((f) => f.t === "peer-leave" && f.id === welcome.you, "peer-leave at late");
+assert.ok(migrationAtLate.host, "new host announced");
+console.log("host migration OK ->", migrationAtLate.host);
 
-// 11. promoted host can publish state to the room
-guest.send({ t: "state", s: { tick: 44, note: "new host" } });
+// 11. promoted host can publish state to the room (guest left and reconnected
+// in 9f, so `returning` — the promoted oldest peer — publishes)
+returning.send({ t: "state", s: { tick: 44, note: "new host" } });
 const lateState2 = await late.next((f) => f.t === "state" && f.s.tick === 44, "state from new host");
 assert.ok(lateState2);
 console.log("promoted-host publish OK");
 
 // 12. bad frames rejected politely
-guest.send("this is not json");
-const err1 = await guest.next((f) => f.t === "error", "bad json error");
+returning.send("this is not json");
+const err1 = await returning.next((f) => f.t === "error", "bad json error");
 assert.equal(err1.code, "bad_frame");
-guest.send({ t: "warp" });
-const err2 = await guest.next((f) => f.t === "error", "unknown frame error");
+returning.send({ t: "warp" });
+const err2 = await returning.next((f) => f.t === "error", "unknown frame error");
 assert.equal(err2.code, "unknown_frame");
 console.log("bad-frame handling OK");
 
@@ -180,14 +244,14 @@ console.log("stats OK:", stats.games, "games,", stats.rooms, "rooms,", stats.cli
 
 // 14. single-server mode: every player lands in the same shared arena room
 const arenaA = await connect();
-arenaA.send({ t: "join", v: 2, game: "arena-game-01", mode: "single", name: "First" });
+arenaA.send({ t: "join", v: 3, game: "arena-game-01", mode: "single", name: "First" });
 const arenaWelcomeA = await arenaA.next((f) => f.t === "welcome", "single-mode welcome A");
 assert.equal(arenaWelcomeA.mode, "single");
 assert.equal(arenaWelcomeA.room, "ARENA");
 assert.equal(arenaWelcomeA.created, true);
 
 const arenaB = await connect();
-arenaB.send({ t: "join", v: 2, game: "arena-game-01", mode: "single", name: "Second" });
+arenaB.send({ t: "join", v: 3, game: "arena-game-01", mode: "single", name: "Second" });
 const arenaWelcomeB = await arenaB.next((f) => f.t === "welcome", "single-mode welcome B");
 assert.equal(arenaWelcomeB.room, "ARENA");
 assert.equal(arenaWelcomeB.created, false);
@@ -199,7 +263,7 @@ console.log("single-server mode OK: both players share room", arenaWelcomeA.room
 
 // 15. single-server rooms are isolated per game and from code rooms
 const arenaC = await connect();
-arenaC.send({ t: "join", v: 2, game: "arena-game-02", mode: "single", name: "Other" });
+arenaC.send({ t: "join", v: 3, game: "arena-game-02", mode: "single", name: "Other" });
 const arenaWelcomeC = await arenaC.next((f) => f.t === "welcome", "single-mode welcome C");
 assert.equal(arenaWelcomeC.room, "ARENA");
 assert.equal(arenaWelcomeC.peers.length, 0);

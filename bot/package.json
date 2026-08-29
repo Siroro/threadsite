@@ -10,11 +10,11 @@
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.18.25",
-    "discord.js": "14.27.0"
+    "discord.js": "14.27.0",
+    "typescript": "5.8.3"
   },
   "devDependencies": {
     "@types/node": "22.15.30",
-    "tsx": "4.20.3",
-    "typescript": "5.8.3"
+    "tsx": "4.20.3"
   }
 }

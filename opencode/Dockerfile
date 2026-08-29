@@ -1,8 +1,14 @@
-FROM node:22-bookworm-slim
+FROM node:24-bookworm-slim
 
 ARG OPENCODE_VERSION=1.18.25
 RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" \
     && mkdir -p /root/.config/opencode/tools /opencode-data /workspace /opt/threadsite
+
+# LSP servers and formatter used by the opencode.json lsp/formatter sections.
+# Installed globally so they resolve in every workspace regardless of whether
+# the generated site has its own package.json.
+RUN npm install -g typescript-language-server typescript \
+    vscode-langservers-extracted prettier
 
 COPY opencode.json /opt/threadsite/opencode.base.json
 COPY start.mjs /opt/threadsite/start.mjs

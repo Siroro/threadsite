@@ -53,18 +53,27 @@ export class ForgejoClient {
     }
   }
 
-  /** Rename a repository. Forgejo leaves a redirect from the old name behind. */
-  async renameRepository(currentName: string, newName: string): Promise<void> {
+  /**
+   * Rename a repository and refresh its description. Forgejo leaves a redirect
+   * from the old name behind. A 404 on the old name still counts as success
+   * when the new name already exists: a previous attempt may have renamed the
+   * repo before a later step failed, and retried renames must converge instead
+   * of stranding a half-renamed project.
+   */
+  async renameRepository(currentName: string, newName: string, description?: string): Promise<void> {
     if (currentName === newName) return;
     const owner = encodeURIComponent(config.forgejoOwner);
     const repo = encodeURIComponent(currentName);
     const response = await this.api(`/api/v1/repos/${owner}/${repo}`, {
       method: "PATCH",
-      body: JSON.stringify({ name: newName }),
+      body: JSON.stringify({ name: newName, ...(description ? { description } : {}) }),
     });
-    if (!response.ok) {
-      throw new Error(`Forgejo repository rename failed (${response.status}): ${await response.text()}`);
+    if (response.ok) return;
+    if (response.status === 404) {
+      const target = await this.api(`/api/v1/repos/${owner}/${encodeURIComponent(newName)}`);
+      if (target.ok) return;
     }
+    throw new Error(`Forgejo repository rename failed (${response.status}): ${await response.text()}`);
   }
 
   /** Delete a repository. */

@@ -45,7 +45,11 @@ export default tool({
         continue;
       }
       try {
-        await execFileAsync(process.execPath, ["--check", file], { timeout: 10_000 });
+        // "node" from PATH, never process.execPath: inside the opencode server
+        // the exec path is the bun-compiled opencode binary, which rejects
+        // --check and would fail every file. The image is node-based, so the
+        // real node binary is always on PATH here.
+        await execFileAsync("node", ["--check", file], { timeout: 10_000 });
         results.push(`✅ ${path.relative(root, file)}`);
       } catch (error) {
         failures += 1;
@@ -72,7 +76,12 @@ async function collect(dir: string, out: string[]): Promise<void> {
 }
 
 function summarizeError(error: unknown): string {
-  const raw = typeof error === "object" && error !== null && "stderr" in error ? String((error as { stderr?: unknown }).stderr ?? "") : String(error);
+  // stderr first, but never render an empty message: CLIs disagree about which
+  // stream carries the error, and execFile failures may only have .message.
+  const detail = error as { stderr?: unknown; stdout?: unknown; message?: unknown } | null;
+  const raw = typeof error === "object" && error !== null
+    ? String(detail?.stderr || detail?.stdout || detail?.message || error)
+    : String(error);
   // Keep the SyntaxError line and its source excerpt; drop the internal stack.
   const lines = raw.split("\n").filter((line) => line.trim() && !/^\s+at\s/.test(line));
   return lines.slice(0, 4).join("\n").trim();

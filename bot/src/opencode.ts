@@ -5,6 +5,12 @@ import { log, logError, serializeError } from "./logger.js";
 import type { ProgressCallback } from "./progress.js";
 import { cleanThreadTitle, errorText, parseModel, truncate } from "./util.js";
 
+// Sent to a session whose turn was killed by an agent-service restart. The
+// workspace keeps the turn's partial edits, so this must continue, not restart.
+const CONTINUE_AFTER_RESTART =
+  "Your previous turn was interrupted by a service restart. Inspect the workspace for partial edits from that turn, "
++ "continue exactly where it left off, finish the requested change (do not start over), and summarize what you did.";
+
 function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(input instanceof Request ? input.headers : undefined);
   for (const [key, value] of new Headers(init.headers)) headers.set(key, value);
@@ -75,13 +81,44 @@ interface TurnState {
   assistantMessageIds: Set<string>;
   /** Output+reasoning tokens produced during this turn. */
   outputTokens: number;
+  /** Input+cache tokens billed across every model step of this turn. */
+  inputTokens: number;
+  /** Portion of inputTokens served from the provider's prompt cache. */
+  cacheTokens: number;
   /** Context size the model was given on its most recent step (input + cache). */
   contextTokens: number;
   /** Effective context window of the active model, when the provider list resolved it. */
   contextLimit?: number;
   cost: number;
+  /** Session-lifetime compaction count; starts at the pre-turn baseline. */
   compactions: number;
+  /** Value `compactions` started at, so per-turn deltas are distinguishable. */
+  baselineCompactions: number;
   model?: { providerID: string; modelID: string };
+  /** Subagent sessions (task-tool children of the root session) seen this turn. */
+  childSessions: Set<string>;
+}
+
+/** Token/context accounting for one agent turn, accumulated from OpenCode events. */
+export interface TurnUsage {
+  /** Input+cache tokens billed across every model step of the turn. */
+  inputTokens: number;
+  /** Output+reasoning tokens produced during the turn. */
+  outputTokens: number;
+  /** Portion of inputTokens served from the provider's prompt cache. */
+  cacheTokens: number;
+  /** Context size the model was given on its most recent step (input + cache). */
+  contextTokens: number;
+  /** Effective context window of the active model, when the provider list resolved it. */
+  contextLimit?: number;
+  /** Compactions that fired during this turn. */
+  compactions: number;
+}
+
+/** Result of one completed prompt: the assistant text plus its turn usage. */
+export interface PromptResult {
+  text: string;
+  usage: TurnUsage;
 }
 
 export class OpenCodeHarness {
@@ -152,13 +189,17 @@ export class OpenCodeHarness {
     model?: string,
     onProgress?: ProgressCallback,
     agent = "sitebuilder",
-  ): Promise<string> {
+    variant?: string,
+  ): Promise<PromptResult> {
     const body: any = {
       agent,
       parts: [{ type: "text", text }],
     };
     const parsed = parseModel(model);
     if (parsed) body.model = parsed;
+    // Model variant, i.e. reasoning effort (opencode "variant"). Omitted for "auto"
+    // so the model's built-in default variant applies.
+    if (variant && variant !== "auto") body.variant = variant;
 
     const snapshot = await this.capturePromptSnapshot(directory, sessionId, agent);
     // One TurnState per prompt, shared by the initial event stream and any reconnect
@@ -166,10 +207,14 @@ export class OpenCodeHarness {
     const turn: TurnState = {
       assistantMessageIds: new Set<string>(),
       outputTokens: 0,
+      inputTokens: 0,
+      cacheTokens: 0,
       contextTokens: 0,
       cost: 0,
       compactions: snapshot.compactions,
+      baselineCompactions: snapshot.compactions,
       model: parsed ? { providerID: parsed.providerID, modelID: parsed.modelID } : undefined,
+      childSessions: new Set<string>(),
     };
     if (turn.model) void this.applyContextLimit(turn, onProgress);
     let stream = await this.startEventStream(directory, sessionId, onProgress, turn).catch((error) => {
@@ -181,19 +226,15 @@ export class OpenCodeHarness {
     log("info", "opencode.prompt_started", {
       sessionId,
       model: model || "default",
+      variant: variant || "auto",
       promptChars: text.length,
       baselineMessages: snapshot.ids.size,
     });
 
     try {
-      const result = await this.client.session.prompt({
-        path: { id: sessionId },
-        query: { directory },
-        body,
-      } as any);
-      const response = unwrap<{ parts?: Array<{ type: string; text?: string }> }>(result, "OpenCode prompt");
+      const summary = await this.sendPromptRaw(directory, sessionId, body);
       log("info", "opencode.prompt_completed", { sessionId, model: model || "default" });
-      return extractText(response.parts);
+      return { text: summary, usage: usageOf(turn) };
     } catch (error) {
       if (isTransportLikeError(error)) {
         log("warn", "opencode.prompt_transport_lost", {
@@ -214,14 +255,14 @@ export class OpenCodeHarness {
         if (stream) emit(onProgress, { text: "🟢 Reconnected — checking the running turn" });
 
         try {
-          const recovered = await this.reconcilePrompt(directory, sessionId, snapshot, model, onProgress, error);
+          const recovered = await this.reconcilePrompt(directory, sessionId, snapshot, model, onProgress, error, body);
           log("info", "opencode.prompt_recovered", {
             sessionId,
             model: model || "default",
             originalTransportError: serializeError(error),
           });
           emit(onProgress, { text: "✅ Recovered the completed agent turn" });
-          return recovered;
+          return { text: recovered, usage: usageOf(turn) };
         } catch (recoveryError) {
           const enriched = enrichProviderError(recoveryError, model);
           logError("opencode.prompt_recovery_failed", enriched, {
@@ -306,7 +347,7 @@ export class OpenCodeHarness {
         "naming the website or game described by this request. Reply with only the title.\n\nREQUEST:\n" +
         truncate(requestText, 1200);
       const raw = await this.prompt(directory, sessionId, instruction, model, undefined, "titler");
-      return cleanThreadTitle(raw);
+      return cleanThreadTitle(raw.text);
     } finally {
       await this.client.session.delete({ path: { id: sessionId }, query: { directory } } as any)
         .catch((error: unknown) => log("debug", "opencode.title_session_delete_failed", { sessionId, error: String(error) }));
@@ -378,6 +419,7 @@ export class OpenCodeHarness {
     model: string | undefined,
     onProgress: ProgressCallback | undefined,
     originalError: unknown,
+    originalBody: Record<string, unknown>,
   ): Promise<string> {
     const deadline = Date.now() + config.opencodeReconcileTimeoutMs;
     let lastStatus: unknown;
@@ -441,19 +483,12 @@ export class OpenCodeHarness {
           idleWithoutTurnSince = undefined;
         } else {
           // An absent status entry means idle. Give persistence a grace window before deciding
-          // the original request never made it to OpenCode.
+          // the original request never made it to OpenCode. When the service itself
+          // restarted mid-turn, the session goes idle without a finished assistant
+          // message — continue the turn instead of failing it.
           idleWithoutTurnSince ??= Date.now();
           if (Date.now() - idleWithoutTurnSince > 8_000) {
-            throw new OpenCodeReconciliationError(
-              "The OpenCode connection dropped and the session became idle without a completed new assistant turn.",
-              {
-                phase: "idle-without-completion",
-                sessionStatus: lastStatus ?? "idle/absent",
-                baselineMessages: snapshot.ids.size,
-                model,
-              },
-              { cause: originalError },
-            );
+            return await this.continueAfterRestart(directory, sessionId, originalBody, snapshot, messages, model, onProgress, originalError);
           }
         }
       } catch (error) {
@@ -472,7 +507,7 @@ export class OpenCodeHarness {
     let aborted = false;
     if (wasBusy) {
       emit(onProgress, { text: "🛑 Recovery window exhausted — stopping the orphaned agent turn" });
-      aborted = await this.abortSession(directory, sessionId).catch((error) => {
+      aborted = await this.abortTurn(directory, sessionId).catch((error) => {
         log("error", "opencode.reconcile_abort_failed", { sessionId, error: serializeError(error) });
         return false;
       });
@@ -491,6 +526,55 @@ export class OpenCodeHarness {
       },
       { cause: originalError, mayStillBeRunning: wasBusy && !aborted },
     );
+  }
+
+  private async sendPromptRaw(directory: string, sessionId: string, body: Record<string, unknown>): Promise<string> {
+    const result = await this.client.session.prompt({
+      path: { id: sessionId },
+      query: { directory },
+      body,
+    } as any);
+    const response = unwrap<{ parts?: Array<{ type: string; text?: string }> }>(result, "OpenCode prompt");
+    return extractText(response.parts);
+  }
+
+  /**
+   * The agent service restarted mid-turn (or the request never reached it): the
+   * session sits idle with no completed assistant message. Ask the session to
+   * continue the interrupted work — or, when the original request never
+   * arrived, send it now — instead of failing the whole Discord turn.
+   */
+  private async continueAfterRestart(
+    directory: string,
+    sessionId: string,
+    originalBody: Record<string, unknown>,
+    snapshot: PromptSnapshot,
+    messages: SessionMessage[] | undefined,
+    model: string | undefined,
+    onProgress: ProgressCallback | undefined,
+    originalError: unknown,
+  ): Promise<string> {
+    const arrived = (messages ?? []).some((message) => {
+      const info = message.info;
+      return Boolean(
+        info?.id && info.role === "user" && !snapshot.ids.has(info.id)
+        && (info.time?.created ?? 0) >= snapshot.startedAt - 2_000,
+      );
+    });
+    log("warn", "opencode.reconcile_continuing_after_restart", { sessionId, requestArrived: arrived });
+    emit(onProgress, { text: "🔁 The agent service restarted mid-turn — asking it to continue" });
+    const body = arrived
+      ? { ...originalBody, parts: [{ type: "text", text: CONTINUE_AFTER_RESTART }] }
+      : originalBody;
+    try {
+      return await this.sendPromptRaw(directory, sessionId, body);
+    } catch (error) {
+      throw new OpenCodeReconciliationError(
+        `Continuing the interrupted turn after an agent-service restart failed: ${errorText(error)}`,
+        { phase: "continue-failed", requestArrived: arrived, model },
+        { cause: originalError },
+      );
+    }
   }
 
   private async listSessionMessages(directory: string, sessionId: string, limit: number): Promise<SessionMessage[]> {
@@ -516,7 +600,8 @@ export class OpenCodeHarness {
     return data as Record<string, unknown>;
   }
 
-  private async abortSession(directory: string, sessionId: string): Promise<boolean> {
+  /** Best-effort HTTP abort of a still-running turn; used when recovery stops waiting. */
+  async abortTurn(directory: string, sessionId: string): Promise<boolean> {
     const url = new URL(`${config.opencodeUrl}/session/${encodeURIComponent(sessionId)}/abort`);
     url.searchParams.set("directory", directory);
     const response = await authFetch(url, {
@@ -606,7 +691,24 @@ export class OpenCodeHarness {
   private handleEvent(event: any, sessionId: string, onProgress: ProgressCallback | undefined, turn: TurnState): void {
     const properties = event?.properties ?? {};
     const eventSessionId = properties.sessionID ?? properties.part?.sessionID ?? properties.info?.sessionID;
-    if (eventSessionId && eventSessionId !== sessionId) return;
+    if (eventSessionId && eventSessionId !== sessionId) {
+      // Subagents run in child sessions of the root session. Their activity is
+      // surfaced as prefixed progress lines and their tokens/cost fold into the
+      // turn stats; everything else from unknown sessions stays filtered out.
+      const isChild = eventSessionId && turn.childSessions.has(eventSessionId);
+      if (!isChild) return;
+      this.handleChildEvent(event, properties, eventSessionId, sessionId, onProgress, turn);
+      return;
+    }
+
+    if (event?.type === "session.created" && properties.info?.parentID === sessionId) {
+      turn.childSessions.add(String(properties.info.id));
+      return;
+    }
+    if (event?.type === "session.updated" && properties.info?.parentID === sessionId) {
+      turn.childSessions.add(String(properties.info.id));
+      return;
+    }
 
     if (event?.type === "message.updated") {
       // Track assistant message IDs so streaming text parts can be attributed to the
@@ -681,7 +783,12 @@ export class OpenCodeHarness {
     if (part.type === "step-finish") {
       const tokens = part.tokens ?? {};
       turn.outputTokens += Number(tokens.output ?? 0) + Number(tokens.reasoning ?? 0);
-      turn.contextTokens = Number(tokens.input ?? 0) + Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
+      // Every step re-processes the full context, so billed input accumulates
+      // per step while the context display only wants the newest window size.
+      const stepInput = Number(tokens.input ?? 0) + Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
+      turn.inputTokens += stepInput;
+      turn.cacheTokens += Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
+      turn.contextTokens = stepInput;
       turn.cost += Number(part.cost ?? 0);
       const stats = composeStats(turn);
       if (stats) emit(onProgress, { kind: "stats", text: stats });
@@ -713,6 +820,67 @@ export class OpenCodeHarness {
     const progress = describeTool(tool, state.input, state.status, state.title);
     if (progress) emit(onProgress, progress);
   }
+
+  // Events from a subagent's child session: attributed, prefixed activity lines
+  // plus token/cost accounting merged into the parent turn's shared stats.
+  private handleChildEvent(
+    event: any,
+    properties: any,
+    childSessionId: string,
+    rootSessionId: string,
+    onProgress: ProgressCallback | undefined,
+    turn: TurnState,
+  ): void {
+    const label = "🤖 Subagent";
+
+    if (event?.type === "session.status") {
+      const type = properties.status?.type;
+      if (type === "busy") emit(onProgress, { text: `${label} is working` });
+      else if (type === "retry") emit(onProgress, { text: `⏳ ${label} retrying (#${properties.status?.attempt ?? "?"})` });
+      return;
+    }
+
+    if (event?.type !== "message.part.updated") return;
+    const part = properties.part;
+    if (!part) return;
+
+    if (part.type === "step-finish") {
+      const tokens = part.tokens ?? {};
+      turn.outputTokens += Number(tokens.output ?? 0) + Number(tokens.reasoning ?? 0);
+      turn.inputTokens += Number(tokens.input ?? 0) + Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
+      turn.cacheTokens += Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
+      turn.cost += Number(part.cost ?? 0);
+      const stats = composeStats(turn);
+      if (stats) emit(onProgress, { kind: "stats", text: stats });
+      return;
+    }
+
+    if (part.type === "text" && !part.synthetic) {
+      const text = singleLineText(String(part.text ?? ""));
+      if (text) emit(onProgress, { text: `${label}: ${truncate(text, 100)}` });
+      return;
+    }
+
+    if (part.type !== "tool") return;
+    const state = part.state ?? {};
+    if (state.status === "error") {
+      log("warn", "opencode.subagent_tool_error", {
+        sessionId: rootSessionId,
+        childSessionId,
+        tool: String(part.tool || "tool"),
+        error: state.error,
+      });
+      emit(onProgress, { text: `⚠️ ${label} tool error` });
+      return;
+    }
+    if (state.status !== "running" && state.status !== "completed") return;
+    const described = describeTool(String(part.tool || "tool"), state.input, state.status, state.title);
+    if (described) emit(onProgress, { text: `${label} — ${described.text}`, detail: described.detail });
+  }
+}
+
+function singleLineText(value: string): string {
+  return value.replace(/\r?\n+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function findTerminalAssistant(messages: SessionMessage[], snapshot: PromptSnapshot): SessionMessage | undefined {
@@ -745,15 +913,54 @@ function formatTokens(count: number): string {
 }
 
 function composeStats(turn: TurnState): string {
+  const text = formatTurnUsage(usageOf(turn));
+  return text ? `🧠 ${text}` : "";
+}
+
+/** Snapshot of a TurnState's user-facing usage fields. */
+function usageOf(turn: TurnState): TurnUsage {
+  return {
+    inputTokens: turn.inputTokens,
+    outputTokens: turn.outputTokens,
+    cacheTokens: turn.cacheTokens,
+    contextTokens: turn.contextTokens,
+    contextLimit: turn.contextLimit,
+    compactions: turn.compactions - turn.baselineCompactions,
+  };
+}
+
+/** Public turn-usage line: current context size, cumulative billed tokens, cache share. */
+export function formatTurnUsage(usage: TurnUsage): string {
   const parts: string[] = [];
-  if (turn.contextTokens > 0) {
-    const limit = turn.contextLimit ? ` / ${formatTokens(turn.contextLimit)}` : "";
-    parts.push(`context ${formatTokens(turn.contextTokens)}${limit}`);
+  if (usage.contextTokens > 0) {
+    const limit = usage.contextLimit ? ` / ${formatTokens(usage.contextLimit)}` : "";
+    parts.push(`context ${formatTokens(usage.contextTokens)}${limit}`);
   }
-  if (turn.outputTokens > 0) parts.push(`this turn ${formatTokens(turn.outputTokens)} tok`);
-  if (turn.cost > 0) parts.push(`$${turn.cost < 1 ? turn.cost.toFixed(3) : turn.cost.toFixed(2)}`);
-  if (turn.compactions > 0) parts.push(`compacted ${turn.compactions}×`);
-  return parts.length ? `🧠 ${parts.join(" · ")}` : "";
+  // Cumulative billed usage: every model step re-reads the context, so input
+  // dwarfs output on tool-heavy turns. The cached share shows whether the
+  // provider is actually returning cached prefixes — near-zero means caching is
+  // not engaging for this model/session.
+  if (usage.inputTokens > 0 || usage.outputTokens > 0) {
+    const cached = usage.cacheTokens > 0 ? ` (${formatTokens(usage.cacheTokens)} cached)` : "";
+    parts.push(`in ${formatTokens(usage.inputTokens)}${cached} · out ${formatTokens(usage.outputTokens)} tok`);
+  }
+  if (usage.compactions > 0) parts.push(`compacted ${usage.compactions}×`);
+  return parts.join(" · ");
+}
+
+/** Combine the usage of multiple prompts that belong to one turn (e.g. a repair pass). */
+export function addUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): TurnUsage | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  // Context size/limit describe the model's latest window, not amounts to sum.
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheTokens: a.cacheTokens + b.cacheTokens,
+    contextTokens: b.contextTokens || a.contextTokens,
+    contextLimit: b.contextLimit ?? a.contextLimit,
+    compactions: a.compactions + b.compactions,
+  };
 }
 
 function emit(callback: ProgressCallback | undefined, update: { text: string; detail?: string; kind?: "activity" | "thought" | "stats" }): void {
@@ -763,6 +970,14 @@ function emit(callback: ProgressCallback | undefined, update: { text: string; de
 
 function describeTool(tool: string, input: any, status: string, title?: string): { text: string; detail?: string } | undefined {
   const normalized = tool.toLowerCase().replace(/-/g, "_");
+  if (normalized === "task") {
+    const agent = typeof input?.agent === "string" && input.agent ? input.agent : "subagent";
+    const description = typeof input?.description === "string" ? input.description : undefined;
+    return {
+      text: status === "running" ? `🤖 Delegating to ${agent}` : `🤖 ${agent} finished`,
+      detail: description ? truncate(description, 90) : undefined,
+    };
+  }
   if (normalized === "websearch") return { text: status === "running" ? "🔎 Searching the web" : "🔎 Web research gathered" };
   if (normalized === "webfetch") return { text: status === "running" ? "🌐 Reading a web reference" : "🌐 Web reference read" };
   if (normalized === "asset_download") {

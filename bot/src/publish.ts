@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { config } from "./config.js";
@@ -58,25 +59,301 @@ export async function validateSite(siteDir: string): Promise<SiteStats> {
 
   await walk(root);
   await validateScriptSyntax(root, scripts);
+  await validateInlineScripts(root);
+  await validateAssetReferences(root);
+  await validateScriptTypes(root, scripts);
   return { files, bytes };
 }
 
 /** Parse every JS file with node --check so syntax errors never reach the browser. */
 async function validateScriptSyntax(root: string, scripts: string[]): Promise<void> {
   for (const script of scripts) {
-    let result: { stderr?: string };
-    try {
-      result = await execFileAsync(process.execPath, ["--check", script], { timeout: 10_000 });
-    } catch (error) {
-      result = error as { stderr?: string };
-    }
-    if (result.stderr?.trim()) {
-      const first = result.stderr.split("\n").find((line) => line.includes("Error:") && !line.trim().startsWith("at ")) ?? result.stderr.split("\n")[0];
-      throw new Error(
-        `JavaScript syntax error in site/${path.relative(root, script).replaceAll(path.sep, "/")}: ${first.trim()}`,
-      );
+    await checkScriptSyntax(script, `site/${path.relative(root, script).replaceAll(path.sep, "/")}`);
+  }
+}
+
+/** node --check one script; `label` names it in the thrown error. */
+async function checkScriptSyntax(absolute: string, label: string): Promise<void> {
+  let result: { stderr?: string };
+  try {
+    result = await execFileAsync(process.execPath, ["--check", absolute], { timeout: 10_000 });
+  } catch (error) {
+    result = error as { stderr?: string };
+  }
+  if (result.stderr?.trim()) {
+    const first = result.stderr.split("\n").find((line) => line.includes("Error:") && !line.trim().startsWith("at ")) ?? result.stderr.split("\n")[0];
+    throw new Error(`JavaScript syntax error in ${label}: ${first.trim()}`);
+  }
+}
+
+/**
+ * Syntax-check JavaScript embedded in <script> blocks and JSON embedded in
+ * import maps: standalone .js files are covered by validateScriptSyntax, but
+ * inline blocks reach the browser just the same. Type-checking inline code is
+ * impractical (its relative imports cannot be relocated), so this pass is
+ * syntax-only.
+ */
+async function validateInlineScripts(root: string): Promise<void> {
+  const checks: Array<{ extension: ".js" | ".mjs" | ".json"; body: string; label: string }> = [];
+  for (const html of await listHtmlFiles(root)) {
+    const rel = `site/${path.relative(root, html).replaceAll(path.sep, "/")}`;
+    const source = await fs.readFile(html, "utf8");
+    let index = 0;
+    for (const [, attrs = "", body = ""] of source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+      index += 1;
+      if (tagAttr(attrs, "src")) continue;
+      if (!body.trim()) continue;
+      const type = tagAttr(attrs, "type").toLowerCase();
+      const label = `${rel} (inline <script> #${index})`;
+      if (type === "importmap") checks.push({ extension: ".json", body, label });
+      else if (type === "module") checks.push({ extension: ".mjs", body, label });
+      else if (!type || /^(?:text|application)\/(?:java|ecma)script$/.test(type)) checks.push({ extension: ".js", body, label });
     }
   }
+  if (!checks.length) return;
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-inline-"));
+  try {
+    for (const [i, check] of checks.entries()) {
+      if (check.extension === ".json") {
+        try {
+          JSON.parse(check.body);
+        } catch (error) {
+          throw new Error(`JavaScript syntax error in ${check.label}: import map is not valid JSON: ${String((error as Error).message ?? error)}`);
+        }
+        continue;
+      }
+      const file = path.join(tempDir, `inline-${i}${check.extension}`);
+      await fs.writeFile(file, check.body, "utf8");
+      await checkScriptSyntax(file, check.label);
+    }
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Local <script src> and stylesheet <link href> references must point at real
+ * files inside the site, and must be relative: sites are served under a path
+ * prefix, so site-root-absolute URLs like "/js/main.js" 404 in production.
+ * Remote URLs, data/blob URIs, fragments, and template placeholders are left
+ * alone, and non-stylesheet links (favicons etc.) are only checked when
+ * already relative.
+ */
+async function validateAssetReferences(root: string): Promise<void> {
+  for (const html of await listHtmlFiles(root)) {
+    const rel = `site/${path.relative(root, html).replaceAll(path.sep, "/")}`;
+    const source = await fs.readFile(html, "utf8");
+    const references: Array<{ kind: string; url: string; enforceRelative: boolean }> = [];
+    for (const [, attrs = ""] of source.matchAll(/<script\b([^>]*)>/gi)) {
+      const src = tagAttr(attrs, "src");
+      if (src) references.push({ kind: "<script src>", url: src, enforceRelative: true });
+    }
+    for (const [, attrs = ""] of source.matchAll(/<link\b([^>]*)>/gi)) {
+      const href = tagAttr(attrs, "href");
+      if (href) {
+        const relAttr = tagAttr(attrs, "rel").toLowerCase();
+        references.push({ kind: `<link rel="${relAttr || "?"}">`, url: href, enforceRelative: /stylesheet/.test(relAttr) });
+      }
+    }
+    for (const reference of references) {
+      const url = reference.url.trim();
+      if (!url || url.startsWith("#")) continue;
+      if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) continue;
+      if (url.includes("${")) continue;
+      if (url.startsWith("/")) {
+        if (reference.enforceRelative) {
+          throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" is a site-root-absolute path, but the site is served under a path prefix — use a relative URL.`);
+        }
+        continue;
+      }
+      const clean = url.split("#")[0].split("?")[0];
+      if (!clean) continue;
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(clean);
+      } catch {
+        throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" is not a valid URL encoding.`);
+      }
+      const resolved = path.resolve(path.dirname(html), decoded);
+      if (!resolved.startsWith(`${root}${path.sep}`)) {
+        throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" points outside the site directory.`);
+      }
+      const exists = await fs.access(resolved).then(() => true, () => false);
+      if (!exists) {
+        throw new Error(`Broken local reference in ${rel}: ${reference.kind} points at missing local file "${url}".`);
+      }
+    }
+  }
+}
+
+/** Value of a quoted attribute (double or single) inside a tag's attribute string. */
+function tagAttr(attrs: string, name: string): string {
+  const match = attrs.match(new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"));
+  return (match?.[1] ?? match?.[2] ?? "").trim();
+}
+
+/**
+ * Check authored browser JavaScript with tsc. Deliberately lenient: strict null
+ * checks are off (DOM APIs return nullable types everywhere and generated code
+ * rarely guards them), TS2307 diagnostics for non-relative imports are
+ * dropped because CDN/import-map dependencies like `three` have no local
+ * node_modules to resolve against, and TS2339 diagnostics on DOM base-type
+ * receivers are dropped because un-narrowed DOM lookups are idiomatic here.
+ */
+async function validateScriptTypes(root: string, scripts: string[]): Promise<void> {
+  const authoredScripts = scripts.filter((script) =>
+    path.relative(root, script).replaceAll(path.sep, "/") !== "js/threadsite-net.js",
+  );
+  if (!authoredScripts.length) return;
+
+  const typeScriptCli = path.join(process.cwd(), "node_modules", "typescript", "bin", "tsc");
+  const typeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-types-"));
+  const args = [
+    typeScriptCli,
+    "--noEmit",
+    "--allowJs",
+    "--checkJs",
+    "--noImplicitAny",
+    "false",
+    "--target",
+    "ES2022",
+    "--module",
+    "ESNext",
+    "--moduleResolution",
+    "Bundler",
+    "--lib",
+    "ES2022,DOM,DOM.Iterable",
+    "--skipLibCheck",
+    "--typeRoots",
+    typeRoot,
+    ...authoredScripts,
+  ];
+  let result: { stdout?: string; stderr?: string };
+  let processError: unknown;
+  try {
+    result = await execFileAsync(process.execPath, args, { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+  } catch (error) {
+    processError = error;
+    result = error as { stdout?: string; stderr?: string };
+  } finally {
+    await fs.rm(typeRoot, { recursive: true, force: true });
+  }
+  const raw = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+  const significant = raw
+    .split("\n")
+    .filter(
+      (line) =>
+        !isUnresolvedExternalImport(line) &&
+        !isVendoredClientDiagnostic(line) &&
+        !isDomBaseTypeDiagnostic(line),
+    )
+    .join("\n")
+    .trim();
+  if (significant) throw new Error(`JavaScript type-check error:\n${significant}`);
+  if (processError && !raw) throw new Error(`JavaScript type-checker failed: ${String(processError)}`);
+  await validateElementIds(root, authoredScripts);
+}
+
+/** Matches TS2307 lines for bare package imports (`three`), not relative paths (`./foo`). */
+function isUnresolvedExternalImport(line: string): boolean {
+  const match = line.match(/error TS2307: Cannot find module '([^']+)'/);
+  return match !== null && !/^[./]/.test(match[1]);
+}
+
+/**
+ * Diagnostics from the vendored relay client. It is excluded from the tsc input
+ * list above, but tsc still follows relative imports into it — without this
+ * filter, harness-owned code could fail a game's turn. Its syntax is already
+ * covered by the node --check pass, which includes it.
+ */
+function isVendoredClientDiagnostic(line: string): boolean {
+  return /[\\/]js[\\/]threadsite-net\.js\(/.test(line);
+}
+
+/**
+ * TS2339 diagnostics whose receiver is a DOM base type. `querySelector`,
+ * `event.target`, and Node-family traversal return these, so members that live
+ * only on HTMLElement or the form controls (`dataset`, `style`, `value`) flag
+ * as errors even though the browser resolves them dynamically on the matched
+ * element — narrowing would just force casts into generated code. Property
+ * typos on these receivers are indistinguishable from that pattern and pass
+ * too; validateElementIds remains the guard for missing elements.
+ */
+function isDomBaseTypeDiagnostic(line: string): boolean {
+  return /error TS2339: Property '[^']+' does not exist on type '(?:Element|HTMLElement|SVGElement|EventTarget|Node|ChildNode)'\.$/
+    .test(line);
+}
+
+/**
+ * Verify that every literal ID looked up in authored JS actually exists somewhere
+ * in the site. This replaces strict-null-check enforcement of DOM lookups: a
+ * typo'd ID is the real bug class, and this catches it with zero noise. IDs are
+ * collected from static HTML, JS markup strings (innerHTML templates), `.id`
+ * assignments, and setAttribute("id", ...) so dynamically created elements are
+ * recognized. Computed (non-literal) lookup arguments can't be checked and are
+ * skipped.
+ */
+async function validateElementIds(root: string, scripts: string[]): Promise<void> {
+  const knownIds = new Set<string>();
+  const lookups: { file: string; id: string }[] = [];
+
+  const htmlFiles: string[] = [];
+  async function walkHtml(dir: string): Promise<void> {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const absolute = safeChild(dir, entry.name);
+      if (entry.isDirectory()) await walkHtml(absolute);
+      else if (/\.x?html?$/i.test(entry.name)) htmlFiles.push(absolute);
+    }
+  }
+  await walkHtml(root);
+  for (const html of htmlFiles) {
+    for (const id of extractHtmlIds(await fs.readFile(html, "utf8"))) knownIds.add(id);
+  }
+
+  for (const script of scripts) {
+    const source = await fs.readFile(script, "utf8");
+    for (const id of extractDynamicIds(source)) knownIds.add(id);
+    const rel = path.relative(root, script).replaceAll(path.sep, "/");
+    for (const id of extractLiteralLookupIds(source)) lookups.push({ file: rel, id });
+  }
+
+  const missing = lookups.filter(({ id }) => !knownIds.has(id));
+  if (missing.length) {
+    const lines = missing.map(({ file, id }) => `- js/${file}: getElementById/querySelector references missing id "${id}"`);
+    throw new Error(
+      `JavaScript type-check error:\nElement ID mismatch: some DOM lookups reference ids that do not exist in the site HTML or are never created by the JS. Fix the id names in the JS or add the elements to the HTML.\n${lines.join("\n")}`,
+    );
+  }
+}
+
+/** All id="..." attribute values in an HTML document (double- or single-quoted). */
+function extractHtmlIds(html: string): string[] {
+  return [...html.matchAll(/\sid\s*=\s*(?:"([^"]*)"|'([^']*)')/g)]
+    .map((m) => m[1] ?? m[2] ?? "")
+    .filter(Boolean);
+}
+
+/** IDs created at runtime by the JS itself: markup strings, `.id =`, setAttribute("id", ...). */
+function extractDynamicIds(source: string): string[] {
+  const ids: string[] = [];
+  // id="..." inside any JS string or template literal (innerHTML/insertAdjacentHTML payloads)
+  for (const m of source.matchAll(/\sid\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) ids.push(m[1] ?? m[2] ?? "");
+  // .id = 'value' / .id = "value"
+  for (const m of source.matchAll(/\.id\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) ids.push(m[1] ?? m[2] ?? "");
+  // setAttribute("id", "value")
+  for (const m of source.matchAll(/setAttribute\(\s*["']id["']\s*,\s*(?:"([^"]*)"|'([^']*)')\s*\)/g)) {
+    ids.push(m[1] ?? m[2] ?? "");
+  }
+  return ids.filter(Boolean);
+}
+
+/** Literal argument IDs from getElementById("x") and querySelector("#x"). */
+function extractLiteralLookupIds(source: string): string[] {
+  const ids: string[] = [];
+  for (const m of source.matchAll(/getElementById\(\s*(?:"([^"]+)"|'([^']+)')\s*\)/g)) ids.push(m[1] ?? m[2] ?? "");
+  for (const m of source.matchAll(/querySelector\(\s*["']#([A-Za-z][\w-]*)["']\s*\)/g)) ids.push(m[1] ?? "");
+  return ids;
 }
 
 export async function publishSite(siteDir: string, siteSlug: string): Promise<void> {
