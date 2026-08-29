@@ -1,0 +1,116 @@
+name: threadsite
+
+services:
+  forgejo:
+    image: ${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo:15-rootless}
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__server__DOMAIN: ${FORGEJO_DOMAIN:-localhost}
+      FORGEJO__server__ROOT_URL: ${FORGEJO_PUBLIC_URL:-http://localhost:3000}
+      FORGEJO__server__PROTOCOL: http
+      FORGEJO__server__HTTP_ADDR: 0.0.0.0
+      FORGEJO__server__HTTP_PORT: "3000"
+      FORGEJO__server__LOCAL_ROOT_URL: http://forgejo:3000/
+      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      FORGEJO__security__INSTALL_LOCK: "true"
+      FORGEJO__repository__DEFAULT_PRIVATE: public
+    volumes:
+      - forgejo-data:/var/lib/gitea
+    ports:
+      - "127.0.0.1:${FORGEJO_PORT:-3000}:3000"
+
+  opencode:
+    build:
+      context: ./opencode
+    restart: unless-stopped
+    environment:
+      XDG_DATA_HOME: /opencode-data
+      OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME:-opencode}
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-change-this-internal-password}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENCODE_ENABLE_EXA: ${OPENCODE_ENABLE_EXA:-1}
+      OPENCODE_LOG_LEVEL: ${OPENCODE_LOG_LEVEL:-INFO}
+      ASSET_MAX_BYTES: ${ASSET_MAX_BYTES:-8388608}
+      ASSET_DOWNLOAD_TIMEOUT_MS: ${ASSET_DOWNLOAD_TIMEOUT_MS:-30000}
+      ASSET_ALLOW_HTTP: ${ASSET_ALLOW_HTTP:-false}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
+      SURPLUS_API_KEY: ${SURPLUS_API_KEY:-}
+      SURPLUS_BASE_URL: ${SURPLUS_BASE_URL:-https://api.surplusintelligence.ai/v1}
+      SURPLUS_MODELS: ${SURPLUS_MODELS:-}
+      SURPLUS_CONTEXT_CAP: ${SURPLUS_CONTEXT_CAP:-}
+    volumes:
+      - ./data/workspaces:/workspace
+      - opencode-data:/opencode-data
+    expose:
+      - "4096"
+
+  bot:
+    build:
+      context: ./bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      OPENCODE_URL: ${OPENCODE_URL:-http://opencode:4096}
+      FORGEJO_INTERNAL_URL: ${FORGEJO_INTERNAL_URL:-http://forgejo:3000}
+      FORGEJO_TOKEN_FILE: ${FORGEJO_TOKEN_FILE:-/run/secrets/forgejo-token}
+      MULTIPLAYER_ENABLED: ${MULTIPLAYER_ENABLED:-true}
+      GAMESERVER_PUBLIC_URL: ${GAMESERVER_PUBLIC_URL:-ws://localhost:8090/ws}
+      GAMESERVER_INTERNAL_URL: ${GAMESERVER_INTERNAL_URL:-http://gameserver:8090}
+      WORKSPACE_ROOT: /workspace
+      PUBLISH_ROOT: /srv/sites
+      STATE_FILE: /data/state.json
+    volumes:
+      - ./data/workspaces:/workspace
+      - ${SITES_HOST_PATH:-./data/sites}:/srv/sites
+      - ./data/bot:/data
+      - ./secrets/forgejo-token:/run/secrets/forgejo-token:ro
+    depends_on:
+      - forgejo
+      - opencode
+      - gameserver
+
+  # One shared multi-tenant multiplayer relay for every generated game.
+  # Tenancy is the game id (site slug); rooms are namespaced per game, so a
+  # single instance serves any number of games without per-game processes.
+  # Browsers reach it through GAMESERVER_PUBLIC_URL (loopback port by default;
+  # proxy wss:// via host Apache for production, see apache/ examples).
+  gameserver:
+    build:
+      context: ./gameserver
+    restart: unless-stopped
+    environment:
+      GAMESERVER_HOST: 0.0.0.0
+      # The container always listens on 8090; GAMESERVER_PORT only picks the host side.
+      GAMESERVER_PORT: "8090"
+      GAMESERVER_MAX_PEERS_PER_ROOM: ${GAMESERVER_MAX_PEERS_PER_ROOM:-16}
+      GAMESERVER_MAX_ROOMS_PER_GAME: ${GAMESERVER_MAX_ROOMS_PER_GAME:-256}
+      GAMESERVER_MAX_MESSAGE_BYTES: ${GAMESERVER_MAX_MESSAGE_BYTES:-65536}
+      GAMESERVER_RATE_PER_SECOND: ${GAMESERVER_RATE_PER_SECOND:-60}
+      GAMESERVER_RATE_BURST: ${GAMESERVER_RATE_BURST:-120}
+      GAMESERVER_ROOM_TTL_MS: ${GAMESERVER_ROOM_TTL_MS:-600000}
+      GAMESERVER_ALLOWED_ORIGINS: ${GAMESERVER_ALLOWED_ORIGINS:-}
+    ports:
+      - "127.0.0.1:${GAMESERVER_PORT:-8090}:8090"
+
+  # Optional. If you already run Apache on the host, do NOT start this profile;
+  # just point SITES_HOST_PATH at the directory your host Apache serves.
+  static-web:
+    image: httpd:2.4-alpine
+    profiles: ["bundled-static"]
+    restart: unless-stopped
+    volumes:
+      - ${SITES_HOST_PATH:-./data/sites}:/usr/local/apache2/htdocs:ro
+    ports:
+      - "${STATIC_PORT:-8080}:80"
+
+volumes:
+  forgejo-data:
+  opencode-data:
