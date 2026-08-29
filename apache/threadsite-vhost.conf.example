@@ -1,0 +1,22 @@
+<VirtualHost *:443>
+    ServerName sites.example.com
+    DocumentRoot /var/www/sites
+
+    <Directory /var/www/sites>
+        Options -Indexes -ExecCGI
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    # ThreadSite appends ?v=<content-hash> to local CSS/JS references on every
+    # publish, so versioned assets can be cached essentially forever while the
+    # HTML that names them always revalidates.
+    <FilesMatch "\.(?:css|js|mjs)$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </FilesMatch>
+    <FilesMatch "\.html?$">
+        Header set Cache-Control "no-cache"
+    </FilesMatch>
+
+    # Add your normal TLS directives here.
+</VirtualHost>

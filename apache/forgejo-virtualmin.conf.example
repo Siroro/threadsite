@@ -1,0 +1,16 @@
+# Add these directives to the HTTPS VirtualHost for git.example.com in Virtualmin.
+# Keep Virtualmin's existing SSL certificate directives.
+# Required modules: proxy, proxy_http, headers
+
+ProxyPreserveHost On
+ProxyRequests Off
+AllowEncodedSlashes NoDecode
+
+# Forgejo is HTTP inside Docker while the public site is HTTPS.
+RequestHeader set X-Forwarded-Proto "https"
+RequestHeader set X-Forwarded-Port "443"
+
+# Proxy the ENTIRE hostname, including /assets/. Do not create a separate
+# DocumentRoot/Alias for Forgejo assets.
+ProxyPass / http://127.0.0.1:3000/ nocanon
+ProxyPassReverse / http://127.0.0.1:3000/

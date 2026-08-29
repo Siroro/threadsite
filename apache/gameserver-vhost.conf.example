@@ -1,0 +1,34 @@
+# Optional: expose the ThreadSite multiplayer relay through host Apache as
+# wss://games.example.com/ws. The relay container is published on loopback only
+# (127.0.0.1:8090), so browsers can only reach it through a proxy like this.
+#
+# Enable the required modules once on Debian/Ubuntu hosts:
+#   sudo a2enmod proxy proxy_http proxy_wstunnel headers
+#   sudo systemctl reload apache2
+#
+# Then set in .env:
+#   GAMESERVER_PUBLIC_URL=wss://games.example.com/ws
+#   GAMESERVER_ALLOWED_ORIGINS=https://sites.example.com
+# and recreate the gameserver container.
+
+<VirtualHost *:443>
+    ServerName games.example.com
+
+    SSLEngine on
+    # ...your existing certificate directives for this host...
+
+    ProxyPreserveHost On
+    ProxyRequests Off
+    RequestHeader set X-Forwarded-Proto "https"
+
+    # WebSocket endpoint used by every generated game.
+    ProxyPass /ws ws://127.0.0.1:8090/ws
+    ProxyPassReverse /ws ws://127.0.0.1:8090/ws
+
+    <Location "/">
+        Require all denied
+    </Location>
+    <Location "/ws">
+        Require all granted
+    </Location>
+</VirtualHost>

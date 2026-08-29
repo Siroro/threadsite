@@ -1,0 +1,14 @@
+{
+  "name": "threadsite-gameserver",
+  "version": "2.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test:relay": "node smoke-test.mjs",
+    "test:client": "node client-smoke-test.mjs"
+  },
+  "dependencies": {
+    "ws": "8.18.3"
+  }
+}
