@@ -7,14 +7,27 @@
 // when the old one leaves, and forwards JSON frames between peers. It never
 // interprets game state.
 //
-// Wire protocol: ThreadSite Multiplayer Protocol v1 (documented in the game
+// Protocol v3 sync guarantees (v2 clients are rejected):
+//   - Stable client ids (`cid` in join) survive reconnects; per-peer state is
+//     retained by cid until the room expires, so a returning player reclaims
+//     their identity and everyone else can reattach avatars to them.
+//   - Every relayed frame carries the server receive timestamp `ts`, so
+//     receivers can order and discard stale state deterministically.
+//   - Events carry a client-stamped monotonic `seq`; the relay echoes it, never
+//     reorders per sender, reports drops (rate_limited includes the seq), and
+//     forwards `resend-req` so receivers can fill gaps from sender buffers.
+//   - `state-req` always answers from the relay's cached snapshot immediately
+//     and additionally asks the live host for a fresh one.
+//
+// Wire protocol: ThreadSite Multiplayer Protocol v3 (documented in the game
 // AGENTS.md profiles and implemented by the vendored site/js/threadsite-net.js
 // browser client).
 
 import http from "node:http";
+import crypto from "node:crypto";
 import { WebSocketServer } from "ws";
 
-const PROTOCOL_VERSION = 2;
+const PROTOCOL_VERSION = 3;
 
 function env(name, fallback = "") {
   return (process.env[name] ?? "").trim() || fallback;
@@ -40,6 +53,10 @@ const RATE_PER_SECOND = intEnv("GAMESERVER_RATE_PER_SECOND", 60);
 const RATE_BURST = intEnv("GAMESERVER_RATE_BURST", 120);
 const ROOM_TTL_MS = intEnv("GAMESERVER_ROOM_TTL_MS", 10 * 60 * 1000);
 const JOIN_TIMEOUT_MS = intEnv("GAMESERVER_JOIN_TIMEOUT_MS", 10_000);
+// How many disconnected players' states a room remembers (bounded so a churny
+// room cannot grow without limit). Oldest are evicted first; an active or
+// reconnecting player always refreshes recency when they publish.
+const MAX_RETAINED_STATES = intEnv("GAMESERVER_MAX_RETAINED_STATES", 64);
 const ALLOWED_ORIGINS = env("GAMESERVER_ALLOWED_ORIGINS")
   .split(",")
   .map((value) => value.trim().toLowerCase())
@@ -49,6 +66,7 @@ const ALLOWED_ORIGINS = env("GAMESERVER_ALLOWED_ORIGINS")
 const ROOM_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const GAME_ID_PATTERN = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const ROOM_CODE_PATTERN = new RegExp(`^[${ROOM_ALPHABET}]{4,12}$`);
+const CID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 const MAX_NAME_LENGTH = 32;
 // Single-server mode: every player of a game joins this one fixed room instead
 // of code-addressed rooms. Chosen from the room alphabet so it round-trips
@@ -82,16 +100,24 @@ class Room {
     this.code = code;
     this.peers = new Map(); // peerId -> peer; insertion order = join order, so the
     // first entry is always the current host (oldest peer).
-    this.lastState = null;
-    this.lastStateFrom = null;
-    // Each peer's newest self-owned player state (peer-state model), retained so
-    // late joiners and reconnecting clients see everyone immediately.
-    this.peerStates = new Map(); // peerId -> latest pstate payload
+    this.lastState = null; // newest room snapshot: { state, from, cid, ts }
+    // Each player's newest self-owned state, keyed by STABLE CLIENT ID so it
+    // survives disconnects and reconnects (until room expiry or eviction).
+    this.peerStates = new Map(); // cid -> { from, cid, s, ts }
     this.lastActivity = Date.now();
   }
 
   get hostId() {
     return this.peers.keys().next().value ?? null;
+  }
+
+  setPeerState(cid, entry) {
+    // Refresh recency, then bound the retained set.
+    this.peerStates.delete(cid);
+    this.peerStates.set(cid, entry);
+    while (this.peerStates.size > MAX_RETAINED_STATES) {
+      this.peerStates.delete(this.peerStates.keys().next().value);
+    }
   }
 
   touch() {
@@ -115,8 +141,8 @@ function broadcast(room, frame, exceptPeerId) {
   }
 }
 
-function errorFrame(code, message) {
-  return { t: "error", code, message };
+function errorFrame(code, message, extra = undefined) {
+  return { t: "error", code, message, ...(extra ?? {}) };
 }
 
 function sanitizeName(raw) {
@@ -125,6 +151,11 @@ function sanitizeName(raw) {
     .trim()
     .slice(0, MAX_NAME_LENGTH);
   return value || "player";
+}
+
+function sanitizeCid(raw) {
+  const value = String(raw ?? "").trim();
+  return CID_PATTERN.test(value) ? value : null;
 }
 
 function makeRoomCode(gameRooms) {
@@ -137,15 +168,6 @@ function makeRoomCode(gameRooms) {
   }
   // Vanishingly unlikely; fall back to a longer code.
   return `Z${Date.now().toString(36).toUpperCase().slice(-6)}`;
-}
-
-function roomSnapshot(room) {
-  return {
-    code: room.code,
-    peers: [...room.peers.values()].map((peer) => ({ id: peer.id, name: peer.name })),
-    host: room.hostId,
-    lastState: room.lastState === null ? null : { from: room.lastStateFrom, state: room.lastState },
-  };
 }
 
 function statsPayload() {
@@ -175,7 +197,7 @@ function removeRoomIfEmpty(gameId, room) {
   const gameRooms = games.get(gameId);
   if (!gameRooms) return;
   // Keep empty rooms around until the TTL so a page refresh or brief disconnect
-  // can rejoin with the last snapshot intact.
+  // can rejoin with the last snapshot and retained player states intact.
   if (Date.now() - room.lastActivity >= ROOM_TTL_MS) {
     gameRooms.delete(room.code);
     if (gameRooms.size === 0) games.delete(gameId);
@@ -183,6 +205,13 @@ function removeRoomIfEmpty(gameId, room) {
 }
 
 function handleJoin(peer, msg) {
+  if (msg.v !== PROTOCOL_VERSION) {
+    send(
+      peer,
+      errorFrame("bad_version", `Protocol v${msg.v ?? "?"} is not supported; this relay speaks v${PROTOCOL_VERSION} only.`),
+    );
+    return;
+  }
   const gameId = String(msg.game ?? "");
   if (!GAME_ID_PATTERN.test(gameId)) {
     send(peer, errorFrame("bad_game", "join.game must be the harness game id (lowercase slug, 3-64 chars)."));
@@ -229,6 +258,10 @@ function handleJoin(peer, msg) {
   peer.game = gameId;
   peer.room = room;
   peer.name = sanitizeName(msg.name);
+  // Stable client identity: provided by the client (persists across reconnects)
+  // or minted here. peerStates are keyed by it, so a returning player reclaims
+  // their retained state automatically.
+  peer.cid = sanitizeCid(msg.cid) ?? `cid-${crypto.randomUUID()}`;
   room.peers.set(peer.id, peer);
   room.touch();
 
@@ -237,17 +270,23 @@ function handleJoin(peer, msg) {
     t: "welcome",
     v: PROTOCOL_VERSION,
     you: peer.id,
+    cid: peer.cid,
     room: room.code,
     mode: singleServer ? "single" : "rooms",
     created: Boolean(peer.createdRoom),
     peers: [...room.peers.values()]
       .filter((other) => other.id !== peer.id)
-      .map((other) => ({ id: other.id, name: other.name, s: room.peerStates.get(other.id) ?? null })),
+      .map((other) => ({ id: other.id, name: other.name, cid: other.cid, s: room.peerStates.get(other.cid)?.s ?? null })),
     host: hostId,
-    s: room.lastState === null ? null : { from: room.lastStateFrom, s: room.lastState },
+    s: room.lastState === null ? null : snapshotFrame(room.lastState),
+    serverTs: Date.now(),
   });
-  broadcast(room, { t: "peer-join", peer: { id: peer.id, name: peer.name }, host: hostId }, peer.id);
-  console.log(`[threadsite-gameserver] join game=${gameId} room=${room.code}${singleServer ? " (single-server)" : ""} peer=${peer.id} peers=${room.peers.size}`);
+  broadcast(room, { t: "peer-join", peer: { id: peer.id, name: peer.name, cid: peer.cid }, host: hostId }, peer.id);
+  console.log(`[threadsite-gameserver] join game=${gameId} room=${room.code}${singleServer ? " (single-server)" : ""} peer=${peer.id} cid=${peer.cid} peers=${room.peers.size}`);
+}
+
+function snapshotFrame(entry) {
+  return { from: entry.from, cid: entry.cid, s: entry.state, ts: entry.ts };
 }
 
 function handleFrame(peer, msg) {
@@ -255,19 +294,38 @@ function handleFrame(peer, msg) {
     case "event": {
       const room = peer.room;
       const type = typeof msg.e === "string" ? msg.e.slice(0, 64) : "";
+      const seq = typeof msg.seq === "number" && Number.isFinite(msg.seq) ? msg.seq : null;
       if (!room || !type) {
         send(peer, errorFrame("bad_frame", "event needs a string e and an active room."));
         return;
       }
       room.touch();
-      const frame = { t: "event", from: peer.id, e: type, d: msg.d ?? null };
+      const frame = { t: "event", from: peer.id, cid: peer.cid, e: type, d: msg.d ?? null, ts: Date.now() };
+      if (seq !== null) frame.seq = seq;
+      if (msg.r === 1) frame.r = 1;
       const target = typeof msg.to === "string" ? room.peers.get(msg.to) : undefined;
       if (msg.to !== undefined) {
         if (target) send(target, frame);
-        else send(peer, errorFrame("bad_target", `Peer ${msg.to} is not in this room.`));
+        else send(peer, errorFrame("bad_target", `Peer ${msg.to} is not in this room.`, { seq }));
       } else {
         broadcast(room, frame, peer.id);
       }
+      return;
+    }
+    case "resend-req": {
+      // Receiver-detected gap recovery: forwarded to the original sender, whose
+      // client library keeps a ring buffer of recent events and re-sends the
+      // requested seq range directly to the requester.
+      const room = peer.room;
+      const target = typeof msg.to === "string" ? room?.peers.get(msg.to) : undefined;
+      const after = typeof msg.after === "number" && Number.isFinite(msg.after) ? msg.after : null;
+      const before = typeof msg.before === "number" && Number.isFinite(msg.before) ? msg.before : null;
+      if (!room || !target || after === null || before === null || after >= before) {
+        send(peer, errorFrame("bad_frame", "resend-req needs to/after/before with after < before and an active room."));
+        return;
+      }
+      room.touch();
+      send(target, { t: "resend-req", from: peer.id, cid: peer.cid, after, before });
       return;
     }
     case "state": {
@@ -277,22 +335,23 @@ function handleFrame(peer, msg) {
         return;
       }
       room.touch();
-      room.lastState = msg.s ?? null;
-      room.lastStateFrom = peer.id;
-      broadcast(room, { t: "state", from: peer.id, s: msg.s ?? null }, peer.id);
+      room.lastState = { state: msg.s ?? null, from: peer.id, cid: peer.cid, ts: Date.now() };
+      broadcast(room, { t: "state", ...snapshotFrame(room.lastState) }, peer.id);
       return;
     }
     case "pstate": {
       // Peer-owned state: each player broadcasts their own entity without any
-      // host round trip. The newest payload per peer is retained for joiners.
+      // host round trip. Keyed by cid so reconnects reclaim identity; the
+      // newest payload per client is retained for joiners.
       const room = peer.room;
       if (!room) {
         send(peer, errorFrame("not_joined", "Join a room before publishing player state."));
         return;
       }
       room.touch();
-      room.peerStates.set(peer.id, msg.s ?? null);
-      broadcast(room, { t: "pstate", from: peer.id, s: msg.s ?? null }, peer.id);
+      const entry = { from: peer.id, cid: peer.cid, s: msg.s ?? null, ts: Date.now() };
+      room.setPeerState(peer.cid, entry);
+      broadcast(room, { t: "pstate", ...entry }, peer.id);
       return;
     }
     case "state-req": {
@@ -301,13 +360,17 @@ function handleFrame(peer, msg) {
         send(peer, errorFrame("not_joined", "Join a room before requesting state."));
         return;
       }
+      room.touch();
+      // Always answer from the cache immediately — a requester must never hang
+      // on a host that ignores state requests — then ask the live host for a
+      // fresher snapshot too.
+      if (room.lastState !== null) send(peer, { t: "state", ...snapshotFrame(room.lastState) });
       const host = room.peers.get(room.hostId);
-      if (host && host !== peer) send(host, { t: "state-req", from: peer.id });
-      else if (room.lastState !== null) send(peer, { t: "state", from: room.lastStateFrom, s: room.lastState });
+      if (host && host !== peer) send(host, { t: "state-req", from: peer.id, cid: peer.cid });
       return;
     }
     case "ping":
-      send(peer, { t: "pong", ts: msg.ts ?? null });
+      send(peer, { t: "pong", ts: msg.ts ?? null, sts: Date.now() });
       return;
     default:
       send(peer, errorFrame("unknown_frame", `Unsupported frame type '${String(msg.t)}'.`));
@@ -363,6 +426,7 @@ wss.on("connection", (ws) => {
 
   const peer = {
     id: `p-${(nextPeerSeq += 1)}`,
+    cid: null,
     ws,
     name: "player",
     game: null,
@@ -413,7 +477,9 @@ wss.on("connection", (ws) => {
         lastRateWarning = now;
         console.warn(`[threadsite-gameserver] rate_limited peer=${peer.id} game=${peer.game ?? "-"} room=${peer.room?.code ?? "-"}`);
       }
-      send(peer, errorFrame("rate_limited", `More than ${RATE_PER_SECOND} frames/sec; slow down.`));
+      // Echo the frame's seq so a well-behaved client can requeue exactly what
+      // was dropped instead of guessing.
+      send(peer, errorFrame("rate_limited", `More than ${RATE_PER_SECOND} frames/sec; slow down.`, { seq: typeof msg.seq === "number" ? msg.seq : null }));
       return;
     }
 
@@ -426,16 +492,17 @@ wss.on("connection", (ws) => {
     if (room) {
       const wasHost = room.hostId === peer.id;
       room.peers.delete(peer.id);
-      room.peerStates.delete(peer.id);
+      // NOTE: peerStates are deliberately NOT cleared — they are keyed by cid
+      // and retained until room expiry so reconnects reclaim identity.
       room.touch();
       const newHost = room.hostId;
-      broadcast(room, { t: "peer-leave", id: peer.id, host: newHost }, peer.id);
+      broadcast(room, { t: "peer-leave", id: peer.id, cid: peer.cid, host: newHost }, peer.id);
       if (wasHost && newHost) {
         console.log(`[threadsite-gameserver] host_migrated game=${peer.game} room=${room.code} from=${peer.id} to=${newHost}`);
       }
       removeRoomIfEmpty(peer.game, room);
     }
-    console.log(`[threadsite-gameserver] leave peer=${peer.id} game=${peer.game ?? "-"} room=${room?.code ?? "-"}`);
+    console.log(`[threadsite-gameserver] leave peer=${peer.id} cid=${peer.cid ?? "-"} game=${peer.game ?? "-"} room=${room?.code ?? "-"}`);
   });
 
   ws.on("error", () => {
@@ -470,8 +537,8 @@ sweeper.unref();
 server.listen(PORT, HOST, () => {
   console.log(
     `[threadsite-gameserver] listening on ${HOST}:${PORT} (protocol v${PROTOCOL_VERSION}, ws path /ws)` +
-    ` caps: ${MAX_PEERS_PER_ROOM} peers/room, ${MAX_ROOMS_PER_GAME} rooms/game, ${MAX_MESSAGE_BYTES} bytes/frame, ${RATE_PER_SECOND}/s per peer` +
-    (ALLOWED_ORIGINS.length ? ` origins: ${ALLOWED_ORIGINS.join(",")}` : " origins: any"),
+      ` caps: ${MAX_PEERS_PER_ROOM} peers/room, ${MAX_ROOMS_PER_GAME} rooms/game, ${MAX_RETAINED_STATES} retained states/room, ${MAX_MESSAGE_BYTES} bytes/frame, ${RATE_PER_SECOND}/s per peer` +
+      (ALLOWED_ORIGINS.length ? ` origins: ${ALLOWED_ORIGINS.join(",")}` : " origins: any"),
   );
 });
 

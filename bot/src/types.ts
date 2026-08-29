@@ -30,10 +30,25 @@ export interface ProjectRecord {
   lastError?: string;
   /** Short hash of the commit belonging to the last accepted turn; used by /site revert. */
   lastCommit?: string;
+  /**
+   * Present while a turn is in flight so a bot restart can recover it: the
+   * interrupted request is continued, then validated, committed, and published.
+   * Cleared on every terminal outcome.
+   */
+  pendingTurn?: {
+    prompt: string;
+    initial: boolean;
+    startedAt: string;
+    author?: CommitAuthor;
+    /** The live status message the turn was streaming into, so recovery can resume editing it. */
+    statusMessageId?: string;
+  };
 }
 
 export interface PersistedSettings {
   model?: string;
+  /** Model variant (reasoning effort) sent with every prompt; "auto" is stored as undefined. */
+  effort?: string;
 }
 
 export interface PersistedState {

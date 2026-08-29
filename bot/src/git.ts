@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
 import { config } from "./config.js";
 import type { ForgejoClient } from "./forgejo.js";
 import type { CommitAuthor } from "./types.js";
@@ -14,7 +15,9 @@ async function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promis
     env: { ...process.env, ...env },
     maxBuffer: 4 * 1024 * 1024,
   });
-  return stdout.trim();
+  // trimEnd, not trim: porcelain status lines legitimately begin with a space
+  // (unstaged column), and a leading trim would shift every parsed path.
+  return stdout.trimEnd();
 }
 
 export async function ensureGitRepository(
@@ -82,6 +85,116 @@ export async function undoLastCommit(
     FORGEJO_GIT_TOKEN: credentials.token,
   });
   return { undone: current, kept: previous };
+}
+
+export interface WorkingTreeSnapshot {
+  files: Map<string, { hash: string; lines: number }>;
+  numstat: Map<string, { additions: number; deletions: number }>;
+}
+
+export interface WorkingTreeStats {
+  files: number;
+  added: number;
+  modified: number;
+  deleted: number;
+  additions: number;
+  deletions: number;
+}
+
+/**
+ * Capture the workspace baseline immediately before an agent turn. Includes
+ * untracked files: failed turns deliberately preserve the agent's partial
+ * edits, and without a baseline entry those files would be recounted as fresh
+ * additions on every later turn.
+ */
+export async function captureWorkingTreeSnapshot(workspace: string): Promise<WorkingTreeSnapshot> {
+  const files = new Map<string, { hash: string; lines: number }>();
+  const lsFiles = (extra: string[]) => git(workspace, ["ls-files", "-z", ...extra]).then((raw) => raw.split("\0").filter(Boolean));
+  for (const file of [...await lsFiles([]), ...await lsFiles(["--others", "--exclude-standard"])]) {
+    const content = await fs.readFile(path.join(workspace, file)).catch(() => undefined);
+    if (content) files.set(file, { hash: requireHash(content), lines: isBinary(content) ? 0 : countLines(content.toString("utf8")) });
+  }
+  const numstat = new Map<string, { additions: number; deletions: number }>();
+  for (const line of (await git(workspace, ["diff", "HEAD", "--numstat"])).split("\n")) {
+    if (!line.trim()) continue;
+    const [added, removed, file] = line.split("\t");
+    if (file && added !== "-" && removed !== "-") numstat.set(file, { additions: Number.parseInt(added, 10) || 0, deletions: Number.parseInt(removed, 10) || 0 });
+  }
+  return { files, numstat };
+}
+
+/** Summarize edits relative to a turn-start snapshot, including new files. */
+export async function workingTreeStats(workspace: string, baseline?: WorkingTreeSnapshot): Promise<WorkingTreeStats> {
+  const status = await git(workspace, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  const stats: WorkingTreeStats = { files: 0, added: 0, modified: 0, deleted: 0, additions: 0, deletions: 0 };
+  const currentPaths = new Set<string>();
+  for (const line of status.split("\n")) {
+    if (!line) continue;
+    const code = line.slice(0, 2);
+    const file = line.slice(3);
+    if (code === "??") {
+      const absolute = path.resolve(workspace, file);
+      const content = await fs.readFile(absolute).catch(() => undefined);
+      const before = baseline?.files.get(file);
+      if (content && (!before || before.hash !== requireHash(content))) {
+        stats.files += 1;
+        stats.added += 1;
+        // Binary assets have no meaningful line count — counting 0x0A bytes in
+        // them is how a few MB of media turns into tens of thousands of "lines".
+        if (!isBinary(content)) stats.additions += countLines(content.toString("utf8"));
+      }
+      currentPaths.add(file);
+      continue;
+    }
+    const before = baseline?.files.get(file);
+    const absolute = path.resolve(workspace, file);
+    const current = await fs.readFile(absolute).catch(() => undefined);
+    const changed = !before || !current || before.hash !== requireHash(current);
+    if (!changed) continue;
+    stats.files += 1;
+    currentPaths.add(file);
+    if (code.includes("A")) stats.added += 1;
+    else if (code.includes("D")) stats.deleted += 1;
+    else stats.modified += 1;
+  }
+
+  const numstat = await git(workspace, ["diff", "HEAD", "--numstat"]);
+  for (const line of numstat.split("\n")) {
+    if (!line.trim()) continue;
+    const [added, removed, file] = line.split("\t");
+    if (!file || !currentPaths.has(file)) continue;
+    // Renames and binary files use non-numeric markers; don't invent line counts.
+    if (added !== "-" && removed !== "-") {
+      const current = { additions: Number.parseInt(added, 10) || 0, deletions: Number.parseInt(removed, 10) || 0 };
+      const before = baseline?.numstat.get(file);
+      stats.additions += Math.max(0, current.additions - (before?.additions ?? 0));
+      stats.deletions += Math.max(0, current.deletions - (before?.deletions ?? 0));
+    }
+  }
+  for (const [file, before] of baseline?.files ?? []) {
+    if (currentPaths.has(file)) continue;
+    // git status only lists files that changed, so absence from it also describes
+    // untouched files — confirm the file is really gone before counting a deletion.
+    const exists = await fs.access(path.join(workspace, file)).then(() => true, () => false);
+    if (exists) continue;
+    stats.files += 1;
+    stats.deleted += 1;
+    stats.deletions += before.lines;
+  }
+  return stats;
+}
+
+function requireHash(content: Buffer): string {
+  return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+/** Git-style binary sniff: a NUL byte in the first 8 KiB means "not line data". */
+function isBinary(content: Buffer): boolean {
+  return content.subarray(0, 8192).includes(0);
+}
+
+function countLines(content: string): number {
+  return content ? content.split(/\r?\n/).length - (content.endsWith("\n") ? 1 : 0) : 0;
 }
 
 export interface CommitStats {

@@ -12,6 +12,7 @@ import {
   ThreadAutoArchiveDuration,
   type ChatInputCommandInteraction,
   type ButtonInteraction,
+  type Message,
   type ThreadChannel,
 } from "discord.js";
 import { AdminReporter } from "./admin-reporter.js";
@@ -20,13 +21,23 @@ import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
 import { getLogFile, log, logError, recentIncidents, recordIncident } from "./logger.js";
 import { multiplayerRelayStatus } from "./multiplayer.js";
-import { OpenCodeHarness } from "./opencode.js";
-import { DiscordProgress } from "./progress.js";
-import { ProjectService } from "./project.js";
+import { OpenCodeHarness, formatTurnUsage } from "./opencode.js";
+import { DiscordProgress, formatElapsed } from "./progress.js";
+import { ProjectService, type MutationResult } from "./project.js";
 import { Store } from "./store.js";
 import { projectKindLabel } from "./templates.js";
 import type { ProjectKind, ProjectRecord } from "./types.js";
 import { commitAuthorIdentity, errorText, slugify, stripSummaryPreamble, truncate } from "./util.js";
+
+// Stray async failures must log instead of killing the process: an unhandled
+// rejection is process-fatal on Node 22 and would take every in-flight thread
+// turn down with it. Individual turn failures are handled per-queue.
+process.on("unhandledRejection", (reason) => {
+  logError("process.unhandled_rejection", reason, {});
+});
+process.on("uncaughtException", (error) => {
+  logError("process.uncaught_exception", error, {});
+});
 
 const store = await Store.open(config.stateFile, config.defaultModel);
 const opencode = new OpenCodeHarness();
@@ -53,7 +64,63 @@ client.once(Events.ClientReady, (ready) => {
     multiplayer: config.multiplayerEnabled ? config.gameserverPublicUrl : "disabled",
     errorRecipients: config.errorReportUserIds.size,
   });
+  void recoverInterruptedTurns();
 });
+
+// Turns that were in flight when the bot stopped are marked in the store.
+// Resume each one (continue the agent work, then commit and publish) now that
+// Discord is available to report the outcome in the thread. The turn's own
+// status message is resumed when it still exists, so the thread keeps one live
+// message per request instead of a frozen leftover plus a new one; a fresh
+// message is posted only as a fallback (e.g. the original was deleted).
+async function recoverInterruptedTurns(): Promise<void> {
+  const interrupted = store.listProjects().filter((project) => project.pendingTurn);
+  if (!interrupted.length) return;
+  log("info", "project.recovery_boot_scan", { interrupted: interrupted.length });
+  for (const project of interrupted) {
+    const channel = await client.channels.fetch(project.threadId).catch(() => undefined);
+    const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
+    let status: Message | undefined;
+    if (thread && project.pendingTurn?.statusMessageId) {
+      const resumed = await thread.messages.fetch(project.pendingTurn.statusMessageId).catch(() => undefined);
+      if (resumed && resumed.author.id === client.user?.id) status = resumed;
+    }
+    if (!status && thread) {
+      status = await thread.send("♻️ Resuming the turn that was in flight when the bot restarted…").catch(() => undefined);
+    }
+    const progress = status ? new DiscordProgress(status, `♻️ Recovering ${project.displayName}`) : undefined;
+    progress?.update("♻️ Resuming the interrupted turn");
+    const deliver: (content: string) => Promise<unknown> = status
+      ? (content) => setStatusMessage(status, content).catch(() => undefined)
+      : thread
+        ? (content) => thread.send(content).catch(() => undefined)
+        : async () => undefined;
+    projects.enqueue(project.threadId, async () => {
+      try {
+        const result = await projects.recoverTurn(project.threadId, progress?.callback);
+        progress?.close();
+        const isGame = result.project.projectKind === "game-2d" || result.project.projectKind === "game-3d";
+        await deliver(
+          `♻️ Recovered the interrupted turn after a restart · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})\n` +
+          `${turnStatsText(result)}\n` +
+          `\n# [${isGame ? "PLAY GAME" : "OPEN SITE"}](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`,
+        );
+      } catch (error) {
+        progress?.close();
+        const incident = await reportFailure(error, {
+          operation: "restart-recovery",
+          guildId: project.guildId,
+          threadId: project.threadId,
+          project,
+          model: store.getModel() || "the model default",
+        });
+        await deliver(
+          `❌ Could not recover the interrupted turn from the last restart · reference \`${incident.id}\`. Partial edits were kept — send a message to try again.`,
+        );
+      }
+    }).catch((error) => logError("project.queue_failed", error, { threadId: project.threadId }));
+  }
+}
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton()) {
@@ -116,12 +183,15 @@ client.on(Events.MessageCreate, async (message) => {
           username: message.author.username,
           id: message.author.id,
         }),
+        status.id,
       );
       progress.close();
       const summary = agentSummaryText(result.agentSummary);
-      await status.edit(
+      await setStatusMessage(
+        status,
         `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})${summary}\n` +
-        `\n# [${isGame ? "PLAY GAME" : "OPEN SITE"}](${projects.siteLink(result.project)})\n[git](${projects.repoLink(result.project)})`,
+        `${turnStatsText(result)}\n` +
+        `\n# [${isGame ? "PLAY GAME" : "OPEN SITE"}](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`,
       );
     } catch (error) {
       progress.close();
@@ -133,10 +203,11 @@ client.on(Events.MessageCreate, async (message) => {
         project,
         model: store.getModel() || "the model default",
       });
-      await status.edit({
-        content: `❌ Update failed · reference \`${incident.id}\`. The previous published version is unchanged.`,
-        ...(await offerEditsChoice(project, error) ? { components: [failureEditsRow()] } : {}),
-      });
+      await setStatusMessage(
+        status,
+        `❌ Update failed · reference \`${incident.id}\`. The previous published version is unchanged.`,
+        (await offerEditsChoice(project, error)) ? [failureEditsRow()] : undefined,
+      );
     }
   }).catch((error) => logError("project.queue_failed", error, { threadId: message.channel.id }));
 });
@@ -203,15 +274,18 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
           initialPrompt: prompt,
           renameable: created && !requestedName,
           initiator: interactionInitiator(interaction),
+          statusMessageId: status.id,
         }, progress.callback, created && !requestedName
           ? (title) => applyAiThreadTitle(thread, title)
           : undefined);
         progress.close();
         const summary = agentSummaryText(result.agentSummary);
-        await status.edit(
+        await setStatusMessage(
+          status,
           `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})${summary}\n` +
+          `${turnStatsText(result)}\n` +
           `\nFrom now on, **every normal message in this thread edits this same site**.\n` +
-          `# [OPEN SITE](${projects.siteLink(result.project)})\n[git](${projects.repoLink(result.project)})`,
+          `# [OPEN SITE](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`,
         );
       } catch (error) {
         progress.close();
@@ -227,10 +301,11 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         const retry = project
           ? "Reply in this thread to retry after the configuration/provider issue is fixed."
           : "Run `/site start` again inside this thread after the setup issue is fixed.";
-        await status.edit({
-          content: `❌ Initial generation failed · reference \`${incident.id}\`. ${retry}`,
-          ...(await offerEditsChoice(project, error) ? { components: [failureEditsRow()] } : {}),
-        });
+        await setStatusMessage(
+          status,
+          `❌ Initial generation failed · reference \`${incident.id}\`. ${retry}`,
+          (await offerEditsChoice(project, error)) ? [failureEditsRow()] : undefined,
+        );
       }
     }).catch((error) => logError("project.queue_failed", error, { threadId: thread.id }));
     return;
@@ -246,7 +321,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         `**${project.displayName}** — ${project.status}\n` +
         `[open site](${projects.siteLink(project)}) · [source](${projects.repoLink(project)})\n` +
         `Type: ${projectKindLabel(project.projectKind)}\n` +
-        `Model: \`${store.getModel() || "the model default"}\`` +
+        `Model: \`${store.getModel() || "the model default"}\` · Effort: \`${store.getEffort() || "auto"}\`` +
         (project.lastError && config.errorReportUserIds.has(interaction.user.id) ? `\nLast private error summary: ${truncate(project.lastError, 900)}` : ""),
       ephemeral: true,
     });
@@ -322,14 +397,17 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
         projectKind,
         renameable: created && !requestedName,
         initiator: interactionInitiator(interaction),
+        statusMessageId: status.id,
       }, progress.callback, created && !requestedName
         ? (title) => applyAiThreadTitle(thread, title)
         : undefined);
       progress.close();
       const summary = agentSummaryText(result.agentSummary);
-      await status.edit(
+      await setStatusMessage(
+        status,
         `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})${summary}\n` +
-        `\n# [PLAY GAME](${projects.siteLink(result.project)})\n[git](${projects.repoLink(result.project)})`,
+        `${turnStatsText(result)}\n` +
+        `\n# [PLAY GAME](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`,
       );
     } catch (error) {
       progress.close();
@@ -345,10 +423,11 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
       const retry = project
         ? "Reply in this thread to retry after the configuration/provider issue is fixed."
         : "Run `/makegam` again inside this thread after the setup issue is fixed.";
-      await status.edit({
-        content: `❌ Initial game generation failed · reference \`${incident.id}\`. ${retry}`,
-        ...(await offerEditsChoice(project, error) ? { components: [failureEditsRow()] } : {}),
-      });
+      await setStatusMessage(
+        status,
+        `❌ Initial game generation failed · reference \`${incident.id}\`. ${retry}`,
+        (await offerEditsChoice(project, error)) ? [failureEditsRow()] : undefined,
+      );
     }
   }).catch((error) => logError("project.queue_failed", error, { threadId: thread.id }));
 }
@@ -362,6 +441,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
   if (sub === "status") {
     await interaction.editReply(
       `Model: \`${store.getModel() || "the model default"}\`\n` +
+      `Effort: \`${store.getEffort() || "auto"}\`\n` +
       `Agent service: ${await opencode.health()}\n` +
       `Web search: enabled for agent research\n` +
       `Asset tool: guarded downloads to site/assets\n` +
@@ -382,6 +462,18 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     await store.setModel(model);
     log("info", "admin.model_changed", { userId: interaction.user.id, model: model || "default" });
     await interaction.editReply(`Future turns will use \`${model || "the model default"}\`. Existing thread sessions switch on their next message too.`);
+    return;
+  }
+
+  if (sub === "effort") {
+    const level = interaction.options.getString("level", true);
+    await store.setEffort(level === "auto" ? undefined : level);
+    log("info", "admin.effort_changed", { userId: interaction.user.id, effort: level });
+    await interaction.editReply(
+      level === "auto"
+        ? "Future turns will use the model's default reasoning effort."
+        : `Future turns will request \`${level}\` reasoning effort. Models without that variant just fall back to their default.`,
+    );
     return;
   }
 
@@ -425,6 +517,13 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
 function agentSummaryText(raw: string | undefined): string {
   const stripped = raw ? stripSummaryPreamble(raw) : "";
   return stripped ? `\n${truncate(stripped, 1600)}` : "";
+}
+
+// Final-message subtext: how long the turn took plus its cumulative token
+// usage and the context size the model ended on, when the agent reported them.
+function turnStatsText(result: MutationResult): string {
+  const usage = result.usage ? formatTurnUsage(result.usage) : "";
+  return `-# ⏱️ ${formatElapsed(result.durationMs)}${usage ? ` · 🧠 ${usage}` : ""}`;
 }
 
 function isAdmin(interaction: ChatInputCommandInteraction): boolean {
@@ -474,6 +573,26 @@ function failureEditsRow(): ActionRowBuilder<ButtonBuilder> {
     new ButtonBuilder().setCustomId("threadsite:rollback").setLabel("Rollback edits").setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId("threadsite:keep").setLabel("Keep edits").setStyle(ButtonStyle.Success),
   );
+}
+
+/**
+ * Publish a final outcome on a turn's live status message. The user may have
+ * deleted that message mid-turn (Discord 10008 Unknown Message) — deliver the
+ * outcome as a fresh thread message instead of failing the whole turn report.
+ */
+async function setStatusMessage(
+  status: Message,
+  content: string,
+  components?: ActionRowBuilder<ButtonBuilder>[],
+): Promise<void> {
+  const payload = { content, ...(components ? { components } : {}) };
+  try {
+    await status.edit(payload);
+  } catch (error) {
+    if ((error as { code?: number }).code !== 10008) throw error;
+    const { channel } = status;
+    if ("send" in channel) await channel.send(payload).catch(() => undefined);
+  }
 }
 
 /**

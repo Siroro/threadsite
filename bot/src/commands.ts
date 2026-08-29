@@ -71,6 +71,22 @@ export const adminCommand = new SlashCommandBuilder()
       .setRequired(true)
       .setMaxLength(200)))
   .addSubcommand((sub) => sub
+    .setName("effort")
+    .setDescription("Change the reasoning effort (model variant) used on every future Discord mutation")
+    .addStringOption((option) => option
+      .setName("level")
+      .setDescription("Availability depends on the active model/provider; 'auto' uses the model default")
+      .setRequired(true)
+      .addChoices(
+        { name: "auto (model default)", value: "auto" },
+        { name: "minimal", value: "minimal" },
+        { name: "low", value: "low" },
+        { name: "medium", value: "medium" },
+        { name: "high", value: "high" },
+        { name: "xhigh", value: "xhigh" },
+        { name: "max (Anthropic)", value: "max" },
+      )))
+  .addSubcommand((sub) => sub
     .setName("token")
     .setDescription("Store/replace a provider API token (ephemeral reply)")
     .addStringOption((option) => option

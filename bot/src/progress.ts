@@ -6,10 +6,10 @@ export interface ProgressUpdate {
   text: string;
   detail?: string;
   /**
-   * "activity" (default) lines become the rolling status bullet. "thought" and
-   * "stats" update dedicated lines streamed straight from OpenCode events.
+   * "activity" (default) lines become the rolling status bullet. "thought",
+   * "stats", and "changes" update dedicated lines streamed from the agent/harness.
    */
-  kind?: "activity" | "thought" | "stats";
+  kind?: "activity" | "thought" | "stats" | "changes";
 }
 
 export type ProgressCallback = (update: ProgressUpdate) => void | Promise<void>;
@@ -24,6 +24,7 @@ export class DiscordProgress {
   private readonly history: string[] = [];
   private thought?: string;
   private stats?: string;
+  private changes?: string;
   private lastEdit = 0;
   private pending?: NodeJS.Timeout;
   private heartbeat?: NodeJS.Timeout;
@@ -45,6 +46,9 @@ export class DiscordProgress {
       this.schedule();
     } else if (update.kind === "stats") {
       this.stats = singleLine(update.text);
+      this.schedule();
+    } else if (update.kind === "changes") {
+      this.changes = singleLine(update.text);
       this.schedule();
     } else {
       this.update(update.text, update.detail);
@@ -99,13 +103,14 @@ export class DiscordProgress {
       [head, ...[...history, this.latest].map((line) => `• ${singleLine(line)}`)].join("\n");
     let history = this.history;
     let body = withHistory(history);
-    while (body.length + (this.thought ? this.thought.length + 8 : 0) + (this.stats ? this.stats.length + 4 : 0) > MAX_RENDER_CHARS && history.length) {
+    while (body.length + (this.thought ? this.thought.length + 8 : 0) + (this.stats ? this.stats.length + 4 : 0) + (this.changes ? this.changes.length + 4 : 0) > MAX_RENDER_CHARS && history.length) {
       history = history.slice(1);
       body = withHistory(history);
     }
     const lines = [body];
     if (this.thought) lines.push(`> 💭 ${this.thought}`);
     if (this.stats) lines.push(`-# ${this.stats}`);
+    if (this.changes) lines.push(`-# ${this.changes}`);
     return lines.join("\n").slice(0, MAX_RENDER_CHARS);
   }
 }
@@ -139,7 +144,7 @@ function singleLine(value: string): string {
     .trim();
 }
 
-function formatElapsed(ms: number): string {
+export function formatElapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;

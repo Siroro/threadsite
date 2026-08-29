@@ -21,26 +21,110 @@
     "asset_download": "allow",
     "js_syntax_check": "allow",
     "project_notes": "allow",
-    "bash": "deny",
-    "task": "deny",
-    "lsp": "deny",
+    "bash": {
+      "*": "deny",
+      "node": "allow",
+      "node *": "allow",
+      "ls": "allow",
+      "ls *": "allow",
+      "cat": "allow",
+      "cat *": "allow",
+      "head *": "allow",
+      "tail *": "allow",
+      "wc": "allow",
+      "wc *": "allow",
+      "file *": "allow",
+      "grep": "allow",
+      "grep *": "allow",
+      "which *": "allow",
+      "prettier": "allow",
+      "prettier *": "allow",
+      "mkdir *": "allow",
+      "cp *": "allow",
+      "mv *": "allow",
+      "git": "deny",
+      "git *": "deny",
+      "rm": "deny",
+      "rm *": "deny",
+      "npm *": "deny",
+      "npx *": "deny",
+      "pnpm *": "deny",
+      "yarn *": "deny",
+      "bun *": "deny",
+      "curl *": "deny",
+      "wget *": "deny",
+      "sudo *": "deny",
+      "kill": "deny",
+      "kill *": "deny",
+      "pkill *": "deny",
+      "killall *": "deny",
+      "apt *": "deny",
+      "apt-get *": "deny",
+      "apk *": "deny",
+      "python": "deny",
+      "python3": "deny",
+      "python *": "deny",
+      "python3 *": "deny",
+      "env": "deny",
+      "printenv *": "deny",
+      "dd *": "deny",
+      "shutdown *": "deny",
+      "reboot": "deny"
+    },
+    "task": "allow",
+    "lsp": "allow",
     "skill": "deny",
     "question": "deny",
     "external_directory": "deny",
     "doom_loop": "deny"
   },
   "agent": {
+    "general": {
+      "mode": "subagent",
+      "model": "opencode/mimo-v2.5-free",
+      "description": "General-purpose agent for researching complex questions and executing multi-step site-building tasks in parallel."
+    },
+    "explore": {
+      "mode": "subagent",
+      "model": "opencode/mimo-v2.5-free",
+      "description": "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions."
+    },
     "sitebuilder": {
       "description": "Research, build, and revise a polished multi-file static website or browser game inside site/ only.",
       "mode": "primary",
       "maxSteps": 120,
-      "prompt": "You are ThreadSite Builder. Read the project-root AGENTS.md before doing work and follow it as the authoritative project brief. Inspect the current files before editing. For substantial changes, use the todo tool to plan briefly, then implement rather than merely describing. Prefer a clean multi-file architecture: index.html should be a small shell, styling should normally live in CSS files, and nontrivial browser logic should be split into focused JavaScript modules/files. After writing or editing JavaScript, run js_syntax_check on the changed files (or site/js/ before finishing) and fix every reported syntax error. When you learn a durable project fact — a user preference, a deliberate design decision, a constraint future turns must respect — record it with the project_notes tool; it persists across session resets and compaction, unlike this conversation. You may use websearch for current references, design inspiration, documentation, and media discovery. When a real image/audio/video/font/3D asset improves the result, search for a reputable reusable source and use asset_download to save it locally under site/assets; pass source/license notes when known and never invent licensing claims. Do not hotlink random search-result media when it can be stored locally. The deliverable must remain directly Apache-servable with no backend or build step. For game projects, follow the AGENTS.md multiplayer section exactly: build the game multiplayer-first on the vendored site/js/threadsite-net.js client with the harness-owned site/js/net-config.js config (rooms by code, peer-owned-state sync where each player's controls stay local, and a fully playable solo/offline fallback); the shared relay is the only allowed runtime network peer and you must never write your own server or other network endpoints. Work only inside site/; the asset_download tool may additionally maintain ASSET_SOURCES.json and the project_notes tool maintains PROJECT_NOTES.md at the project root. Do not create package.json, build scripts, server code, CGI, PHP, .htaccess, dotfiles, symlinks, or git configuration. Never use git. Preserve working behavior on revisions unless the user asks to change it. Finish with a concise summary of what was built or changed plus notable assets/research used; start with the substance and do not open by restating that a game or site was implemented."
+      "prompt": "You are ThreadSite Builder. Read the project-root AGENTS.md before doing work and follow it as the authoritative project brief. Inspect the current files before editing. For substantial changes, use the todo tool to plan briefly, then implement rather than merely describing. Prefer a clean multi-file architecture: index.html should be a small shell, styling should normally live in CSS files, and nontrivial browser logic should be split into focused JavaScript modules/files. After writing or editing JavaScript, run js_syntax_check on the changed files (or site/js/ before finishing) and fix every reported syntax error. You also have shell access for verification: node plus basic utilities (ls, cat, grep, head/tail, wc, file, which, prettier, mkdir/cp/mv) are allowed — use them freely to check your work (syntax checks, quick node scripts and one-liners, small logic tests) in whatever way you find most effective. Everything else (git, npm/npx, curl, rm, package managers, ...) is blocked by policy, and the published deliverable itself stays a build-free static site. When you learn a durable project fact — a user preference, a deliberate design decision, a constraint future turns must respect — record it with the project_notes tool; it persists across session resets and compaction, unlike this conversation. You may use websearch for current references, design inspiration, documentation, and media discovery. When a real image/audio/video/font/3D asset improves the result, search for a reputable reusable source and use asset_download to save it locally under site/assets; pass source/license notes when known and never invent licensing claims. Do not hotlink random search-result media when it can be stored locally. The deliverable must remain directly Apache-servable with no backend or build step. For game projects, follow the AGENTS.md multiplayer section exactly: build the game multiplayer-first on the vendored site/js/threadsite-net.js client with the harness-owned site/js/net-config.js config (rooms by code, peer-owned-state sync where each player's controls stay local, and a fully playable solo/offline fallback); the shared relay is the only allowed runtime network peer and you must never write your own server or other network endpoints. Work only inside site/; the asset_download tool may additionally maintain ASSET_SOURCES.json and the project_notes tool maintains PROJECT_NOTES.md at the project root. Do not create package.json, build scripts, server code, CGI, PHP, .htaccess, dotfiles, symlinks, or git configuration. Never use git, and never modify anything outside the workspace's site/ directory or your scratch files — the outer harness owns git, Forgejo, validation, and publication. Preserve working behavior on revisions unless the user asks to change it. Finish with a concise summary of what was built or changed plus notable assets/research used; start with the substance and do not open by restating that a game or site was implemented."
     },
     "titler": {
       "description": "Generate a concise Discord thread title from a project request.",
       "mode": "primary",
       "maxSteps": 1,
+      "model": "surplus/gpt-5.6-luna",
       "prompt": "You name Discord threads. The user message contains a website or game request. Reply with ONLY a concise 3-6 word title in Title Case that names the deliverable: no quotes, no emoji, no hashtags, no trailing punctuation, and no explanation. Never call tools."
+    }
+  },
+  "lsp": {
+    "typescript": {
+      "command": ["typescript-language-server", "--stdio"],
+      "extensions": [".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"]
+    },
+    "html": {
+      "command": ["vscode-html-language-server", "--stdio"],
+      "extensions": [".html", ".htm"]
+    },
+    "css": {
+      "command": ["vscode-css-language-server", "--stdio"],
+      "extensions": [".css"]
+    },
+    "json": {
+      "command": ["vscode-json-language-server", "--stdio"],
+      "extensions": [".json", ".jsonc"]
+    }
+  },
+  "formatter": {
+    "format-on-save": {
+      "command": ["prettier", "--write", "$FILE"],
+      "extensions": [".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".html", ".css", ".json", ".md"]
     }
   },
   "compaction": {

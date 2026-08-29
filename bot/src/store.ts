@@ -43,6 +43,15 @@ export class Store {
     await this.save();
   }
 
+  getEffort(): string | undefined {
+    return this.state.settings.effort;
+  }
+
+  async setEffort(effort?: string): Promise<void> {
+    this.state.settings.effort = effort || undefined;
+    await this.save();
+  }
+
   getProject(threadId: string): ProjectRecord | undefined {
     return this.state.projects[threadId];
   }

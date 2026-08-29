@@ -1,5 +1,7 @@
 import type { MultiplayerContext, ProjectKind } from "./types.js";
 
+export const MULTIPLAYER_PROTOCOL_VERSION = 3;
+
 export function projectAgents(kind: ProjectKind, multiplayer?: MultiplayerContext): string {
   const mp = kind !== "site" && multiplayer ? multiplayerAgents(multiplayer) : "";
   if (kind === "game-2d") return `${GAME_2D_AGENTS}\n${mp}`;
@@ -34,7 +36,12 @@ export function mutationInstruction(kind: ProjectKind, userPrompt: string, notes
 }
 
 export function repairInstruction(validationError: string): string {
-  return `Automated validation rejected the previous output with a JavaScript syntax error. Fix it now: open the listed file(s), correct every parse error, remove duplicate declarations, and make sure the whole file parses. Use the js_syntax_check tool on the affected files before finishing. Do not change anything unrelated to the syntax errors and do not remove or stub working functionality to make the error go away.\n\nVALIDATION ERROR:\n${validationError}`;
+  return `Automated validation rejected the previous output with a JavaScript validation error. Fix it now: open the listed file(s), correct every reported syntax, type, and DOM id error, and make sure the browser code is valid. Use the js_syntax_check tool on the affected files before finishing. If a DOM lookup references an id that does not exist, fix the id name or add the missing element to the HTML. Do not change anything unrelated to the validation errors and do not remove or stub working functionality to make the error go away.\n\nVALIDATION ERROR:\n${validationError}`;
+}
+
+/** Nudge used by boot recovery when a turn was interrupted by a restart. */
+export function recoveryInstruction(originalPrompt: string, notes?: string): string {
+  return `The previous turn was interrupted by a service restart before it could be committed and published. Re-read AGENTS.md and inspect the workspace: it may already contain partial edits from that turn. Continue exactly where it left off and finish the requested change (do not start over), then summarize what you did.${notesSection(notes)}\n\nORIGINAL REQUEST:\n${originalPrompt}`;
 }
 
 export function projectKindLabel(kind: ProjectKind | undefined): string {
@@ -69,6 +76,33 @@ This repository is maintained by the ThreadSite Discord harness. The published d
 - Keep module boundaries understandable. Do not create dozens of microscopic files just to satisfy the multi-file rule.
 - Use ES modules when they make the browser code cleaner. Keep all imports browser-compatible and relative unless a deliberately pinned CDN library is justified.
 - Add comments for unusual math/algorithms, not for obvious code.
+
+## Verification tools available to you
+
+- You have a shell with **node** and a few utilities (ls, cat, grep, head/tail, wc, file, which, prettier, mkdir/cp/mv) for verification only: syntax checks, quick one-liners, scratch scripts, and small logic tests. Everything else — git, npm/npx, curl/wget, rm, package managers — is blocked by policy. The published deliverable stays a build-free static site regardless.
+- Keep any scratch verification files in \`/tmp\` — anything inside the workspace gets committed to git, and anything inside \`site/\` additionally gets published.
+- \`js_syntax_check\` runs \`node --check\` over files or directories under \`site/\` — use it after editing JavaScript.
+- Language servers (TypeScript, HTML, CSS, JSON) are attached; heeding their diagnostics prevents validation failures later.
+
+## What the harness validates before shipping (satisfy these before finishing)
+
+- Every JavaScript file under \`site/\` — and every inline \`<script>\` block in your HTML — must parse (\`node --check\`; \`type="module"\` blocks are parsed as ES modules).
+- \`<script type="importmap">\` content must be valid JSON.
+- Authored JavaScript is type-checked with tsc (lenient: implicit \`any\` is allowed, unresolvable bare CDN imports are ignored, and member access on base-typed DOM lookups such as \`querySelector\` results or \`event.target\` is not flagged — no narrowing or casts needed for those). Undefined variables and genuinely wrong types fail the turn.
+- Every local \`<script src>\` and stylesheet \`<link href>\` must point at a file that exists inside \`site/\`. Root-absolute URLs like \`/js/main.js\` are rejected — the site is served under a path prefix, so use relative paths only.
+- Every literal \`getElementById("...")\` / \`querySelector("#...")\` id must exist somewhere in the site HTML or be created by the JavaScript.
+- No dotfiles, symlinks, or server-executable file types anywhere under \`site/\`.
+
+## End of turn: how your work ships
+
+You never deploy, commit, or publish anything yourself. The moment your reply ends, the bot's deploy pipeline runs automatically:
+
+1. Harness-owned files (\`site/js/threadsite-net.js\`, \`site/js/net-config.js\`, this \`AGENTS.md\`) are restored to their canonical versions — editing them is always undone.
+2. \`site/\` is validated with the checks above; JavaScript errors get exactly one automatic repair round-trip back to you before the turn fails.
+3. The accepted \`site/\` tree is committed to the project's git repository, authored by the Discord user who requested the change.
+4. That exact directory is published as static HTML to the site's public URL (local asset URLs gain content-hash version strings for cache busting), and the Discord thread receives the link.
+
+The published artifact is the \`site/\` directory served verbatim by Apache. Leave it complete, self-contained, and directly openable over plain HTTP(S) — no deferred work, no "run this first" steps, no server required.
 
 ## Web research and reusable assets
 
@@ -228,33 +262,49 @@ The relay supports two join modes. Choose one up front — it shapes your whole 
         name: playerName,
       });
 
-      // your game loop — you own your player, controls never leave this machine:
+      // your game loop — you own your player, controls never leave this machine.
+      // (throttled to ~15 Hz internally; call it every frame if you like)
       net.publishPlayerState({ x, y, vx, vy, anim });
       // interactions — tell the target; the target applies it to itself:
       net.sendTo(targetId, "hit", { force: 12 });
 
 This game's wiring: game id \`${mp.gameId}\`, relay \`${mp.wsUrl}\` (already in \`net-config.js\`). If \`connect()\` rejects (relay down), fall back to solo play and keep retrying in the background per the client's \`autoReconnect\`.
 
+### The sync contract (mandatory — this is what keeps players in sync)
+
+The client library enforces most of this for you, but your game code must honor these rules or players WILL drift apart:
+
+- **Key every player by \`cid\`, never by peer id.** Peer ids are per-connection and change on every reconnect; \`cid\` is stable forever (\`net.cid\` is yours, every callback payload and \`peers\` entry carries each player's). When \`onPlayerState\`/\`onEvent\` arrives from a \`cid\` you already know, update that existing avatar/score/health — do not spawn a duplicate. When a peer leaves but their \`cid\` is known, keep their entity (mark it stale via \`net.isStale(id)\`); if the same \`cid\` returns, reattach instead of respawning.
+- **Never publish per render frame.** \`publishPlayerState\` coalesces internally (default 15 Hz, pass \`pstateHz\` to change), so calling it per frame is fine — but never build your own raw send loop. For world snapshots call \`publishState\` at 8–15 Hz with a monotonically increasing \`tick\`.
+- **Events are sequenced and recovered automatically — never double-apply.** Every \`net.send\`/\`net.sendTo\` event carries a \`seq\`; the library detects drops, re-requests missing events, and dedupes re-deliveries. But your handlers must be **idempotent by seq**: keep the last applied seq per sender and ignore anything with a seq you have already processed (belt and braces on top of the library's dedup).
+- **Discard stale snapshots.** \`onState\` payloads carry the relay's receive timestamp \`ts\`. Track the newest \`ts\` per snapshot source and ignore anything older — late joiners and reconnects deliver cached snapshots that may arrive out of order.
+- **Hosts MUST answer \`onStateRequest\` immediately** with a full \`publishState\` snapshot. The relay also answers from its cache, but the cache can be a fraction of a second old. This is the single most common resync bug: a client reconnects, nobody answers its state request, and it plays on stale data.
+- **Interpolate remote players; never snap.** Keep the last two states per remote player and render 100–150 ms behind the newest (a jitter buffer). Snapping to the newest state makes other players teleport whenever a frame drops — which looks exactly like "out of sync".
+- **Use \`net.serverNow()\` for shared timers** (round countdown, match clock) so every client agrees on wall-clock time without syncing their own clocks.
+- **Surface sync health.** \`net.dropped\`, \`net.resent\`, \`net.rateLimited\`, \`net.isStale(id)\` and \`onStatus("degraded")\` tell you when the connection is unhealthy — show a subtle indicator rather than letting players wonder why the game feels wrong. If the relay drops, keep simulating locally and let the outbox replay your events when it returns.
+
 ### Wire protocol (JSON text frames over one WebSocket; the client implements this for you)
 
 Client → relay:
 
-- \`{ "t": "join", "v": ${mp.protocolVersion}, "game", "mode", "room", "create", "name" }\` — join a room; \`mode: "single"\` joins this game's shared arena (room/ignored), otherwise join by \`room\` code or \`create\` a fresh one.
-- \`{ "t": "pstate", "s" }\` — publish **your own** player's state; relayed to the room, no host involved, and retained per peer for late joiners.
-- \`{ "t": "event", "e", "d", "to"? }\` — application event, broadcast to the room or sent to one peer id.
+- \`{ "t": "join", "v": ${mp.protocolVersion}, "game", "mode", "room", "create", "name", "cid" }\` — join a room; \`mode: "single"\` joins this game's shared arena (room/ignored), otherwise join by \`room\` code or \`create\` a fresh one. \`cid\` is your stable client id. Protocol version must match or the relay rejects the join.
+- \`{ "t": "pstate", "s" }\` — publish **your own** player's state; relayed to the room, no host involved, and retained per client id for late joiners and reconnects.
+- \`{ "t": "event", "e", "d", "seq", "to"? }\` — application event, broadcast to the room or sent to one peer id. \`seq\` is a per-sender monotonic counter (the client library stamps it for you); receivers use it to detect and recover drops.
 - \`{ "t": "state", "s" }\` — publish a room snapshot (shared world); the relay keeps the newest one and hands it to late joiners.
-- \`{ "t": "state-req" }\` — ask the host for a fresh snapshot.
-- \`{ "t": "ping", "ts" }\` — RTT probe (\`net.rtt\`).
+- \`{ "t": "state-req" }\` — ask the host for a fresh snapshot; the relay always answers from its cache immediately too.
+- \`{ "t": "resend-req", "to", "after", "before" }\` — ask a sender to re-transmit events with \`after < seq < before\` (the client library does this automatically on gap detection).
+- \`{ "t": "ping", "ts" }\` — RTT probe (\`net.rtt\`) and clock sync (\`net.serverNow()\`).
 
 Relay → client:
 
-- \`{ "t": "welcome", "you", "room", "mode", "created", "peers", "host", "s" }\` — your peer id, the room code, the mode you joined with, current peers (each with their latest player state), current host, and the room's newest snapshot \`s\` (null when nobody published yet).
-- \`{ "t": "peer-join", "peer", "host" }\` / \`{ "t": "peer-leave", "id", "host" }\` — roster changes; \`host\` after a leave announces host migration.
-- \`{ "t": "pstate", "from", "s" }\` — a peer's newest own-player state.
-- \`{ "t": "event", "from", "e", "d" }\` — relayed application event.
-- \`{ "t": "state", "from", "s" }\` — relayed snapshot.
-- \`{ "t": "state-req", "from" }\` — forwarded to the host only.
-- \`{ "t": "pong", "ts" }\`, \`{ "t": "error", "code", "message" }\`, \`{ "t": "bye", "reason" }\`.
+- \`{ "t": "welcome", "you", "cid", "room", "mode", "created", "peers", "host", "s", "serverTs" }\` — your peer id, your stable client id, the room code, the mode you joined with, current peers (each with \`cid\` and their latest player state), current host, the room's newest snapshot \`s\` (null when nobody published yet), and the relay's clock.
+- \`{ "t": "peer-join", "peer", "host" }\` / \`{ "t": "peer-leave", "id", "cid", "host" }\` — roster changes; \`host\` after a leave announces host migration. A leaving peer's retained state survives (keyed by \`cid\`) in case they reconnect.
+- \`{ "t": "pstate", "from", "cid", "s", "ts" }\` — a peer's newest own-player state with the relay receive time.
+- \`{ "t": "event", "from", "cid", "e", "d", "seq", "ts", "r"? }\` — relayed application event (\`r: 1\` marks a gap-recovery re-send).
+- \`{ "t": "state", "from", "cid", "s", "ts" }\` — relayed snapshot with the relay receive time.
+- \`{ "t": "state-req", "from" }\` — forwarded to the host only; the relay also answers the requester from its cache.
+- \`{ "t": "resend-req", "from", "after", "before" }\` — a receiver detected a gap in your events; re-send the requested seq range (the client library answers automatically from its send buffer).
+- \`{ "t": "pong", "ts", "sts" }\`, \`{ "t": "error", "code", "message", "seq"? }\`, \`{ "t": "bye", "reason" }\`. \`rate_limited\` errors echo the dropped frame's \`seq\` and the client requeues it.
 
 Frames are small JSON; the relay caps frame size and rate-limits every connection, so send compact deltas, not asset data.
 
@@ -262,16 +312,16 @@ Frames are small JSON; the relay caps frame size and rate-limits every connectio
 
 Recommended default: **peer-owned state** — every player owns and simulates their own entity.
 
-- Simulate only **your** player locally and publish from the game loop at 10–20 Hz: \`net.publishPlayerState({ x, y, vx, vy, anim, score, ... })\`. Controls never travel through anyone else's machine, so input latency is exactly local play; there is no host round trip and no host to lose.
-- Render every other player from their newest player state (\`onPlayerState\`, \`net.peerState(id)\`, \`net.playerStates\`), interpolating between the last two updates to hide latency. Keep the payload small and flat.
-- **Affecting another player:** send an event and let the target apply it to itself — \`net.sendTo(target, "hit", { force: 12 })\` or a broadcast. Each client is the authority over its own player and accepts events addressed to it. Among friends this is the simplest robust rule; effects like knockback play out on the target's machine where their own simulation lives.
+- Simulate only **your** player locally and publish from the game loop: \`net.publishPlayerState({ x, y, vx, vy, anim, score, ... })\` (throttled to ~15 Hz internally; newest state wins, so per-frame calls are safe). Controls never travel through anyone else's machine, so input latency is exactly local play; there is no host round trip and no host to lose.
+- Render every other player from their newest player state (\`onPlayerState\`, \`net.peerState(id)\`, \`net.playerStates\`), interpolating between the last two updates to hide latency (see the sync contract's jitter-buffer rule). Keep the payload small and flat.
+- **Affecting another player:** send an event and let the target apply it to itself — \`net.sendTo(target, "hit", { force: 12 })\` or a broadcast. Each client is the authority over its own player and accepts events addressed to it. Events are sequenced, deduped, and gap-recovered by the library, but keep your handlers idempotent by \`seq\` anyway. Among friends this is the simplest robust rule; effects like knockback play out on the target's machine where their own simulation lives.
 - **Shared world entities** (ball, NPC, pickups, round timer): give each entity exactly one owner. Either the room host includes them in \`net.publishState(...)\` room snapshots, or the peer that spawned the entity keeps simulating it and broadcasts it (\`net.send("world", { entity })\` or a dedicated shape inside their player state). Tag entities with their owner so everyone agrees.
-- Late joiners and reconnecting players automatically receive every peer's latest player state in \`welcome\` — create remote avatars from it before entering play.
+- Late joiners and reconnecting players automatically receive every player's latest player state in \`welcome\` (keyed by \`cid\`, so a reconnecting player reclaims their identity) — create remote avatars from it before entering play.
 - The host (\`net.isHost\`, \`onHostChange\`) only matters for shared-world ownership you chose to give it. Losing or migrating the host never affects anyone's controls.
 
 Use **host-authoritative simulation** instead when players physically interact through shared state (sumo shoving, shared physics, competitive fairness matters): only the host simulates the world; guests send input intents (\`net.send("input", { seq, move })\`) and render the newest \`net.publishState\` snapshot (8–15 Hz with a \`tick\`), interpolating between snapshots. Sequence-number the inputs so re-sent or rejoined inputs cannot double-apply, and on \`onHostChange\` promotion rebuild from your newest snapshot and resume publishing.
 
-Use **last-writer-wins room state** for turn-based, co-op puzzle, or shared-canvas games: any client may \`publishState\`; keep each write small and idempotent and merge per-entity instead of replacing the whole world.
+Use **last-writer-wins room state** for turn-based, co-op puzzle, or shared-canvas games: any client may \`publishState\`; keep each write small and idempotent and merge per-entity instead of replacing the whole world. Snapshots carry the relay's \`ts\`; apply only newer ones per source.
 
 Either way: everything arriving through \`onEvent\`/\`onState\`/\`onPlayerState\` came from untrusted peers. Validate shapes, ranges, and ids before it touches simulation or the DOM, and ignore malformed input.
 
