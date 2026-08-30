@@ -62,7 +62,8 @@ This repository is maintained by the ThreadSite Discord harness. The published d
 - Only edit files inside \`site/\`. Do not edit \`AGENTS.md\`, \`README.md\`, \`ASSET_SOURCES.json\`, git metadata, or harness files.
 - Use relative project URLs. The final site is not guaranteed to be mounted at \`/\`.
 - Never create \`.htaccess\`, dotfiles, symlinks, package manifests, lockfiles, shell scripts, or git configuration.
-- The outer harness owns git, Forgejo, validation, rollback, and publication. Never try to perform git operations.
+- **Git is read-only for you.** Read-only inspection commands (\`git status\`, \`git log\`, \`git diff\`, \`git show\`, \`git blame\`, \`git branch\`, \`git tag\`, \`git ls-files\`, \`git rev-parse\`, \`git config --get\`, and similar) are allowed and can help you understand the project's history and current state. Anything that writes — \`add\`, \`commit\`, \`push\`, \`pull\`, \`checkout\`, \`restore\`, \`clean\`, \`reset\`, \`stash\`, \`config\` changes, hooks, or repository setup — stays blocked, and you never need it.
+- The outer harness owns git writes, Forgejo, validation, rollback, and publication. Never try to perform git write operations.
 - Do not require login credentials, private APIs, secrets, or environment variables in the generated browser app.
 
 ## Work like a real small front-end project
@@ -79,7 +80,7 @@ This repository is maintained by the ThreadSite Discord harness. The published d
 
 ## Verification tools available to you
 
-- You have a shell with **node** and a few utilities (ls, cat, grep, head/tail, wc, file, which, echo, prettier, mkdir/cp/mv, plus unzip/tar to unpack downloaded asset archives) for verification only: syntax checks, quick one-liners, scratch scripts, and small logic tests. Everything else — git, npm/npx, curl/wget, rm, package managers — is blocked by policy. The published deliverable stays a build-free static site regardless.
+- You have a shell with **node** and a few utilities (ls, cat, grep, head/tail, wc, file, which, echo, prettier, mkdir/cp/mv, plus unzip/tar to unpack downloaded asset archives) for verification only: syntax checks, quick one-liners, scratch scripts, and small logic tests. Everything else — git writes, npm/npx, curl/wget, rm, package managers — is blocked by policy. Read-only git inspection (\`git status\`, \`git log\`, \`git diff\`, \`git show\`, \`git blame\`, and similar) **is** allowed for understanding project history; the published deliverable stays a build-free static site regardless.
 - Keep any scratch verification files in \`/tmp\` — anything inside the workspace gets committed to git, and anything inside \`site/\` additionally gets published.
 - \`js_syntax_check\` runs \`node --check\` over files or directories under \`site/\` — use it after editing JavaScript.
 - Language servers (TypeScript, HTML, CSS, JSON) are attached; heeding their diagnostics prevents validation failures later.
