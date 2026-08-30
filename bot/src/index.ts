@@ -107,8 +107,10 @@ async function recoverInterruptedTurns(): Promise<void> {
           await deliver(finishedWithErrorsMessageText(result));
           await sendOutcomeFollowUp(thread, result, { operation: "restart-recovery", guildId: project.guildId });
         } else {
-          await deliver(successMessageText(result, isGame, undefined,
-            `♻️ Recovered the interrupted turn after a restart · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})`));
+          const recoveryHead = result.noChanges
+            ? "♻️ Recovered the interrupted turn after a restart · no changes to the site"
+            : `♻️ Recovered the interrupted turn after a restart · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})`;
+          await deliver(successMessageText(result, isGame, undefined, recoveryHead));
         }
       } catch (error) {
         progress?.close();
