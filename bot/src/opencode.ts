@@ -646,6 +646,29 @@ export class OpenCodeHarness {
     return true;
   }
 
+  /** Answer a pending question request (one label list per asked question, in order). */
+  async replyToQuestion(directory: string, requestID: string, answers: string[][]): Promise<void> {
+    const url = new URL(`${config.opencodeUrl}/question/${encodeURIComponent(requestID)}/reply`);
+    url.searchParams.set("directory", directory);
+    const response = await authFetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) throw new Error(`OpenCode question reply returned HTTP ${response.status}: ${truncate(await response.text(), 500)}`);
+    log("info", "opencode.question_replied", { requestID, answers });
+  }
+
+  /** Dismiss a pending question request; the agent sees the question was rejected. */
+  async rejectQuestion(directory: string, requestID: string): Promise<void> {
+    const url = new URL(`${config.opencodeUrl}/question/${encodeURIComponent(requestID)}/reject`);
+    url.searchParams.set("directory", directory);
+    const response = await authFetch(url, { method: "POST", signal: AbortSignal.timeout(8_000) });
+    if (!response.ok) throw new Error(`OpenCode question reject returned HTTP ${response.status}: ${truncate(await response.text(), 500)}`);
+    log("info", "opencode.question_rejected", { requestID });
+  }
+
   private async startEventStream(
     directory: string,
     sessionId: string,
@@ -780,6 +803,49 @@ export class OpenCodeHarness {
     if (event?.type === "session.error") {
       log("error", "opencode.session_error", { sessionId, providerError: properties.error });
       emit(onProgress, { text: "⚠️ Provider/session error detected" });
+      return;
+    }
+
+    // The question tool blocks the turn until the user answers, so it must be
+    // surfaced immediately as buttons on the Discord status message.
+    if (event?.type === "question.asked" || event?.type === "question.v2.asked") {
+      const requestID = typeof properties.id === "string" ? properties.id : "";
+      const questions = Array.isArray(properties.questions) ? properties.questions : [];
+      if (!requestID || !questions.length) return;
+      log("info", "opencode.question_asked", {
+        sessionId,
+        requestID,
+        count: questions.length,
+        headers: questions.map((q: any) => q?.header).filter(Boolean),
+      });
+      emit(onProgress, {
+        kind: "question",
+        text: "❓ The agent has a question",
+        question: {
+          requestID,
+          questions: questions.map((q: any) => ({
+            header: String(q?.header ?? "Question").slice(0, 80),
+            question: String(q?.question ?? "").slice(0, 500),
+            multiple: Boolean(q?.multiple),
+            options: (Array.isArray(q?.options) ? q.options : []).slice(0, 4).map((o: any) => ({
+              label: String(o?.label ?? "Option").slice(0, 80),
+              description: typeof o?.description === "string" ? o.description.slice(0, 120) : undefined,
+            })),
+          })),
+        },
+      });
+      return;
+    }
+    if (
+      event?.type === "question.replied" || event?.type === "question.v2.replied"
+      || event?.type === "question.rejected" || event?.type === "question.v2.rejected"
+    ) {
+      const requestID = String(properties.requestID ?? "");
+      emit(onProgress, {
+        kind: "question",
+        text: event.type.includes("rejected") ? "🤔 The agent moved on without an answer" : "✅ Question answered",
+        question: { requestID, questions: [], resolved: true },
+      });
       return;
     }
 
@@ -1047,7 +1113,7 @@ export function mergeModelUsage(entries: ModelUsage[]): ModelUsage[] {
   return [...merged.values()].sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens));
 }
 
-function emit(callback: ProgressCallback | undefined, update: { text: string; detail?: string; kind?: "activity" | "thought" | "stats" }): void {
+function emit(callback: ProgressCallback | undefined, update: { text: string; detail?: string; kind?: "activity" | "thought" | "stats" | "question"; question?: { requestID: string; questions: any[]; resolved?: boolean } }): void {
   if (!callback) return;
   Promise.resolve(callback(update)).catch((error) => log("debug", "progress.callback_failed", { error: String(error) }));
 }

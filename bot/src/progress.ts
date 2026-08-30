@@ -1,7 +1,21 @@
-import type { Message } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, type Message, type MessageEditOptions } from "discord.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
 import { MAX_DISCORD_MESSAGE_CHARS } from "./util.js";
+
+/** One question the agent asked via OpenCode's question tool. */
+export interface AgentQuestion {
+  /** OpenCode question request id, used to route the Discord answer back. */
+  requestID: string;
+  questions: Array<{
+    header: string;
+    question: string;
+    multiple?: boolean;
+    options: Array<{ label: string; description?: string }>;
+  }>;
+  /** Set when the request was answered/rejected on the OpenCode side. */
+  resolved?: boolean;
+}
 
 export interface ProgressUpdate {
   text: string;
@@ -9,8 +23,10 @@ export interface ProgressUpdate {
   /**
    * "activity" (default) lines become the rolling status bullet. "thought",
    * "stats", and "changes" update dedicated lines streamed from the agent/harness.
+   * "question" carries an agent question to render as buttons.
    */
-  kind?: "activity" | "thought" | "stats" | "changes";
+  kind?: "activity" | "thought" | "stats" | "changes" | "question";
+  question?: AgentQuestion;
 }
 
 export type ProgressCallback = (update: ProgressUpdate) => void | Promise<void>;
@@ -25,6 +41,7 @@ export class DiscordProgress {
   private thought?: string;
   private stats?: string;
   private changes?: string;
+  private question?: AgentQuestion;
   private lastEdit = 0;
   private pending?: NodeJS.Timeout;
   private heartbeat?: NodeJS.Timeout;
@@ -50,10 +67,58 @@ export class DiscordProgress {
     } else if (update.kind === "changes") {
       this.changes = singleLine(update.text);
       this.schedule();
+    } else if (update.kind === "question") {
+      if (update.question?.resolved) {
+        if (this.question?.requestID === update.question.requestID) this.question = undefined;
+      } else if (update.question) {
+        this.question = update.question;
+        this.update(update.text, update.detail);
+      }
     } else {
       this.update(update.text, update.detail);
     }
   };
+
+  /** Buttons for the pending agent question; empty when none is pending. */
+  questionComponents(): Array<ActionRowBuilder<ButtonBuilder>> {
+    if (!this.question) return [];
+    const rows: Array<ActionRowBuilder<ButtonBuilder>> = [];
+    this.question.questions.slice(0, 5).forEach((q, qIndex) => {
+      const row = new ActionRowBuilder<ButtonBuilder>();
+      for (const [oIndex, option] of q.options.slice(0, 4).entries()) {
+        row.addComponents(
+          new ButtonBuilder()
+            .setCustomId(`q:${this.question!.requestID}:${qIndex}:${oIndex}`)
+            .setLabel(option.label.slice(0, 80))
+            .setStyle(ButtonStyle.Primary),
+        );
+      }
+      // Skip rejects the whole request; offer it once, on the first row.
+      if (qIndex === 0) {
+        row.addComponents(
+          new ButtonBuilder()
+            .setCustomId(`qskip:${this.question!.requestID}`)
+            .setLabel("Skip — decide yourself")
+            .setStyle(ButtonStyle.Secondary),
+        );
+      }
+      rows.push(row);
+    });
+    return rows;
+  }
+
+  /** The stored pending question, for resolving button customIds back to labels. */
+  pendingQuestion(requestID: string): AgentQuestion | undefined {
+    return this.question?.requestID === requestID ? this.question : undefined;
+  }
+
+  /** Drop the stored question once answered/rejected so flushes stop re-rendering it. */
+  clearQuestion(requestID: string): void {
+    if (this.question?.requestID === requestID) {
+      this.question = undefined;
+      this.schedule();
+    }
+  }
 
   update(text: string, detail?: string): void {
     if (this.closed) return;
@@ -86,7 +151,13 @@ export class DiscordProgress {
     this.pending = undefined;
     this.lastEdit = Date.now();
     try {
-      await this.message.edit(this.render());
+      const components = this.questionComponents();
+      const options: MessageEditOptions = components.length
+        ? { ...this.render(), components }
+        // Omitting components in an edit leaves any existing ones attached, so
+        // an answered question's buttons must be explicitly cleared.
+        : { ...this.render(), components: [] };
+      await this.message.edit(options);
     } catch (error) {
       log("debug", "discord.progress_edit_failed", { messageId: this.message.id, error: String(error) });
     }
@@ -96,7 +167,7 @@ export class DiscordProgress {
   // a summary line of what the model is narrating, and a context-usage subtext.
   // The whole message stays inside Discord's 2000-character edit budget; when it
   // would overflow, the oldest history lines are dropped first.
-  private render(): string {
+  private render(): { content: string } {
     const elapsed = formatElapsed(Date.now() - this.started);
     const head = `**${this.title}** · ${elapsed}`;
     const withHistory = (history: string[]) =>
@@ -111,7 +182,7 @@ export class DiscordProgress {
     if (this.thought) lines.push(`> 💭 ${this.thought}`);
     if (this.stats) lines.push(`-# ${this.stats}`);
     if (this.changes) lines.push(`-# ${this.changes}`);
-    return lines.join("\n").slice(0, MAX_DISCORD_MESSAGE_CHARS);
+    return { content: lines.join("\n").slice(0, MAX_DISCORD_MESSAGE_CHARS) };
   }
 }
 
