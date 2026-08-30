@@ -58,6 +58,67 @@ const client = new Client({
 });
 const adminReporter = new AdminReporter(client);
 
+// Live turn status messages that may carry agent-question buttons, keyed by the
+// Discord status message id. Registered when a turn starts, removed when the
+// turn's outcome message replaces the status message.
+const liveProgress = new Map<string, DiscordProgress>();
+
+function registerQuestionButtons(statusMessage: Message, progress: DiscordProgress): void {
+  liveProgress.set(statusMessage.id, progress);
+}
+
+function unregisterQuestionButtons(statusMessageId: string | undefined): void {
+  if (statusMessageId) liveProgress.delete(statusMessageId);
+}
+
+// customId "q:<requestID>:<questionIndex>:<optionIndex>" answers the agent's
+// question; "qskip:<requestID>" rejects it so the agent proceeds on its own
+// judgment. Option indices resolve against the DiscordProgress copy of the
+// question, which also carries each option's real label.
+async function handleQuestionButton(interaction: ButtonInteraction): Promise<void> {
+  const progress = liveProgress.get(interaction.message.id);
+  if (!progress) {
+    await interaction.reply({ content: "That question is no longer pending — the turn it belonged to already finished.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
+    return;
+  }
+  const [kind, requestID, qIndexRaw, oIndexRaw] = interaction.customId.split(":");
+  const directory = store.getProject(interaction.channelId ?? "")?.workspacePath;
+  if (!directory || !requestID) {
+    await interaction.reply({ content: "This question's agent session could not be found.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
+    return;
+  }
+  if (!interaction.memberPermissions?.has(PermissionFlagsBits.SendMessages)) {
+    await interaction.reply({ content: "You need permission to post in this thread to answer the agent.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
+    return;
+  }
+  // One answer per request: strip the buttons immediately so a double click
+  // cannot double-answer, then ack before the awaited OpenCode call.
+  await interaction.update({ components: [] }).catch(() => undefined);
+  try {
+    if (kind === "qskip") {
+      await opencode.rejectQuestion(directory, requestID);
+      await interaction.followUp({ content: "⏭️ Skipped — the agent will use its best judgment.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
+      return;
+    }
+    const question = progress.pendingQuestion(requestID);
+    const qIndex = Number.parseInt(qIndexRaw ?? "", 10);
+    const oIndex = Number.parseInt(oIndexRaw ?? "", 10);
+    const label = question?.questions[qIndex]?.options[oIndex]?.label;
+    if (!question || qIndex < 0 || oIndex < 0 || !label) {
+      await interaction.followUp({ content: "That answer option is no longer available.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
+      await opencode.rejectQuestion(directory, requestID).catch(() => undefined);
+      return;
+    }
+    // OpenCode expects one answer list per asked question, in order; unanswered
+    // questions in the request get an empty selection.
+    const answers = question.questions.map((_, index) => (index === qIndex ? [label] : []));
+    await opencode.replyToQuestion(directory, requestID, answers);
+    await interaction.followUp({ content: `✅ Answered: **${truncate(label, 80)}**`, flags: MessageFlags.Ephemeral }).catch(() => undefined);
+  } finally {
+    progress.clearQuestion(requestID);
+  }
+}
+
 client.once(Events.ClientReady, (ready) => {
   log("info", "discord.ready", {
     user: ready.user.tag,
@@ -92,6 +153,7 @@ async function recoverInterruptedTurns(): Promise<void> {
       status = await thread.send("♻️ Resuming the turn that was in flight when the bot restarted…").catch(() => undefined);
     }
     const progress = status ? new DiscordProgress(status, `♻️ Recovering ${project.displayName}`) : undefined;
+    if (status && progress) registerQuestionButtons(status, progress);
     progress?.update("♻️ Resuming the interrupted turn");
     const deliver: (content: string) => Promise<unknown> = status
       ? (content) => setStatusMessage(status, content).catch(() => undefined)
@@ -132,7 +194,11 @@ async function recoverInterruptedTurns(): Promise<void> {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton()) {
     try {
-      await handleFailureButton(interaction);
+      if (interaction.customId.startsWith("q:") || interaction.customId.startsWith("qskip:")) {
+        await handleQuestionButton(interaction);
+      } else {
+        await handleFailureButton(interaction);
+      }
     } catch (error) {
       logError("discord.button_failed", error, {
         customId: interaction.customId,
@@ -175,6 +241,7 @@ client.on(Events.MessageCreate, async (message) => {
   const isGame = project.projectKind === "game-2d" || project.projectKind === "game-3d";
   const status = await message.reply(isGame ? "🎮 Queued game update…" : "🛠️ Queued site update…");
   const progress = new DiscordProgress(status, `${isGame ? "🎮 Updating" : "🛠️ Updating"} ${project.displayName}`);
+  registerQuestionButtons(status, progress);
   progress.update("⏱️ Waiting for the project queue");
 
   projects.enqueue(message.channel.id, async () => {
@@ -271,6 +338,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     if (store.getProject(thread.id)) throw new Error("That thread already has a site. Just reply in the thread to mutate it.");
     const status = await thread.send("🛠️ Preparing this thread's persistent site…");
     const progress = new DiscordProgress(status, `🛠️ Building ${requestedName || thread.name}`);
+    registerQuestionButtons(status, progress);
     progress.update("📋 Request accepted");
 
     await interaction.editReply(`Created/attached <#${thread.id}>. The public thread will show live build stages; detailed failures stay private.`);
@@ -403,6 +471,7 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
   if (store.getProject(thread.id)) throw new Error("That thread already has a project. Use a fresh thread for /makegam, then reply normally to mutate the game.");
   const status = await thread.send(`🎮 Preparing a persistent **${dimension.toUpperCase()} static web game**…`);
   const progress = new DiscordProgress(status, `🎮 Building ${requestedName || thread.name}`);
+  registerQuestionButtons(status, progress);
   progress.update(`🕹️ ${dimension.toUpperCase()} game profile selected`);
 
   await interaction.editReply(`Created/attached <#${thread.id}>. The thread will show live research/edit/publish stages; detailed failures stay private.`);
@@ -721,6 +790,9 @@ async function setStatusMessage(
   content: string,
   components?: ActionRowBuilder<ButtonBuilder>[],
 ): Promise<void> {
+  // The outcome message replaces the live status: any pending agent-question
+  // buttons on it are gone, so stop routing clicks for this message.
+  unregisterQuestionButtons(status.id);
   const payload = { content: truncate(content, MAX_DISCORD_MESSAGE_CHARS), ...(components ? { components } : {}) };
   try {
     await status.edit(payload);
