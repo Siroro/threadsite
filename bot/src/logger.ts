@@ -47,6 +47,26 @@ export function redactText(input: string): string {
   return value;
 }
 
+// Usage counters like inputTokens/outputTokens match the credential pattern by
+// key name alone, so exclude them; anything else containing "token"/"key"/etc.
+// (authToken, botToken, apiKey) is treated as sensitive.
+const usageTokenKey = /^(input|output|cache|context|total|prompt|completion|reasoning|estimated)[_ ]?tokens?$/i;
+
+function isSensitiveKey(key: string): boolean {
+  return !usageTokenKey.test(key) && /(?:token|key|password|secret|authorization|cookie)/i.test(key);
+}
+
+function isPrimitive(value: unknown): boolean {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
+// String/number values under a sensitive key would otherwise fall through to
+// content-only redactText, so blank them outright; objects keep recursing so
+// their non-sensitive siblings survive.
+function sanitizeKeyed(key: string, child: unknown, depth: number): unknown {
+  return isSensitiveKey(key) && isPrimitive(child) ? "[REDACTED]" : sanitize(child, depth + 1);
+}
+
 function sanitize(value: unknown, depth = 0): unknown {
   if (depth > 7) return "[MAX_DEPTH]";
   if (typeof value === "string") return redactText(value);
@@ -56,9 +76,7 @@ function sanitize(value: unknown, depth = 0): unknown {
   if (typeof value === "object") {
     const output: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value as Record<string, unknown>).slice(0, 100)) {
-      output[key] = /(?:token|key|password|secret|authorization|cookie)/i.test(key)
-        ? "[REDACTED]"
-        : sanitize(child, depth + 1);
+      output[key] = sanitizeKeyed(key, child, depth);
     }
     return output;
   }
@@ -72,7 +90,7 @@ export function serializeError(error: unknown, depth = 0): SerializedError {
     const keys = new Set([...Object.getOwnPropertyNames(error), ...Object.keys(error)]);
     for (const key of keys) {
       if (["name", "message", "stack", "cause"].includes(key)) continue;
-      details[key] = sanitize((error as unknown as Record<string, unknown>)[key], depth + 1);
+      details[key] = sanitizeKeyed(key, (error as unknown as Record<string, unknown>)[key], depth);
     }
     const cause = (error as Error & { cause?: unknown }).cause;
     if (cause !== undefined) details.cause = serializeError(cause, depth + 1);
