@@ -793,7 +793,9 @@ async function setStatusMessage(
   // The outcome message replaces the live status: any pending agent-question
   // buttons on it are gone, so stop routing clicks for this message.
   unregisterQuestionButtons(status.id);
-  const payload = { content: truncate(content, MAX_DISCORD_MESSAGE_CHARS), ...(components ? { components } : {}) };
+  // Discord keeps existing components when an edit omits them — an explicit
+  // empty array is what actually strips leftover question buttons.
+  const payload = { content: truncate(content, MAX_DISCORD_MESSAGE_CHARS), components: components ?? [] };
   try {
     await status.edit(payload);
   } catch (error) {

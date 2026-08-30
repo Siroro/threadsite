@@ -69,7 +69,11 @@ export class DiscordProgress {
       this.schedule();
     } else if (update.kind === "question") {
       if (update.question?.resolved) {
-        if (this.question?.requestID === update.question.requestID) this.question = undefined;
+        if (this.question?.requestID === update.question.requestID) {
+          this.question = undefined;
+          // Record the resolution in the rolling activity feed.
+          this.update(update.text, update.detail);
+        }
       } else if (update.question) {
         this.question = update.question;
         this.update(update.text, update.detail);
