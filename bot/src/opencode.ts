@@ -1,5 +1,7 @@
 import path from "node:path";
-import { createOpencodeClient } from "@opencode-ai/sdk";
+// The v2 entrypoint of the same pinned SDK package: same wire routes as v1 for
+// everything the harness uses, plus a typed question namespace (absent in v1).
+import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { config } from "./config.js";
 import { log, logError, serializeError } from "./logger.js";
 import type { ProgressCallback } from "./progress.js";
@@ -204,8 +206,8 @@ export class OpenCodeHarness {
 
   async createSession(directory: string, title: string): Promise<string> {
     const result = await this.client.session.create({
-      query: { directory },
-      body: { title },
+      directory,
+      title,
     } as any);
     const session = unwrap<{ id: string }>(result, "OpenCode session creation");
     if (!session?.id) throw new Error("OpenCode did not return a session id");
@@ -354,9 +356,9 @@ export class OpenCodeHarness {
 
   async revertSession(directory: string, sessionId: string, messageID: string): Promise<void> {
     const result = await this.client.session.revert({
-      path: { id: sessionId },
-      query: { directory },
-      body: { messageID },
+      sessionID: sessionId,
+      directory,
+      messageID,
     } as any);
     unwrap(result, "OpenCode session revert");
     log("info", "opencode.session_reverted", { sessionId, messageID });
@@ -364,9 +366,11 @@ export class OpenCodeHarness {
 
   async compactSession(directory: string, sessionId: string, providerID: string, modelID: string): Promise<void> {
     const result = await this.client.session.summarize({
-      path: { id: sessionId },
-      query: { directory },
-      body: { providerID, modelID, auto: false },
+      sessionID: sessionId,
+      directory,
+      providerID,
+      modelID,
+      auto: false,
     } as any);
     unwrap(result, "OpenCode session compaction");
     log("info", "opencode.session_compact_requested", { sessionId, model: `${providerID}/${modelID}` });
@@ -382,7 +386,7 @@ export class OpenCodeHarness {
       const raw = await this.prompt(directory, sessionId, instruction, model, undefined, "titler");
       return { title: cleanThreadTitle(raw.text), usage: raw.usage };
     } finally {
-      await this.client.session.delete({ path: { id: sessionId }, query: { directory } } as any)
+      await this.client.session.delete({ sessionID: sessionId, directory } as any)
         .catch((error: unknown) => log("debug", "opencode.title_session_delete_failed", { sessionId, error: String(error) }));
     }
   }
@@ -563,9 +567,12 @@ export class OpenCodeHarness {
 
   private async sendPromptRaw(directory: string, sessionId: string, body: Record<string, unknown>): Promise<string> {
     const result = await this.client.session.prompt({
-      path: { id: sessionId },
-      query: { directory },
-      body,
+      sessionID: sessionId,
+      directory,
+      agent: body.agent as string | undefined,
+      model: body.model as { providerID: string; modelID: string } | undefined,
+      variant: body.variant as string | undefined,
+      parts: body.parts as Array<{ type: string; text: string }>,
     } as any);
     const response = unwrap<{ parts?: Array<{ type: string; text?: string }> }>(result, "OpenCode prompt");
     return extractText(response.parts);
@@ -648,24 +655,22 @@ export class OpenCodeHarness {
 
   /** Answer a pending question request (one label list per asked question, in order). */
   async replyToQuestion(directory: string, requestID: string, answers: string[][]): Promise<void> {
-    const url = new URL(`${config.opencodeUrl}/question/${encodeURIComponent(requestID)}/reply`);
-    url.searchParams.set("directory", directory);
-    const response = await authFetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answers }),
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!response.ok) throw new Error(`OpenCode question reply returned HTTP ${response.status}: ${truncate(await response.text(), 500)}`);
+    const result = await this.client.question.reply({
+      requestID,
+      directory,
+      answers,
+    } as any);
+    unwrap(result, "OpenCode question reply");
     log("info", "opencode.question_replied", { requestID, answers });
   }
 
   /** Dismiss a pending question request; the agent sees the question was rejected. */
   async rejectQuestion(directory: string, requestID: string): Promise<void> {
-    const url = new URL(`${config.opencodeUrl}/question/${encodeURIComponent(requestID)}/reject`);
-    url.searchParams.set("directory", directory);
-    const response = await authFetch(url, { method: "POST", signal: AbortSignal.timeout(8_000) });
-    if (!response.ok) throw new Error(`OpenCode question reject returned HTTP ${response.status}: ${truncate(await response.text(), 500)}`);
+    const result = await this.client.question.reject({
+      requestID,
+      directory,
+    } as any);
+    unwrap(result, "OpenCode question reject");
     log("info", "opencode.question_rejected", { requestID });
   }
 
