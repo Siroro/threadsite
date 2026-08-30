@@ -42,6 +42,8 @@ export class DiscordProgress {
   private stats?: string;
   private changes?: string;
   private question?: AgentQuestion;
+  /** Pinned context line: the pending question, then its answer once given. */
+  private questionPin?: string;
   private lastEdit = 0;
   private pending?: NodeJS.Timeout;
   private heartbeat?: NodeJS.Timeout;
@@ -71,11 +73,15 @@ export class DiscordProgress {
       if (update.question?.resolved) {
         if (this.question?.requestID === update.question.requestID) {
           this.question = undefined;
-          // Record the resolution in the rolling activity feed.
-          this.update(update.text, update.detail);
+          // Pin the decision at the top of the status for the rest of the turn.
+          this.questionPin = singleLine(update.text);
+          this.schedule();
         }
       } else if (update.question) {
         this.question = update.question;
+        const first = update.question.questions[0];
+        const asked = first ? `${first.header}: ${first.question}` : update.text;
+        this.questionPin = `❓ ${singleLine(asked)}${update.question.questions.length > 1 ? ` (+${update.question.questions.length - 1} more)` : ""}`;
         this.update(update.text, update.detail);
       }
     } else {
@@ -176,13 +182,20 @@ export class DiscordProgress {
     const head = `**${this.title}** · ${elapsed}`;
     const withHistory = (history: string[]) =>
       [head, ...[...history, this.latest].map((line) => `• ${singleLine(line)}`)].join("\n");
+    const extra = (this.questionPin ? this.questionPin.length + 4 : 0)
+      + (this.thought ? this.thought.length + 8 : 0)
+      + (this.stats ? this.stats.length + 4 : 0)
+      + (this.changes ? this.changes.length + 4 : 0);
     let history = this.history;
     let body = withHistory(history);
-    while (body.length + (this.thought ? this.thought.length + 8 : 0) + (this.stats ? this.stats.length + 4 : 0) + (this.changes ? this.changes.length + 4 : 0) > MAX_DISCORD_MESSAGE_CHARS && history.length) {
+    while (body.length + extra > MAX_DISCORD_MESSAGE_CHARS && history.length) {
       history = history.slice(1);
       body = withHistory(history);
     }
+    // Question is pinned directly under the head so thread readers always see
+    // what the agent is asking (and later, what was decided) without scrolling.
     const lines = [body];
+    if (this.questionPin) lines.push(singleLine(this.questionPin));
     if (this.thought) lines.push(`> 💭 ${this.thought}`);
     if (this.stats) lines.push(`-# ${this.stats}`);
     if (this.changes) lines.push(`-# ${this.changes}`);
