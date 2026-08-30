@@ -352,7 +352,7 @@ export class ProjectService {
         durationMs: Date.now() - turnStartedAt,
         usage: result.usage,
         fallbackModel: this.store.getModel(),
-        failed: Boolean(result.validationError || result.deliveryError || !result.commit),
+        failed: Boolean(result.validationError || result.deliveryError || (!result.commit && !result.noChanges)),
       });
       return result;
     } catch (error) {
@@ -633,7 +633,7 @@ export class ProjectService {
         durationMs: Date.now() - turnStartedAt,
         usage: result.usage,
         fallbackModel: this.store.getModel(),
-        failed: Boolean(result.validationError || result.deliveryError || !result.commit),
+        failed: Boolean(result.validationError || result.deliveryError || (!result.commit && !result.noChanges)),
       });
       log("info", "project.recovery_completed", { threadId, commit: result.commit, published: !result.validationError && !result.deliveryError });
       return result;
