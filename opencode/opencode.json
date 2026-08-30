@@ -111,7 +111,6 @@
     "task": "allow",
     "lsp": "allow",
     "skill": "deny",
-    "question": "deny",
     "external_directory": "deny",
     "doom_loop": "deny"
   },
