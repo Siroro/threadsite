@@ -103,7 +103,7 @@ async function recoverInterruptedTurns(): Promise<void> {
         const result = await projects.recoverTurn(project.threadId, progress?.callback);
         progress?.close();
         const isGame = result.project.projectKind === "game-2d" || result.project.projectKind === "game-3d";
-        if (result.validationError || result.deliveryError || !result.commit) {
+        if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
           await deliver(finishedWithErrorsMessageText(result));
           await sendOutcomeFollowUp(thread, result, { operation: "restart-recovery", guildId: project.guildId });
         } else {
@@ -191,7 +191,7 @@ client.on(Events.MessageCreate, async (message) => {
         status.id,
       );
       progress.close();
-      if (result.validationError || result.deliveryError || !result.commit) {
+      if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
         await setStatusMessage(status, finishedWithErrorsMessageText(result));
         await sendOutcomeFollowUp(message.channel, result, {
           operation: "thread-update",
@@ -287,7 +287,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
           ? (title) => applyAiThreadTitle(thread, title)
           : undefined);
         progress.close();
-        if (result.validationError || result.deliveryError || !result.commit) {
+        if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
           await setStatusMessage(
             status,
             finishedWithErrorsMessageText(result, "From now on, **every normal message in this thread edits this same site**."),
@@ -420,8 +420,8 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
         ? (title) => applyAiThreadTitle(thread, title)
         : undefined);
       progress.close();
-      if (result.validationError || result.deliveryError || !result.commit) {
-        await setStatusMessage(status, finishedWithErrorsMessageText(result));
+        if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
+          await setStatusMessage(status, finishedWithErrorsMessageText(result));
         await sendOutcomeFollowUp(thread, result, {
           operation: `initial-${dimension}-game-build`,
           guildId: interaction.guildId,
@@ -546,7 +546,10 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
 // passes a ♻️ head override; its summary then shows whether the turn was
 // continued by the agent or had already finished on the agent side.
 function successMessageText(result: MutationResult, isGame: boolean, note?: string, headOverride?: string): string {
-  const head = headOverride ?? `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${commitStatsText(result)}`;
+  const head = headOverride
+    ?? (result.noChanges
+      ? `ℹ️ **${result.project.displayName}** — no changes to the site this turn`
+      : `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${commitStatsText(result)}`);
   const stats = turnStatsText(result);
   const noteLine = note ? `\n${note}\n` : "\n";
   const links = `# [${isGame ? "PLAY GAME" : "OPEN SITE"}](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`;
@@ -561,7 +564,11 @@ function successMessageText(result: MutationResult, isGame: boolean, note?: stri
 // separate thread message (sendOutcomeFollowUp).
 function finishedWithErrorsMessageText(result: MutationResult, note?: string): string {
   const head = !result.commit
-    ? `⚠️ **${result.project.displayName}** — the agent finished, but committing failed · edits preserved in the workspace`
+    ? result.noChanges
+      ? result.validationError
+        ? `ℹ️ **${result.project.displayName}** — nothing changed this turn; validation errors persist and the live site still shows the older version`
+        : `ℹ️ **${result.project.displayName}** — answered without changing the project · nothing to commit`
+      : `⚠️ **${result.project.displayName}** — the agent finished, but committing failed · edits preserved in the workspace`
     : result.validationError
       ? `⚠️ **${result.project.displayName}** · validation failed — committed \`${result.commit}\`, not published · ${commitStatsText(result)}`
       : `⚠️ **${result.project.displayName}** · committed \`${result.commit}\`, but publishing failed — not live · ${commitStatsText(result)}`;
@@ -607,12 +614,18 @@ async function sendOutcomeFollowUp(
   const blocks: string[] = [];
   if (result.validationError) {
     blocks.push(
-      `⚠️ **Validation errors**${result.commit ? ` — the work is committed as \`${result.commit}\` but **not published**; the live version is unchanged` : " — and the work could not be committed"}.\n`
+      `⚠️ **Validation errors**${result.commit
+        ? ` — the work is committed as \`${result.commit}\` but **not published**; the live version is unchanged`
+        : result.noChanges
+          ? " — and nothing changed this turn, so there is no new work to fix; the live site still shows the older version"
+          : " — and the work could not be committed"}.\n`
         + `${truncate(result.validationError, 900)}\n`
         + "Reply in this thread to have the agent fix these errors.",
     );
   }
-  if (!result.commit || result.deliveryError) {
+  // No-change turns have no operational failure: the block below is only for
+  // real commit/publish problems.
+  if ((!result.commit && !result.noChanges) || result.deliveryError) {
     const incident = await reportFailure(new Error(result.deliveryError ?? "Committing the finished work failed"), {
       operation: context.operation,
       guildId: context.guildId,

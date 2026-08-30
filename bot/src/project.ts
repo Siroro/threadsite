@@ -18,13 +18,15 @@ import { errorText, parseModel, safeChild, slugify, truncate, withTimeout } from
 export interface MutationResult {
   project: ProjectRecord;
   agentSummary: string;
-  /** Commit created by this turn; undefined when committing itself failed (see deliveryError). */
+  /** Commit created by this turn; undefined when committing itself failed or when the turn changed nothing. */
   commit?: string;
   /** Files changed by the commit itself (vs. total files in site/). */
   commitFiles: number;
   /** Lines added and removed by the commit. */
   additions: number;
   deletions: number;
+  /** True when the turn changed nothing — no commit was created and none was needed. */
+  noChanges?: boolean;
   files: number;
   bytes: number;
   /** Wall-clock duration of the turn: agent work through commit and publish. */
@@ -492,6 +494,8 @@ export class ProjectService {
         logError("project.commit_failed", error, { threadId });
       }
     }
+    // A clean tree means nothing changed (question-only turn); there is no
+    // commit to publish and no failure to report.
     if (commitStats && !validationError && !deliveryError) {
       emit(input.onProgress, "🚀 Publishing to Apache");
       try {
@@ -503,9 +507,15 @@ export class ProjectService {
     }
 
     const published = Boolean(commitStats) && !validationError && !deliveryError;
+    // An empty commit was skipped: the turn answered without changing the
+    // workspace. That is a normal outcome, not a delivery failure — leave the
+    // project's status and lastError exactly as they were.
+    const noChanges = !commitStats && !deliveryError;
     project = await this.store.patchProject(threadId, {
-      status: published ? "ready" : "error",
-      lastError: published ? undefined : truncate(validationError || deliveryError || "the turn did not publish", 1000),
+      ...(noChanges ? {} : {
+        status: published ? "ready" : "error",
+        lastError: published ? undefined : truncate(validationError || deliveryError || "the turn did not publish", 1000),
+      }),
       ...(commitStats ? { lastCommit: commitStats.commit } : {}),
       pendingTurn: undefined,
       // Record when the session was last used and how full its context window
@@ -532,6 +542,8 @@ export class ProjectService {
       });
     } else if (validationError) {
       log("warn", "project.validation_failed_committed", { threadId, commit: commitStats?.commit, error: truncate(validationError, 400) });
+    } else if (noChanges) {
+      log("info", "project.no_changes", { threadId });
     } else {
       log("warn", "project.delivery_failed", { threadId, commit: commitStats?.commit, error: truncate(deliveryError || "unknown", 400) });
     }
@@ -544,6 +556,7 @@ export class ProjectService {
       ...(commitStats
         ? { commit: commitStats.commit, commitFiles: commitStats.files, additions: commitStats.additions, deletions: commitStats.deletions }
         : { commitFiles: 0, additions: 0, deletions: 0 }),
+      ...(commitStats ? {} : { noChanges: true as const }),
       ...(stats ?? { files: 0, bytes: 0 }),
       ...(validationError ? { validationError } : {}),
       ...(deliveryError ? { deliveryError } : {}),

@@ -212,8 +212,13 @@ export async function commitAndPush(
   summary: string,
   forgejo: ForgejoClient,
   author?: CommitAuthor,
-): Promise<CommitStats> {
+): Promise<CommitStats | null> {
   await git(workspace, ["add", "-A"]);
+  // A turn that only asks a question (or answers without edits) stages nothing;
+  // committing then would push an empty commit to Forgejo. Null tells the
+  // caller the tree was already clean and no commit was created.
+  const staged = await git(workspace, ["status", "--porcelain=v1"]);
+  if (!staged.trim()) return null;
   const subject = summary.replace(/[\r\n]+/g, " ").trim().slice(0, 72) || "Update from Discord";
   const message = `${subject}\n\nCo-authored-by: ${config.commitBotName} <${config.commitBotEmail}>`;
   // The Discord requester authors the change; the bot commits it and is
