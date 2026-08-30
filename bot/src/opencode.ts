@@ -174,10 +174,9 @@ export class OpenCodeHarness {
   private async fetchProviderContextLimits(): Promise<Map<string, number>> {
     const map = new Map<string, number>();
     try {
-      const response = await authFetch(`${config.opencodeUrl}/provider`, { signal: AbortSignal.timeout(8_000) });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = await response.json();
-      const providers = (payload as any)?.data?.all ?? (payload as any)?.all;
+      const result = await this.client.provider.list({} as any);
+      const payload = unwrap<any>(result, "OpenCode provider list");
+      const providers = payload?.all;
       if (!Array.isArray(providers)) return map;
       for (const provider of providers) {
         const providerID = typeof provider?.id === "string" ? provider.id : undefined;
@@ -288,6 +287,13 @@ export class OpenCodeHarness {
           return undefined;
         });
         if (stream) emit(onProgress, { text: "🟢 Reconnected — checking the running turn" });
+    // Buttons for a question asked before the transport dropped are gone from
+    // the event stream; ask the server what is still pending and re-emit it.
+    if (stream) {
+      await this.resurfacePendingQuestion(directory, sessionId, onProgress).catch((error) => {
+        log("debug", "opencode.question_resurface_failed", { sessionId, error: String(error) });
+      });
+    }
 
         try {
           const recovered = await this.reconcilePrompt(directory, sessionId, snapshot, model, onProgress, error, body);
@@ -392,23 +398,57 @@ export class OpenCodeHarness {
   }
 
   async setProviderToken(providerID: string, token: string): Promise<void> {
-    const response = await authFetch(`${config.opencodeUrl}/auth/${encodeURIComponent(providerID)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "api", key: token }),
-    });
-    if (!response.ok) throw new Error(`OpenCode auth update failed (${response.status}): ${await response.text()}`);
+    const result = await this.client.auth.set({
+      providerID,
+      auth: { type: "api", key: token },
+    } as any);
+    unwrap(result, "OpenCode auth update");
     log("info", "opencode.provider_token_updated", { providerID });
   }
 
   async clearProviderToken(providerID: string): Promise<void> {
-    const response = await authFetch(`${config.opencodeUrl}/auth/${encodeURIComponent(providerID)}`, {
-      method: "DELETE",
-    });
-    if (!response.ok && response.status !== 404) {
-      throw new Error(`OpenCode auth removal failed (${response.status}): ${await response.text()}`);
+    try {
+      const result = await this.client.auth.remove({ providerID } as any);
+      unwrap(result, "OpenCode auth removal");
+    } catch (error) {
+      // Removing a token that was never set is fine — matches the old raw-HTTP
+      // behavior of tolerating 404.
+      if (!/\b404\b|not.?found/i.test(errorText(error))) throw error;
     }
     log("info", "opencode.provider_token_removed", { providerID });
+  }
+
+  /**
+   * Pending question requests across sessions, with their questions and
+   * options — used to re-surface a question whose Discord buttons were lost
+   * (bot restart, event-stream drop) while the agent is still blocked on it.
+   */
+  async listPendingQuestions(directory: string): Promise<Array<{
+    id: string;
+    sessionID: string;
+    questions: Array<{
+      header: string;
+      question: string;
+      multiple?: boolean;
+      options: Array<{ label: string; description?: string }>;
+    }>;
+  }>> {
+    const result = await this.client.question.list({ directory } as any);
+    const data = unwrap<Array<any>>(result, "OpenCode question list");
+    if (!Array.isArray(data)) return [];
+    return data.map((request) => ({
+      id: String(request?.id ?? ""),
+      sessionID: String(request?.sessionID ?? ""),
+      questions: (Array.isArray(request?.questions) ? request.questions : []).map((q: any) => ({
+        header: String(q?.header ?? "Question").slice(0, 80),
+        question: String(q?.question ?? "").slice(0, 500),
+        multiple: Boolean(q?.multiple),
+        options: (Array.isArray(q?.options) ? q.options : []).slice(0, 4).map((o: any) => ({
+          label: String(o?.label ?? "Option").slice(0, 80),
+          description: typeof o?.description === "string" ? o.description.slice(0, 120) : undefined,
+        })),
+      })),
+    })).filter((request) => request.id && request.questions.length);
   }
 
   async health(): Promise<string> {
@@ -617,38 +657,47 @@ export class OpenCodeHarness {
     }
   }
 
+  /** Re-emit the session's pending question, if any, after a transport recovery. */
+  private async resurfacePendingQuestion(
+    directory: string,
+    sessionId: string,
+    onProgress: ProgressCallback | undefined,
+  ): Promise<void> {
+    const pending = (await this.listPendingQuestions(directory)).find((request) => request.sessionID === sessionId);
+    if (!pending) return;
+    log("info", "opencode.question_resurfaced", { sessionId, requestID: pending.id });
+    emit(onProgress, {
+      kind: "question",
+      text: "❓ Still waiting on the agent's question",
+      question: { requestID: pending.id, questions: pending.questions },
+    });
+  }
+
   private async listSessionMessages(directory: string, sessionId: string, limit: number): Promise<SessionMessage[]> {
-    const url = new URL(`${config.opencodeUrl}/session/${encodeURIComponent(sessionId)}/message`);
-    url.searchParams.set("directory", directory);
-    url.searchParams.set("limit", String(limit));
-    const response = await authFetch(url, { signal: AbortSignal.timeout(6_000) });
-    if (!response.ok) throw new Error(`OpenCode message history returned HTTP ${response.status}: ${truncate(await response.text(), 500)}`);
-    const payload = await response.json();
-    const data = (payload as any)?.data ?? payload;
+    const result = await this.client.session.messages({
+      sessionID: sessionId,
+      directory,
+      limit,
+    } as any);
+    const data = unwrap<SessionMessage[]>(result, "OpenCode message history");
     if (!Array.isArray(data)) throw new Error("OpenCode message history returned an unexpected payload");
-    return data as SessionMessage[];
+    return data;
   }
 
   private async sessionStatus(directory: string): Promise<Record<string, unknown>> {
-    const url = new URL(`${config.opencodeUrl}/session/status`);
-    url.searchParams.set("directory", directory);
-    const response = await authFetch(url, { signal: AbortSignal.timeout(6_000) });
-    if (!response.ok) throw new Error(`OpenCode session status returned HTTP ${response.status}: ${truncate(await response.text(), 500)}`);
-    const payload = await response.json();
-    const data = (payload as any)?.data ?? payload;
+    const result = await this.client.session.status({ directory } as any);
+    const data = unwrap<Record<string, unknown>>(result, "OpenCode session status");
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("OpenCode session status returned an unexpected payload");
-    return data as Record<string, unknown>;
+    return data;
   }
 
   /** Best-effort HTTP abort of a still-running turn; used when recovery stops waiting. */
   async abortTurn(directory: string, sessionId: string): Promise<boolean> {
-    const url = new URL(`${config.opencodeUrl}/session/${encodeURIComponent(sessionId)}/abort`);
-    url.searchParams.set("directory", directory);
-    const response = await authFetch(url, {
-      method: "POST",
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!response.ok) throw new Error(`OpenCode abort returned HTTP ${response.status}: ${truncate(await response.text(), 500)}`);
+    const result = await this.client.session.abort({
+      sessionID: sessionId,
+      directory,
+    } as any);
+    unwrap(result, "OpenCode abort");
     log("warn", "opencode.session_aborted_after_recovery_timeout", { sessionId });
     return true;
   }
