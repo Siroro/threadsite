@@ -32,7 +32,9 @@ export interface ProgressUpdate {
 export type ProgressCallback = (update: ProgressUpdate) => void | Promise<void>;
 
 const MAX_SUMMARY_CHARS = 180;
-const HISTORY_LINES = 3;
+// Recent activity bullets kept under the head; the render drops oldest-first
+// only when the message would exceed Discord's edit budget.
+const HISTORY_LINES = 6;
 
 export class DiscordProgress {
   private readonly started = Date.now();
