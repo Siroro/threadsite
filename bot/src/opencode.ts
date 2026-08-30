@@ -895,9 +895,18 @@ export class OpenCodeHarness {
       || event?.type === "question.rejected" || event?.type === "question.v2.rejected"
     ) {
       const requestID = String(properties.requestID ?? "");
+      const rejected = event.type.includes("rejected");
+      const labels = (Array.isArray(properties.answers) ? properties.answers : [])
+        .flat()
+        .filter((answer: unknown): answer is string => typeof answer === "string" && Boolean(answer));
+      const text = rejected
+        ? "🤔 Skipped — the agent decides on its own"
+        : labels.length
+          ? `✅ Answered: ${labels.join(", ")}`
+          : "✅ Question answered";
       emit(onProgress, {
         kind: "question",
-        text: event.type.includes("rejected") ? "🤔 The agent moved on without an answer" : "✅ Question answered",
+        text,
         question: { requestID, questions: [], resolved: true },
       });
       return;
