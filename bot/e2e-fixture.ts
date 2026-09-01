@@ -382,6 +382,49 @@ async function main(): Promise<void> {
   ].join("\n"));
   await expectThrow("import of the old js/ net path fails the build", () => buildSite(wsNetLegacyImport), /TypeScript compile error[\s\S]*Could not resolve "\.\.\/js\/threadsite-net\.js"/);
 
+  console.log("\n== 14. live legacy game survives the harness update turn ==");
+  // A real pre-TypeSwitch game: authored js/main.js, imports the net client
+  // from js/, an import map in the HTML. On its next turn the harness
+  // deletes js/threadsite-net.js + js/net-config.js — the game must keep
+  // working in the same turn (remap to site/net/) or fail loudly into the
+  // repair round-trip, never ship broken.
+  const wsLive = await scaffold("game-2d");
+  const siteLive = path.join(wsLive, "site");
+  // Rewind the scaffold to the legacy layout the game shipped with: authored
+  // JS in js/ including the net client there, no src/.
+  await fs.rm(path.join(siteLive, "src"), { recursive: true, force: true });
+  await fs.rm(path.join(wsLive, "build-manifest.json"), { force: true }).catch(() => undefined);
+  const legacyNet = await fs.readFile(path.join(siteLive, "net", "threadsite-net.js"), "utf8");
+  await fs.writeFile(path.join(siteLive, "js", "threadsite-net.js"), legacyNet);
+  await fs.writeFile(path.join(siteLive, "js", "net-config.js"),
+    "/** @type {{protocol: number, game: string, url: string}} */\nexport const NET_CONFIG = Object.freeze({ protocol: 3, game: \"e2e\", url: \"ws://localhost:8090/ws\" });\n");
+  await fs.writeFile(path.join(siteLive, "js", "main.js"),
+    `import { NET_CONFIG } from "./net-config.js";\nimport { ThreadSiteNet } from "./threadsite-net.js";\nconst app = document.getElementById("app");\nif (app) app.textContent = \`legacy \${NET_CONFIG.game}\`;\nconsole.log(typeof ThreadSiteNet.connect);\n`);
+  await fs.writeFile(path.join(siteLive, "index.html"),
+    `<!doctype html><html><body><main id="app"></main><script type="importmap">{"imports":{"pixi.js":"./js/vendor-pixi.mjs"}}</script><script type="module" src="js/main.js"></script></body></html>\n`);
+  await fs.writeFile(path.join(siteLive, "js", "vendor-pixi.mjs"), "export const VERSION = \"8.20.1\";\nexport class Application {}\n");
+
+  // The update turn: harness restore runs (removes the old js/ net copies,
+  // seeds site/net/), then the deploy-tail build+validate — exactly what
+  // completeTurn does before the agent is even prompted.
+  await ensureMultiplayerFiles(wsLive, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: 3 }, "game-2d");
+  check("legacy game's js/net client removed by restore", await fs.access(path.join(siteLive, "js", "threadsite-net.js")).then(() => false, () => true));
+  const liveBuilt = await buildSite(wsLive);
+  check("legacy project builds skipped (no src/)", liveBuilt.skipped === true, JSON.stringify(liveBuilt));
+  const liveValidateError = await validateSite(siteLive).then(() => undefined, (error: unknown) => String((error as Error).message));
+  // Two acceptable outcomes: passes as-is (nothing referenced the removed
+  // file), or fails loudly through either repairable channel — the tsc gate
+  // (TS2307 on the now-missing module) or the module-resolution pass (Broken
+  // local reference). Both match the repair regex, so the agent fixes the
+  // import the same turn, and AGENTS.md's legacy section documents the new
+  // path. Silently shipping a broken page is the only unacceptable outcome.
+  check("legacy game either validates or fails loudly (never ships broken)",
+    liveValidateError === undefined || /Broken local reference|type-check error/.test(liveValidateError),
+    liveValidateError ?? "validated");
+  if (liveValidateError) {
+    check("failure names the removed file so repair can fix it", /threadsite-net\.js|net-config\.js/.test(liveValidateError), liveValidateError.slice(0, 200));
+  }
+
   console.log(`\n=== ${passed} passed, ${failed} failed ===`);
   if (failed > 0) process.exitCode = 1;
 }
