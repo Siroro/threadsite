@@ -14,7 +14,6 @@ Maintained by the ThreadSite Discord harness. You author **TypeScript under `sit
 
 - Each **top-level** `src/*.ts` is one bundle entry becoming `js/<name>.js`; `index.html` loads `js/main.js` by convention, and `<script src>` must reference compiled `js/*.js`, never a `.ts` source. Nested files (`src/game/player.ts`) are shared modules with no output of their own.
 - Imports resolve like a normal bundler: `"./player.js"` (preferred) or `"./player"` finds the sibling `player.ts`. JSON imports are inlined; media imported from TypeScript emits hashed asset URLs. Prefer plain `<link>` stylesheets over CSS imports.
-- Bare `"three"`/`"pixi.js"` resolve from the harness-managed `node_modules/` (gitignored, never published) — engine code reaches the browser only inside your bundle, tree-shaken to what you import. Both engines ship **full TypeScript types**: your editor and validation check engine usage against the real API, so wrong arguments and misspelled members fail the turn. Don't download second copies; addons fetched with `asset_download` into `site/assets/vendor/addons/` work when they import bare `"three"` — adapt `"three/addons/*"` subpaths.
 - Fixed compiler flags (no tsconfig exists or is allowed): ES2022 + DOM libs, ES modules, lenient types — implicit `any` and unguarded DOM lookups are fine. Build failures (missing import, misspelled export, syntax damage) fail the turn with file:line and the offending source line — fix what they point at.
 
 ## Verification
