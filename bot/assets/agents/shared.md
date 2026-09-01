@@ -19,7 +19,14 @@ Maintained by the ThreadSite Discord harness. You author **TypeScript under `sit
 
 ## Verification
 
-Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, unzip/tar (npm, curl, rm, and git writes are blocked). Use `js_syntax_check` on TypeScript you edit, heed the attached language servers, and keep scratch files in `/tmp` — the workspace is committed and `site/` is published.
+Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, unzip/tar (npm, curl, rm, and git writes are blocked). Keep scratch files in `/tmp` — the workspace is committed and `site/` is published.
+
+- While editing: use `js_syntax_check` on files you change, and heed the attached language servers — they surface the same diagnostics the gate will.
+- Before finishing, run the gate's own check yourself (it type-checks the whole import graph against the engines' and net client's real declarations):
+
+      node /usr/local/lib/node_modules/typescript/bin/tsc --noEmit --allowJs --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM,DOM.Iterable --skipLibCheck site/src/*.ts
+
+  Fix everything it reports — errors that reach the harness still get only one automatic repair round-trip.
 
 ## How your work ships
 
