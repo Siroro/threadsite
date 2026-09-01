@@ -6,8 +6,12 @@ import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, ensureGitRepo
 import { ensureMultiplayerFiles, multiplayerContext } from "./multiplayer.js";
 import { OpenCodeHarness, addUsage, errorUsage, type PromptResult, type TurnUsage } from "./opencode.js";
 import { publishIndex, publishSite, siteUrl, validateSite } from "./publish.js";
+import { buildSite } from "./build.js";
+import { enginePackages, ensureEnginePackages } from "./engines.js";
+import { ensureSkillFiles, skillNames } from "./skills.js";
 import { Store } from "./store.js";
 import { initialProjectInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, repairInstruction } from "./templates.js";
+import { starterHtml, starterSource } from "./starter.js";
 import type { CommitAuthor, MultiplayerContext, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog } from "./usage.js";
 import type { ProgressCallback } from "./progress.js";
@@ -101,9 +105,13 @@ export class ProjectService {
     const projectKind = input.projectKind ?? "site";
 
     emit(onProgress, "📁 Preparing persistent workspace");
-    await fs.mkdir(siteDir, { recursive: true });
+    const srcDir = safeChild(workspacePath, "site", "src");
+    await fs.mkdir(srcDir, { recursive: true });
     await fs.writeFile(path.join(siteDir, "index.html"), starterHtml(input.displayName), "utf8");
-    await fs.writeFile(path.join(workspacePath, ".gitignore"), "\n", "utf8");
+    await fs.writeFile(path.join(srcDir, "main.ts"), starterSource(projectKind), "utf8");
+    // The harness-managed node_modules stays out of git; the manifest,
+    // sources, and compiled bundles are the committed record.
+    await fs.writeFile(path.join(workspacePath, ".gitignore"), "node_modules/\n", "utf8");
     const multiplayer = multiplayerContext(projectKind, siteSlug);
     if (multiplayer) {
       // Games are multi-tenant clients of the shared relay: vendored protocol
@@ -112,8 +120,24 @@ export class ProjectService {
       await ensureMultiplayerFiles(workspacePath, multiplayer, projectKind);
     } else {
       emit(onProgress, "🧭 Writing project-specific AGENTS.md");
-      await fs.writeFile(path.join(workspacePath, "AGENTS.md"), projectAgents(projectKind), "utf8");
+      await fs.writeFile(path.join(workspacePath, "AGENTS.md"), await projectAgents(projectKind), "utf8");
     }
+    if (enginePackages(projectKind).length) {
+      // The engine package is installed before the agent session starts, like
+      // a dependency manager would, and re-seeded every turn if it ever goes
+      // missing — authored code just imports "three"/"pixi.js".
+      emit(onProgress, "📦 Installing the engine package (node_modules)");
+      await ensureEnginePackages(workspacePath, projectKind);
+    }
+    if (skillNames(projectKind).length) {
+      // The matching curated engine/game playbooks ride along as repo content;
+      // OpenCode discovers them from the workspace root and loads them on demand.
+      emit(onProgress, "🎓 Installing the curated game skills (.opencode/skills)");
+      await ensureSkillFiles(workspacePath, projectKind);
+    }
+    // Compile the starter so the baseline commit and the initial turn both
+    // carry the runnable js/ output that index.html references.
+    await buildSite(workspacePath);
 
     emit(onProgress, "🌱 Creating/checking Forgejo repository");
     await this.forgejo.ensureRepository(repoName, `${projectKindLabel(projectKind)} generated from Discord thread ${input.displayName}`);
@@ -268,10 +292,22 @@ export class ProjectService {
         // Non-multiplayer projects get the same per-turn guarantee: AGENTS.md
         // rule updates reach existing threads, not just newly created ones.
         const agentsFile = path.join(workspacePath, "AGENTS.md");
-        const agents = projectAgents(projectKind);
+        const agents = await projectAgents(projectKind);
         if ((await fs.readFile(agentsFile, "utf8").catch(() => undefined)) !== agents) {
           await fs.writeFile(agentsFile, agents, "utf8");
         }
+      }
+      // The engine package gets the same per-turn guarantee: if node_modules
+      // ever goes missing or drifts, it is reseeded before the agent runs, so
+      // the imports AGENTS.md promises always resolve at build time.
+      if (await ensureEnginePackages(workspacePath, projectKind)) {
+        emit(onProgress, "📦 Restored the engine package (node_modules)");
+      }
+      // The engine playbook skill gets the same per-turn guarantee: seeded
+      // before the prompt (and after the turn, below), so it is always
+      // present, current, and committed in game repos.
+      if (await ensureSkillFiles(workspacePath, projectKind)) {
+        emit(onProgress, "🎓 Restored the curated game skills (.opencode/skills)");
       }
       // Durable project memory: read fresh each turn so notes land in the very
       // turn after they are written. Missing file is fine (nothing noted yet).
@@ -311,6 +347,10 @@ export class ProjectService {
           usage = result.usage;
         } catch (error) {
           if (!/404|not found|unknown session/i.test(errorText(error))) throw error;
+          // The session was replaced out from under this turn (e.g. /site-admin
+          // reset deleted it) — recreating here would resurrect a turn the
+          // reset just stopped.
+          if (this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;
           emit(onProgress, "♻️ Recreating a missing agent session");
           const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
           project = await this.store.patchProject(threadId, { sessionId });
@@ -412,23 +452,35 @@ export class ProjectService {
     const workspacePath = project.workspacePath;
     const siteDir = safeChild(workspacePath, "site");
     const restoreHarnessFiles = async (): Promise<void> => {
-      if (!input.multiplayer) return;
-      if (await ensureMultiplayerFiles(workspacePath, input.multiplayer, input.projectKind)) {
-        emit(input.onProgress, "🕹️ Restored harness-owned multiplayer files");
-      }
+      let restored = false;
+      if (await ensureEnginePackages(workspacePath, input.projectKind)) restored = true;
+      if (await ensureSkillFiles(workspacePath, input.projectKind)) restored = true;
+      if (input.multiplayer && await ensureMultiplayerFiles(workspacePath, input.multiplayer, input.projectKind)) restored = true;
+      if (restored) emit(input.onProgress, "🗂️ Restored harness-owned files (engine package, game skills, multiplayer client)");
     };
     let agentSummary = input.agentSummary;
     let usage = input.usage;
 
     await restoreHarnessFiles();
-    emit(input.onProgress, "🧪 Validating static output");
     let stats: { files: number; bytes: number } | undefined;
     let validationError: string | undefined;
+    // The static build step of deployment: bundle site/src/ TypeScript into
+    // site/js/ (with code-framed bundler errors an agent can act on), then
+    // validate the resulting tree. Kept as one unit so a bundle failure feeds
+    // the same repair round-trip as a validation failure.
+    const buildAndValidate = async (): Promise<{ files: number; bytes: number }> => {
+      const built = await buildSite(workspacePath);
+      if (!built.skipped) {
+        emit(input.onProgress, `⚙️ Bundled TypeScript · ${built.emitted} output file${built.emitted === 1 ? "" : "s"}${built.pruned ? ` · ${built.pruned} stale pruned` : ""}`);
+      }
+      emit(input.onProgress, "🧪 Validating static output");
+      return validateSite(siteDir);
+    };
     try {
-      stats = await validateSite(siteDir);
+      stats = await buildAndValidate();
     } catch (error) {
       const firstError = errorText(error);
-      if (!/JavaScript (?:syntax|type-check) error|Broken local reference/i.test(firstError)) {
+      if (!/JavaScript (?:syntax|type-check) error|TypeScript compile error|Broken local reference/i.test(firstError)) {
         // Structural problems (missing index.html, dotfiles, blocked file
         // types, size caps) get no repair round-trip; they commit unpublished,
         // exactly like a failed repair.
@@ -437,7 +489,7 @@ export class ProjectService {
         // One repair attempt: feed the validation error back to the same agent
         // session, which can see the files it just wrote, then re-validate.
         log("warn", "project.validation_javascript_retry", { threadId, error: firstError });
-        emit(input.onProgress, "🔧 JavaScript validation errors found — asking the agent to repair them");
+        emit(input.onProgress, "🔧 Validation errors found — asking the agent to repair them");
         try {
           const repaired = await this.opencode.prompt(
             workspacePath,
@@ -453,7 +505,7 @@ export class ProjectService {
           emit(input.onProgress, "🧪 Re-validating after the repair");
           await restoreHarnessFiles();
           try {
-            stats = await validateSite(siteDir);
+            stats = await buildAndValidate();
           } catch (reValidationError) {
             validationError = errorText(reValidationError);
           }
@@ -603,6 +655,7 @@ export class ProjectService {
           usage = result.usage;
         } catch (error) {
           if (!/404|not found|unknown session/i.test(errorText(error))) throw error;
+          if (this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;
           log("warn", "project.recovery_session_lost", { threadId, sessionId: project.sessionId });
           const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
           project = await this.store.patchProject(threadId, { sessionId });
@@ -830,6 +883,48 @@ export class ProjectService {
     return updated;
   }
 
+  /**
+   * Admin-wide hard reset: stop EVERY active session on the agent service —
+   * abort running turns, discard pending questions, and delete each session —
+   * then start a fresh session for every project the store tracks. The sweep
+   * also covers sessions the store no longer knows about (orphans, subagent
+   * children, abandoned titler runs), so nothing survives to keep working or
+   * be resumed. Unlike resetSession this does not refuse while a turn runs —
+   * the turn is stopped and its Discord turn fails through the normal failure
+   * path. Sites, git history, and project notes are untouched.
+   */
+  async resetAllSessions(): Promise<{ total: number; stopped: number; failed: number; aborted: number }> {
+    // Sweep first, while every existing session is still listed; fresh
+    // sessions created afterwards are the only thing left alive on the service.
+    const sweep = await this.opencode.stopAllSessions(new Set()).catch((error) => {
+      logError("project.admin_reset_sweep_failed", error, {});
+      return { sessions: 0, aborted: 0 };
+    });
+
+    const projects = this.store.listProjects();
+    const outcomes = await Promise.all(projects.map(async (project) => {
+      try {
+        const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
+        // Clear pendingTurn so boot recovery does not resurrect the aborted
+        // turn after the next restart, and mirror resetSession for the rest.
+        await this.store.patchProject(project.threadId, { sessionId, pendingTurn: undefined, lastTurnUsage: undefined, lastTurnAt: undefined });
+        log("info", "project.session_admin_reset", { threadId: project.threadId, oldSessionId: project.sessionId, sessionId });
+        return true;
+      } catch (error) {
+        logError("project.admin_reset_failed", error, { threadId: project.threadId });
+        return false;
+      }
+    }));
+    const summary = {
+      total: projects.length,
+      stopped: outcomes.filter(Boolean).length,
+      failed: outcomes.filter((ok) => !ok).length,
+      aborted: sweep.aborted,
+    };
+    log("info", "project.admin_reset_completed", { ...summary, sweptSessions: sweep.sessions });
+    return summary;
+  }
+
   /** Tear down a project entirely: workspace, Forgejo repo, published page, and record. */
   async deleteProject(threadId: string): Promise<void> {
     const project = this.store.getProject(threadId);
@@ -869,9 +964,12 @@ export class ProjectService {
     log("warn", "project.rollback_requested", { threadId, sessionId: project.sessionId });
   }
 
-  async republish(threadId: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {    let project = this.store.getProject(threadId);
+  async republish(threadId: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {
+    let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
     const siteDir = safeChild(project.workspacePath, "site");
+    emit(onProgress, "⚙️ Rebuilding the TypeScript bundle");
+    await buildSite(project.workspacePath);
     emit(onProgress, "🧪 Validating checked-in static files");
     await validateSite(siteDir);
     emit(onProgress, "🚀 Republishing to Apache");
@@ -995,9 +1093,4 @@ function commitSubjectFor(prompt: string, initial: boolean, kind: ProjectKind): 
   if (line) return line;
   const noun = kind === "site" ? "site" : "game";
   return initial ? `Create ${noun} from Discord` : `Update ${noun} from Discord`;
-}
-
-function starterHtml(name: string): string {
-  const safe = name.replace(/[&<>"']/g, "");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safe}</title></head><body><main><h1>${safe}</h1><p>Site generation is starting…</p></main></body></html>\n`;
 }

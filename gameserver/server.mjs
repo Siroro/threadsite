@@ -20,7 +20,7 @@
 //     and additionally asks the live host for a fresh one.
 //
 // Wire protocol: ThreadSite Multiplayer Protocol v3 (documented in the game
-// AGENTS.md profiles and implemented by the vendored site/js/threadsite-net.js
+// AGENTS.md profiles and implemented by the vendored site/net/threadsite-net.js
 // browser client).
 
 import http from "node:http";

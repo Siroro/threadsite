@@ -44,8 +44,11 @@ export class DiscordProgress {
   private stats?: string;
   private changes?: string;
   private question?: AgentQuestion;
-  /** Pinned context line: the pending question, then its answer once given. */
-  private questionPin?: string;
+  /**
+   * Pinned block directly under the head: the question, then who answered and
+   * what they picked once resolved. Stays visible for the rest of the turn.
+   */
+  private questionPin?: { requestID: string; question: string; resolution?: string };
   private lastEdit = 0;
   private pending?: NodeJS.Timeout;
   private heartbeat?: NodeJS.Timeout;
@@ -73,17 +76,19 @@ export class DiscordProgress {
       this.schedule();
     } else if (update.kind === "question") {
       if (update.question?.resolved) {
-        if (this.question?.requestID === update.question.requestID) {
+        if (this.questionPin?.requestID === update.question.requestID && !this.questionPin.resolution) {
           this.question = undefined;
-          // Pin the decision at the top of the status for the rest of the turn.
-          this.questionPin = singleLine(update.text);
+          // Generic decision line for answers that didn't come from the
+          // Discord buttons (recordAnswer/recordSkip write the named one).
+          this.questionPin.resolution = singleLine(update.text);
           this.schedule();
         }
       } else if (update.question) {
         this.question = update.question;
         const first = update.question.questions[0];
         const asked = first ? `${first.header}: ${first.question}` : update.text;
-        this.questionPin = `❓ ${singleLine(asked)}${update.question.questions.length > 1 ? ` (+${update.question.questions.length - 1} more)` : ""}`;
+        const question = `❓ ${singleLine(asked)}${update.question.questions.length > 1 ? ` (+${update.question.questions.length - 1} more)` : ""}`;
+        this.questionPin = { requestID: update.question.requestID, question };
         this.update(update.text, update.detail);
       }
     } else {
@@ -130,6 +135,24 @@ export class DiscordProgress {
       this.question = undefined;
       this.schedule();
     }
+  }
+
+  /**
+   * Pin who answered the pinned question and what they picked. Called from the
+   * button handler, which knows the Discord user; the OpenCode resolved event
+   * carries no responder, so it only fills in a fallback line.
+   */
+  recordAnswer(requestID: string, responder: string, label: string): void {
+    if (this.questionPin?.requestID !== requestID || this.questionPin.resolution) return;
+    this.questionPin.resolution = `✅ ${singleLine(responder)} chose: ${singleLine(label)}`;
+    this.schedule();
+  }
+
+  /** Pin that the pinned question was skipped and by whom. */
+  recordSkip(requestID: string, responder: string): void {
+    if (this.questionPin?.requestID !== requestID || this.questionPin.resolution) return;
+    this.questionPin.resolution = `⏭️ ${singleLine(responder)} skipped — the agent uses its best judgment`;
+    this.schedule();
   }
 
   update(text: string, detail?: string): void {
@@ -182,9 +205,16 @@ export class DiscordProgress {
   private render(): { content: string } {
     const elapsed = formatElapsed(Date.now() - this.started);
     const head = `**${this.title}** · ${elapsed}`;
+    const pinLines = this.questionPin
+      ? this.questionPin.resolution
+        ? [this.questionPin.question, `↳ ${this.questionPin.resolution}`]
+        : [this.questionPin.question]
+      : [];
     const withHistory = (history: string[]) =>
-      [head, ...[...history, this.latest].map((line) => `• ${singleLine(line)}`)].join("\n");
-    const extra = (this.questionPin ? this.questionPin.length + 4 : 0)
+      [head, ...pinLines, ...[...history, this.latest].map((line) => `• ${singleLine(line)}`)].join("\n");
+    const extra = (this.questionPin
+      ? pinLines.reduce((sum, line) => sum + line.length + 1, 0)
+      : 0)
       + (this.thought ? this.thought.length + 8 : 0)
       + (this.stats ? this.stats.length + 4 : 0)
       + (this.changes ? this.changes.length + 4 : 0);
@@ -194,10 +224,7 @@ export class DiscordProgress {
       history = history.slice(1);
       body = withHistory(history);
     }
-    // Question is pinned directly under the head so thread readers always see
-    // what the agent is asking (and later, what was decided) without scrolling.
     const lines = [body];
-    if (this.questionPin) lines.push(singleLine(this.questionPin));
     if (this.thought) lines.push(`> 💭 ${this.thought}`);
     if (this.stats) lines.push(`-# ${this.stats}`);
     if (this.changes) lines.push(`-# ${this.changes}`);

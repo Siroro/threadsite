@@ -1,4 +1,4 @@
-# ThreadSite V2.3 — Discord threads that become persistent websites & multiplayer games
+# ThreadSite V2.4 — Discord threads that become persistent websites & multiplayer games
 
 ThreadSite is a small Discord harness for an AI coding agent. One Discord thread maps to one persistent static website **or static web game** and one public Forgejo repository.
 
@@ -43,9 +43,15 @@ V2.1 also recursively serializes `Error.cause` into the private JSONL log and ad
 
 ## Why static-only
 
-This harness intentionally does **not** let the model run `npm install`, shell commands, git, or server code. Games are also static web deliverables: HTML/CSS/browser JavaScript/assets only, with no Node or game server at runtime. The agent platform is configured so the `sitebuilder` agent can edit `site/**` and inspect the workspace, while shell, external directories, arbitrary web fetching, subagents, LSP, skills, and questions are denied. `websearch` is explicitly allowed, and media downloads go through a guarded `asset_download` tool.
+This harness intentionally does **not** let the model run `npm install`, shell commands, git, or server code. Games are also static web deliverables: HTML/CSS/static browser JavaScript/assets only, with no Node or game server at runtime. The agent platform is configured so the `sitebuilder` agent can edit `site/**` and inspect the workspace, while shell, external directories, arbitrary web fetching, subagents, LSP, skills, and questions are denied. `websearch` is explicitly allowed, and media downloads go through a guarded `asset_download` tool.
 
-The one deliberate runtime exception is the **harness-owned multiplayer relay**: the model never writes server code, it only uses the vendored browser client (`site/js/threadsite-net.js`) pointed at the shared relay whose URL and game id the harness injects. The relay is part of the infrastructure, not part of any generated deliverable, and games must stay fully playable solo when it is unreachable.
+### TypeScript sources, harness-owned build
+
+Projects are authored in **TypeScript under `site/src/`**. The model never runs a build; the *harness* runs the only one, as the final step of deployment: when the agent's turn ends, the bot bundles every top-level `site/src/*.ts` entry into plain browser JavaScript under `site/js/` with **esbuild** (TypeScript compiled, the import graph followed, modules merged and tree-shaken, code-split chunks under `js/chunks/`). Sources and compiled output are committed together, and the published artifact is still an ordinary static tree served verbatim by Apache — no runtime build, no deferred work. Bundler failures (unresolved imports, misspelled exports, syntax damage) surface as code-framed `file:line:col` errors and feed the same one-shot automatic repair round-trip as validation errors.
+
+Game repos get their **engine installed the way a dependency manager would**: three.js (r185) for 3D games and PixiJS 8 for 2D games live in a harness-managed `node_modules/` at the workspace root (gitignored, never published, re-seeded on drift). Authored code imports the bare package names (`import * as THREE from "three"`, `import * as PIXI from "pixi.js"`) and esbuild resolves them by walking up from `site/src/` exactly like normal npm usage, tree-shaking them so a small game ships a small bundle. Both engines ship their **real TypeScript declarations**, so the agent's editor and the validation gate check engine usage against the actual APIs — wrong argument types and misspelled members fail the turn. Each game repo also carries a per-kind **engine playbook as an OpenCode skill** — `.opencode/skills/game-2d` for PixiJS, `game-3d` for three.js — seeded, re-checked, and committed on the same schedule as the engine package, so the agent loads the deep engine how-to (bootstrap patterns, lighting and batching budgets, disposal, asset pipelines) on demand while AGENTS.md stays the compact rulebook; site projects get no skill.
+
+The one deliberate runtime exception is the **harness-owned multiplayer relay**: the model never writes server code, it only uses the vendored browser client (`site/net/threadsite-net.js`) pointed at the shared relay whose URL and game id the harness injects. The relay is part of the infrastructure, not part of any generated deliverable, and games must stay fully playable solo when it is unreachable.
 
 The bot then applies a second publication boundary: `site/index.html` is required; symlinks, dotfiles (including `.htaccess`), and non-static/server-executable file extensions are rejected; total files and bytes are capped. This makes it a much better fit for an existing Apache static host than running arbitrary model-generated build scripts.
 
@@ -253,9 +259,10 @@ Each accepted message does this:
 Discord thread message
   -> same persistent agent session + same workspace
   -> load persistent project AGENTS.md when present (2D/3D game + multiplayer rules)
-  -> harness re-checks the multiplayer client/config files
-  -> edit site/** only
-  -> validate static tree
+  -> harness re-checks the multiplayer client/config files, the engine packages in node_modules, and the engine playbook skill under .opencode/skills/
+  -> edit site/** only (browser code authored in TypeScript under site/src/)
+  -> harness build: bundle site/src/ -> static site/js/ (esbuild, tree-shaken)
+  -> validate static tree (bundle errors and type errors get one repair round-trip)
   -> bot writes README metadata
   -> git commit --allow-empty
   -> git push to public Forgejo
@@ -269,8 +276,8 @@ The git commit is deliberately performed by the harness rather than by the model
 
 Both profiles are deliberately **static-web only** and go through the same validation, git-push-first, and Apache publication boundary as normal sites. Both are also built **multiplayer-first** through the shared relay (see the next section): the agent gets the vendored net client, this game's tenant config, and the full sync guide in its `AGENTS.md`.
 
-- **2D**: prefers Canvas 2D for action games, with DOM/SVG also allowed for board/puzzle/UI-heavy games. Its `AGENTS.md` asks for responsive controls, game states, scoring/progression, collision discipline, frame-rate-independent animation, and lightweight game feel.
-- **3D**: requires a genuine 3D play space using WebGL/browser-side rendering. It forbids npm/Vite/webpack/build pipelines, asks for conservative geometry/effects, camera and input guidance, and a visible fallback when WebGL or an optional pinned CDN module cannot initialize.
+- **2D**: builds on the installed PixiJS 8 engine package by default for action/arcade/sprite-heavy games, with Canvas 2D or DOM/SVG also allowed for board/puzzle/UI-heavy games. Its `AGENTS.md` asks for responsive controls, game states, scoring/progression, collision discipline, frame-rate-independent animation, and lightweight game feel.
+- **3D**: requires a genuine 3D play space using WebGL, built on the installed three.js engine package. It forbids npm/Vite/webpack/build pipelines of the agent's own, asks for conservative geometry/effects, camera and input guidance, and a visible fallback when WebGL cannot initialize.
 
 The generated `AGENTS.md` is committed to the public project repository but is outside `site/`, so the agent can read it but cannot edit it under the supplied permissions. The agent platform discovers project-root `AGENTS.md` files as persistent project instructions.
 
@@ -287,8 +294,8 @@ A single relay therefore serves any number of games and any number of rooms per 
 
 On creation — and re-checked before every mutation, in case the agent removed them:
 
-- `site/js/threadsite-net.js` — a vendored, zero-dependency browser client for the protocol (connect/reconnect, room join, peer roster, host flag, snapshots, events, RTT).
-- `site/js/net-config.js` — harness-owned config: `export const NET_CONFIG = Object.freeze({ protocol, game, url })`.
+- `site/net/threadsite-net.js` + `threadsite-net.d.ts` — a vendored, zero-dependency browser client for the protocol (connect/reconnect, room join, peer roster, host flag, snapshots, events, RTT), shipped with full TypeScript declarations so authored game code is type-checked against the real client API. `net-config.js` (+ its own declarations) carries this game's tenant identity.
+- the engine package in the harness-managed workspace `node_modules/` — three.js (r185) for 3D projects, PixiJS 8 for 2D projects — imported by its bare package name, type-checked against its real declarations, and tree-shaken into the published bundle.
 - the `AGENTS.md` multiplayer section — the full protocol reference, the recommended **peer-owned-state** sync model (every player simulates their own entity locally and broadcasts it at 10–20 Hz, so controls never route through a host; interactions are events the target applies to itself; shared-world entities get a single owner), the host-authoritative alternative for shared-physics games, host-migration notes, untrusted-input validation rules, and the required lobby/room-code/offline-fallback UX. Agents are told to design **multiplayer-first**, treating solo play as the same game with one player.
 
 The first-turn prompt and the `sitebuilder` agent configuration both reinforce this: use the provided client, never write server code, and never invent other runtime network endpoints.

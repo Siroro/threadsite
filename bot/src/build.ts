@@ -1,0 +1,215 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import * as esbuild from "esbuild";
+import { log } from "./logger.js";
+import { safeChild } from "./util.js";
+
+export interface BuildResult {
+  /** True when the workspace has no site/src TypeScript — a legacy plain-JS project. */
+  skipped: boolean;
+  /** Bundled files emitted into site/js/ by this build (entries, chunks, assets). */
+  emitted: number;
+  /** Stale outputs removed because nothing in the current graph emits them. */
+  pruned: number;
+}
+
+/**
+ * Bare engine imports (`import * as THREE from "three"`, `import * as PIXI
+ * from "pixi.js"`) resolve natively: the harness seeds a curated
+ * `node_modules/` at the workspace root (see engines.ts), and esbuild walks
+ * up from `site/src/` to find it, bundling and tree-shaking the package into
+ * the output. The validation gate maps the same names onto the packages'
+ * real TypeScript declarations through tsconfig paths.
+ */
+
+/** Manifest of the previous build's outputs; see buildSite(). */
+interface Manifest { outputs: string[] }
+
+/**
+ * The static build step of deployment: bundle every entry under `site/src/`
+ * (top-level `.ts`/`.mts` files) into plain browser JavaScript under
+ * `site/js/` with esbuild — TypeScript compiled, the import graph followed
+ * and merged, the engine packages from the harness-managed node_modules and
+ * the harness net client bundled and tree-shaken into the output. Runs as
+ * the agent's turn ends, before validation, commit, and publication; the
+ * output is committed next to the sources so the repository and a plain
+ * `republish` always carry a complete, directly runnable static site.
+ *
+ * esbuild is chosen specifically for its failure mode: bundle errors arrive
+ * as precise code-framed diagnostics (file:line:col, the offending source
+ * line, a caret span) — unresolved relative imports, missing exports, syntax
+ * damage — which are thrown verbatim as a "TypeScript compile error" so the
+ * existing one-shot repair round-trip hands the agent something it can act
+ * on directly. Type errors are NOT esbuild's job; the validation gate's tsc
+ * run owns those.
+ *
+ * Stale outputs are pruned via a manifest at the workspace root listing the
+ * previous build's outputs (from esbuild's metafile, so shared chunks and
+ * emitted assets are tracked too). Workspaces without `site/src/` (sites from
+ * before the TypeScript switch) keep their authored `site/js/` untouched.
+ */
+export async function buildSite(workspacePath: string): Promise<BuildResult> {
+  const siteDir = safeChild(workspacePath, "site");
+  const srcDir = safeChild(siteDir, "src");
+  const entries = await collectEntries(srcDir);
+  const manifestFile = path.join(workspacePath, "build-manifest.json");
+  const previous = await readManifest(manifestFile);
+
+  if (!entries.length) {
+    const sources = await collectTypeScript(srcDir);
+    if (!sources.length) {
+      // No TypeScript at all: legacy project, nothing to build or prune.
+      const pruned = previous.size ? await prune(siteDir, previous, new Set()) : 0;
+      if (previous.size) await fs.rm(manifestFile, { force: true });
+      return { skipped: true, emitted: 0, pruned };
+    }
+    // TypeScript exists but no top-level entry: every previous output is now
+    // unreachable. Prune them; the reference validation reports the missing
+    // js/main.js the HTML expects, which the agent can repair.
+    const pruned = await prune(siteDir, previous, new Set());
+    await writeManifest(manifestFile, new Set());
+    return { skipped: false, emitted: 0, pruned };
+  }
+
+  const outputs = await bundle(siteDir, entries);
+  const pruned = await prune(siteDir, previous, outputs);
+  await writeManifest(manifestFile, outputs);
+  return { skipped: false, emitted: outputs.size, pruned };
+}
+
+/** Run the bundler and return the site-relative outputs it wrote (js/…). */
+async function bundle(siteDir: string, entries: string[]): Promise<Set<string>> {
+  let result: Awaited<ReturnType<typeof esbuild.build>>;
+  try {
+    result = await esbuild.build({
+      absWorkingDir: siteDir,
+      entryPoints: entries,
+      outdir: "js",
+      outbase: "src",
+      bundle: true,
+      format: "esm",
+      splitting: true,
+      target: "es2022",
+      // Vendored libraries carry MIT banners; keep them in the output.
+      legalComments: "eof",
+      sourcemap: false,
+      minify: false,
+      metafile: true,
+      logLevel: "silent",
+      chunkNames: "chunks/[name]-[hash]",
+      assetNames: "assets/[name]-[hash]",
+      // Entries imported only for types still emit an (empty) module so the
+      // HTML's js/<name>.js reference always resolves.
+    });
+  } catch (error) {
+    // esbuild rejects on build errors; the rejection carries the structured
+    // messages, so format them with code frames just like the result path.
+    const messages = (error as { errors?: esbuild.Message[] }).errors;
+    if (messages?.length) {
+      throw new Error(await formatBundlerErrors(messages));
+    }
+    // Genuine usage/IO failures; shape them like a compile error anyway.
+    throw new Error(`TypeScript compile error: the bundler could not run: ${String((error as Error).message ?? error)}`);
+  }
+
+  if (result.warnings.length) {
+    log("info", "build.esbuild_warnings", { count: result.warnings.length, first: result.warnings[0]?.text });
+  }
+  if (result.errors.length) {
+    throw new Error(await formatBundlerErrors(result.errors));
+  }
+
+  const outputs = new Set<string>();
+  for (const file of Object.keys(result.metafile?.outputs ?? {})) {
+    if (/^js\//.test(file) && !file.endsWith(".map")) outputs.add(file);
+  }
+  if (!outputs.size) throw new Error("TypeScript compile error: the bundler produced no output.");
+  return outputs;
+}
+
+/** Code-framed, LLM-actionable bundler errors — the repair round-trip's input. */
+async function formatBundlerErrors(errors: esbuild.Message[]): Promise<string> {
+  const formatted = await esbuild.formatMessages(errors.slice(0, 12), { kind: "error", color: false });
+  return `TypeScript compile error: the browser bundle could not be built (${errors.length} error${errors.length === 1 ? "" : "s"}):\n\n${formatted.join("\n")}`;
+}
+
+/**
+ * Delete outputs the previous build produced that the current one no longer
+ * does, so removed/renamed sources stop shipping their old bundles. Only
+ * manifest-listed paths under js/ are ever touched, and never the
+ * harness-owned multiplayer files.
+ */
+async function prune(siteDir: string, previous: Set<string>, current: Set<string>): Promise<number> {
+  let removed = 0;
+  for (const output of previous) {
+    if (current.has(output)) continue;
+    try {
+      await fs.rm(safeChild(siteDir, ...output.split("/")));
+      removed += 1;
+    } catch {
+      // Already gone — the outcome pruning wants anyway.
+    }
+  }
+  return removed;
+}
+
+/**
+ * Entry discovery: every top-level .ts/.mts under site/src/ becomes one
+ * bundle (src/main.ts -> js/main.js), mirroring how the HTML references the
+ * output. Nested files are shared modules reached through imports.
+ */
+async function collectEntries(srcDir: string): Promise<string[]> {
+  let entries: string[] = [];
+  try {
+    entries = (await fs.readdir(srcDir, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && /\.(?:ts|mts)$/.test(entry.name) && !/\.d\.[cm]?ts$/.test(entry.name))
+      .map((entry) => `src/${entry.name}`)
+      .sort();
+  } catch {
+    return [];
+  }
+  return entries;
+}
+
+/** Every TypeScript file under site/src as src/-relative POSIX paths (for the legacy/no-entry paths). */
+async function collectTypeScript(srcDir: string): Promise<string[]> {
+  const out: string[] = [];
+  async function walk(dir: string, prefix: string[]): Promise<void> {
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      if (entry.isDirectory()) {
+        await walk(path.join(dir, entry.name), [...prefix, entry.name]);
+      } else if (/\.(?:ts|mts)$/.test(entry.name)) {
+        out.push([...prefix, entry.name].join("/"));
+      }
+    }
+  }
+  await walk(srcDir, ["src"]);
+  return out.sort();
+}
+
+async function readManifest(file: string): Promise<Set<string>> {
+  const set = new Set<string>();
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, "utf8")) as Manifest;
+    if (Array.isArray(parsed.outputs)) {
+      for (const entry of parsed.outputs) {
+        if (typeof entry === "string" && /^js\/[A-Za-z0-9][\w./-]*$/.test(entry)) set.add(entry);
+      }
+    }
+  } catch {
+    // Missing or corrupt manifest: nothing to prune, treat as empty.
+  }
+  return set;
+}
+
+async function writeManifest(file: string, outputs: Set<string>): Promise<void> {
+  const manifest: Manifest = { outputs: [...outputs].sort() };
+  await fs.writeFile(file, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}

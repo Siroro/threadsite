@@ -61,6 +61,12 @@ export const config = {
   defaultModel: env("OPENCODE_DEFAULT_MODEL"),
   opencodeReconcileTimeoutMs: intEnv("OPENCODE_RECONCILE_TIMEOUT_MS", 30 * 60 * 1000),
   opencodeReconcilePollMs: intEnv("OPENCODE_RECONCILE_POLL_MS", 1500),
+  // Headers/body timeouts for HTTP requests to the OpenCode service. Agent
+  // turns routinely outlive undici's 5-minute defaults while the turn keeps
+  // running server-side, so these default to disabled (0) — the reconcile
+  // window above is the real deadline.
+  opencodeRequestHeadersTimeoutMs: msEnv("OPENCODE_HEADERS_TIMEOUT_MS", 0),
+  opencodeRequestBodyTimeoutMs: msEnv("OPENCODE_BODY_TIMEOUT_MS", 0),
 
   // Session context lifecycle. Idle sessions lose their provider prompt cache
   // and carry stale conversation state, so past SESSION_IDLE_RESET_MS the next

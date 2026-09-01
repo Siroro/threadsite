@@ -94,9 +94,11 @@ async function handleQuestionButton(interaction: ButtonInteraction): Promise<voi
   // One answer per request: strip the buttons immediately so a double click
   // cannot double-answer, then ack before the awaited OpenCode call.
   await interaction.update({ components: [] }).catch(() => undefined);
+  const responder = interaction.user.globalName ?? interaction.user.username;
   try {
     if (kind === "qskip") {
       await opencode.rejectQuestion(directory, requestID);
+      progress.recordSkip(requestID, responder);
       await interaction.followUp({ content: "⏭️ Skipped — the agent will use its best judgment.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
       return;
     }
@@ -113,6 +115,7 @@ async function handleQuestionButton(interaction: ButtonInteraction): Promise<voi
     // questions in the request get an empty selection.
     const answers = question.questions.map((_, index) => (index === qIndex ? [label] : []));
     await opencode.replyToQuestion(directory, requestID, answers);
+    progress.recordAnswer(requestID, responder, label);
     await interaction.followUp({ content: `✅ Answered: **${truncate(label, 80)}**`, flags: MessageFlags.Ephemeral }).catch(() => undefined);
   } finally {
     progress.clearQuestion(requestID);
@@ -587,6 +590,22 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     const provider = interaction.options.getString("provider", true).trim();
     await opencode.clearProviderToken(provider);
     await interaction.editReply(`Removed the stored credential for \`${provider}\`.`);
+    return;
+  }
+
+  if (sub === "reset") {
+    const summary = await projects.resetAllSessions();
+    log("info", "admin.reset_all", { userId: interaction.user.id, ...summary });
+    if (!summary.total && !summary.aborted) {
+      await interaction.editReply("Nothing to reset — no projects exist and no agent sessions were active.");
+      return;
+    }
+    await interaction.editReply(
+      `🛑 Hard reset complete: aborted ${summary.aborted} running turn(s) and deleted every agent session on the service. ` +
+      `Fresh sessions were started for ${summary.stopped}/${summary.total} project(s).` +
+      `${summary.failed ? ` ${summary.failed} project(s) could not be re-sessioned — see the bot log.` : ""}\n` +
+      "Sites, git history, and project notes are untouched. Interrupted threads will show a failure message for the turn that was stopped.",
+    );
     return;
   }
 
