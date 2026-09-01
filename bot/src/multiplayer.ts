@@ -9,6 +9,7 @@ export const PROTOCOL_VERSION = MULTIPLAYER_PROTOCOL_VERSION;
 
 const ASSETS_DIR = path.join(process.cwd(), "assets");
 const NET_CLIENT_STEM = "threadsite-net.js";
+const NET_CLIENT_TYPES_STEM = "threadsite-net.d.ts";
 
 /**
  * Games are multi-tenant clients of the shared relay: the tenant key is simply
@@ -24,25 +25,32 @@ export function multiplayerContext(kind: ProjectKind, siteSlug: string): Multipl
 }
 
 /**
- * Keep the harness-owned multiplayer files in a game workspace current:
- * site/js/threadsite-net.js (vendored protocol client), site/js/net-config.js
- * (this game's tenant id + relay URL), and the project AGENTS.md multiplayer
- * section. Runs on project creation, before every mutation, and again after
- * each agent turn (before validation), so agent deletions/drift are repaired
- * within the same turn. Writes are content-compared so an unchanged tree stays
- * untouched. Returns true when any file had to be restored.
+ * Keep the harness-owned multiplayer files in a game workspace current under
+ * `site/net/`: the vendored protocol client with its full TypeScript
+ * declarations (threadsite-net.js + threadsite-net.d.ts — authored code gets
+ * real types for the whole sync API), and this game's tenant config
+ * (net-config.js + net-config.d.ts). The project AGENTS.md multiplayer
+ * section is rewritten alongside. Runs on project creation, before every
+ * mutation, and again after each agent turn (before validation), so agent
+ * deletions/drift are repaired within the same turn. Writes are
+ * content-compared so an unchanged tree stays untouched; legacy copies of the
+ * client/config in `site/js/` (their pre-TypeScript home, when js/ was still
+ * hand-authored) are removed so nothing imports a stale, never-updated
+ * client. Returns true when any file had to be written.
  */
 export async function ensureMultiplayerFiles(
   workspacePath: string,
   multiplayer: MultiplayerContext,
   kind: ProjectKind,
 ): Promise<boolean> {
-  const jsDir = safeChild(workspacePath, "site", "js");
-  await fs.mkdir(jsDir, { recursive: true });
+  const netDir = safeChild(workspacePath, "site", "net");
+  await fs.mkdir(netDir, { recursive: true });
 
   let changed = false;
   const client = await fs.readFile(path.join(ASSETS_DIR, NET_CLIENT_STEM), "utf8");
-  changed = (await writeIfChanged(safeChild(jsDir, NET_CLIENT_STEM), `${client.trimEnd()}\n`)) || changed;
+  changed = (await writeIfChanged(safeChild(netDir, NET_CLIENT_STEM), `${client.trimEnd()}\n`)) || changed;
+  const clientTypes = await fs.readFile(path.join(ASSETS_DIR, NET_CLIENT_TYPES_STEM), "utf8");
+  changed = (await writeIfChanged(safeChild(netDir, NET_CLIENT_TYPES_STEM), `${clientTypes.trimEnd()}\n`)) || changed;
 
   const netConfig = [
     "// Harness-owned multiplayer configuration for this game.",
@@ -57,11 +65,33 @@ export async function ensureMultiplayerFiles(
     `});`,
     "",
   ].join("\n");
-  changed = (await writeIfChanged(safeChild(jsDir, "net-config.js"), netConfig)) || changed;
+  changed = (await writeIfChanged(safeChild(netDir, "net-config.js"), netConfig)) || changed;
+  const netConfigTypes = [
+    "// Type declarations for the harness-owned net-config.js.",
+    "export declare const NET_CONFIG: {",
+    "  readonly protocol: number;",
+    "  readonly game: string;",
+    "  readonly url: string;",
+    "};",
+    "",
+  ].join("\n");
+  changed = (await writeIfChanged(safeChild(netDir, "net-config.d.ts"), netConfigTypes)) || changed;
+
+  // Pre-TypeSwitch projects kept the client/config directly in site/js/; now
+  // that js/ is purely build output, those copies would silently drift from
+  // protocol updates. Remove them — the turn's build points any stale
+  // "../js/threadsite-net.js" import at the new location to fix.
+  for (const stale of ["threadsite-net.js", "net-config.js"]) {
+    const legacy = safeChild(workspacePath, "site", "js", stale);
+    if (await fs.access(legacy).then(() => true, () => false)) {
+      await fs.rm(legacy, { force: true }).catch(() => undefined);
+      changed = true;
+    }
+  }
 
   changed = (await writeIfChanged(
     safeChild(workspacePath, "AGENTS.md"),
-    projectAgents(kind, multiplayer),
+    await projectAgents(kind, multiplayer),
   )) || changed;
   return changed;
 }

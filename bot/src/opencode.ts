@@ -1,4 +1,5 @@
 import path from "node:path";
+import { Agent } from "undici";
 // The v2 entrypoint of the same pinned SDK package: same wire routes as v1 for
 // everything the harness uses, plus a typed question namespace (absent in v1).
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
@@ -13,6 +14,14 @@ const CONTINUE_AFTER_RESTART =
   "Your previous turn was interrupted by a service restart. Inspect the workspace for partial edits from that turn, "
 + "continue exactly where it left off, finish the requested change (do not start over), and summarize what you did.";
 
+// Undici's default 5-minute headers/body timeouts kill requests for long agent
+// turns while the turn keeps running server-side; 0 disables them and the
+// reconcile pipeline (OPENCODE_RECONCILE_TIMEOUT_MS) supervises instead.
+const opencodeAgent = new Agent({
+  headersTimeout: config.opencodeRequestHeadersTimeoutMs,
+  bodyTimeout: config.opencodeRequestBodyTimeoutMs,
+});
+
 function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(input instanceof Request ? input.headers : undefined);
   for (const [key, value] of new Headers(init.headers)) headers.set(key, value);
@@ -22,20 +31,29 @@ function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Re
       `Basic ${Buffer.from(`${config.opencodeUsername}:${config.opencodePassword}`).toString("base64")}`,
     );
   }
-  return fetch(input, { ...init, headers });
+  return fetch(input, { ...init, headers, dispatcher: opencodeAgent } as RequestInit);
 }
 
 function unwrap<T>(result: any, operation: string): T {
   if (result?.error) {
-    const text = typeof result.error === "string" ? result.error : JSON.stringify(result.error);
-    throw new OpenCodeRequestError(`${operation} failed: ${text}`, { operation, response: result.error });
+    const error = result.error;
+    // Error instances (network failures from the SDK's in-band error path)
+    // stringify to "{}", so describe them from their name/message/cause chain
+    // and keep the original as cause — transport detection and error
+    // classification downstream both read that chain.
+    const text = typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? diagnosticText(error)
+        : JSON.stringify(error);
+    throw new OpenCodeRequestError(`${operation} failed: ${text}`, { operation, response: error }, { cause: error });
   }
   return (result?.data ?? result) as T;
 }
 
 class OpenCodeRequestError extends Error {
-  constructor(message: string, readonly details: Record<string, unknown>) {
-    super(message);
+  constructor(message: string, readonly details: Record<string, unknown>, options?: { cause?: unknown }) {
+    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = "OpenCodeRequestError";
   }
 }
@@ -702,6 +720,78 @@ export class OpenCodeHarness {
     return true;
   }
 
+  /** Every session known to the agent service, across all projects. */
+  private async listAllSessions(): Promise<Array<{ id: string; directory: string }>> {
+    const result = await this.client.session.list({} as any);
+    const data = unwrap<any[]>(result, "OpenCode session list");
+    if (!Array.isArray(data)) return [];
+    return data
+      .map((session) => ({ id: String(session?.id ?? ""), directory: String(session?.directory ?? "") }))
+      .filter((session) => session.id);
+  }
+
+  /** IDs of sessions currently running or retrying a turn, across all projects. */
+  private async listBusySessionIds(): Promise<Set<string>> {
+    const result = await this.client.session.status({} as any);
+    const data = unwrap<Record<string, unknown>>(result, "OpenCode session status");
+    const busy = new Set<string>();
+    for (const [sessionId, status] of Object.entries(data ?? {})) {
+      const type = (status as any)?.type;
+      if (type === "busy" || type === "retry") busy.add(sessionId);
+    }
+    return busy;
+  }
+
+  /**
+   * Server-wide hard stop: reject every pending question, abort every busy
+   * turn, wait for the aborts to land, then delete every session except the
+   * `keep` set (freshly created replacements). Covers sessions the Discord
+   * store no longer tracks — orphans, subagent children, abandoned titler
+   * runs — so nothing on the service can keep working or be resumed.
+   */
+  async stopAllSessions(keep: ReadonlySet<string>): Promise<{ sessions: number; aborted: number }> {
+    const all = await this.listAllSessions();
+    const targets = all.filter((session) => !keep.has(session.id));
+    const directoryOf = new Map(targets.map((session) => [session.id, session.directory]));
+    const busy = await this.listBusySessionIds().catch(() => new Set<string>());
+
+    // A turn parked on a question must be released before an abort can land;
+    // question listing is directory-scoped, so walk the known ones.
+    for (const directory of new Set([...directoryOf.values()].filter(Boolean))) {
+      const pending = await this.listPendingQuestions(directory).catch(() => []);
+      for (const request of pending) {
+        await this.rejectQuestion(directory, request.id).catch((error) => {
+          log("warn", "opencode.admin_reset_question_reject_failed", { requestID: request.id, directory, error: serializeError(error) });
+        });
+      }
+    }
+
+    let aborted = 0;
+    for (const sessionId of busy) {
+      const directory = directoryOf.get(sessionId);
+      if (!directory) continue;
+      const ok = await this.abortTurn(directory, sessionId).catch((error) => {
+        log("warn", "opencode.admin_reset_abort_failed", { sessionId, directory, error: serializeError(error) });
+        return false;
+      });
+      if (ok) aborted += 1;
+    }
+
+    // Give the aborts a moment to land so the deletes do not race dying turns.
+    for (let i = 0; i < 20 && busy.size > 0; i += 1) {
+      const stillBusy = await this.listBusySessionIds().catch(() => busy);
+      if (stillBusy.size === 0) break;
+      await sleep(500);
+    }
+
+    for (const session of targets) {
+      await this.client.session.delete({ sessionID: session.id, directory: session.directory || undefined } as any)
+        .catch((error: unknown) => log("warn", "opencode.admin_reset_delete_failed", { sessionId: session.id, directory: session.directory, error: serializeError(error) }));
+    }
+    log("warn", "opencode.admin_reset_sweep", { sessions: targets.length, aborted, busySeen: busy.size, kept: keep.size });
+    return { sessions: targets.length, aborted };
+  }
+
   /** Answer a pending question request (one label list per asked question, in order). */
   async replyToQuestion(directory: string, requestID: string, answers: string[][]): Promise<void> {
     const result = await this.client.question.reply({
@@ -1241,7 +1331,7 @@ function enrichProviderError(error: unknown, model?: string, usage?: TurnUsage):
 
 function isTransportLikeError(error: unknown): boolean {
   const text = diagnosticText(error);
-  return /fetch failed|network|socket|connection (?:reset|closed|refused)|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|UND_ERR_|other side closed|terminated|aborted/i.test(text);
+  return /fetch failed|network|socket|connection (?:reset|closed|refused)|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|UND_ERR_|SocketError|HeadersTimeoutError|other side closed|terminated|aborted/i.test(text);
 }
 
 function diagnosticText(error: unknown, depth = 0): string {

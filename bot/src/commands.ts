@@ -122,6 +122,9 @@ export const adminCommand = new SlashCommandBuilder()
       .setName("limit")
       .setDescription("How many incidents to show (default 5)")
       .setMinValue(1)
-      .setMaxValue(10)));
+      .setMaxValue(10)))
+  .addSubcommand((sub) => sub
+    .setName("reset")
+    .setDescription("Stop every running agent turn and start a fresh session in every thread (sites are kept)"));
 
 export const commandJson = [siteCommand.toJSON(), makeGameCommand.toJSON(), adminCommand.toJSON()];

@@ -5,6 +5,7 @@ import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { config } from "./config.js";
+import { engineTypeEntries } from "./engines.js";
 import type { ProjectRecord } from "./types.js";
 import { htmlEscape, safeChild } from "./util.js";
 
@@ -31,6 +32,7 @@ export async function validateSite(siteDir: string): Promise<SiteStats> {
   let files = 0;
   let bytes = 0;
   const scripts: string[] = [];
+  const tsSources: string[] = [];
 
   async function walk(dir: string): Promise<void> {
     const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -48,7 +50,25 @@ export async function validateSite(siteDir: string): Promise<SiteStats> {
       if (BLOCKED_SERVER_EXTENSIONS.has(extension)) {
         throw new Error(`Blocked server-executable file extension '${extension}': ${path.relative(root, absolute)}`);
       }
+      const relative = path.relative(root, absolute).replaceAll(path.sep, "/");
       if (extension === ".js" || extension === ".mjs") scripts.push(absolute);
+      if (/\.d\.[cm]?ts$/.test(entry.name)) {
+        // Declaration files carry no runnable code (the harness-owned net
+        // client's types live under site/net/), so they may sit anywhere.
+        if (relative.startsWith("src/")) tsSources.push(absolute);
+      } else if (extension === ".ts" || extension === ".mts") {
+        // Only the site/src/ tree is compiled and bundled; TypeScript anywhere
+        // else (js/, css/, assets/, page folders) would ship as dead weight
+        // that no browser executes. Repairable, so it rides the type-check
+        // error channel into the one-shot repair round-trip.
+        if (!relative.startsWith("src/")) {
+          throw new Error(`JavaScript type-check error: TypeScript file site/${relative} is outside site/src/ — only the src/ tree is compiled. Move it below site/src/.`);
+        }
+        tsSources.push(absolute);
+      }
+      if (/\.(?:tsx|cts|jsx)$/.test(extension)) {
+        throw new Error(`JavaScript type-check error: site/${relative} uses unsupported script type '${extension}' — write plain TypeScript (.ts) under site/src/.`);
+      }
       files += 1;
       bytes += stat.size;
       if (files > config.maxSiteFiles) throw new Error(`Site exceeds MAX_SITE_FILES (${config.maxSiteFiles})`);
@@ -60,7 +80,8 @@ export async function validateSite(siteDir: string): Promise<SiteStats> {
   await validateScriptSyntax(root, scripts);
   await validateInlineScripts(root);
   await validateAssetReferences(root);
-  await validateScriptTypes(root, scripts);
+  await validateModuleResolution(root);
+  await validateScriptTypes(root, scripts, tsSources);
   return { files, bytes };
 }
 
@@ -160,6 +181,9 @@ async function validateAssetReferences(root: string): Promise<void> {
       if (!url || url.startsWith("#")) continue;
       if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) continue;
       if (url.includes("${")) continue;
+      if (reference.kind === "<script src>" && /\.(?:ts|mts)$/i.test(url.split("#")[0].split("?")[0])) {
+        throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" points at TypeScript source, which browsers cannot execute — reference the compiled bundle (js/<name>.js) instead.`);
+      }
       if (url.startsWith("/")) {
         if (reference.enforceRelative) {
           throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" is a site-root-absolute path, but the site is served under a path prefix — use a relative URL.`);
@@ -186,6 +210,121 @@ async function validateAssetReferences(root: string): Promise<void> {
   }
 }
 
+/**
+ * Runtime-resolved module references the tag-level checks cannot see: import
+ * map targets and the relative imports of inline module scripts — and,
+ * transitively, every local file those load. A split browser library (e.g.
+ * three.js's ESM wrapper re-exporting a sibling core build) 404s only when the
+ * browser executes its internal `import "./sibling.js"`, so an agent that
+ * vendors just the wrapper ships a broken site through every other check.
+ * This pass resolves the chain at validation time and fails the turn naming
+ * the missing file, so the fix lands in the same turn instead of as a live
+ * 404. Bundled js/ output needs no scanning — the bundler already proved its
+ * own graph — but files reached from an import map or inline script are
+ * followed regardless of where they live.
+ */
+async function validateModuleResolution(root: string): Promise<void> {
+  for (const html of await listFiles(root, /\.html?$/i)) {
+    const rel = `site/${path.relative(root, html).replaceAll(path.sep, "/")}`;
+    const source = await fs.readFile(html, "utf8");
+    const queue: Array<{ from: string; kind: string; specifier: string }> = [];
+    for (const [, attrs = "", body = ""] of source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+      const type = tagAttr(attrs, "type").toLowerCase();
+      const src = tagAttr(attrs, "src");
+      if (type === "importmap") {
+        let map: { imports?: Record<string, unknown>; scopes?: Record<string, Record<string, unknown>> };
+        try {
+          map = JSON.parse(body) as typeof map;
+        } catch {
+          continue; // malformed import maps already fail the inline JSON check
+        }
+        const values = [
+          ...Object.values(map.imports ?? {}),
+          ...Object.values(map.scopes ?? {}).flatMap((scope) => Object.values(scope ?? {})),
+        ];
+        for (const value of values) {
+          if (typeof value !== "string") continue;
+          const clean = value.trim().split("#")[0].split("?")[0];
+          // Prefix mappings end in "/"; remote/absolute/data targets resolve
+          // elsewhere (or cannot be checked) — only same-site relative ones.
+          if (!clean || clean.endsWith("/") || !clean.startsWith(".") || /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(value.trim())) continue;
+          queue.push({ from: html, kind: `import map target "${value.trim()}"`, specifier: clean });
+        }
+      } else if (type === "module") {
+        // Inline modules resolve their specifiers against this HTML file;
+        // src'd modules (bundled output is self-consistent by construction,
+        // hand-written legacy files are not) get their import chain followed.
+        if (src) {
+          const clean = src.trim().split("#")[0].split("?")[0];
+          if (clean && clean.startsWith(".") && !/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(src.trim())) {
+            queue.push({ from: html, kind: `module script "${src.trim()}"`, specifier: clean });
+          }
+        } else {
+          for (const specifier of staticRelativeImports(body)) {
+            queue.push({ from: html, kind: `inline module import "${specifier}"`, specifier });
+          }
+        }
+      }
+    }
+    if (!queue.length) continue;
+
+    const visited = new Set<string>();
+    while (queue.length) {
+      const item = queue.shift()!;
+      const resolved = resolveLocalSpecifier(root, item.from, item.specifier);
+      if (resolved === undefined) continue;
+      const relative = path.relative(root, resolved).replaceAll(path.sep, "/");
+      const via = path.relative(root, item.from).replaceAll(path.sep, "/") || "index.html";
+      if (!resolved.startsWith(`${root}${path.sep}`)) {
+        throw new Error(
+          `Broken local reference in ${rel}: ${item.kind}, loaded from site/${via}, resolves to site/${relative} — outside the site directory, which is never published (workspace files such as node_modules/). Import the engine from site/src/ TypeScript so it is bundled, or move the referenced file under site/.`,
+        );
+      }
+      if (!await fs.access(resolved).then(() => true, () => false)) {
+        throw new Error(
+          `Broken local reference in ${rel}: ${item.kind}, loaded from site/${via}, resolves to missing file site/${relative}. If this is a split library (an ESM wrapper re-exporting sibling builds), vendor every file it imports — or import the harness-vendored copy instead.`,
+        );
+      }
+      if (visited.has(resolved) || visited.size > 200) continue;
+      visited.add(resolved);
+      if (/\.(?:m?js)$/i.test(resolved)) {
+        const code = await fs.readFile(resolved, "utf8").catch(() => "");
+        for (const specifier of staticRelativeImports(code)) {
+          queue.push({ from: resolved, kind: `import "${specifier}" (via site/${relative})`, specifier });
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Relative module specifiers in JavaScript/TypeScript source: `from "…"`,
+ * side-effect/dynamic `import "…"` / `import("…")`. Remote, bare, data, and
+ * absolute specifiers are left alone — they resolve through other means
+ * (import maps, CDNs) or are not checkable.
+ */
+function staticRelativeImports(code: string): string[] {
+  const out: string[] = [];
+  for (const [, quote = "", specifier = ""] of code.matchAll(/(?:\bfrom|\bimport)\s*\(?\s*(["'])([^"'\n]+)\1/g)) {
+    void quote;
+    if (specifier.startsWith(".")) out.push(specifier);
+  }
+  return out;
+}
+
+/** Resolve a relative specifier against its importing file, contained to site/. */
+function resolveLocalSpecifier(root: string, fromFile: string, specifier: string): string | undefined {
+  const clean = specifier.split("#")[0].split("?")[0];
+  if (!clean.startsWith(".")) return undefined;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(clean);
+  } catch {
+    return undefined;
+  }
+  return path.resolve(path.dirname(fromFile), decoded);
+}
+
 /** Value of a quoted attribute (double or single) inside a tag's attribute string. */
 function tagAttr(attrs: string, name: string): string {
   const match = attrs.match(new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"));
@@ -193,7 +332,7 @@ function tagAttr(attrs: string, name: string): string {
 }
 
 /**
- * Check authored browser JavaScript with tsc. Deliberately lenient: strict null
+ * Check authored browser code with tsc. Deliberately lenient: strict null
  * checks are off (DOM APIs return nullable types everywhere and generated code
  * rarely guards them), TS2307 diagnostics for non-relative imports are dropped
  * because CDN/import-map dependencies like `three` have no local node_modules
@@ -209,20 +348,30 @@ function tagAttr(attrs: string, name: string): string {
  * variables, genuinely wrong types, too-few arguments, misspelled imports —
  * fails the turn.
  *
- * Vendored code is never type-checked: inference over a minified bundle (a
- * vendored three.js yields hundreds of bogus diagnostics) also poisons call
- * sites in authored code that uses it. The check instead runs against a temp
- * mirror of the site's scripts in which every vendored library under `assets/`
- * is replaced by a `.d.ts` stub re-declaring its real export names as `any`.
- * Authored imports still resolve — a misspelled export name fails, which the
- * agent can act on — while the vendored implementation stays out of the tsc
- * program entirely, the same trust model as bare CDN imports. The
- * harness-owned relay client keeps its real types for authored call sites but
- * is not an input and its own diagnostics are filtered. Vendored files are
- * still syntax-checked by the `node --check` pass over the real tree, so a
- * truncated download still fails the turn.
+ * Two shapes of project flow through here. TypeScript projects (site/src/
+ * exists) are checked on their sources; the bundled site/js/ output is
+ * compiler-generated and only needs the node --check pass. Legacy projects
+ * (authored .js from before the TypeScript switch) keep the original
+ * checkJs-over-authored-JavaScript gate.
+ *
+ * Vendored code the agent downloads itself is never type-checked: inference
+ * over a minified bundle (a vendored three.js yields hundreds of bogus
+ * diagnostics) also poisons call sites in authored code that uses it. Those
+ * files under `assets/` are replaced in the temp mirror by a `.d.ts` stub
+ * re-declaring their real export names as `any`. The harness-seeded engine
+ * packages are different: their real declarations are mapped in through
+ * tsconfig `paths`, so `from "three"` is checked against the actual API —
+ * matching what the agent's language server sees.
+ * The harness-owned relay client keeps its real types for authored call sites
+ * (it and net-config.js are mirrored verbatim) but is not an input. Vendored
+ * files are still syntax-checked by the `node --check` pass over the real
+ * tree, so a truncated download still fails the turn.
  */
-async function validateScriptTypes(root: string, scripts: string[]): Promise<void> {
+async function validateScriptTypes(root: string, scripts: string[], tsSources: string[]): Promise<void> {
+  if (tsSources.length) {
+    await validateTypeScriptSources(root, tsSources, scripts);
+    return;
+  }
   const authored = scripts.filter((script) => !isVendoredScript(root, script));
   if (!authored.length) return;
 
@@ -242,7 +391,7 @@ async function validateScriptTypes(root: string, scripts: string[]): Promise<voi
         await fs.writeFile(stubPath(mirrored), vendorStub(source), "utf8");
       } else {
         await fs.writeFile(mirrored, source, "utf8");
-        if (relative !== "js/threadsite-net.js") inputs.push(relative);
+        if (relative !== "js/threadsite-net.js" && relative !== "net/threadsite-net.js") inputs.push(relative);
       }
     }
 
@@ -301,10 +450,120 @@ async function validateScriptTypes(root: string, scripts: string[]): Promise<voi
   await validateElementIds(root, authored);
 }
 
+/**
+ * Type-check the authored TypeScript sources of a bundled project: a temp
+ * mirror carries site/src/ verbatim and the harness-owned js/ files verbatim
+ * (real types for call sites, never inputs); the harness-seeded engine
+ * packages contribute their REAL declarations through absolute tsconfig
+ * `paths`, and hand-downloaded vendored files under assets/ become any-typed
+ * stubs with their real export names. tsc runs from a tsconfig in the mirror
+ * with the lenient flags and diagnostic filters described above; the bundled
+ * site/js/ output is not checked here (it is compiler output and already
+ * covered by node --check).
+ */
+async function validateTypeScriptSources(root: string, tsSources: string[], scripts: string[]): Promise<void> {
+  const mirrorRoot = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-ts-"));
+  try {
+    const inputs: string[] = [];
+    for (const absolute of tsSources) {
+      const relative = path.relative(root, absolute).replaceAll(path.sep, "/");
+      const mirrored = path.join(mirrorRoot, ...relative.split("/"));
+      await fs.mkdir(path.dirname(mirrored), { recursive: true });
+      await fs.writeFile(mirrored, await fs.readFile(absolute, "utf8"), "utf8");
+      if (!/\.d\.[cm]?ts$/.test(relative)) inputs.push(relative);
+    }
+
+    // Harness-owned net files stay real so authored imports resolve: the
+    // client's declarations give call sites the full typed API (the .js is
+    // never an input; with checkJs off nothing reports from the .js itself).
+    // The legacy js/ location is mirrored too while pre-TypeSwitch projects
+    // still carry it.
+    for (const name of [
+      "net/threadsite-net.js", "net/threadsite-net.d.ts",
+      "net/net-config.js", "net/net-config.d.ts",
+      "js/threadsite-net.js",
+    ]) {
+      const content = await fs.readFile(safeChild(root, ...name.split("/")), "utf8").catch(() => undefined);
+      if (content === undefined) continue;
+      const mirrored = path.join(mirrorRoot, ...name.split("/"));
+      await fs.mkdir(path.dirname(mirrored), { recursive: true });
+      await fs.writeFile(mirrored, content, "utf8");
+    }
+
+    // Agent-vendored libraries under assets/ become any-typed stubs with their
+    // real export names — the original trust model for hand-downloaded files.
+    for (const script of scripts) {
+      const relative = path.relative(root, script).replaceAll(path.sep, "/");
+      if (!isVendoredLibrary(relative)) continue;
+      const mirrored = path.join(mirrorRoot, ...relative.split("/"));
+      await fs.mkdir(path.dirname(mirrored), { recursive: true });
+      await fs.writeFile(stubPath(mirrored), vendorStub(await fs.readFile(script, "utf8")), "utf8");
+    }
+
+    // The harness-seeded engine packages (workspace node_modules/) contribute
+    // their REAL TypeScript declarations: bare "three"/"pixi.js" resolve onto
+    // them through tsconfig paths (absolute, pointing into the workspace — no
+    // copying), so authored engine code is type-checked against the library's
+    // actual API, matching what the agent's language server sees.
+    const workspacePath = path.resolve(root, "..");
+    const paths: Record<string, string[]> = {};
+    for (const engine of engineTypeEntries(workspacePath)) {
+      if (await fs.access(engine.declaration).then(() => true, () => false)) {
+        paths[engine.importName] = [engine.declaration.replaceAll(path.sep, "/")];
+      }
+    }
+
+    const tsconfig = {
+      compilerOptions: {
+        noEmit: true,
+        allowJs: true,
+        checkJs: false,
+        noImplicitAny: false,
+        allowSyntheticDefaultImports: false,
+        target: "ES2022",
+        module: "ESNext",
+        moduleResolution: "Bundler",
+        lib: ["ES2022", "DOM", "DOM.Iterable"],
+        skipLibCheck: true,
+        typeRoots: [],
+        paths,
+      },
+      files: inputs,
+    };
+    await fs.writeFile(path.join(mirrorRoot, "tsconfig.json"), JSON.stringify(tsconfig), "utf8");
+
+    if (inputs.length) {
+      const typeScriptCli = path.join(process.cwd(), "node_modules", "typescript", "bin", "tsc");
+      let result: { stdout?: string; stderr?: string };
+      let processError: unknown;
+      try {
+        result = await execFileAsync(process.execPath, [typeScriptCli, "-p", path.join(mirrorRoot, "tsconfig.json")], {
+          cwd: mirrorRoot,
+          timeout: 60_000,
+          maxBuffer: 8 * 1024 * 1024,
+        });
+      } catch (error) {
+        processError = error;
+        result = error as { stdout?: string; stderr?: string };
+      }
+      const raw = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+      const mirrorPosix = mirrorRoot.replaceAll(path.sep, "/");
+      const significant = significantDiagnostics(raw)
+        .replaceAll(`${mirrorPosix}/`, "")
+        .replaceAll(`${mirrorRoot}${path.sep}`, "");
+      if (significant) throw new Error(`JavaScript type-check error:\n${significant}`);
+      if (processError && !raw) throw new Error(`JavaScript type-checker failed: ${String(processError)}`);
+    }
+  } finally {
+    await fs.rm(mirrorRoot, { recursive: true, force: true });
+  }
+  await validateElementIds(root, tsSources);
+}
+
 /** Scripts excluded from the type-check inputs: vendored libraries and the harness-owned client. */
 function isVendoredScript(root: string, file: string): boolean {
   const relative = path.relative(root, file).replaceAll(path.sep, "/");
-  return isVendoredLibrary(relative) || relative === "js/threadsite-net.js";
+  return isVendoredLibrary(relative) || relative === "js/threadsite-net.js" || relative === "net/threadsite-net.js";
 }
 
 /** Downloaded vendor/library files live below `assets/` per the AGENTS.md contract. */
@@ -409,13 +668,14 @@ function isUnresolvedExternalImport(line: string): boolean {
 
 /**
  * Diagnostics from vendored files: the relay client (kept real in the mirror
- * for authored call-site types, but never an input) and, as defense in depth,
+ * for authored call-site types, but never an input — in site/net/ with its
+ * declarations, or the legacy site/js/ location) and, as defense in depth,
  * anything under `assets/` — the stubs normally keep vendored implementations
  * out of the tsc program entirely. Its syntax is already covered by the
  * `node --check` pass, which includes it.
  */
 function isVendoredFileDiagnostic(line: string): boolean {
-  return /(?:^|[\\/])(?:assets[\\/][^(]*|js[\\/]threadsite-net\.js)\(/.test(line);
+  return /(?:^|[\\/])(?:assets[\\/][^(]*|(?:js|net)[\\/]threadsite-net\.js)\(/.test(line);
 }
 
 /**

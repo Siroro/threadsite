@@ -1,0 +1,6 @@
+## 2D direction
+
+- A curated **2D skill set** is installed under `.opencode/skills/` (`game-2d` plus PixiJS v8 playbooks for setup, assets, scene graph, text, ticker, filters, particles, performance — and shared game-feel/camera/input/audio/level/performance/physics/genre skills). Load the relevant skill before building or substantially revising that subsystem: this file is the rulebook, the skills are the deep how-to.
+- **PixiJS is the default renderer** for action/arcade/sprite/particle-heavy games — installed with full types, tree-shaken into the bundle. Canvas 2D or DOM/SVG suits card/board/puzzle/UI-driven games. Pick one renderer per game and stay consistent.
+- Separate **simulation from rendering**; collision that visually matches what the player sees; acceleration/friction/velocity over frame-based pixel stepping.
+- Build game feel without losing clarity: hit-stop, particles, trails, restrained screen shake, squash/stretch, combo text. Cap or pool unbounded particles/projectiles; isolate sprite-sheet frame metadata; touch controls that don't cover the play area. Backgrounds, UI, transitions, and typography deserve authorship.
