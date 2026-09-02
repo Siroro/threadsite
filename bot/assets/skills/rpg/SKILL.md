@@ -4,7 +4,7 @@ description: "Build an RPG: stats and leveling, inventory and equipment, quests,
 license: Apache-2.0
 ---
 
-<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/pixi.js) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
 
 
 # RPG
@@ -17,9 +17,9 @@ that make growth and choice feel meaningful, and points to the skills that imple
 ## When to use
 
 - Use when building an RPG/JRPG/action-RPG: the player has **stats that grow**, an
-  **inventory**, **quests**, **dialogue**, and persistent progress.
+ **inventory**, **quests**, **dialogue**, and persistent progress.
 - Use when designing a leveling curve, a damage formula, an inventory/equipment model, or a
-  quest state machine.
+ quest state machine.
 
 **When *not* to use:** permadeath dungeon runs with no persistent character → `roguelike`.
 Pure conversation/branching story → `visual-novel`. Open-world needs/crafting/base-building →
@@ -62,12 +62,12 @@ shaping who your character is*; every system should feed that growth-and-choice 
 ```python
 # Pseudocode. Base attributes are the only "truth"; combat stats are derived each time.
 def derive(base, mods):
-    s = apply_modifiers(base, mods)          # base + flat adds + percent, then clamp
-    return {
-        "max_hp":  20 + s["VIT"] * 8,
-        "attack":  s["STR"] * 2,
-        "defense": s["VIT"] + s["AGI"] * 0.5,
-    }
+ s = apply_modifiers(base, mods) # base + flat adds + percent, then clamp
+ return {
+ "max_hp": 20 + s["VIT"] * 8,
+ "attack": s["STR"] * 2,
+ "defense": s["VIT"] + s["AGI"] * 0.5,
+ }
 # Equipping pushes a modifier; unequipping pops it. HP/attack recompute automatically.
 ```
 
@@ -78,12 +78,12 @@ def derive(base, mods):
 def xp_to_next(level, base=100): return base * level * level
 
 def gain_xp(actor, amount):
-    actor.xp += amount
-    while actor.xp >= xp_to_next(actor.level):
-        actor.xp -= xp_to_next(actor.level)
-        actor.level += 1
-        actor.base["STR"] += 2; actor.base["VIT"] += 2   # grant gains / skill points
-        on_level_up(actor)                                # heal, unlock, notify
+ actor.xp += amount
+ while actor.xp >= xp_to_next(actor.level):
+ actor.xp -= xp_to_next(actor.level)
+ actor.level += 1
+ actor.base["STR"] += 2; actor.base["VIT"] += 2 # grant gains / skill points
+ on_level_up(actor) # heal, unlock, notify
 ```
 
 ### 3. Quest objective update driven by game events
@@ -91,41 +91,41 @@ def gain_xp(actor, amount):
 ```python
 # Pseudocode. Game events advance matching objectives; completion grants rewards.
 def on_event(kind, data):
-    for q in active_quests:
-        for obj in q.objectives:
-            if obj.event == kind and matches(obj, data) and not obj.done:
-                obj.count += 1
-                if obj.count >= obj.needed: obj.done = True
-        if all(o.done for o in q.objectives):
-            q.state = "complete"                # turn-in grants xp/gold/items
+ for q in active_quests:
+ for obj in q.objectives:
+ if obj.event == kind and matches(obj, data) and not obj.done:
+ obj.count += 1
+ if obj.count >= obj.needed: obj.done = True
+ if all(o.done for o in q.objectives):
+ q.state = "complete" # turn-in grants xp/gold/items
 ```
 
 ## Pitfalls / failure modes
 
 - **Editing base stats for buffs/gear** → values drift and corrupt on save/reload. Keep a
-  modifier layer; push/pop it (Pattern 1).
+ modifier layer; push/pop it (Pattern 1).
 - **Storing derived stats as truth** → desync after a stat change. Recompute from base.
 - **Runaway XP/damage numbers** → either an exponential curve with no cap or a subtractive
-  formula at huge values. Pick a curve and a formula family deliberately (refs).
+ formula at huge values. Pick a curve and a formula family deliberately (refs).
 - **Content as code** → every item/quest hardcoded. Define items, enemies, and quests as
-  **data** (`godot-resources` / `unity-scriptableobjects`).
+ **data**.
 - **Save format with no version field** → old saves break on update. Add a `version` and a
-  migration path from day one (see `save-systems`).
+ migration path from day one (see `save-systems`).
 - **Choices without consequences** → dialogue branches that reconverge immediately feel hollow.
-  Set flags that actually change later quests/world state.
+ Set flags that actually change later quests/world state.
 - **Quest progress not persisted** → reloading loses mid-quest state. Save quest state, not
-  just completion.
+ just completion.
 
 ## Composition (build it from these skills)
 
 - **Dialogue:** `dialogue-systems` (Yarn Spinner / Ink) — branching lines, conditions, variables.
 - **Persistence:** `save-systems` — character, inventory, quest flags, world state, versioning.
-- **Content data:** `godot-resources` / `unity-scriptableobjects` — items, enemies, quests, skills as assets.
+- **Content data:** the engine's equivalent API — items, enemies, quests, skills as assets.
 - **Combat AI:** `game-ai` for enemy behavior; for turn order reuse the scheduler idea in `roguelike`.
-- **UI:** `game-ui-ux` for HUD/menu layout, resolution scaling, and controller/keyboard nav; `godot-ui-control` for the concrete inventory, quest log, character sheet, and dialogue box.
-- **World:** `level-design` plus your engine's tilemap/3D skill (`godot-tilemap`, `godot-3d-essentials`).
+- **UI:** `game-ui-ux` for HUD/menu layout, resolution scaling, and controller/keyboard nav; the engine's equivalent API for the concrete inventory, quest log, character sheet, and dialogue box.
+- **World:** `level-design` plus your engine's tilemap/3D skill.
 
 ## References
 
 - For stat/damage formulas, leveling curves, turn-vs-action combat timelines, inventory/equipment
-  data shapes, and the quest state model, read `references/stats-combat-quests.md`.
+ data shapes, and the quest state model, read `references/stats-combat-quests.md`.

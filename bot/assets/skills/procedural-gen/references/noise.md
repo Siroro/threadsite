@@ -1,3 +1,5 @@
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Noise for terrain, biomes, and scatter
 
 Gradient noise (Perlin, Simplex, OpenSimplex) is the workhorse of procedural
@@ -25,13 +27,13 @@ multiplies frequency by **lacunarity** (commonly 2.0) and amplitude by **gain**
 
 ```python
 def fbm(noise, x, y, octaves=5, lacunarity=2.0, gain=0.5):
-    total, amp, freq, norm = 0.0, 1.0, 1.0, 0.0
-    for _ in range(octaves):
-        total += amp * noise(x * freq, y * freq)
-        norm  += amp
-        amp   *= gain
-        freq  *= lacunarity
-    return total / norm        # divide by summed amplitude -> stays in 0..1
+ total, amp, freq, norm = 0.0, 1.0, 1.0, 0.0
+ for _ in range(octaves):
+ total += amp * noise(x * freq, y * freq)
+ norm += amp
+ amp *= gain
+ freq *= lacunarity
+ return total / norm # divide by summed amplitude -> stays in 0..1
 ```
 
 To keep octaves independent (avoid correlation artifacts near the origin), give
@@ -43,9 +45,9 @@ each octave its own seed, or add a per-octave offset like
 Raw fBm is "all hills". Reshape it with a function `e = f(e)`:
 
 - **Valleys/plateaus**: `e = pow(e, exponent)` with `exponent > 1` pushes mid
-  elevations down into flats; `< 1` pulls them up toward peaks.
+ elevations down into flats; `< 1` pulls them up toward peaks.
 - **Ridges (mountain spines)**: `r = 1 - abs(2*noise - 1)` (a "ridged" transform)
-  before summing octaves.
+ before summing octaves.
 - **Terraces**: `e = round(e * levels) / levels` snaps to discrete bands.
 
 These are the same image-filter ideas as a photo "curves" tool; experiment and
@@ -58,15 +60,15 @@ One noise value bands the map; two decorrelated values give variety. Sample
 
 ```python
 def biome(e, m):
-    if e < 0.10: return "OCEAN"
-    if e < 0.12: return "BEACH"
-    if e > 0.80:
-        return "SNOW" if m > 0.5 else "TUNDRA"
-    if e > 0.60:
-        return "TAIGA" if m > 0.66 else "SHRUBLAND"
-    if m < 0.16: return "DESERT"
-    if m < 0.50: return "GRASSLAND"
-    return "FOREST"
+ if e < 0.10: return "OCEAN"
+ if e < 0.12: return "BEACH"
+ if e > 0.80:
+ return "SNOW" if m > 0.5 else "TUNDRA"
+ if e > 0.60:
+ return "TAIGA" if m > 0.66 else "SHRUBLAND"
+ if m < 0.16: return "DESERT"
+ if m < 0.50: return "GRASSLAND"
+ return "FOREST"
 # These thresholds are starting points — every generator needs its own tuning.
 ```
 
@@ -78,7 +80,7 @@ shape. With `nx, ny` in `-1..+1` from center:
 ```python
 # Square-bump distance: 0 at center, ~1 at edges.
 d = 1 - (1 - nx*nx) * (1 - ny*ny)
-e = lerp(e, 1 - d, mix)        # mix=0 -> original; mix~0.5 -> island
+e = lerp(e, 1 - d, mix) # mix=0 -> original; mix~0.5 -> island
 ```
 
 Round islands: `d = min(1, (nx*nx + ny*ny) / sqrt(2))`. Apply island shaping only
@@ -103,4 +105,4 @@ rescale afterward.
 - One seeded noise generator per field, stored in the save.
 - No time-, frame-, or hash-randomized input feeding generation.
 - Same engine + same library version = same output (note: switching noise
-  libraries changes results even with the same seed).
+ libraries changes results even with the same seed).

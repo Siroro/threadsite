@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # HTMLText
 
 Text rendered via an SVG `<foreignObject>` wrapping an HTML fragment. This gives you the full HTML/CSS box model for typography; real `<b>`, `<i>`, `<br>`, `<div>`, line-breaks, nested styles, emoji; rasterized to a texture. Use `HTMLText` for rich formatting, mixed content, inline custom tags, or markup that the canvas `Text` class can't express.
@@ -6,14 +8,14 @@ Text rendered via an SVG `<foreignObject>` wrapping an HTML fragment. This gives
 
 ```ts
 const rich = new HTMLText({
-  text: "<b>Bold</b> and <i>italic</i> text",
-  style: {
-    fontFamily: "Arial",
-    fontSize: 24,
-    fill: 0x333333,
-    wordWrap: true,
-    wordWrapWidth: 400,
-  },
+ text: "<b>Bold</b> and <i>italic</i> text",
+ style: {
+ fontFamily: "Arial",
+ fontSize: 24,
+ fill: 0x333333,
+ wordWrap: true,
+ wordWrapWidth: 400,
+ },
 });
 
 app.stage.addChild(rich);
@@ -27,12 +29,12 @@ app.stage.addChild(rich);
 const minimal = new HTMLText({ text: "<b>Hello</b>" });
 
 const styled = new HTMLText({
-  text: "<i>Styled</i>",
-  style: { fontSize: 24, fill: 0xffffff },
-  anchor: 0.5,
-  resolution: 2,
-  autoGenerateMipmaps: true,
-  textureStyle: { scaleMode: "linear" },
+ text: "<i>Styled</i>",
+ style: { fontSize: 24, fill: 0xffffff },
+ anchor: 0.5,
+ resolution: 2,
+ autoGenerateMipmaps: true,
+ textureStyle: { scaleMode: "linear" },
 });
 ```
 
@@ -40,11 +42,11 @@ const styled = new HTMLText({
 
 `HTMLText` extends the base `TextOptions` (typed with `HTMLTextStyle` / `HTMLTextStyleOptions` as its style) and adds HTML-specific fields. Inherited `text`, `style`, `anchor`, `resolution`, and `roundPixels` behave as documented in `references/text.md` — only the HTMLText-specific additions are listed here.
 
-| Option                | Type                                    | Default                                            | Description                                                                                                                                               |
+| Option | Type | Default | Description |
 | --------------------- | --------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `style`               | `HTMLTextStyle \| HTMLTextStyleOptions` | `new HTMLTextStyle()`                              | HTML text style object or options. Matches `TextStyle` minus `leading`, `textBaseline`, `trim`, and `filters`. Adds `cssOverrides` for raw CSS injection. |
-| `textureStyle`        | `TextureStyle \| TextureStyleOptions`   | `undefined`                                        | Override the generated texture's scale mode, wrap, etc. (@advanced)                                                                                       |
-| `autoGenerateMipmaps` | `boolean`                               | `TextureSource.defaultOptions.autoGenerateMipmaps` | Generate mipmaps for the text texture; improves quality when scaled down.                                                                                 |
+| `style` | `HTMLTextStyle \| HTMLTextStyleOptions` | `new HTMLTextStyle()` | HTML text style object or options. Matches `TextStyle` minus `leading`, `textBaseline`, `trim`, and `filters`. Adds `cssOverrides` for raw CSS injection. |
+| `textureStyle` | `TextureStyle \| TextureStyleOptions` | `undefined` | Override the generated texture's scale mode, wrap, etc. (@advanced) |
+| `autoGenerateMipmaps` | `boolean` | `TextureSource.defaultOptions.autoGenerateMipmaps` | Generate mipmaps for the text texture; improves quality when scaled down. |
 
 All base text options (`text`, `anchor`, `resolution`, `roundPixels`) are inherited from `TextOptions` — see `references/text.md`.
 
@@ -58,16 +60,16 @@ All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zInde
 
 ```ts
 const message = new HTMLText({
-  text: "<warning>Low power</warning> <custom>Press any key</custom>",
-  style: {
-    fontFamily: "Arial",
-    fontSize: 28,
-    fill: 0xffffff,
-    tagStyles: {
-      warning: { fill: 0xff3333, fontWeight: "bold" },
-      custom: { fill: 0x66ccff, fontStyle: "italic" },
-    },
-  },
+ text: "<warning>Low power</warning> <custom>Press any key</custom>",
+ style: {
+ fontFamily: "Arial",
+ fontSize: 28,
+ fill: 0xffffff,
+ tagStyles: {
+ warning: { fill: 0xff3333, fontWeight: "bold" },
+ custom: { fill: 0x66ccff, fontStyle: "italic" },
+ },
+ },
 });
 ```
 
@@ -77,8 +79,8 @@ const message = new HTMLText({
 
 ```ts
 const styled = new HTMLText({
-  text: "Underlined shadowed text",
-  style: { fontSize: 24, fill: 0xffffff },
+ text: "Underlined shadowed text",
+ style: { fontSize: 24, fill: 0xffffff },
 });
 
 styled.style.addOverride("text-decoration: underline");
@@ -91,15 +93,15 @@ For CSS properties without a `TextStyle` equivalent, use `addOverride` to inject
 
 ```ts
 const wrapped = new HTMLText({
-  text: "A long paragraph of HTML text that should wrap automatically",
-  style: {
-    fontFamily: "Arial",
-    fontSize: 20,
-    fill: 0xffffff,
-    wordWrap: true,
-    wordWrapWidth: 300,
-    align: "center",
-  },
+ text: "A long paragraph of HTML text that should wrap automatically",
+ style: {
+ fontFamily: "Arial",
+ fontSize: 20,
+ fill: 0xffffff,
+ wordWrap: true,
+ wordWrapWidth: 300,
+ align: "center",
+ },
 });
 ```
 
@@ -109,10 +111,10 @@ Word wrap is handled by the browser's SVG layout, so it supports everything CSS 
 
 ```ts
 const crisp = new HTMLText({
-  text: "Retina crisp",
-  style: { fontSize: 32, fill: 0xffffff },
-  resolution: 2,
-  autoGenerateMipmaps: true,
+ text: "Retina crisp",
+ style: { fontSize: 32, fill: 0xffffff },
+ resolution: 2,
+ autoGenerateMipmaps: true,
 });
 ```
 
@@ -122,14 +124,14 @@ Same pattern as canvas `Text`: `resolution` controls the rasterized texture dens
 
 ```ts
 const htmlText = new HTMLText({
-  text: "Initial content",
-  style: { fontSize: 24, fill: 0xffffff },
+ text: "Initial content",
+ style: { fontSize: 24, fill: 0xffffff },
 });
 htmlText.visible = false;
 app.stage.addChild(htmlText);
 
 app.ticker.addOnce(() => {
-  htmlText.visible = true;
+ htmlText.visible = true;
 });
 ```
 
@@ -143,7 +145,7 @@ Wrong:
 
 ```ts
 app.ticker.add(() => {
-  htmlText.text = `Score: ${score}`;
+ htmlText.text = `Score: ${score}`;
 });
 ```
 
@@ -152,7 +154,7 @@ Correct:
 ```ts
 const bitmap = new BitmapText({ text: "Score: 0", style });
 app.ticker.add(() => {
-  bitmap.text = `Score: ${score}`;
+ bitmap.text = `Score: ${score}`;
 });
 ```
 
@@ -178,7 +180,7 @@ Correct:
 ```ts
 const text = new HTMLText({ text: "Hello", style });
 app.ticker.addOnce(() => {
-  text.x = (app.screen.width - text.width) / 2;
+ text.x = (app.screen.width - text.width) / 2;
 });
 ```
 

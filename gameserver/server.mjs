@@ -8,14 +8,18 @@
 // interprets game state.
 //
 // Protocol v3 sync guarantees (v2 clients are rejected):
-//   - Stable client ids (`cid` in join) survive reconnects; per-peer state is
-//     retained by cid until the room expires, so a returning player reclaims
-//     their identity and everyone else can reattach avatars to them.
+//   - Tab-session client ids (`cid` in join) survive reconnect/reload in that
+//     tab, so a reconnecting tab can reclaim persistent game identity.
 //   - Every relayed frame carries the server receive timestamp `ts`, so
 //     receivers can order and discard stale state deterministically.
-//   - Events carry a client-stamped monotonic `seq`; the relay echoes it, never
-//     reorders per sender, reports drops (rate_limited includes the seq), and
-//     forwards `resend-req` so receivers can fill gaps from sender buffers.
+//   - Events carry a client-stamped monotonic `seq` (an event id receivers
+//     dedupe by); the relay echoes it, never reorders per sender, and reports
+//     drops (rate_limited includes the seq) so the client can requeue exactly
+//     that event. There is no server-side resend machinery: WebSocket delivery
+//     is ordered per connection, and snapshots plus event ids cover recovery.
+//   - Room snapshots (`state`) are host-authoritative: only the current host's
+//     publishes replace the relay's cached snapshot, so a stray guest frame
+//     cannot poison late-join and host-migration recovery.
 //   - `state-req` always answers from the relay's cached snapshot immediately
 //     and additionally asks the live host for a fresh one.
 //
@@ -69,8 +73,10 @@ const ROOM_CODE_PATTERN = new RegExp(`^[${ROOM_ALPHABET}]{4,12}$`);
 const CID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 const MAX_NAME_LENGTH = 32;
 // Single-server mode: every player of a game joins this one fixed room instead
-// of code-addressed rooms. Chosen from the room alphabet so it round-trips
-// through reconnects like any other code.
+// of code-addressed rooms. Reserved: a code-addressed join asking for this
+// code is rejected, so the shared-arena namespace can never collide with a
+// normal room (otherwise a player could create a code room named ARENA and
+// silently merge with the arena crowd — or split it).
 const SINGLE_ROOM_CODE = "ARENA";
 
 const games = new Map(); // gameId -> Map<roomCode, Room>
@@ -100,10 +106,13 @@ class Room {
     this.code = code;
     this.peers = new Map(); // peerId -> peer; insertion order = join order, so the
     // first entry is always the current host (oldest peer).
-    this.lastState = null; // newest room snapshot: { state, from, cid, ts }
-    // Each player's newest self-owned state, keyed by STABLE CLIENT ID so it
-    // survives disconnects and reconnects (until room expiry or eviction).
-    this.peerStates = new Map(); // cid -> { from, cid, s, ts }
+    this.lastState = null; // newest HOST-published snapshot: { state, from, cid, ts }
+    // Each currently connected player's newest self-published state, keyed by
+    // LIVE PEER ID (deleted on disconnect — reconnecting players are restored
+    // from the authoritative snapshot, not from retained transforms). cid is
+    // reconnect metadata and is not guaranteed unique among simultaneous
+    // connections (for example duplicated browser tabs).
+    this.peerStates = new Map(); // peerId -> { from, cid, s, ts }
     this.lastActivity = Date.now();
   }
 
@@ -111,10 +120,10 @@ class Room {
     return this.peers.keys().next().value ?? null;
   }
 
-  setPeerState(cid, entry) {
-    // Refresh recency, then bound the retained set.
-    this.peerStates.delete(cid);
-    this.peerStates.set(cid, entry);
+  setPeerState(peerId, entry) {
+    // Refresh recency, then bound the live-state cache.
+    this.peerStates.delete(peerId);
+    this.peerStates.set(peerId, entry);
     while (this.peerStates.size > MAX_RETAINED_STATES) {
       this.peerStates.delete(this.peerStates.keys().next().value);
     }
@@ -164,7 +173,7 @@ function makeRoomCode(gameRooms) {
     for (let i = 0; i < 5; i += 1) {
       code += ROOM_ALPHABET[Math.floor(Math.random() * ROOM_ALPHABET.length)];
     }
-    if (!gameRooms.has(code)) return code;
+    if (code !== SINGLE_ROOM_CODE && !gameRooms.has(code)) return code;
   }
   // Vanishingly unlikely; fall back to a longer code.
   return `Z${Date.now().toString(36).toUpperCase().slice(-6)}`;
@@ -224,6 +233,12 @@ function handleJoin(peer, msg) {
     : String(msg.room ?? "")
       .toUpperCase()
       .replace(/[^A-Z0-9]/g, "");
+  // ARENA is the reserved single-server namespace: a code-addressed join may
+  // never create or enter it (mode "single" is the only door in).
+  if (!singleServer && requestedCode === SINGLE_ROOM_CODE) {
+    send(peer, errorFrame("reserved_room", `Room code ${SINGLE_ROOM_CODE} is reserved for single-server mode; join with mode "single" or pick another code.`));
+    return;
+  }
 
   let gameRooms = games.get(gameId);
   if (!gameRooms) {
@@ -258,9 +273,9 @@ function handleJoin(peer, msg) {
   peer.game = gameId;
   peer.room = room;
   peer.name = sanitizeName(msg.name);
-  // Stable client identity: provided by the client (persists across reconnects)
-  // or minted here. peerStates are keyed by it, so a returning player reclaims
-  // their retained state automatically.
+  // Client continuity identity: provided by the client (persists across
+  // reconnect/reload in its tab) or minted here. Live routing/state never
+  // assumes cid is unique; peer.id is the active connection identity.
   peer.cid = sanitizeCid(msg.cid) ?? `cid-${crypto.randomUUID()}`;
   room.peers.set(peer.id, peer);
   room.touch();
@@ -276,7 +291,7 @@ function handleJoin(peer, msg) {
     created: Boolean(peer.createdRoom),
     peers: [...room.peers.values()]
       .filter((other) => other.id !== peer.id)
-      .map((other) => ({ id: other.id, name: other.name, cid: other.cid, s: room.peerStates.get(other.cid)?.s ?? null })),
+      .map((other) => ({ id: other.id, name: other.name, cid: other.cid, s: room.peerStates.get(other.id)?.s ?? null })),
     host: hostId,
     s: room.lastState === null ? null : snapshotFrame(room.lastState),
     serverTs: Date.now(),
@@ -313,19 +328,11 @@ function handleFrame(peer, msg) {
       return;
     }
     case "resend-req": {
-      // Receiver-detected gap recovery: forwarded to the original sender, whose
-      // client library keeps a ring buffer of recent events and re-sends the
-      // requested seq range directly to the requester.
-      const room = peer.room;
-      const target = typeof msg.to === "string" ? room?.peers.get(msg.to) : undefined;
-      const after = typeof msg.after === "number" && Number.isFinite(msg.after) ? msg.after : null;
-      const before = typeof msg.before === "number" && Number.isFinite(msg.before) ? msg.before : null;
-      if (!room || !target || after === null || before === null || after >= before) {
-        send(peer, errorFrame("bad_frame", "resend-req needs to/after/before with after < before and an active room."));
-        return;
-      }
-      room.touch();
-      send(target, { t: "resend-req", from: peer.id, cid: peer.cid, after, before });
+      // Removed: automatic gap-resend existed only for sequence gaps that
+      // cannot occur on ordered WebSocket delivery, and its forwarding was a
+      // double-delivery hazard. Recovery is event ids + snapshots; reject the
+      // frame so stale clients fail visibly instead of silently no-oping.
+      send(peer, errorFrame("unsupported_frame", "resend-req is no longer part of the protocol; delivery is ordered, dedupe by seq, recover via snapshots."));
       return;
     }
     case "state": {
@@ -334,15 +341,23 @@ function handleFrame(peer, msg) {
         send(peer, errorFrame("not_joined", "Join a room before publishing state."));
         return;
       }
+      // The cached snapshot is authoritative room state for late joiners and
+      // host migration: only the current host may replace it. A guest publish
+      // is rejected (not silently ignored) so buggy game code surfaces fast.
+      if (room.hostId !== peer.id) {
+        send(peer, errorFrame("not_host", "Only the room host may publish authoritative room state."));
+        return;
+      }
       room.touch();
       room.lastState = { state: msg.s ?? null, from: peer.id, cid: peer.cid, ts: Date.now() };
       broadcast(room, { t: "state", ...snapshotFrame(room.lastState) }, peer.id);
       return;
     }
     case "pstate": {
-      // Peer-owned state: each player broadcasts their own entity without any
-      // host round trip. Keyed by cid so reconnects reclaim identity; the
-      // newest payload per client is retained for joiners.
+      // Self-published player state: each player broadcasts its responsive local
+      // transform without a host round trip. Shared-world authority is a game-layer
+      // policy. Live states are keyed by peer id so simultaneous connections
+      // with the same cid remain distinct for joiners.
       const room = peer.room;
       if (!room) {
         send(peer, errorFrame("not_joined", "Join a room before publishing player state."));
@@ -350,7 +365,7 @@ function handleFrame(peer, msg) {
       }
       room.touch();
       const entry = { from: peer.id, cid: peer.cid, s: msg.s ?? null, ts: Date.now() };
-      room.setPeerState(peer.cid, entry);
+      room.setPeerState(peer.id, entry);
       broadcast(room, { t: "pstate", ...entry }, peer.id);
       return;
     }
@@ -492,8 +507,10 @@ wss.on("connection", (ws) => {
     if (room) {
       const wasHost = room.hostId === peer.id;
       room.peers.delete(peer.id);
-      // NOTE: peerStates are deliberately NOT cleared — they are keyed by cid
-      // and retained until room expiry so reconnects reclaim identity.
+      // A disconnected peer is no longer a live simulation participant. cid is
+      // still included in peer-leave so game code may reattach persistent
+      // identity when that tab reconnects, but stale transform state is removed.
+      room.peerStates.delete(peer.id);
       room.touch();
       const newHost = room.hostId;
       broadcast(room, { t: "peer-leave", id: peer.id, cid: peer.cid, host: newHost }, peer.id);

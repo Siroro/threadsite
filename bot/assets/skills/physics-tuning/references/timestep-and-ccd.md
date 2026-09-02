@@ -1,3 +1,5 @@
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Fixed timestep, interpolation, CCD, and stability
 
 The root cause of most physics problems is the relationship between a **fixed**
@@ -19,24 +21,24 @@ Engines implement this for you; understanding it explains the settings.
 PHYSICS_HZ = 60
 FIXED_DT = 1.0 / PHYSICS_HZ
 accumulator = 0.0
-MAX_STEPS = 5            # cap to avoid the "spiral of death" after a hitch
+MAX_STEPS = 5 # cap to avoid the "spiral of death" after a hitch
 
 def frame(render_dt):
-    global accumulator
-    accumulator += min(render_dt, FIXED_DT * MAX_STEPS)   # clamp giant dt spikes
-    steps = 0
-    while accumulator >= FIXED_DT and steps < MAX_STEPS:
-        store_previous_state()        # for interpolation
-        physics_step(FIXED_DT)        # ALL simulation uses the constant dt
-        accumulator -= FIXED_DT
-        steps += 1
-    alpha = accumulator / FIXED_DT    # leftover fraction toward the next tick
-    render(interpolate(prev_state, curr_state, alpha))
+ global accumulator
+ accumulator += min(render_dt, FIXED_DT * MAX_STEPS) # clamp giant dt spikes
+ steps = 0
+ while accumulator >= FIXED_DT and steps < MAX_STEPS:
+ store_previous_state() # for interpolation
+ physics_step(FIXED_DT) # ALL simulation uses the constant dt
+ accumulator -= FIXED_DT
+ steps += 1
+ alpha = accumulator / FIXED_DT # leftover fraction toward the next tick
+ render(interpolate(prev_state, curr_state, alpha))
 ```
 
 - Running 0, 1, or several physics steps per frame is normal and correct.
 - Clamping `render_dt` (and `MAX_STEPS`) prevents a slow frame from requesting
-  dozens of steps, which would make the game slower still — the "spiral of death".
+ dozens of steps, which would make the game slower still — the "spiral of death".
 
 ## Render interpolation
 
@@ -46,7 +48,7 @@ current physics states by `alpha`:
 
 ```
 visual_pos = lerp(prev_pos, curr_pos, alpha)
-visual_rot = slerp(prev_rot, curr_rot, alpha)   # rotations: spherical lerp
+visual_rot = slerp(prev_rot, curr_rot, alpha) # rotations: spherical lerp
 ```
 
 This adds up to one physics step of latency but removes stutter. Engines expose
@@ -68,11 +70,11 @@ thickness per step can pass through a thin collider entirely (tunneling). CCD
 sweeps the body along its motion and catches the first contact.
 
 - Enable CCD only on bodies that need it (small + fast: bullets, balls); it costs
-  more than discrete checks.
+ more than discrete checks.
 - Modes vary: sweep against static geometry only, or against dynamic bodies too
-  (more expensive). Use the cheapest mode that fixes your case.
+ (more expensive). Use the cheapest mode that fixes your case.
 - Complementary fixes: cap maximum velocity so
-  `speed / PHYSICS_HZ < thinnest_collider`; thicken thin walls; raise PHYSICS_HZ.
+ `speed / PHYSICS_HZ < thinnest_collider`; thicken thin walls; raise PHYSICS_HZ.
 
 ## Solver iterations and stability
 
@@ -81,9 +83,9 @@ The constraint solver runs a fixed number of iterations per step; more iteration
 
 - **Exploding/penetrating stacks**: raise solver (position/velocity) iterations.
 - **Extreme mass ratios** (a feather resting under a boulder) are inherently
-  unstable — keep ratios within ~1:10 where you can.
+ unstable — keep ratios within ~1:10 where you can.
 - **Jittery resting contacts**: enable a small contact offset / allowed
-  penetration, and let bodies sleep.
+ penetration, and let bodies sleep.
 
 ## Sleeping
 

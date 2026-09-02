@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Renderers: WebGPU, WebGL, and Canvas
 
 PixiJS v8 ships three renderers: `WebGPURenderer` (fastest where available), `WebGLRenderer` (broad compatibility, WebGL2), and `CanvasRenderer` (a last-resort 2D Canvas backend). `autoDetectRenderer` (used internally by `Application.init`) picks the best available backend based on a preference list.
@@ -10,11 +12,11 @@ PixiJS v8 ships three renderers: `WebGPURenderer` (fastest where available), `We
 const app = new Application();
 
 await app.init({
-  preference: ["webgpu", "webgl"],
-  width: 800,
-  height: 600,
-  background: 0x222233,
-  antialias: true,
+ preference: ["webgpu", "webgl"],
+ width: 800,
+ height: 600,
+ background: 0x222233,
+ antialias: true,
 });
 
 document.body.appendChild(app.canvas);
@@ -46,11 +48,11 @@ A string form falls through to defaults if the preferred backend isn't available
 
 ```ts
 await app.init({
-  width: 800,
-  height: 600,
-  webgpu: { antialias: true, powerPreference: "high-performance" },
-  webgl: { antialias: true, premultipliedAlpha: false },
-  canvasOptions: { backgroundAlpha: 0 },
+ width: 800,
+ height: 600,
+ webgpu: { antialias: true, powerPreference: "high-performance" },
+ webgl: { antialias: true, premultipliedAlpha: false },
+ canvasOptions: { backgroundAlpha: 0 },
 });
 ```
 
@@ -86,16 +88,16 @@ renderer.render(app.stage);
 
 // options form: control clearing, transform, or a render target
 renderer.render({
-  container: app.stage,
-  clear: true,
-  transform: new Matrix(),
+ container: app.stage,
+ clear: true,
+ transform: new Matrix(),
 });
 
 // render into a specific mip level of a RenderTexture
 renderer.render({
-  container: myContainer,
-  target: renderTexture,
-  mipLevel: 1,
+ container: myContainer,
+ target: renderTexture,
+ mipLevel: 1,
 });
 ```
 
@@ -132,8 +134,8 @@ Releases GPU resources, systems, pipes, and event listeners. A destroyed rendere
 await app.init({ autoStart: false, width: 800, height: 600 });
 
 function frame() {
-  app.renderer.render(app.stage);
-  requestAnimationFrame(frame);
+ app.renderer.render(app.stage);
+ requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 ```
@@ -152,11 +154,11 @@ After `init`, `app.renderer` is the concrete class. Use `app.renderer.name` (a s
 
 ```ts
 if (await isWebGPUSupported()) {
-  // ok to prefer webgpu
+ // ok to prefer webgpu
 }
 
 if (isWebGLSupported()) {
-  // ok to prefer webgl
+ // ok to prefer webgl
 }
 ```
 

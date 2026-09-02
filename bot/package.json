@@ -13,7 +13,7 @@
     "@types/three": "0.185.1",
     "discord.js": "14.27.0",
     "esbuild": "0.27.7",
-    "pixi.js": "8.20.1",
+    "phaser": "4.2.1",
     "three": "0.185.1",
     "typescript": "5.9.3",
     "undici": "^7.29.0"

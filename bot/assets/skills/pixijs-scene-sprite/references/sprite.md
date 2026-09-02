@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Sprite
 
 The core image-drawing leaf. Displays a single `Texture` at a transform. Use `Sprite` whenever you want to draw a static image that isn't animated (`AnimatedSprite`), repeating (`TilingSprite`), or resizable with borders (`NineSliceSprite`).
@@ -8,9 +10,9 @@ The core image-drawing leaf. Displays a single `Texture` at a transform. Use `Sp
 const texture = await Assets.load("bunny.png");
 
 const sprite = new Sprite({
-  texture,
-  anchor: 0.5,
-  tint: 0xff8888,
+ texture,
+ anchor: 0.5,
+ tint: 0xff8888,
 });
 sprite.x = app.screen.width / 2;
 sprite.y = app.screen.height / 2;
@@ -34,23 +36,23 @@ const fromCache = Sprite.from("bunny.png");
 const fromCanvasNoCache = Sprite.from(canvas, true);
 
 const withOptions = new Sprite({
-  texture,
-  anchor: 0.5,
-  x: 100,
-  y: 200,
-  tint: 0xffcc00,
-  alpha: 0.8,
-  roundPixels: true,
+ texture,
+ anchor: 0.5,
+ x: 100,
+ y: 200,
+ tint: 0xffcc00,
+ alpha: 0.8,
+ roundPixels: true,
 });
 ```
 
 #### SpriteOptions
 
-| Option        | Type                  | Default         | Description                                                                           |
+| Option | Type | Default | Description |
 | ------------- | --------------------- | --------------- | ------------------------------------------------------------------------------------- |
-| `texture`     | `Texture`             | `Texture.EMPTY` | Texture to draw.                                                                      |
-| `anchor`      | `PointData \| number` | `0`             | Normalized draw origin in `[0, 1]`; falls back to `texture.defaultAnchor` when unset. |
-| `roundPixels` | `boolean`             | `false`         | Snap rendering coordinates to integers for crisp pixel art.                           |
+| `texture` | `Texture` | `Texture.EMPTY` | Texture to draw. |
+| `anchor` | `PointData \| number` | `0` | Normalized draw origin in `[0, 1]`; falls back to `texture.defaultAnchor` when unset. |
+| `roundPixels` | `boolean` | `false` | Snap rendering coordinates to integers for crisp pixel art. |
 
 All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zIndex`, etc.) are also valid here — see `skills/pixijs-scene-core-concepts/references/constructor-options.md`.
 

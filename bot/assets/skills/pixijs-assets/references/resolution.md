@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Resolution and Format Detection
 
 PixiJS's asset resolver can pick the best asset variant for the current device based on pixel density (`@0.5x`, `@1x`, `@2x`) and supported image formats (`avif`, `webp`, `png`). Use resolution and format patterns to serve one asset spec that adapts to retina displays, format support, and bandwidth budgets.
@@ -6,10 +8,10 @@ PixiJS's asset resolver can pick the best asset variant for the current device b
 
 ```ts
 await Assets.init({
-  texturePreference: {
-    resolution: window.devicePixelRatio,
-    format: ["avif", "webp", "png"],
-  },
+ texturePreference: {
+ resolution: window.devicePixelRatio,
+ format: ["avif", "webp", "png"],
+ },
 });
 
 Assets.add({ alias: "hero", src: "hero@{0.5,1,2}x.{webp,png}" });
@@ -25,10 +27,10 @@ The resolver expands the pattern to six candidates (`hero@0.5x.webp`, `hero@0.5x
 
 ```ts
 await Assets.init({
-  texturePreference: {
-    resolution: window.devicePixelRatio, // e.g., 2 on retina
-    format: ["avif", "webp", "png"], // preferred-first order
-  },
+ texturePreference: {
+ resolution: window.devicePixelRatio, // e.g., 2 on retina
+ format: ["avif", "webp", "png"], // preferred-first order
+ },
 });
 ```
 
@@ -63,9 +65,9 @@ Both patterns can appear in the same `src`. The resolver does a Cartesian produc
 
 ```ts
 Assets.add({
-  alias: "sharp",
-  src: "sharp.png",
-  data: { resolution: 2 },
+ alias: "sharp",
+ src: "sharp.png",
+ data: { resolution: 2 },
 });
 ```
 
@@ -87,8 +89,8 @@ Change the resolution filename pattern if your build pipeline uses a different c
 
 ```ts
 await Assets.init({
-  skipDetections: true,
-  texturePreference: { format: ["webp"] },
+ skipDetections: true,
+ texturePreference: { format: ["webp"] },
 });
 ```
 

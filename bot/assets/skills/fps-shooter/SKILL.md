@@ -4,7 +4,7 @@ description: "Build a first-person shooter: move+mouse-look controller, hitscan 
 license: Apache-2.0
 ---
 
-<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/pixi.js) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
 
 
 # FPS Shooter
@@ -17,12 +17,12 @@ the feel knobs (TTK, recoil, spread) that decide whether the guns feel good.
 ## When to use
 
 - Use when building a first-person game whose core verb is **aim and shoot** — arena shooter,
-  tactical FPS, PvE shooter, boomer-shooter.
+ tactical FPS, PvE shooter, boomer-shooter.
 - Use when deciding hitscan vs. projectile, tuning time-to-kill, recoil, spread, or aim feel.
 
 **When *not* to use:** third-person/2D shooting → reuse the shooting model here but build the
 camera/controller from the relevant genre. Wave survival with towers → `tower-defense`.
-For the camera/character body itself, use `godot-3d-essentials` / `unreal-cpp-gameplay`.
+For the camera/character body itself, use the engine's equivalent API.
 
 ## Core loop
 
@@ -64,10 +64,10 @@ responsive look, clear hit feedback, and a death that reads instantly.
 direction = apply_spread(camera.forward, current_spread)
 hit = raycast(camera.world_position, direction, max_dist=RANGE, mask=SHOOTABLE)
 if hit:
-    dmg = base_damage * falloff(hit.distance)
-    if hit.is_head: dmg *= HEADSHOT_MULT
-    hit.actor.take_damage(dmg)
-    spawn_impact_fx(hit.point, hit.normal)        # decal + sound + hitmarker
+ dmg = base_damage * falloff(hit.distance)
+ if hit.is_head: dmg *= HEADSHOT_MULT
+ hit.actor.take_damage(dmg)
+ spawn_impact_fx(hit.point, hit.normal) # decal + sound + hitmarker
 ```
 
 ### 2. Projectile shot (dodgeable, leads the target)
@@ -76,8 +76,8 @@ if hit:
 # Pseudocode. Spawn a moving body; it deals damage on its own collision.
 p = spawn(projectile_scene, at=muzzle.world_position)
 p.velocity = camera.forward * PROJECTILE_SPEED
-p.on_hit   = lambda other, point: (other.take_damage(base_damage), explode_fx(point))
-p.lifetime = RANGE / PROJECTILE_SPEED             # despawn so shots don't live forever
+p.on_hit = lambda other, point: (other.take_damage(base_damage), explode_fx(point))
+p.lifetime = RANGE / PROJECTILE_SPEED # despawn so shots don't live forever
 ```
 
 ### 3. Time-to-kill (balance the trio together)
@@ -85,35 +85,35 @@ p.lifetime = RANGE / PROJECTILE_SPEED             # despawn so shots don't live 
 ```python
 # Pseudocode. TTK falls out of HP, per-shot damage, and fire rate — tune as one system.
 shots_to_kill = ceil(target_hp / damage_per_shot)
-ttk_seconds   = (shots_to_kill - 1) / fire_rate_per_second   # first shot at t=0
+ttk_seconds = (shots_to_kill - 1) / fire_rate_per_second # first shot at t=0
 ```
 
 ## Pitfalls / failure modes
 
 - **Look tied to frame rate or unscaled by `dt`** → sensitivity changes with FPS. Look should
-  be driven by raw mouse delta; movement integration uses `dt` (see `physics-tuning`).
+ be driven by raw mouse delta; movement integration uses `dt` (see `physics-tuning`).
 - **Pure random recoil/spread** → feels uncontrollable and unfair. Use a learnable recoil
-  pattern; keep the first shot accurate.
+ pattern; keep the first shot accurate.
 - **Hitscan with no falloff** → pistols snipe across the map. Add range-based damage falloff.
 - **No hit feedback** → players can't tell if shots land. Always show hitmarkers, impact FX, and
-  a distinct kill confirm.
+ a distinct kill confirm.
 - **Mismatched TTK** → too low feels twitchy/unfair; too high feels spongy. Tune damage,
-  fire rate, and HP as one system (Pattern 3).
+ fire rate, and HP as one system (Pattern 3).
 - **Trusting the client in multiplayer** → cheating and "I shot first" disputes. Keep authority
-  server-side; use lag compensation (refs) and defer netcode to the engine multiplayer skill.
+ server-side; use lag compensation (refs) and defer netcode to the engine multiplayer skill.
 - **No FOV / sensitivity options** → motion sickness and accessibility failures. Always expose them.
 
 ## Composition (build it from these skills)
 
-- **Controller + camera:** `godot-3d-essentials` (Godot) or `unreal-cpp-gameplay` / `unreal-blueprints`; Unity uses `unity-physics` + a character controller.
-- **Input:** `input-systems` (or `unreal-enhanced-input`) for look/move, rebinding, and gamepad aim assist.
-- **Shooting physics:** `godot-physics` / `unity-physics` for raycasts and projectile collision.
-- **Enemies:** `game-ai` with `unity-navmesh` / `unreal-behavior-trees` / Godot navigation.
+- **Controller + camera:** the shipped engine's camera and character-controller support; see `camera-systems` and `input-systems`.
+- **Input:** `input-systems` (or the engine's equivalent API) for look/move, rebinding, and gamepad aim assist.
+- **Shooting physics:** the engine's equivalent API for raycasts and projectile collision.
+- **Enemies:** `game-ai` with the engine's equivalent API / Godot navigation.
 - **Camera & feel:** `camera-systems` for FOV/recoil kick and look smoothing; `game-feel` for hit-stop, screen shake, and impact juice.
-- **Polish:** `audio-design` for weapon/impact sound; `shader-programming` for muzzle/impact VFX.
+- **Polish:** `audio-design` for weapon/impact sound; a GPU shader reference for muzzle/impact VFX.
 - **Process:** `prototype-fast` to validate aim feel before building content.
 
 ## References
 
 - For hitscan vs. projectile trade-offs, damage falloff, recoil/spread, TTK math, hit
-  registration/lag compensation, and enemy AI states, read `references/shooting-and-feel.md`.
+ registration/lag compensation, and enemy AI states, read `references/shooting-and-feel.md`.

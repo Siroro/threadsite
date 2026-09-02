@@ -1,3 +1,5 @@
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Puzzle board models and resolution (depth)
 
 Detail behind `SKILL.md`. Engine-neutral pseudocode. Board coordinates are `(y, x)` with
@@ -9,18 +11,18 @@ The resolution loop is: detect matches → score → clear → gravity → refil
 
 ```python
 def apply_gravity(board):
-    for x in range(W):
-        # Compact non-empty cells downward within each column.
-        column = [board[y][x] for y in range(H) if board[y][x] is not EMPTY]
-        pad = [EMPTY] * (H - len(column))
-        for y in range(H):
-            board[y][x] = (pad + column)[y]      # empties on top, pieces settle to the bottom
+ for x in range(W):
+ # Compact non-empty cells downward within each column.
+ column = [board[y][x] for y in range(H) if board[y][x] is not EMPTY]
+ pad = [EMPTY] * (H - len(column))
+ for y in range(H):
+ board[y][x] = (pad + column)[y] # empties on top, pieces settle to the bottom
 
 def refill(board, rng):
-    for y in range(H):
-        for x in range(W):
-            if board[y][x] is EMPTY:
-                board[y][x] = random_piece(rng)  # seeded RNG for reproducibility
+ for y in range(H):
+ for x in range(W):
+ if board[y][x] is EMPTY:
+ board[y][x] = random_piece(rng) # seeded RNG for reproducibility
 ```
 
 **Avoid spawning matches on refill** if you don't want free cascades: when filling, reject a
@@ -37,16 +39,16 @@ A board with no possible matching move is a soft-lock. Detect it and react:
 
 ```python
 def has_valid_move(board):
-    # Try every adjacent swap; if any creates a match, a move exists.
-    for y in range(H):
-        for x in range(W):
-            for dy, dx in ((0, 1), (1, 0)):
-                if in_bounds(y+dy, x+dx):
-                    swap(board, (y, x), (y+dy, x+dx))
-                    ok = bool(find_matches(board))
-                    swap(board, (y, x), (y+dy, x+dx))   # swap back
-                    if ok: return True
-    return False
+ # Try every adjacent swap; if any creates a match, a move exists.
+ for y in range(H):
+ for x in range(W):
+ for dy, dx in ((0, 1), (1, 0)):
+ if in_bounds(y+dy, x+dx):
+ swap(board, (y, x), (y+dy, x+dx))
+ ok = bool(find_matches(board))
+ swap(board, (y, x), (y+dy, x+dx)) # swap back
+ if ok: return True
+ return False
 # If not has_valid_move(board): reshuffle existing pieces (keep counts) until a move exists,
 # or end the level, depending on your rules.
 ```
@@ -57,8 +59,8 @@ Reward chains so deep setups feel great:
 
 ```python
 def score_for(matches, chain):
-    base = len(matches) * 10
-    return base * chain            # linear in chain; or base * 2**(chain-1) for exponential
+ base = len(matches) * 10
+ return base * chain # linear in chain; or base * 2**(chain-1) for exponential
 # Bonus for larger single matches (4 = line-clear piece, 5 = color bomb, etc.) is a common
 # layer on top — special pieces created by 4+/5+ matches add strategy.
 ```
@@ -70,15 +72,15 @@ Resolution is a legality check, not a cascade.
 
 ```python
 def try_push(board, player, dir):
-    ahead  = player + dir
-    beyond = player + dir * 2
-    if is_wall(board, ahead): return False
-    if is_block(board, ahead):
-        if is_wall(board, beyond) or is_block(board, beyond):
-            return False                       # can't push two blocks or into a wall
-        move_block(board, ahead, beyond)
-    move_player(board, player, ahead)
-    return True
+ ahead = player + dir
+ beyond = player + dir * 2
+ if is_wall(board, ahead): return False
+ if is_block(board, ahead):
+ if is_wall(board, beyond) or is_block(board, beyond):
+ return False # can't push two blocks or into a wall
+ move_block(board, ahead, beyond)
+ move_player(board, player, ahead)
+ return True
 # Win when every target cell holds a block. Undo is essential — sokoban is unforgiving.
 # Detect dead states (a block pushed into a corner that isn't a target) to hint a restart.
 ```
@@ -107,12 +109,12 @@ after undo — they must match.
 Generated levels must be solvable, or players hit unfair dead ends:
 
 - **Generate-and-verify:** make a candidate, run a solver (BFS/DFS/A\* over board states for
-  push/slide puzzles; move-existence for match-3); keep it only if solvable within the move/time
-  budget. Use a seed so a level is reproducible.
+ push/slide puzzles; move-existence for match-3); keep it only if solvable within the move/time
+ budget. Use a seed so a level is reproducible.
 - **Reverse generation:** start from a solved board and apply random *legal inverse* moves; the
-  scrambled result is guaranteed solvable by reversing them. Great for sliding/sokoban puzzles.
+ scrambled result is guaranteed solvable by reversing them. Great for sliding/sokoban puzzles.
 - Tag each level with its seed and intended difficulty so progression curves are tunable and a
-  bad level can be reproduced and fixed.
+ bad level can be reproduced and fixed.
 
 ## 8. Input locking and presentation
 

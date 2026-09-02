@@ -21,8 +21,8 @@ app.stage.addChild(sprite);
 const [hero, enemy] = await Assets.load(["hero.png", "enemy.png"]);
 
 await Assets.load({
-  alias: "logo",
-  src: "logo.webp",
+ alias: "logo",
+ src: "logo.webp",
 });
 
 const logo = new Sprite(Assets.get("logo"));
@@ -32,18 +32,18 @@ const logo = new Sprite(Assets.get("logo"));
 
 ## Supported file types
 
-| Type                | Extensions                                                       | Parser ID                     | Loader                                                                                                                          |
+| Type | Extensions | Parser ID | Loader |
 | ------------------- | ---------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Textures            | `.png`, `.jpg`, `.jpeg`, `.webp`, `.avif`                        | `texture`                     | `loadTextures`                                                                                                                  |
-| SVG                 | `.svg`                                                           | `svg`                         | `loadSvg` (see `references/svg.md`)                                                                                             |
-| Video textures      | `.mp4`, `.m4v`, `.webm`, `.ogg`, `.ogv`, `.h264`, `.avi`, `.mov` | `video`                       | `loadVideoTextures` (see `references/video.md`)                                                                                 |
-| Sprite sheets       | `.json` (Spritesheet format)                                     | `spritesheet`                 | `spritesheetAsset` (see `references/spritesheet.md`)                                                                            |
-| Bitmap fonts        | `.fnt`, `.xml`                                                   | `bitmap-font`                 | `loadBitmapFont` (loading works by default; rendering `BitmapText` requires `'pixi.js/text-bitmap'`; see `references/fonts.md`) |
-| Web fonts           | `.ttf`, `.otf`, `.woff`, `.woff2`                                | `web-font`                    | `loadWebFont` (see `references/fonts.md`)                                                                                       |
-| JSON                | `.json`                                                          | `json`                        | `loadJson`                                                                                                                      |
-| Text                | `.txt`                                                           | `text`                        | `loadTxt`                                                                                                                       |
-| Compressed textures | `.basis`, `.dds`, `.ktx`, `.ktx2`                                | `basis`, `dds`, `ktx`, `ktx2` | See `references/compressed-textures.md`                                                                                         |
-| Animated GIFs       | `.gif`                                                           | `gif`                         | Requires `'pixi.js/gif'`; returns `GifSource` (see `references/gif.md`)                                                         |
+| Textures | `.png`, `.jpg`, `.jpeg`, `.webp`, `.avif` | `texture` | `loadTextures` |
+| SVG | `.svg` | `svg` | `loadSvg` (see `references/svg.md`) |
+| Video textures | `.mp4`, `.m4v`, `.webm`, `.ogg`, `.ogv`, `.h264`, `.avi`, `.mov` | `video` | `loadVideoTextures` (see `references/video.md`) |
+| Sprite sheets | `.json` (Spritesheet format) | `spritesheet` | `spritesheetAsset` (see `references/spritesheet.md`) |
+| Bitmap fonts | `.fnt`, `.xml` | `bitmap-font` | `loadBitmapFont` (loading works by default; rendering `BitmapText` requires `'pixi.js/text-bitmap'`; see `references/fonts.md`) |
+| Web fonts | `.ttf`, `.otf`, `.woff`, `.woff2` | `web-font` | `loadWebFont` (see `references/fonts.md`) |
+| JSON | `.json` | `json` | `loadJson` |
+| Text | `.txt` | `text` | `loadTxt` |
+| Compressed textures | `.basis`, `.dds`, `.ktx`, `.ktx2` | `basis`, `dds`, `ktx`, `ktx2` | See `references/compressed-textures.md` |
+| Animated GIFs | `.gif` | `gif` | Requires `'pixi.js/gif'`; returns `GifSource` (see `references/gif.md`) |
 
 The **Parser ID** column is the value you pass to the top-level `parser` field on an asset descriptor to force a specific loader. See "Forcing a parser" below.
 
@@ -54,29 +54,29 @@ By default, PixiJS picks a loader by matching the file extension or MIME type. W
 ```ts
 // Signed CDN URL with no extension
 const texture = await Assets.load({
-  src: "https://cdn.example.com/signed/abc123?token=xyz",
-  parser: "texture",
+ src: "https://cdn.example.com/signed/abc123?token=xyz",
+ parser: "texture",
 });
 
 // API endpoint that returns JSON
 const data = await Assets.load({
-  alias: "config",
-  src: "https://api.example.com/v1/config",
-  parser: "json",
+ alias: "config",
+ src: "https://api.example.com/v1/config",
+ parser: "json",
 });
 
 // Extension-less font URL with explicit family
 await Assets.load({
-  src: "https://cdn.example.com/fonts/hero-v2",
-  parser: "web-font",
-  data: { family: "Hero", weights: ["400", "700"] },
+ src: "https://cdn.example.com/fonts/hero-v2",
+ parser: "web-font",
+ data: { family: "Hero", weights: ["400", "700"] },
 });
 
 // Video stream without a file extension
 const clipTexture = await Assets.load({
-  src: "https://cdn.example.com/stream/xyz",
-  parser: "video",
-  data: { mime: "video/mp4", muted: true, playsinline: true },
+ src: "https://cdn.example.com/stream/xyz",
+ parser: "video",
+ data: { mime: "video/mp4", muted: true, playsinline: true },
 });
 ```
 
@@ -114,20 +114,20 @@ await Assets.load({ src: "...", parser: "texture" });
 
 Every asset workflow is covered in a reference file. Pick the one that matches the question:
 
-| Topic                          | Reference                                                              | When                                        |
+| Topic | Reference | When |
 | ------------------------------ | ---------------------------------------------------------------------- | ------------------------------------------- |
-| Texture atlases and animations | [references/spritesheet.md](references/spritesheet.md)                 | Loading sprite sheets with `AnimatedSprite` |
-| Video textures                 | [references/video.md](references/video.md)                             | `.mp4`, `.webm`, autoplay, looping, mobile  |
-| Web and bitmap fonts           | [references/fonts.md](references/fonts.md)                             | `.woff2`, `.fnt`, font families, SDF fonts  |
-| Animated GIFs                  | [references/gif.md](references/gif.md)                                 | `.gif`, `GifSprite`, playback control       |
-| Grouping assets by feature     | [references/bundles.md](references/bundles.md)                         | `addBundle`, `loadBundle`, `unloadBundle`   |
-| Declaring everything upfront   | [references/manifests.md](references/manifests.md)                     | `Assets.init({ manifest })` workflows       |
-| Cache lookups and cleanup      | [references/caching.md](references/caching.md)                         | `Assets.get`, `Assets.unload`, `Cache`      |
-| Priming future assets          | [references/background.md](references/background.md)                   | `backgroundLoad`, `backgroundLoadBundle`    |
-| Loading screens                | [references/progress.md](references/progress.md)                       | `onProgress`, LoadOptions progress          |
-| GPU-compressed formats         | [references/compressed-textures.md](references/compressed-textures.md) | `.ktx2`, `.basis`, `.dds`, `.ktx`           |
-| Vector vs raster SVG           | [references/svg.md](references/svg.md)                                 | `parseAsGraphicsContext`, texture mode      |
-| Retina + format detection      | [references/resolution.md](references/resolution.md)                   | `@{1,2}x`, `format` preferences             |
+| Texture atlases and animations | [references/spritesheet.md](references/spritesheet.md) | Loading sprite sheets with `AnimatedSprite` |
+| Video textures | [references/video.md](references/video.md) | `.mp4`, `.webm`, autoplay, looping, mobile |
+| Web and bitmap fonts | [references/fonts.md](references/fonts.md) | `.woff2`, `.fnt`, font families, SDF fonts |
+| Animated GIFs | [references/gif.md](references/gif.md) | `.gif`, `GifSprite`, playback control |
+| Grouping assets by feature | [references/bundles.md](references/bundles.md) | `addBundle`, `loadBundle`, `unloadBundle` |
+| Declaring everything upfront | [references/manifests.md](references/manifests.md) | `Assets.init({ manifest })` workflows |
+| Cache lookups and cleanup | [references/caching.md](references/caching.md) | `Assets.get`, `Assets.unload`, `Cache` |
+| Priming future assets | [references/background.md](references/background.md) | `backgroundLoad`, `backgroundLoadBundle` |
+| Loading screens | [references/progress.md](references/progress.md) | `onProgress`, LoadOptions progress |
+| GPU-compressed formats | [references/compressed-textures.md](references/compressed-textures.md) | `.ktx2`, `.basis`, `.dds`, `.ktx` |
+| Vector vs raster SVG | [references/svg.md](references/svg.md) | `parseAsGraphicsContext`, texture mode |
+| Retina + format detection | [references/resolution.md](references/resolution.md) | `@{1,2}x`, `format` preferences |
 
 ## Decision guide
 
@@ -151,14 +151,14 @@ There are two separate "options" concepts when loading assets:
 
 ```ts
 await Assets.load(["hero.png", "enemy.png"], {
-  onProgress: (p) => updateBar(p),
-  onError: (err, url) => {
-    const src = typeof url === "string" ? url : url.src;
-    console.warn("failed:", src, err);
-  },
-  strategy: "retry",
-  retryCount: 3,
-  retryDelay: 250,
+ onProgress: (p) => updateBar(p),
+ onError: (err, url) => {
+ const src = typeof url === "string" ? url : url.src;
+ console.warn("failed:", src, err);
+ },
+ strategy: "retry",
+ retryCount: 3,
+ retryDelay: 250,
 });
 ```
 
@@ -174,28 +174,28 @@ Global defaults live on `Loader.defaultOptions`, or pass `loadOptions` to `Asset
 
 Each loader parser reads its own options from the `data` field on the asset descriptor. Use the table below to pick the right options for each asset type:
 
-| Asset type         | `data` shape                                                                    | Key options                                                                                                                                                                                                                                                | Reference                           |
+| Asset type | `data` shape | Key options | Reference |
 | ------------------ | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| Texture (image)    | `TextureSourceOptions`                                                          | `resolution`, `scaleMode`, `alphaMode`, `autoGenerateMipmaps`, `antialias`, `addressMode`                                                                                                                                                                  | `references/resolution.md`          |
-| SVG                | `{ parseAsGraphicsContext?, resolution? }`                                      | `parseAsGraphicsContext` for Graphics mode; `resolution` for sharper raster                                                                                                                                                                                | `references/svg.md`                 |
-| Video              | `VideoSourceOptions`                                                            | `autoPlay`, `loop`, `muted`, `playsinline`, `preload`, `updateFPS`, `crossorigin`, `mime`                                                                                                                                                                  | `references/video.md`               |
-| Web font           | `LoadFontData`                                                                  | `family`, `weights`, `style`, `display`, `unicodeRange`, `featureSettings`                                                                                                                                                                                 | `references/fonts.md`               |
-| Bitmap font        | (none; auto-configured)                                                         | Distance-field detection sets scale mode and mipmaps                                                                                                                                                                                                       | `references/fonts.md`               |
-| Spritesheet        | `{ texture?, imageFilename?, ignoreMultiPack?, textureOptions?, cachePrefix? }` | `textureOptions` forwards `TextureSourceOptions` (e.g. `scaleMode`) to the atlas image; `texture` to skip image load; `imageFilename` to override the referenced image; `ignoreMultiPack` to skip multi-pack follow-ups; `cachePrefix` to namespace frames | `references/spritesheet.md`         |
-| GIF                | `GifBufferOptions`                                                              | `fps`, `scaleMode`, `resolution`, `autoGenerateMipmaps`                                                                                                                                                                                                    | `references/gif.md`                 |
-| Compressed texture | `TextureSourceOptions`                                                          | `scaleMode`, `addressMode`, `autoGenerateMipmaps`                                                                                                                                                                                                          | `references/compressed-textures.md` |
-| JSON / Text        | (none)                                                                          | Returned as-is                                                                                                                                                                                                                                             | —                                   |
+| Texture (image) | `TextureSourceOptions` | `resolution`, `scaleMode`, `alphaMode`, `autoGenerateMipmaps`, `antialias`, `addressMode` | `references/resolution.md` |
+| SVG | `{ parseAsGraphicsContext?, resolution? }` | `parseAsGraphicsContext` for Graphics mode; `resolution` for sharper raster | `references/svg.md` |
+| Video | `VideoSourceOptions` | `autoPlay`, `loop`, `muted`, `playsinline`, `preload`, `updateFPS`, `crossorigin`, `mime` | `references/video.md` |
+| Web font | `LoadFontData` | `family`, `weights`, `style`, `display`, `unicodeRange`, `featureSettings` | `references/fonts.md` |
+| Bitmap font | (none; auto-configured) | Distance-field detection sets scale mode and mipmaps | `references/fonts.md` |
+| Spritesheet | `{ texture?, imageFilename?, ignoreMultiPack?, textureOptions?, cachePrefix? }` | `textureOptions` forwards `TextureSourceOptions` (e.g. `scaleMode`) to the atlas image; `texture` to skip image load; `imageFilename` to override the referenced image; `ignoreMultiPack` to skip multi-pack follow-ups; `cachePrefix` to namespace frames | `references/spritesheet.md` |
+| GIF | `GifBufferOptions` | `fps`, `scaleMode`, `resolution`, `autoGenerateMipmaps` | `references/gif.md` |
+| Compressed texture | `TextureSourceOptions` | `scaleMode`, `addressMode`, `autoGenerateMipmaps` | `references/compressed-textures.md` |
+| JSON / Text | (none) | Returned as-is | — |
 
 Example combining `LoadOptions` and `data`:
 
 ```ts
 await Assets.load(
-  {
-    alias: "hero",
-    src: "hero.png",
-    data: { scaleMode: "nearest", resolution: 2 },
-  },
-  { strategy: "retry", retryCount: 3 },
+ {
+ alias: "hero",
+ src: "hero.png",
+ data: { scaleMode: "nearest", resolution: 2 },
+ },
+ { strategy: "retry", retryCount: 3 },
 );
 ```
 
@@ -203,22 +203,22 @@ Inside a manifest or bundle, every entry can carry its own `data`:
 
 ```ts
 await Assets.init({
-  manifest: {
-    bundles: [
-      {
-        name: "level1",
-        assets: [
-          { alias: "tiles", src: "tiles.png", data: { scaleMode: "nearest" } },
-          { alias: "font", src: "hero.woff2", data: { family: "Hero" } },
-          {
-            alias: "clip",
-            src: "intro.mp4",
-            data: { autoPlay: false, muted: true },
-          },
-        ],
-      },
-    ],
-  },
+ manifest: {
+ bundles: [
+ {
+ name: "level1",
+ assets: [
+ { alias: "tiles", src: "tiles.png", data: { scaleMode: "nearest" } },
+ { alias: "font", src: "hero.woff2", data: { family: "Hero" } },
+ {
+ alias: "clip",
+ src: "intro.mp4",
+ data: { autoPlay: false, muted: true },
+ },
+ ],
+ },
+ ],
+ },
 });
 ```
 
@@ -236,12 +236,12 @@ After init, preferences can still be tuned:
 
 ```ts
 Assets.setPreferences({
-  crossOrigin: "anonymous",
-  preferCreateImageBitmap: false,
+ crossOrigin: "anonymous",
+ preferCreateImageBitmap: false,
 });
 
 for (const detection of Assets.detections) {
-  console.log(detection.extension);
+ console.log(detection.extension);
 }
 
 Assets.reset();

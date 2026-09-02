@@ -15,10 +15,10 @@ Assumes familiarity with `pixijs-scene-core-concepts`.
 
 ```ts
 const group = new Container({
-  label: "hero-group",
-  x: 200,
-  y: 150,
-  sortableChildren: true,
+ label: "hero-group",
+ x: 200,
+ y: 150,
+ sortableChildren: true,
 });
 
 const body = new Sprite(await Assets.load("body.png"));
@@ -41,19 +41,19 @@ app.stage.addChild(group);
 
 ```ts
 const container = new Container({
-  label: "world",
-  x: 100,
-  y: 50,
-  scale: 2,
-  rotation: Math.PI / 4,
-  alpha: 0.8,
-  visible: true,
-  tint: 0xffaa00,
-  blendMode: "add",
-  sortableChildren: true,
-  isRenderGroup: true,
-  origin: { x: 0, y: 0 },
-  boundsArea: new Rectangle(0, 0, 1920, 1080),
+ label: "world",
+ x: 100,
+ y: 50,
+ scale: 2,
+ rotation: Math.PI / 4,
+ alpha: 0.8,
+ visible: true,
+ tint: 0xffaa00,
+ blendMode: "add",
+ sortableChildren: true,
+ isRenderGroup: true,
+ origin: { x: 0, y: 0 },
+ boundsArea: new Rectangle(0, 0, 1920, 1080),
 });
 ```
 
@@ -194,11 +194,11 @@ const { width, height } = sprite.getSize();
 const parent = new Container();
 
 parent.on("childAdded", (child, container, index) => {
-  console.log("added at", index, child.label);
+ console.log("added at", index, child.label);
 });
 
 parent.on("childRemoved", (child, container, index) => {
-  console.log("removed from", index);
+ console.log("removed from", index);
 });
 
 const child = new Container();
@@ -210,14 +210,14 @@ child.on("destroyed", (destroyed) => console.log("gone", destroyed.label));
 parent.addChild(child);
 ```
 
-| Event            | Fires on                              | Arguments                   |
+| Event | Fires on | Arguments |
 | ---------------- | ------------------------------------- | --------------------------- |
-| `childAdded`     | the parent receiving the child        | `(child, container, index)` |
-| `childRemoved`   | the parent losing the child           | `(child, container, index)` |
-| `added`          | the child that was attached           | `(parent)`                  |
-| `removed`        | the child that was detached           | `(parent)`                  |
-| `destroyed`      | the destroyed container               | `(container)`               |
-| `visibleChanged` | the container whose `visible` flipped | `(visible)`                 |
+| `childAdded` | the parent receiving the child | `(child, container, index)` |
+| `childRemoved` | the parent losing the child | `(child, container, index)` |
+| `added` | the child that was attached | `(parent)` |
+| `removed` | the child that was detached | `(parent)` |
+| `destroyed` | the destroyed container | `(container)` |
+| `visibleChanged` | the container whose `visible` flipped | `(visible)` |
 
 These are emitted on the `EventEmitter` side of `Container`; do not confuse them with pointer events from `pixijs-events`.
 
@@ -229,7 +229,7 @@ These are emitted on the `EventEmitter` side of `Container`; do not confuse them
 const container = new Container();
 
 container.onRender = (renderer) => {
-  container.rotation += 0.01;
+ container.rotation += 0.01;
 };
 
 container.onRender = null;
@@ -259,9 +259,9 @@ oldSprite.removeFromParent();
 container.destroy();
 
 container.destroy({
-  children: true,
-  texture: true,
-  textureSource: true,
+ children: true,
+ texture: true,
+ textureSource: true,
 });
 
 console.log(container.destroyed);

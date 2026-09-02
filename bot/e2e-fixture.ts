@@ -76,11 +76,60 @@ async function main(): Promise<void> {
   await publishSite(site3d, "e2e-3d");
   const publishedIndex = await fs.readFile(path.join(publishRoot, "e2e-3d", "index.html"), "utf8");
   check("published index cache-busts the bundle", /js\/main\.js\?v=[0-9a-f]{10}/.test(publishedIndex), publishedIndex.slice(0, 200));
+
+  console.log("\n== 1b. publish stamps a deploy version and injects the update checker ==");
+  const readVersion = async (): Promise<{ version: string; commit?: string | null }> => JSON.parse(
+    await fs.readFile(path.join(publishRoot, "e2e-3d", "threadsite-version.json"), "utf8"),
+  ) as { version: string; commit?: string | null };
+  const deployed = await readVersion();
+  check("deploy version file stamped", /^[0-9a-f]{12}$/.test(deployed.version), JSON.stringify(deployed));
+  check("repo-less workspace stamps commit null", deployed.commit == null, JSON.stringify(deployed));
+  // A workspace that IS a git repo (the real Forgejo-mirror case) records HEAD,
+  // so a live browser can be traced to the exact source commit.
+  {
+    const execFileSync = (await import("node:child_process")).execFileSync;
+    const wsGit = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-e2e-git-"));
+    const siteGit = path.join(wsGit, "site");
+    await fs.mkdir(path.join(siteGit, "pages"), { recursive: true });
+    await fs.copyFile(path.join(site3d, "index.html"), path.join(siteGit, "index.html"));
+    execFileSync("git", ["init", "--quiet"], { cwd: wsGit });
+    execFileSync("git", ["add", "."], { cwd: wsGit });
+    execFileSync("git", ["-c", "user.email=e2e@local", "-c", "user.name=e2e", "commit", "--quiet", "-m", "init"], { cwd: wsGit });
+    await publishSite(siteGit, "e2e-git");
+    const stamped = JSON.parse(
+      await fs.readFile(path.join(publishRoot, "e2e-git", "threadsite-version.json"), "utf8"),
+    ) as { version: string; commit?: string | null };
+    check("git workspace stamps its HEAD commit", /^[0-9a-f]{40}$/.test(stamped.commit ?? ""), JSON.stringify(stamped));
+  }
+  check("page carries the update checker for its deploy",
+    publishedIndex.includes("threadsite-version.json") && publishedIndex.includes(`var DEPLOYED = "${deployed.version}"`),
+    publishedIndex.slice(-400));
+
+  // Republishing the identical tree must not move the deploy id.
+  await publishSite(site3d, "e2e-3d");
+  check("unchanged tree republishes to the same deploy version", (await readVersion()).version === deployed.version);
+
+  // A page in a subdirectory must resolve the version file against the site root.
+  await fs.mkdir(path.join(site3d, "pages"), { recursive: true });
+  await fs.writeFile(path.join(site3d, "pages", "credits.html"),
+    `<!doctype html><html><body><a href="../index.html">home</a></body></html>\n`);
+  await publishSite(site3d, "e2e-3d");
+  const subpage = await fs.readFile(path.join(publishRoot, "e2e-3d", "pages", "credits.html"), "utf8");
+  check("subpage checker resolves the site-root version file", subpage.includes(`var VERSION_URL = "../threadsite-version.json"`), subpage.slice(-400));
+
+  // Any content change — here one appended CSS rule — must move the deploy id.
+  await fs.appendFile(path.join(site3d, "css", "s.css"), "/* bumped */\n");
+  await publishSite(site3d, "e2e-3d");
+  const bumped = await readVersion();
+  check("changed content bumps the deploy version", bumped.version !== deployed.version, `${deployed.version} -> ${bumped.version}`);
+  const bumpedIndex = await fs.readFile(path.join(publishRoot, "e2e-3d", "index.html"), "utf8");
+  check("republished page restamped with the new version", bumpedIndex.includes(`var DEPLOYED = "${bumped.version}"`));
+
   const skill3dPath = path.join(ws3d, ".opencode", "skills", "game-3d", "SKILL.md");
   const skill3d = await fs.readFile(skill3dPath, "utf8").catch(() => "");
   check("game-3d playbook skill seeded with frontmatter", skill3d.startsWith("---\n") && skill3d.includes("name: game-3d"));
-  check("game-3d gets curated skill set", skillNames("game-3d").length === 24
-    && await fs.stat(path.join(ws3d, ".opencode", "skills", "threejs-gltf-loading", "references")).then(() => true, () => false));
+  check("game-3d gets curated skill set", skillNames("game-3d").length === 22
+    && await fs.stat(path.join(ws3d, ".opencode", "skills", "threejs-game-studio", "references")).then(() => true, () => false));
   await fs.rm(path.join(ws3d, ".opencode"), { recursive: true, force: true });
   check("skill reseeded after deletion", (await ensureSkillFiles(ws3d, "game-3d")) === true
     && (await fs.readFile(skill3dPath, "utf8")) === skill3d);
@@ -92,12 +141,29 @@ async function main(): Promise<void> {
   console.log("\n== 2. net client import bundles cleanly; multiplayer game-2d ==");
   const ws2d = await scaffold("game-2d");
   const site2d = path.join(ws2d, "site");
+  check("Phaser compact ESM seeded", await fs.stat(path.join(ws2d, "node_modules", "phaser", "dist", "phaser.esm.min.js")).then(() => true, () => false));
+  check("Phaser real declarations seeded", await fs.stat(path.join(ws2d, "node_modules", "phaser", "types", "phaser.d.ts")).then(() => true, () => false));
+  // The runtime build could go missing while the (old probe) type file stayed;
+  // the freshness check now verifies every seed file and reseeds.
+  await fs.rm(path.join(ws2d, "node_modules", "phaser", "dist", "phaser.esm.min.js"));
+  check("missing runtime build reseeds", (await ensureEnginePackages(ws2d, "game-2d")) === true
+    && await fs.stat(path.join(ws2d, "node_modules", "phaser", "dist", "phaser.esm.min.js")).then(() => true, () => false));
+  // .gitignore is ensured, never replaced: pre-existing lines survive.
+  await fs.writeFile(path.join(ws2d, ".gitignore"), "*.log\nsecrets.txt\n");
+  check(".gitignore preserves existing entries", (await ensureEnginePackages(ws2d, "game-2d")) === true
+    && (await fs.readFile(path.join(ws2d, ".gitignore"), "utf8")).split(/\r?\n/).includes("node_modules/")
+    && (await fs.readFile(path.join(ws2d, ".gitignore"), "utf8")).includes("secrets.txt"));
+  check("gitignore ensure idempotent", (await ensureEnginePackages(ws2d, "game-2d")) === false);
+  await fs.mkdir(path.join(ws2d, "node_modules", "pixi.js"), { recursive: true });
+  await fs.writeFile(path.join(ws2d, "node_modules", "pixi.js", "package.json"), "{}\n");
+  check("legacy Pixi package removed on freshness pass", (await ensureEnginePackages(ws2d, "game-2d")) === true
+    && !(await fs.stat(path.join(ws2d, "node_modules", "pixi.js")).then(() => true, () => false)));
   await fs.writeFile(path.join(site2d, "src", "main.ts"), [
-    `import * as PIXI from "pixi.js";`,
+    `import * as Phaser from "phaser";`,
     `import { NET_CONFIG } from "../net/net-config.js";`,
     `import { ThreadSiteNet } from "../net/threadsite-net.js";`,
     `const app = document.getElementById("app");`,
-    `if (app) app.textContent = \`pixi \${PIXI.VERSION} relay \${NET_CONFIG.url}\`;`,
+    `if (app) app.textContent = \`phaser \${Phaser.VERSION} relay \${NET_CONFIG.url}\`;`,
     `// Typed envelope: ps.from/ps.cid/ps.state/ps.ts all resolve from the d.ts.`,
     `void ThreadSiteNet.connect({`,
     `  ...NET_CONFIG,`,
@@ -111,12 +177,12 @@ async function main(): Promise<void> {
   const built2d = await buildSite(ws2d);
   check("game-2d builds", built2d.skipped === false && built2d.emitted === 1, JSON.stringify(built2d));
   const bundle2d = await fs.readFile(path.join(site2d, "js", "main.js"), "utf8");
-  check("pixi bundled", bundle2d.includes("Application"), `${(bundle2d.length / 1024).toFixed(0)}KB`);
+  check("phaser bundled", bundle2d.includes("Phaser") || bundle2d.includes("Scene"), `${(bundle2d.length / 1024).toFixed(0)}KB`);
   check("net client bundled", bundle2d.includes("ThreadSiteNet"));
   await validateSite(site2d);
   check("game-2d validates", true);
-  check("game-2d gets curated skill set", skillNames("game-2d").length === 33
-    && await fs.stat(path.join(ws2d, ".opencode", "skills", "pixijs-application", "references")).then(() => true, () => false));
+  check("game-2d gets curated skill set", skillNames("game-2d").includes("phaser-4")
+    && await fs.stat(path.join(ws2d, ".opencode", "skills", "phaser-4", "SKILL.md")).then(() => true, () => false));
 
   console.log("\n== 3. sibling modules, extensionless + .js imports, dynamic import ==");
   const wsMod = await scaffold("site");
@@ -309,31 +375,24 @@ async function main(): Promise<void> {
   await validateSite(siteTypes);
   check("idiomatic three.js code passes the real-types gate", true);
 
-  const wsPixiTypes = await scaffold("game-2d");
-  const sitePixiTypes = path.join(wsPixiTypes, "site");
-  await fs.writeFile(path.join(sitePixiTypes, "src", "main.ts"), [
-    `import { Application, Sprite, Texture, Container } from "pixi.js";`,
+  const wsPhaserTypes = await scaffold("game-2d");
+  const sitePhaserTypes = path.join(wsPhaserTypes, "site");
+  await fs.writeFile(path.join(sitePhaserTypes, "src", "main.ts"), [
+    `import * as Phaser from "phaser";`,
     ``,
-    `const app = new Application();`,
-    `await app.init({ width: 960, height: 540, background: "#102030" });`,
-    `const host = document.getElementById("app");`,
-    `if (host) host.appendChild(app.canvas);`,
-    ``,
-    `const world = new Container();`,
-    `app.stage.addChild(world);`,
-    `const sprite = new Sprite(Texture.WHITE);`,
-    `sprite.anchor.set(0.5);`,
-    `sprite.position.set(480, 270);`,
-    `sprite.width = 64;`,
-    `sprite.height = 64;`,
-    `world.addChild(sprite);`,
-    ``,
-    `app.ticker.add((ticker) => { sprite.rotation += ticker.deltaMS * 0.001; });`,
+    `class DemoScene extends Phaser.Scene {`,
+    `  constructor() { super("demo"); }`,
+    `  create(): void {`,
+    `    const box = this.add.rectangle(480, 270, 64, 64, 0x3fa9f5);`,
+    `    this.tweens.add({ targets: box, angle: 360, duration: 1200, repeat: -1 });`,
+    `  }`,
+    `}`,
+    `new Phaser.Game({ type: Phaser.AUTO, parent: "app", width: 960, height: 540, scene: DemoScene });`,
     ``,
   ].join("\n"));
-  await buildSite(wsPixiTypes);
-  await validateSite(sitePixiTypes);
-  check("idiomatic PixiJS code passes the real-types gate", true);
+  await buildSite(wsPhaserTypes);
+  await validateSite(sitePhaserTypes);
+  check("idiomatic Phaser code passes the real-types gate", true);
 
   const wsMisuse = await scaffold("game-3d");
   const siteMisuse = path.join(wsMisuse, "site");
@@ -401,8 +460,7 @@ async function main(): Promise<void> {
   await fs.writeFile(path.join(siteLive, "js", "main.js"),
     `import { NET_CONFIG } from "./net-config.js";\nimport { ThreadSiteNet } from "./threadsite-net.js";\nconst app = document.getElementById("app");\nif (app) app.textContent = \`legacy \${NET_CONFIG.game}\`;\nconsole.log(typeof ThreadSiteNet.connect);\n`);
   await fs.writeFile(path.join(siteLive, "index.html"),
-    `<!doctype html><html><body><main id="app"></main><script type="importmap">{"imports":{"pixi.js":"./js/vendor-pixi.mjs"}}</script><script type="module" src="js/main.js"></script></body></html>\n`);
-  await fs.writeFile(path.join(siteLive, "js", "vendor-pixi.mjs"), "export const VERSION = \"8.20.1\";\nexport class Application {}\n");
+    `<!doctype html><html><body><main id="app"></main><script type="module" src="js/main.js"></script></body></html>\n`);
 
   // The update turn: harness restore runs (removes the old js/ net copies,
   // seeds site/net/), then the deploy-tail build+validate — exactly what

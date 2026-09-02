@@ -27,10 +27,10 @@ console.log(\`[boot] three.js r\${THREE.REVISION} — build the game in site/src
     return `// ThreadSite starter — site/src/main.ts.
 // The harness bundles each top-level src/*.ts entry into js/<name>.js when
 // your turn ends; index.html already loads js/main.js as a module. Import
-// siblings like "./player.js" and the engine package like "pixi.js" (see AGENTS.md).
-import * as PIXI from "pixi.js";
+// siblings like "./player.js" and the engine package like "phaser" (see AGENTS.md).
+import * as Phaser from "phaser";
 
-console.log(\`[boot] PixiJS \${PIXI.VERSION} — build the game in site/src/\`);
+console.log(\`[boot] Phaser \${Phaser.VERSION} — build the game in site/src/\`);
 `;
   }
   return `// ThreadSite starter — site/src/main.ts.

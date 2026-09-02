@@ -9,6 +9,24 @@ import type { CommitAuthor } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
+/** Unambiguous alphabet for generated push credentials: no 0/O/1/l/I. */
+const CREDENTIAL_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+
+function randomCredential(length: number): string {
+  const bytes = crypto.randomBytes(length);
+  let out = "";
+  for (let i = 0; i < length; i += 1) out += CREDENTIAL_ALPHABET[bytes[i] % CREDENTIAL_ALPHABET.length];
+  return out;
+}
+
+/**
+ * Username/password pair for a repo push-key account. Random on every call;
+ * persistence is the caller's job (the project record).
+ */
+export function generatePushCredentials(): { username: string; password: string } {
+  return { username: `push-${randomCredential(6)}`, password: randomCredential(20) };
+}
+
 async function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
     cwd,
@@ -54,6 +72,121 @@ export async function ensureLocalBaseline(workspace: string): Promise<void> {
   }
 }
 
+/** Env vars authenticating git operations against Forgejo via the askpass helper. */
+async function pushAuthEnv(forgejo: ForgejoClient): Promise<NodeJS.ProcessEnv> {
+  const credentials = await forgejo.gitCredentials();
+  return {
+    GIT_ASKPASS: "/usr/local/bin/threadsite-git-askpass",
+    GIT_TERMINAL_PROMPT: "0",
+    FORGEJO_GIT_USERNAME: credentials.username,
+    FORGEJO_GIT_TOKEN: credentials.token,
+  };
+}
+
+/**
+ * Fetch origin/main and rebase local commits on top, so a bot push survives an
+ * external push (a push-key holder committed to main) without losing either
+ * side's work. A conflict aborts the rebase and throws — the caller fails the
+ * turn loudly rather than dropping history.
+ */
+export async function fetchAndRebase(workspace: string, forgejo: ForgejoClient): Promise<void> {
+  const auth = await pushAuthEnv(forgejo);
+  try {
+    await git(workspace, ["fetch", "origin", "main"], auth);
+  } catch (error) {
+    // A brand-new repository has no main on the remote yet — the push that
+    // follows this call creates it, so there is nothing to rebase onto.
+    if (/couldn't find remote ref/i.test(String(error))) return;
+    throw error;
+  }
+  // "HEAD is up to date" exits 0 with nothing rebased; a divergence with no
+  // conflicts rebases silently. Only actual conflicts throw here.
+  await git(workspace, ["rebase", "origin/main"]).catch(async (error) => {
+    await git(workspace, ["rebase", "--abort"]).catch(() => undefined);
+    throw error;
+  });
+}
+
+/**
+ * Adopt whatever commit currently sits on origin/main: fetch, then hard-reset
+ * the workspace to it. Used after an external push so the workspace, the repo,
+ * and (on Publish) the live site all converge on the pushed commit.
+ */
+export async function syncToRemote(workspace: string, forgejo: ForgejoClient): Promise<{ commit: string }> {
+  const auth = await pushAuthEnv(forgejo);
+  try {
+    await git(workspace, ["fetch", "origin", "main"], auth);
+  } catch (error) {
+    // No main on the remote means nothing was ever pushed; the local workspace
+    // is the only history, so adopting is a no-op on the current HEAD.
+    if (/couldn't find remote ref/i.test(String(error))) {
+      return { commit: await currentHead(workspace) };
+    }
+    throw error;
+  }
+  await git(workspace, ["reset", "--hard", "origin/main"]);
+  await git(workspace, ["clean", "-fd"]);
+  return { commit: await currentHead(workspace) };
+}
+
+/** Reset the working tree to a specific commit (kept as-is otherwise). */
+export async function resetToCommit(workspace: string, ref: string): Promise<void> {
+  await git(workspace, ["reset", "--hard", ref]);
+  await git(workspace, ["clean", "-fd"]);
+}
+
+/** Full hash of the commit currently checked out in the workspace. */
+export async function currentHead(workspace: string): Promise<string> {
+  return git(workspace, ["rev-parse", "HEAD"]);
+}
+
+/** Whether the working tree has no uncommitted or untracked changes. */
+export async function workingTreeClean(workspace: string): Promise<boolean> {
+  const status = await git(workspace, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  return !status.trim();
+}
+
+export interface RemoteSyncOutcome {
+  /** Full hash of HEAD after the sync. */
+  commit: string;
+  /** Local commits rebased on top of origin/main and pushed back (e.g. a rejected push). */
+  ahead: number;
+  /** Remote commits the workspace adopted. */
+  behind: number;
+}
+
+/**
+ * Reconcile the workspace with origin/main in one step: adopt remote commits,
+ * rebase local unpushed commits on top, and push the reconciled history. A
+ * clean tree is the caller's precondition — a rebase cannot survive uncommitted
+ * edits, and discarding them silently would destroy a failed turn's work.
+ */
+export async function syncWithRemote(workspace: string, forgejo: ForgejoClient): Promise<RemoteSyncOutcome> {
+  const auth = await pushAuthEnv(forgejo);
+  const count = (range: string): Promise<number> =>
+    git(workspace, ["rev-list", "--count", range])
+      .then((out) => Number.parseInt(out, 10) || 0)
+      .catch(() => 0);
+  await git(workspace, ["fetch", "origin", "main"], auth);
+  const ahead = await count("origin/main..HEAD");
+  const behind = await count("HEAD..origin/main");
+  if (behind > 0) {
+    if (ahead > 0) {
+      await git(workspace, ["rebase", "origin/main"], auth).catch(async (error) => {
+        await git(workspace, ["rebase", "--abort"], auth).catch(() => undefined);
+        throw error;
+      });
+    } else {
+      await git(workspace, ["reset", "--hard", "origin/main"]);
+    }
+    await git(workspace, ["clean", "-fd"]);
+  }
+  if (ahead > 0 || behind > 0) {
+    await git(workspace, ["push", "-u", "origin", "main"], auth);
+  }
+  return { commit: await currentHead(workspace), ahead, behind };
+}
+
 export async function restoreWorkingTree(workspace: string): Promise<void> {
   await git(workspace, ["reset", "--hard", "HEAD"]);
   await git(workspace, ["clean", "-fd"]);
@@ -75,15 +208,9 @@ export async function undoLastCommit(
   }
   await git(workspace, ["reset", "--hard", "HEAD~1"]);
   await git(workspace, ["clean", "-fd"]);
-  // History is being rewritten on purpose: the undone turn's commit must leave the
-  // public repository as well as the local worktree.
-  const credentials = await forgejo.gitCredentials();
-  await git(workspace, ["push", "--force", "origin", "main"], {
-    GIT_ASKPASS: "/usr/local/bin/threadsite-git-askpass",
-    GIT_TERMINAL_PROMPT: "0",
-    FORGEJO_GIT_USERNAME: credentials.username,
-    FORGEJO_GIT_TOKEN: credentials.token,
-  });
+  // History is being rewritten on purpose: the undone turn's commit must leave
+  // the public repository as well as the local worktree.
+  await git(workspace, ["push", "--force", "origin", "main"], await pushAuthEnv(forgejo));
   return { undone: current, kept: previous };
 }
 
@@ -244,13 +371,11 @@ export async function commitAndPush(
       deletions += parseInt(removed, 10) || 0;
     }
   }
-  const credentials = await forgejo.gitCredentials();
-  await git(workspace, ["push", "-u", "origin", "main"], {
-    GIT_ASKPASS: "/usr/local/bin/threadsite-git-askpass",
-    GIT_TERMINAL_PROMPT: "0",
-    FORGEJO_GIT_USERNAME: credentials.username,
-    FORGEJO_GIT_TOKEN: credentials.token,
-    ...identity,
-  });
-  return { commit, files, additions, deletions };
+  // An external push (a push-key holder) may have moved origin/main ahead of
+  // the local history this turn was built on; rebasing keeps both sides.
+  await fetchAndRebase(workspace, forgejo);
+  await git(workspace, ["push", "-u", "origin", "main"], { ...(await pushAuthEnv(forgejo)), ...identity });
+  // The rebase may have rewritten the commit; read the hash the push actually published.
+  const pushed = await git(workspace, ["rev-parse", "--short=10", "HEAD"]);
+  return { commit: pushed, files, additions, deletions };
 }

@@ -17,16 +17,16 @@ Assumes familiarity with `pixijs-scene-core-concepts`. `Graphics` is a leaf: do 
 const g = new Graphics();
 
 g.rect(10, 10, 200, 100)
-  .fill({ color: 0x3498db, alpha: 0.8 })
-  .stroke({ width: 3, color: 0x2c3e50 });
+ .fill({ color: 0x3498db, alpha: 0.8 })
+ .stroke({ width: 3, color: 0x2c3e50 });
 
 g.circle(300, 60, 40).fill(0xe74c3c);
 
 g.moveTo(50, 200)
-  .lineTo(200, 200)
-  .bezierCurveTo(250, 250, 100, 300, 50, 250)
-  .closePath()
-  .fill(0x6c5ce7);
+ .lineTo(200, 200)
+ .bezierCurveTo(250, 250, 100, 300, 50, 250)
+ .closePath()
+ .fill(0x6c5ce7);
 
 app.stage.addChild(g);
 ```
@@ -39,10 +39,10 @@ All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zInde
 
 Leaf-specific options added by `GraphicsOptions`:
 
-| Option        | Type              | Default                 | Description                                                                                                                                                                                          |
+| Option | Type | Default | Description |
 | ------------- | ----------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `context`     | `GraphicsContext` | new `GraphicsContext()` | Shared drawing context. Passing a context reuses its tessellated geometry across multiple `Graphics` nodes, avoiding duplicate GPU work. If omitted, each `Graphics` creates and owns a new context. |
-| `roundPixels` | `boolean`         | `false`                 | Rounds the final on-screen `x`/`y` to the nearest pixel. Produces crisper lines for pixel-art styles at the cost of smooth sub-pixel movement.                                                       |
+| `context` | `GraphicsContext` | new `GraphicsContext()` | Shared drawing context. Passing a context reuses its tessellated geometry across multiple `Graphics` nodes, avoiding duplicate GPU work. If omitted, each `Graphics` creates and owns a new context. |
+| `roundPixels` | `boolean` | `false` | Rounds the final on-screen `x`/`y` to the nearest pixel. Produces crisper lines for pixel-art styles at the cost of smooth sub-pixel movement. |
 
 The constructor also accepts a `GraphicsContext` instance as its sole argument (`new Graphics(ctx)`), which is shorthand for `new Graphics({ context: ctx })`.
 
@@ -54,8 +54,8 @@ The constructor also accepts a `GraphicsContext` instance as its sole argument (
 const g = new Graphics();
 
 g.rect(10, 10, 200, 100)
-  .fill({ color: 0x3498db, alpha: 0.8 })
-  .stroke({ width: 3, color: 0x2c3e50 });
+ .fill({ color: 0x3498db, alpha: 0.8 })
+ .stroke({ width: 3, color: 0x2c3e50 });
 
 g.circle(150, 200, 40).fill(0xe74c3c);
 g.roundRect(300, 10, 150, 80, 12).fill(0x2ecc71);
@@ -73,30 +73,30 @@ g.ellipse(100, 350, 60, 30).fill(0x1abc9c);
 
 `stroke()` accepts a color, a `FillGradient`, a `FillPattern`, or a `StrokeStyle` object that combines all `FillStyle` keys (`color`, `alpha`, `texture`, `matrix`, `fill`, `textureSpace`) with stroke attributes:
 
-| Attribute    | Default   | Notes                                                                   |
+| Attribute | Default | Notes |
 | ------------ | --------- | ----------------------------------------------------------------------- |
-| `width`      | `1`       | Pixel width of the stroke.                                              |
-| `cap`        | `'butt'`  | One of `'butt'`, `'round'`, `'square'`. End style for open paths.       |
-| `join`       | `'miter'` | One of `'miter'`, `'round'`, `'bevel'`. Corner style.                   |
-| `miterLimit` | `10`      | Caps how far miter joins extend before falling back to bevel.           |
-| `alignment`  | `0.5`     | `1` = inside the shape, `0.5` = centered, `0` = outside.                |
-| `pixelLine`  | `false`   | Aligns 1-pixel lines to the pixel grid for crisp output. Graphics-only. |
+| `width` | `1` | Pixel width of the stroke. |
+| `cap` | `'butt'` | One of `'butt'`, `'round'`, `'square'`. End style for open paths. |
+| `join` | `'miter'` | One of `'miter'`, `'round'`, `'bevel'`. Corner style. |
+| `miterLimit` | `10` | Caps how far miter joins extend before falling back to bevel. |
+| `alignment` | `0.5` | `1` = inside the shape, `0.5` = centered, `0` = outside. |
+| `pixelLine` | `false` | Aligns 1-pixel lines to the pixel grid for crisp output. Graphics-only. |
 
 Strokes can use the same gradients and patterns as fills via `fill: gradient` or `texture: tex`:
 
 ```ts
 const grad = new FillGradient({
-  end: { x: 1, y: 0 },
-  colorStops: [
-    { offset: 0, color: 0xff0000 },
-    { offset: 1, color: 0x0000ff },
-  ],
+ end: { x: 1, y: 0 },
+ colorStops: [
+ { offset: 0, color: 0xff0000 },
+ { offset: 1, color: 0x0000ff },
+ ],
 });
 g.rect(0, 0, 200, 100).stroke({
-  width: 8,
-  fill: grad,
-  join: "round",
-  cap: "round",
+ width: 8,
+ fill: grad,
+ join: "round",
+ cap: "round",
 });
 ```
 
@@ -110,13 +110,13 @@ g.roundPoly(250, 100, 50, 5, 10).fill(0xe74c3c);
 g.chamferRect(350, 50, 100, 80, 15).fill(0x2ecc71);
 g.filletRect(500, 50, 100, 80, 15).fill(0x9b59b6);
 g.roundShape(
-  [
-    { x: 50, y: 250, radius: 20 },
-    { x: 150, y: 250, radius: 5 },
-    { x: 150, y: 350, radius: 10 },
-    { x: 50, y: 350, radius: 15 },
-  ],
-  10,
+ [
+ { x: 50, y: 250, radius: 20 },
+ { x: 150, y: 250, radius: 5 },
+ { x: 150, y: 350, radius: 10 },
+ { x: 50, y: 350, radius: 15 },
+ ],
+ 10,
 ).fill(0xf39c12);
 ```
 
@@ -163,12 +163,12 @@ Calling `cut()` on a shape that already has a hole **adds** to the existing hole
 
 ```ts
 g.moveTo(50, 50)
-  .lineTo(200, 50)
-  .bezierCurveTo(250, 100, 250, 150, 200, 200)
-  .quadraticCurveTo(100, 250, 50, 200)
-  .closePath()
-  .fill({ color: 0x6c5ce7, alpha: 0.7 })
-  .stroke({ width: 2, color: 0xdfe6e9 });
+ .lineTo(200, 50)
+ .bezierCurveTo(250, 100, 250, 150, 200, 200)
+ .quadraticCurveTo(100, 250, 50, 200)
+ .closePath()
+ .fill({ color: 0x6c5ce7, alpha: 0.7 })
+ .stroke({ width: 2, color: 0xdfe6e9 });
 ```
 
 Path methods: `moveTo`, `lineTo`, `bezierCurveTo`, `quadraticCurveTo`, `arc`, `arcTo`, `arcToSvg`, `closePath`. Call `beginPath()` to discard the current path and start a new one.
@@ -176,14 +176,14 @@ Path methods: `moveTo`, `lineTo`, `bezierCurveTo`, `quadraticCurveTo`, `arc`, `a
 ```ts
 // arc(cx, cy, radius, startAngle, endAngle, counterclockwise?)
 g.moveTo(80, 50)
-  .arc(50, 50, 30, 0, Math.PI)
-  .stroke({ width: 4, color: 0x2c3e50 });
+ .arc(50, 50, 30, 0, Math.PI)
+ .stroke({ width: 4, color: 0x2c3e50 });
 
 // arcTo(x1, y1, x2, y2, radius) — rounded corner between two line segments
 g.moveTo(150, 20)
-  .arcTo(200, 20, 200, 80, 20)
-  .lineTo(200, 80)
-  .stroke({ width: 2 });
+ .arcTo(200, 20, 200, 80, 20)
+ .lineTo(200, 80)
+ .stroke({ width: 2 });
 
 // arcToSvg(rx, ry, xAxisRotation, largeArcFlag, sweepFlag, x, y) — matches the SVG `A` command
 g.moveTo(250, 50).arcToSvg(40, 20, 0, 1, 0, 330, 50).stroke({ width: 2 });
@@ -194,25 +194,25 @@ g.moveTo(250, 50).arcToSvg(40, 20, 0, 1, 0, 330, 50).stroke({ width: 2 });
 ```ts
 // Linear gradient
 const linear = new FillGradient({
-  end: { x: 1, y: 0 },
-  colorStops: [
-    { offset: 0, color: 0xff0000 },
-    { offset: 1, color: 0x0000ff },
-  ],
+ end: { x: 1, y: 0 },
+ colorStops: [
+ { offset: 0, color: 0xff0000 },
+ { offset: 1, color: 0x0000ff },
+ ],
 });
 g.rect(0, 0, 200, 100).fill(linear);
 
 // Radial gradient — inner circle at center, outer circle reaches edges
 const radial = new FillGradient({
-  type: "radial",
-  center: { x: 100, y: 100 },
-  innerRadius: 0,
-  outerCenter: { x: 100, y: 100 },
-  outerRadius: 100,
-  colorStops: [
-    { offset: 0, color: 0xffffff },
-    { offset: 1, color: 0x000000 },
-  ],
+ type: "radial",
+ center: { x: 100, y: 100 },
+ innerRadius: 0,
+ outerCenter: { x: 100, y: 100 },
+ outerRadius: 100,
+ colorStops: [
+ { offset: 0, color: 0xffffff },
+ { offset: 1, color: 0x000000 },
+ ],
 });
 g.circle(100, 100, 100).fill(radial);
 
@@ -220,9 +220,9 @@ const brick = await Assets.load("brick.png");
 
 // Options-object form (preferred)
 const pattern = new FillPattern({
-  texture: brick,
-  repetition: "repeat", // 'repeat' | 'repeat-x' | 'repeat-y' | 'no-repeat'
-  textureSpace: "global", // 'global' (default) | 'local'
+ texture: brick,
+ repetition: "repeat", // 'repeat' | 'repeat-x' | 'repeat-y' | 'no-repeat'
+ textureSpace: "global", // 'global' (default) | 'local'
 });
 
 // Legacy positional form is still supported
@@ -274,7 +274,7 @@ Parse SVG markup into the active context with `svg()`:
 
 ```ts
 g.svg(`<svg viewBox="0 0 100 100">
-    <circle cx="50" cy="50" r="40" fill="red"/>
+ <circle cx="50" cy="50" r="40" fill="red"/>
 </svg>`);
 ```
 
@@ -286,10 +286,10 @@ Serialize a `Graphics` or `GraphicsContext` back to a self-contained SVG documen
 import { Graphics, graphicsContextToSvg } from "pixi.js";
 
 const g = new Graphics()
-  .rect(0, 0, 100, 50)
-  .fill({ color: 0xff0000 })
-  .circle(150, 25, 25)
-  .stroke({ color: 0x0000ff, width: 4 });
+ .rect(0, 0, 100, 50)
+ .fill({ color: 0xff0000 })
+ .circle(150, 25, 25)
+ .stroke({ color: 0x0000ff, width: 4 });
 
 const svgString = graphicsContextToSvg(g, 2);
 ```
@@ -300,14 +300,14 @@ const svgString = graphicsContextToSvg(g, 2);
 
 ```ts
 const arrow = new GraphicsPath()
-  .moveTo(0, 0)
-  .lineTo(40, 0)
-  .lineTo(40, -10)
-  .lineTo(60, 10)
-  .lineTo(40, 30)
-  .lineTo(40, 20)
-  .lineTo(0, 20)
-  .closePath();
+ .moveTo(0, 0)
+ .lineTo(40, 0)
+ .lineTo(40, -10)
+ .lineTo(60, 10)
+ .lineTo(40, 30)
+ .lineTo(40, 20)
+ .lineTo(0, 20)
+ .closePath();
 
 g.path(arrow).fill(0x3498db);
 g.translateTransform(80, 0).path(arrow).fill(0xe74c3c);
@@ -319,22 +319,22 @@ g.translateTransform(80, 0).path(arrow).fill(0xe74c3c);
 
 `Graphics` has its own transform stack used **while drawing** that is separate from the `Container` transform applied to the rendered output. The drawing methods are renamed to avoid clashing with `Container.rotation`, `Container.scale`, `Container.position`:
 
-| Drawing transform                                         | Container transform       |
+| Drawing transform | Container transform |
 | --------------------------------------------------------- | ------------------------- |
-| `g.rotateTransform(angle)`                                | `g.rotation`              |
-| `g.scaleTransform(x, y?)`                                 | `g.scale.set(x, y)`       |
-| `g.translateTransform(x, y?)`                             | `g.position.set(x, y)`    |
+| `g.rotateTransform(angle)` | `g.rotation` |
+| `g.scaleTransform(x, y?)` | `g.scale.set(x, y)` |
+| `g.translateTransform(x, y?)` | `g.position.set(x, y)` |
 | `g.setTransform(matrix)` or `setTransform(a,b,c,d,tx,ty)` | `g.setFromMatrix(matrix)` |
-| `g.transform(matrix)` or `transform(a,b,c,d,tx,ty)`       | n/a                       |
-| `g.getTransform()` / `g.resetTransform()`                 | n/a                       |
+| `g.transform(matrix)` or `transform(a,b,c,d,tx,ty)` | n/a |
+| `g.getTransform()` / `g.resetTransform()` | n/a |
 
 ```ts
 const g = new Graphics();
 
 g.translateTransform(100, 100)
-  .rotateTransform(Math.PI / 4)
-  .rect(-25, -25, 50, 50)
-  .fill(0x3498db);
+ .rotateTransform(Math.PI / 4)
+ .rect(-25, -25, 50, 50)
+ .fill(0x3498db);
 
 // The square is rotated 45 degrees as it is added to the geometry.
 // Setting g.rotation later rotates the entire Graphics on screen.
@@ -358,8 +358,8 @@ g.restore();
 
 ```ts
 g.setFillStyle({ color: 0x3498db, alpha: 0.8 }).setStrokeStyle({
-  width: 2,
-  color: 0x2c3e50,
+ width: 2,
+ color: 0x2c3e50,
 });
 
 g.rect(0, 0, 100, 100).fill().stroke();
@@ -374,9 +374,9 @@ g.circle(150, 50, 40).fill().stroke();
 const g = new Graphics().star(100, 100, 5, 60, 30).fill(0xf39c12);
 g.eventMode = "static";
 g.on("pointermove", (e) => {
-  if (g.containsPoint(g.toLocal(e.global))) {
-    /* over the star, not just its bbox */
-  }
+ if (g.containsPoint(g.toLocal(e.global))) {
+ /* over the star, not just its bbox */
+ }
 });
 ```
 
@@ -402,20 +402,20 @@ g.clear(); // wipes active path, instructions, and transform; fill/stroke styles
 
 ### GraphicsContext utilities
 
-| Member                                          | Behavior                                                                                             |
+| Member | Behavior |
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `ctx.path(graphicsPath)`                        | Apply a prebuilt `GraphicsPath` onto the active path. Reuse one path across many contexts or frames. |
-| `ctx.beginPath()`                               | Discard the current active path and start a new one without affecting committed instructions.        |
-| `ctx.setFillStyle(style)` / `ctx.fillStyle`     | Set or read the default fill style used by subsequent shapes without calling `fill()`.               |
-| `ctx.setStrokeStyle(style)` / `ctx.strokeStyle` | Set or read the default stroke style used by subsequent shapes without calling `stroke()`.           |
-| `ctx.bounds`                                    | Cached geometry bounds across all fill/stroke/texture instructions.                                  |
-| `ctx.clear()`                                   | Wipe instructions, the active path, and the drawing transform.                                       |
-| `ctx.clone()`                                   | Deep copy including instructions, active path, transform, styles, and stack.                         |
-| `ctx.containsPoint(point)`                      | Topology-aware hit test against all filled and stroked shapes (including holes).                     |
-| `ctx.batchMode`                                 | One of `'auto'`, `'batch'`, `'no-batch'` — force or disable batching for the shapes in this context. |
-| `ctx.customShader`                              | Assign a `Shader` to override the default graphics shader.                                           |
-| `GraphicsContext.defaultFillStyle`              | Static fallback used when `fill()` is called without arguments and no fill style is set.             |
-| `GraphicsContext.defaultStrokeStyle`            | Static fallback used when `stroke()` is called without arguments and no stroke style is set.         |
+| `ctx.path(graphicsPath)` | Apply a prebuilt `GraphicsPath` onto the active path. Reuse one path across many contexts or frames. |
+| `ctx.beginPath()` | Discard the current active path and start a new one without affecting committed instructions. |
+| `ctx.setFillStyle(style)` / `ctx.fillStyle` | Set or read the default fill style used by subsequent shapes without calling `fill()`. |
+| `ctx.setStrokeStyle(style)` / `ctx.strokeStyle` | Set or read the default stroke style used by subsequent shapes without calling `stroke()`. |
+| `ctx.bounds` | Cached geometry bounds across all fill/stroke/texture instructions. |
+| `ctx.clear()` | Wipe instructions, the active path, and the drawing transform. |
+| `ctx.clone()` | Deep copy including instructions, active path, transform, styles, and stack. |
+| `ctx.containsPoint(point)` | Topology-aware hit test against all filled and stroked shapes (including holes). |
+| `ctx.batchMode` | One of `'auto'`, `'batch'`, `'no-batch'` — force or disable batching for the shapes in this context. |
+| `ctx.customShader` | Assign a `Shader` to override the default graphics shader. |
+| `GraphicsContext.defaultFillStyle` | Static fallback used when `fill()` is called without arguments and no fill style is set. |
+| `GraphicsContext.defaultStrokeStyle` | Static fallback used when `stroke()` is called without arguments and no stroke style is set. |
 
 `GraphicsContext` is an `EventEmitter` that emits `update`, `destroy`, and `unload` events. Subscribe via `ctx.on('update' | 'destroy' | 'unload', cb)` when tooling or pools need to react to context lifecycle changes.
 
@@ -479,11 +479,11 @@ Wrong:
 
 ```ts
 g.beginFill(0x00ff00)
-  .drawRect(0, 0, 100, 100)
-  .beginHole()
-  .drawCircle(50, 50, 20)
-  .endHole()
-  .endFill();
+ .drawRect(0, 0, 100, 100)
+ .beginHole()
+ .drawCircle(50, 50, 20)
+ .endHole()
+ .endFill();
 ```
 
 Correct:

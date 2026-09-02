@@ -25,8 +25,6 @@ interface EnginePackage {
   files: Array<{ from: string; to: string }>;
   /** Directories copied recursively, as [bot-relative source, package-relative target]. */
   dirs: Array<{ from: string; to: string }>;
-  /** Existence probe beyond the manifest — reseeds if the payload went missing. */
-  probe: string;
   /** Package-relative path of the TypeScript declaration entry. */
   typesEntry: string;
 }
@@ -58,49 +56,49 @@ const THREE_PACKAGE: EnginePackage = {
     { from: "@types/three/index.d.ts", to: "index.d.ts" },
   ],
   dirs: [{ from: "@types/three/src", to: "src" }],
-  probe: "build/three.core.min.js",
   typesEntry: "three/index.d.ts",
 };
 
-const PIXI_PACKAGE: EnginePackage = {
-  name: "pixi.js",
-  version: "8.20.1",
+const PHASER_PACKAGE: EnginePackage = {
+  name: "phaser",
+  version: "4.2.1",
   manifest: JSON.stringify({
-    name: "pixi.js",
-    version: "8.20.1",
-    description: "PixiJS browser ESM build (harness-seeded, curated manifest)",
+    name: "phaser",
+    version: "4.2.1",
+    description: "Phaser 4 browser ESM build (harness-seeded, curated manifest)",
     type: "module",
     license: "MIT",
-    main: "./dist/pixi.min.mjs",
-    types: "./dist/pixi.js.d.ts",
+    main: "./dist/phaser.esm.min.js",
+    types: "./types/phaser.d.ts",
     exports: {
       ".": {
-        types: "./dist/pixi.js.d.ts",
-        import: "./dist/pixi.min.mjs",
+        types: "./types/phaser.d.ts",
+        import: "./dist/phaser.esm.min.js",
+        default: "./dist/phaser.esm.min.js",
       },
     },
   }, null, 2) + "\n",
   files: [
-    { from: "pixi.js/dist/pixi.min.mjs", to: "dist/pixi.min.mjs" },
-    { from: "pixi.js/dist/pixi.js.d.ts", to: "dist/pixi.js.d.ts" },
-    { from: "pixi.js/LICENSE", to: "LICENSE" },
+    { from: "phaser/dist/phaser.esm.min.js", to: "dist/phaser.esm.min.js" },
+    { from: "phaser/types/phaser.d.ts", to: "types/phaser.d.ts" },
+    { from: "phaser/types/matter.d.ts", to: "types/matter.d.ts" },
+    { from: "phaser/LICENSE.md", to: "LICENSE.md" },
   ],
   dirs: [],
-  probe: "dist/pixi.js.d.ts",
-  typesEntry: "pixi.js/dist/pixi.js.d.ts",
+  typesEntry: "phaser/types/phaser.d.ts",
 };
 
 /** The engine packages a project kind depends on; sites get none. */
 export function enginePackages(kind: ProjectKind): EnginePackage[] {
   if (kind === "game-3d") return [THREE_PACKAGE];
-  if (kind === "game-2d") return [PIXI_PACKAGE];
+  if (kind === "game-2d") return [PHASER_PACKAGE];
   return [];
 }
 
 /** Bare import name → bundled declaration for every engine the harness can
  * seed, kind-independent; callers probe for the packages they care about. */
 export function engineTypeEntries(workspacePath: string): Array<{ importName: string; declaration: string }> {
-  return [THREE_PACKAGE, PIXI_PACKAGE].map((engine) => ({
+  return [THREE_PACKAGE, PHASER_PACKAGE].map((engine) => ({
     importName: engine.name,
     declaration: safeChild(workspacePath, "node_modules", ...engine.typesEntry.split("/")),
   }));
@@ -113,19 +111,36 @@ export function engineTypeEntries(workspacePath: string): Array<{ importName: st
  * compiled bundle. Runs on project creation (before the agent session starts)
  * and is re-checked before every mutation and after every agent turn. The
  * agent cannot edit outside `site/` at all, so drift is only deletion or
- * corruption; a content-compared manifest plus a payload probe catches both
- * and triggers a clean reseed. Returns true when anything had to be written.
+ * corruption; a content-compared manifest plus existence checks on EVERY
+ * seeded payload file (runtime and declarations alike) catches both and
+ * triggers a clean reseed. Returns true when anything had to be written.
  */
 export async function ensureEnginePackages(workspacePath: string, kind: ProjectKind): Promise<boolean> {
   const packages = enginePackages(kind);
   if (!packages.length) return false;
 
   let changed = false;
+  // v2.x workspaces may still carry the old harness-owned Pixi package. Remove
+  // it during the same freshness pass so the agent cannot silently keep using
+  // a renderer the current 2D rules no longer support.
+  if (kind === "game-2d") {
+    const legacyPixi = safeChild(workspacePath, "node_modules", "pixi.js");
+    if (await fs.access(legacyPixi).then(() => true, () => false)) {
+      await fs.rm(legacyPixi, { recursive: true, force: true });
+      changed = true;
+    }
+  }
   for (const engine of packages) {
     const packageDir = safeChild(workspacePath, "node_modules", engine.name);
     const manifestFile = path.join(packageDir, "package.json");
+    // Every seeded file must exist — a runtime build missing while its types
+    // remain would otherwise look healthy. (Contents are covered by the
+    // content-compared manifest plus the reseeding of the whole tree.)
     const fresh = await fs.readFile(manifestFile, "utf8").catch(() => undefined) === engine.manifest
-      && await fs.access(path.join(packageDir, ...engine.probe.split("/"))).then(() => true, () => false);
+      && await Promise.all(
+        engine.files.map((file) =>
+          fs.access(path.join(packageDir, ...file.to.split("/"))).then(() => true, () => false)),
+      ).then((checks) => checks.every(Boolean));
     if (fresh) continue;
 
     await fs.rm(packageDir, { recursive: true, force: true });
@@ -145,13 +160,19 @@ export async function ensureEnginePackages(workspacePath: string, kind: ProjectK
 
   // The packages are build inputs, not project content: keep them out of git
   // (the manifest, sources, and compiled output stay the committed record).
-  changed = (await writeIfChanged(path.join(workspacePath, ".gitignore"), "node_modules/\n")) || changed;
+  // Ensure the ignore line exists without clobbering anything else the
+  // workspace (or the agent's tooling) put in the file.
+  changed = (await ensureGitignoreLine(workspacePath, "node_modules/")) || changed;
   return changed;
 }
 
-async function writeIfChanged(file: string, content: string): Promise<boolean> {
-  const current = await fs.readFile(file, "utf8").catch(() => undefined);
-  if (current === content) return false;
-  await fs.writeFile(file, content, "utf8");
+/** Add `line` to the workspace .gitignore when missing; never rewrite the file. */
+async function ensureGitignoreLine(workspacePath: string, line: string): Promise<boolean> {
+  const file = path.join(workspacePath, ".gitignore");
+  const current = await fs.readFile(file, "utf8").catch(() => "");
+  const lines = current.split(/\r?\n/);
+  if (lines.some((entry) => entry.trim() === line)) return false;
+  const next = current === "" ? `${line}\n` : `${current.endsWith("\n") ? current : `${current}\n`}${line}\n`;
+  await fs.writeFile(file, next, "utf8");
   return true;
 }

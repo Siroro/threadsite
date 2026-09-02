@@ -4,13 +4,15 @@ ThreadSite is a small Discord harness for an AI coding agent. One Discord thread
 
 - `/site start prompt:"..."` in a text channel creates a Discord thread, a workspace, an agent session, a public Forgejo repository, the first git commit, and a live static site.
 - `/makegam dimension:<2d|3d> prompt:"..."` does the same for a **static browser game** and writes a mode-specific `AGENTS.md` before the agent session starts.
-- Every game is built **multiplayer-first**: the harness provides one shared multi-tenant WebSocket relay, a documented wire protocol (ThreadSite Multiplayer Protocol v1), and a vendored browser client, so games get rooms, live sync, and host migration with zero server code and zero per-game instances (see below).
+- Every game is built **multiplayer-first**: the harness provides one shared multi-tenant WebSocket relay, a documented wire protocol (ThreadSite Multiplayer Protocol v3), and a vendored browser client, so games get rooms, live sync, and host migration with zero server code and zero per-game instances (see below).
 - Every normal message in that registered thread becomes the next mutation of the same site.
-- The harness validates the result, commits and **pushes git first**, and only then publishes it to Apache. A failed push does not replace the previously published site.
+- The harness validates the result, commits and **pushes git first**, and only then publishes it to Apache. A failed push does not replace the previously published site. Each publish also stamps a content-derived deploy id into the site and pages reload themselves when a newer deploy goes live.
 - `/site-admin model` changes the model globally for the next turn in every thread.
 - `/site-admin token` stores/replaces a provider API token in the agent platform's own persistent auth storage. The bot does not write the LLM token to its state file.
 - `/site info` shows the live URL, source repository, model, and last error.
 - `/site republish` republishes the current static tree without spending model tokens.
+- `/site sync` pulls commits that were pushed to the repository from outside the bot (e.g. with a repo push key) into the workspace, rebases any local-only commits on top, rebuilds, and republishes from the result. It is the manual recovery path when a push from Discord was rejected because the remote had moved ahead.
+- `/site pushkey` issues repo-scoped git push credentials for this thread's repository; pushes made with them are detected by a poller and offered to the thread with Publish/Dismiss buttons, and a rejected bot push rebases on top of them automatically on the next commit.
 - `/site compact` asks the agent to compact this thread's session context immediately (see below).
 - `/site revert` undoes the last accepted turn: it reverts the agent conversation, resets git to the previous commit, force-pushes the repository, and republishes the previous site.
 - The publish root also gets an automatically generated `index.html` listing all ready sites and their source repos.
@@ -49,7 +51,7 @@ This harness intentionally does **not** let the model run `npm install`, shell c
 
 Projects are authored in **TypeScript under `site/src/`**. The model never runs a build; the *harness* runs the only one, as the final step of deployment: when the agent's turn ends, the bot bundles every top-level `site/src/*.ts` entry into plain browser JavaScript under `site/js/` with **esbuild** (TypeScript compiled, the import graph followed, modules merged and tree-shaken, code-split chunks under `js/chunks/`). Sources and compiled output are committed together, and the published artifact is still an ordinary static tree served verbatim by Apache — no runtime build, no deferred work. Bundler failures (unresolved imports, misspelled exports, syntax damage) surface as code-framed `file:line:col` errors and feed the same one-shot automatic repair round-trip as validation errors.
 
-Game repos get their **engine installed the way a dependency manager would**: three.js (r185) for 3D games and PixiJS 8 for 2D games live in a harness-managed `node_modules/` at the workspace root (gitignored, never published, re-seeded on drift). Authored code imports the bare package names (`import * as THREE from "three"`, `import * as PIXI from "pixi.js"`) and esbuild resolves them by walking up from `site/src/` exactly like normal npm usage, tree-shaking them so a small game ships a small bundle. Both engines ship their **real TypeScript declarations**, so the agent's editor and the validation gate check engine usage against the actual APIs — wrong argument types and misspelled members fail the turn. Each game repo also carries a per-kind **engine playbook as an OpenCode skill** — `.opencode/skills/game-2d` for PixiJS, `game-3d` for three.js — seeded, re-checked, and committed on the same schedule as the engine package, so the agent loads the deep engine how-to (bootstrap patterns, lighting and batching budgets, disposal, asset pipelines) on demand while AGENTS.md stays the compact rulebook; site projects get no skill.
+Game repos get their **engine installed the way a dependency manager would**: three.js (r185) for 3D games and Phaser 4.2.1 for 2D games live in a harness-managed `node_modules/` at the workspace root (gitignored, never published, re-seeded on drift). Authored code imports the bare package names (`import * as THREE from "three"`, `import * as Phaser from "phaser"`) and esbuild resolves them by walking up from `site/src/` exactly like normal npm usage. Three.js remains tree-shakeable; Phaser is seeded from its official minified ESM distribution so its framework baseline stays well inside the static-site budget. Both engines ship their **real TypeScript declarations**, so the agent's editor and the validation gate check engine usage against the actual APIs — wrong argument types and misspelled members fail the turn. Each game repo also carries a per-kind **engine playbook as an OpenCode skill** — `.opencode/skills/game-2d` + `phaser-4` for Phaser, `game-3d` for three.js — seeded, re-checked, and committed on the same schedule as the engine package, so the agent loads the deep engine how-to (bootstrap patterns, lighting and batching budgets, disposal, asset pipelines) on demand while AGENTS.md stays the compact rulebook; site projects get no skill.
 
 The one deliberate runtime exception is the **harness-owned multiplayer relay**: the model never writes server code, it only uses the vendored browser client (`site/net/threadsite-net.js`) pointed at the shared relay whose URL and game id the harness injects. The relay is part of the infrastructure, not part of any generated deliverable, and games must stay fully playable solo when it is unreachable.
 
@@ -253,6 +255,19 @@ When `/site start` or `/makegam` creates a new thread and no explicit `name` opt
 - `/site compact` requests on-demand compaction for the thread's session using the model the session last used (or the globally configured model). Useful after very long threads even with automatic compaction. The published site is untouched.
 - `/site revert` undoes the prior turn end-to-end: the agent conversation is reverted to before the last request (the model will not remember the undone turn), the workspace is reset to the previous commit, the commit is force-pushed away from the public Forgejo repository, and the previously published site is restored. If the last turn had failed before publishing, only its conversation is removed and git is left alone. Reverting below the initial creation commit is refused.
 
+### Repo push keys (`/site pushkey`)
+
+Forgejo has no per-repository HTTP tokens, so a ThreadSite push key is a dedicated **restricted Forgejo account** (username `push-xxxxxx`, random password) with Write permission on exactly one project repository. Restricted accounts can see nothing else on the instance, so handing out a key is scoped to that repo's git history only.
+
+- `/site pushkey` in a project thread issues (or re-shows) that thread's key as a clone URL plus username/password. `/site pushkey rotate: true` replaces it — the old account is deleted, which revokes the old credentials immediately.
+- Push-key holders push to `main` like any collaborator. **A push does not go live by itself**: the bot polls each repo's `main` tip (`EXTERNAL_PUSH_POLL_MS`, default 60 s, `0` disables), and posts an **External push detected** message in the thread with **Publish** / **Dismiss** buttons.
+  - **Publish** syncs the workspace to the pushed commit, rebuilds, validates, and publishes through the normal pipeline. If validation fails, the live site keeps the previous version, the workspace rolls back to the last published commit, and the thread sees the validation errors (the commit stays in the repo).
+  - **Dismiss** adopts the commit into the workspace and git history only; the live site is unchanged and the next thread message builds on the pushed code.
+- The bot's own pushes rebase on top of any external commits first, so an accepted external push never breaks the next Discord turn.
+- `/site sync` is the manual counterpart: it pulls whatever is on `main` into the workspace (rebasing a rejected local commit on top), pushes, rebuilds, and republishes — the recovery path when a bot push was rejected with non-fast-forward, when the external push predates the poller's marker, or when the Publish button message is gone. It refuses while an agent turn is live and while the workspace still holds uncommitted edits from a failed turn.
+- Keys require `secrets/forgejo-admin-token` (created by `./scripts/bootstrap-forgejo.sh` alongside the service token); the admin token is used solely to create/delete the restricted push accounts. Credentials are stored in the bot's private state file and are visible to anyone who can read the thread, which is the intended audience.
+- Deleting the project (thread deletion) deletes the repo; the push account itself can be removed by rotating or deleting it in the Forgejo admin UI.
+
 Each accepted message does this:
 
 ```text
@@ -276,7 +291,7 @@ The git commit is deliberately performed by the harness rather than by the model
 
 Both profiles are deliberately **static-web only** and go through the same validation, git-push-first, and Apache publication boundary as normal sites. Both are also built **multiplayer-first** through the shared relay (see the next section): the agent gets the vendored net client, this game's tenant config, and the full sync guide in its `AGENTS.md`.
 
-- **2D**: builds on the installed PixiJS 8 engine package by default for action/arcade/sprite-heavy games, with Canvas 2D or DOM/SVG also allowed for board/puzzle/UI-heavy games. Its `AGENTS.md` asks for responsive controls, game states, scoring/progression, collision discipline, frame-rate-independent animation, and lightweight game feel.
+- **2D**: builds on the installed Phaser 4.2.1 engine package by default for action/arcade/sprite-heavy games, using its Scenes/input/cameras/Arcade Physics before hand-rolling engine infrastructure, with Canvas 2D or DOM/SVG also allowed for board/puzzle/UI-heavy games. Its `AGENTS.md` asks for responsive controls, game states, scoring/progression, collision discipline, frame-rate-independent animation, and lightweight game feel.
 - **3D**: requires a genuine 3D play space using WebGL, built on the installed three.js engine package. It forbids npm/Vite/webpack/build pipelines of the agent's own, asks for conservative geometry/effects, camera and input guidance, and a visible fallback when WebGL cannot initialize.
 
 The generated `AGENTS.md` is committed to the public project repository but is outside `site/`, so the agent can read it but cannot edit it under the supplied permissions. The agent platform discovers project-root `AGENTS.md` files as persistent project instructions.
@@ -295,8 +310,8 @@ A single relay therefore serves any number of games and any number of rooms per 
 On creation — and re-checked before every mutation, in case the agent removed them:
 
 - `site/net/threadsite-net.js` + `threadsite-net.d.ts` — a vendored, zero-dependency browser client for the protocol (connect/reconnect, room join, peer roster, host flag, snapshots, events, RTT), shipped with full TypeScript declarations so authored game code is type-checked against the real client API. `net-config.js` (+ its own declarations) carries this game's tenant identity.
-- the engine package in the harness-managed workspace `node_modules/` — three.js (r185) for 3D projects, PixiJS 8 for 2D projects — imported by its bare package name, type-checked against its real declarations, and tree-shaken into the published bundle.
-- the `AGENTS.md` multiplayer section — the full protocol reference, the recommended **peer-owned-state** sync model (every player simulates their own entity locally and broadcasts it at 10–20 Hz, so controls never route through a host; interactions are events the target applies to itself; shared-world entities get a single owner), the host-authoritative alternative for shared-physics games, host-migration notes, untrusted-input validation rules, and the required lobby/room-code/offline-fallback UX. Agents are told to design **multiplayer-first**, treating solo play as the same game with one player.
+- the engine package in the harness-managed workspace `node_modules/` — three.js (r185) for 3D projects, Phaser 4.2.1 for 2D projects — imported by its bare package name and type-checked against its real declarations; the harness seeds Phaser's official compact ESM build into the published bundle.
+- the `AGENTS.md` multiplayer section — the full protocol reference, the authority-selection rules (host-authoritative shared world by default for real-time action games with shared enemies/damage/pickups while player controls stay locally responsive; peer-owned state only when players are genuinely independent), stable live peer identity vs reconnect cid, relay-time interpolation, background-tab host handoff, host-migration notes, untrusted-input validation rules, and the required lobby/room-code/offline-fallback UX. Agents are told to design **multiplayer-first**, treating solo play as the same game with one player.
 
 The first-turn prompt and the `sitebuilder` agent configuration both reinforce this: use the provided client, never write server code, and never invent other runtime network endpoints.
 
@@ -397,7 +412,7 @@ A minimal separate-origin vhost is included at `apache/threadsite-vhost.conf.exa
 
 `AllowOverride None` is recommended even though ThreadSite rejects dotfiles. Do not enable PHP/CGI handlers in this vhost.
 
-Add cache headers so republished sites reach returning visitors immediately (full copy with comments in the example file): HTML always revalidates, assets carrying the `?v=<hash>` ThreadSite appends on publish cache immutably, and any asset requested without a version revalidates instead of pinning an old copy for the cache lifetime.
+Add cache headers so republished sites reach returning visitors immediately (full copy with comments in the example file): HTML always revalidates, assets carrying the `?v=<hash>` ThreadSite appends on publish cache immutably, and any asset requested without a version revalidates instead of pinning an old copy for the cache lifetime. Every publish also stamps a `threadsite-version.json` deploy marker into the site root and appends a tiny update-checker to every published page: the checker re-fetches the marker every 30 seconds (and whenever the tab regains focus), and when the live deploy id differs from the one the page was served with, the page reloads itself — hidden tabs immediately, visible tabs behind a one-second "New version available — updating…" notice. Visitors therefore land on the newest build without manually refreshing, and republishing an unchanged site produces the same id, so nobody is reloaded for nothing.
 
 ```apache
 <FilesMatch "\.(?:css|js|mjs)$">
@@ -406,6 +421,9 @@ Add cache headers so republished sites reach returning visitors immediately (ful
 </FilesMatch>
 <FilesMatch "\.html?$">
     Header set Cache-Control "no-cache"
+</FilesMatch>
+<FilesMatch "^threadsite-version\.json$">
+    Header set Cache-Control "no-store"
 </FilesMatch>
 ```
 

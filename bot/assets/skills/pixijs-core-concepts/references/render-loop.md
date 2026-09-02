@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Render Loop
 
 Every PixiJS frame runs a fixed sequence of ticker callbacks in priority order, with `app.render()` registered at `UPDATE_PRIORITY.LOW` — scene graph update and GPU draw happen _inside_ that one callback. The `Application`'s `TickerPlugin` drives this loop automatically. Understanding the priority order and when to render yourself is key for integrating game logic, physics, and custom frame pacing.
@@ -8,20 +10,20 @@ Each frame, the `Ticker` measures elapsed time, clamps it with `minFPS`/`maxFPS`
 
 ```
 requestAnimationFrame
-        │
-    [Ticker._tick()]
-        │
-    ├─ Compute elapsed time (minFPS/maxFPS clamp)
-    └─ Call listeners in priority order
-        ├─ INTERACTION / HIGH / NORMAL listeners
-        ├─ LOW: app.render()
-        │   ├─ Traverse display list
-        │   ├─ Update world transforms
-        │   │   └─ object.onRender() (per-object during traversal)
-        │   ├─ Cull display objects (if enabled)
-        │   ├─ Upload data to GPU
-        │   └─ Draw
-        └─ UTILITY listeners (post-render)
+ │
+ [Ticker._tick()]
+ │
+ ├─ Compute elapsed time (minFPS/maxFPS clamp)
+ └─ Call listeners in priority order
+ ├─ INTERACTION / HIGH / NORMAL listeners
+ ├─ LOW: app.render()
+ │ ├─ Traverse display list
+ │ ├─ Update world transforms
+ │ │ └─ object.onRender() (per-object during traversal)
+ │ ├─ Cull display objects (if enabled)
+ │ ├─ Upload data to GPU
+ │ └─ Draw
+ └─ UTILITY listeners (post-render)
 ```
 
 Rendering is **retained mode**: objects persist across frames unless you explicitly remove them.
@@ -30,15 +32,15 @@ Rendering is **retained mode**: objects persist across frames unless you explici
 
 ```ts
 app.ticker.add((ticker) => {
-  sprite.rotation += 0.01 * ticker.deltaTime;
+ sprite.rotation += 0.01 * ticker.deltaTime;
 });
 
 app.ticker.add(
-  (ticker) => {
-    updatePhysics(ticker.deltaMS);
-  },
-  undefined,
-  UPDATE_PRIORITY.HIGH,
+ (ticker) => {
+ updatePhysics(ticker.deltaMS);
+ },
+ undefined,
+ UPDATE_PRIORITY.HIGH,
 );
 ```
 
@@ -51,36 +53,36 @@ Callbacks receive a `Ticker` instance. Use `ticker.deltaTime` (dimensionless, ~1
 The ticker runs registered callbacks in descending priority. The `TickerPlugin` registers `app.render()` at `UPDATE_PRIORITY.LOW`, so callbacks at `NORMAL`, `HIGH`, or `INTERACTION` run before the render.
 
 ```
-UPDATE_PRIORITY.INTERACTION = 50   // pointer events
-UPDATE_PRIORITY.HIGH        = 25   // physics, input sampling
-UPDATE_PRIORITY.NORMAL      =  0   // gameplay (default)
-UPDATE_PRIORITY.LOW         = -25  // app.render() registered here
-UPDATE_PRIORITY.UTILITY     = -50  // post-render cleanup
+UPDATE_PRIORITY.INTERACTION = 50 // pointer events
+UPDATE_PRIORITY.HIGH = 25 // physics, input sampling
+UPDATE_PRIORITY.NORMAL = 0 // gameplay (default)
+UPDATE_PRIORITY.LOW = -25 // app.render() registered here
+UPDATE_PRIORITY.UTILITY = -50 // post-render cleanup
 ```
 
 ```ts
 import { UPDATE_PRIORITY } from "pixi.js";
 
 app.ticker.add(
-  (ticker) => {
-    handleInput(ticker.deltaMS);
-  },
-  undefined,
-  UPDATE_PRIORITY.HIGH,
+ (ticker) => {
+ handleInput(ticker.deltaMS);
+ },
+ undefined,
+ UPDATE_PRIORITY.HIGH,
 );
 
 app.ticker.add((ticker) => {
-  updateAnimations(ticker.deltaTime);
+ updateAnimations(ticker.deltaTime);
 });
 ```
 
 ### Time units
 
-| Property    | Type                          | Scaled by speed? | Capped by minFPS? |
+| Property | Type | Scaled by speed? | Capped by minFPS? |
 | ----------- | ----------------------------- | ---------------- | ----------------- |
-| `deltaTime` | dimensionless (~1.0 at 60fps) | yes              | yes               |
-| `deltaMS`   | milliseconds                  | yes              | yes               |
-| `elapsedMS` | milliseconds                  | no               | no                |
+| `deltaTime` | dimensionless (~1.0 at 60fps) | yes | yes |
+| `deltaMS` | milliseconds | yes | yes |
+| `elapsedMS` | milliseconds | no | no |
 
 Use `deltaTime` as a frame-rate multiplier for simple per-frame logic; use `deltaMS` for pixels-per-second or other time-based math; use `elapsedMS` only for profiling (raw, uncapped, unscaled).
 
@@ -90,9 +92,9 @@ Use `deltaTime` as a frame-rate multiplier for simple per-frame logic; use `delt
 await app.init({ autoStart: false, width: 800, height: 600 });
 
 function frame(time: number) {
-  updateGameState();
-  app.renderer.render(app.stage);
-  requestAnimationFrame(frame);
+ updateGameState();
+ app.renderer.render(app.stage);
+ requestAnimationFrame(frame);
 }
 
 requestAnimationFrame(frame);
@@ -114,7 +116,7 @@ Useful for a pause menu or when the user switches away from the tab. The ticker 
 ```ts
 const sprite = new Sprite(texture);
 sprite.onRender = () => {
-  sprite.rotation += 0.01;
+ sprite.rotation += 0.01;
 };
 
 app.stage.addChild(sprite);
@@ -139,7 +141,7 @@ Wrong:
 
 ```ts
 app.ticker.add((dt) => {
-  sprite.rotation += dt; // dt is the Ticker instance, not a number
+ sprite.rotation += dt; // dt is the Ticker instance, not a number
 });
 ```
 
@@ -147,7 +149,7 @@ Correct:
 
 ```ts
 app.ticker.add((ticker) => {
-  sprite.rotation += ticker.deltaTime;
+ sprite.rotation += ticker.deltaTime;
 });
 ```
 
@@ -160,10 +162,10 @@ Wrong:
 
 ```ts
 class MySprite extends Sprite {
-  updateTransform() {
-    super.updateTransform();
-    this.rotation += 0.01;
-  }
+ updateTransform() {
+ super.updateTransform();
+ this.rotation += 0.01;
+ }
 }
 ```
 
@@ -171,12 +173,12 @@ Correct:
 
 ```ts
 class MySprite extends Sprite {
-  constructor() {
-    super();
-    this.onRender = () => {
-      this.rotation += 0.01;
-    };
-  }
+ constructor() {
+ super();
+ this.onRender = () => {
+ this.rotation += 0.01;
+ };
+ }
 }
 ```
 
@@ -189,7 +191,7 @@ Wrong:
 
 ```ts
 app.ticker.add(() => {
-  readPixelsFromCanvas(); // empty; render hasn't happened yet this frame
+ readPixelsFromCanvas(); // empty; render hasn't happened yet this frame
 });
 ```
 
@@ -197,11 +199,11 @@ Correct:
 
 ```ts
 app.ticker.add(
-  () => {
-    readPixelsFromCanvas();
-  },
-  undefined,
-  UPDATE_PRIORITY.UTILITY,
+ () => {
+ readPixelsFromCanvas();
+ },
+ undefined,
+ UPDATE_PRIORITY.UTILITY,
 );
 ```
 

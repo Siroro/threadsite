@@ -28,43 +28,40 @@
 //
 // ## Sync guarantees built into this client (v3)
 //
-// - **Stable identity.** Every connection carries a persistent client id
-//   (`cid`, kept in localStorage) that survives reconnects, so peers can keep
-//   your avatar, score, and history attached to YOU across drops. Key game
-//   state by `cid` (available as `net.cid`, on peers, and on every callback
-//   payload) — never by the per-connection peer id.
+// - **Two-level identity.** Every live connection has a unique peer id used
+//   for routing and active avatars. `cid` is tab-session continuity metadata
+//   (kept in sessionStorage) so reconnects/reloads in the same tab can reattach
+//   persistent player data without collapsing simultaneous tabs.
 // - **Throttled player-state publishing.** `publishPlayerState()` coalesces to
 //   `pstateHz` (default 15 Hz, newest state wins) so the game loop can call it
 //   every render frame without flooding the relay's rate limiter. Call
-//   `net.flushPlayerState()` to push important changes immediately.
-// - **Sequenced events with gap recovery.** Every `send()`/`sendTo()` event is
-//   stamped with a monotonic `seq`. The library keeps a recent-send buffer,
-//   detects sequence gaps in what it receives, asks the sender to re-transmit
-//   the missing events (`resend-req`), and answers such requests itself.
-//   Counters: `net.dropped` (gap-detected events), `net.resent` (recovered),
-//   `net.duplicates` (out-of-order re-deliveries).
-// - **Offline outbox.** Frames sent while the socket is down (up to 256) are
-//   queued and flushed on reconnect in order, so events fired during a blip
+//   `net.flushPlayerState()` to push important changes immediately. Player and
+//   world state are NEVER queued while offline: after a reconnect they would
+//   be stale snapshots rubber-banding peers and burning rate-limit budget.
+//   Only sequenced application events (send/sendTo) queue through a drop.
+// - **Sequenced events.** Every `send()`/`sendTo()` event is stamped with a
+//   monotonic `seq` (event id) the receiver can dedupe by. WebSocket delivery
+//   is ordered per connection, so no automatic gap-resend exists — if the
+//   relay rate-limits one of your events, the exact event is requeued once and
+//   re-delivered marked as a retry (`r: 1`) so handlers stay idempotent by seq.
+//   Counters: `net.dropped` (out-of-order arrivals), `net.duplicates`
+//   (re-deliveries suppressed).
+// - **Offline outbox.** Event frames sent while the socket is down (up to 256)
+//   are queued and flushed on reconnect in order, so events fired during a blip
 //   still arrive.
 // - **Frame-size guard.** Oversized frames throw `frame_too_large` locally
 //   instead of silently killing the connection at the relay.
 // - **Staleness tracking.** `net.peerLastSeen(id)` / `net.isStale(id, ms)` tell
 //   you how fresh a peer's last update is, so you can grey out or drop frozen
 //   avatars; `onPlayerState` payloads carry the relay's receive timestamp `ts`.
-// - **Server clock.** `net.serverNow()` approximates the relay's clock (from
-//   ping/pong offset) for shared timers; `net.rtt` holds the round-trip time.
+// - **Server clock.** `net.serverNow()` approximates the relay's clock: seeded
+//   immediately from the welcome frame's `serverTs` and refined on every
+//   ping/pong. `net.rtt` holds the round-trip time.
 //
-// Recommended sync model for casual games (see the project AGENTS.md guide):
-// every player owns and simulates their OWN entity, so controls never travel
-// through another player's machine. Call net.publishPlayerState({ x, y, vx, vy,
-// anim, ... }) from your game loop (it throttles internally), render other
-// players from their newest player state (interpolating between the last two
-// updates), and affect other players by sending them events ("I hit you") that
-// their own client applies. Shared-world state (ball, NPCs) can live in
-// net.publishState snapshots, or be owned by the spawning peer. The room's
-// oldest peer is the "host" — that only matters if you give it shared-world
-// ownership; losing it never affects anyone's controls (onHostChange reports
-// migrations).
+// Which sync model fits your game (player-owned entities vs host-authoritative
+// shared worlds), how to interpolate remote players, and the host's
+// responsibilities are defined in the project AGENTS.md multiplayer guide —
+// it is the authoritative source; this file only documents the transport API.
 //
 // Invite links: after hosting, build a shareable URL with net.inviteUrl() (the
 // current page URL plus "#room=CODE"). On load, pass ThreadSiteNet.roomFromUrl()
@@ -91,10 +88,10 @@ export const NET_STATUS = Object.freeze({
 
 // Keep comfortably under the relay's default 64 KiB max frame size.
 const MAX_FRAME_BYTES = 60 * 1024;
-const RECENT_EVENTS = 128; // events remembered for resend requests
-const OUTBOX_LIMIT = 256; // frames queued while offline
+const RECENT_EVENTS = 128; // events remembered for rate-limit requeue
+const RECENT_APPLIED = 256; // applied event ids remembered per peer for dedupe
+const OUTBOX_LIMIT = 256; // event frames queued while offline
 const PSTATE_HZ_DEFAULT = 15;
-const RESEND_COOLDOWN_MS = 500;
 
 export class ThreadSiteNetError extends Error {
   constructor(message, code = "error", cause) {
@@ -116,18 +113,19 @@ function normalizeUrl(url) {
   return value;
 }
 
-const CID_STORAGE_KEY = "threadsite-cid";
+const CID_STORAGE_KEY = "threadsite-session-cid";
 
 function loadCid() {
-  if (typeof localStorage === "undefined") return null;
   try {
-    const existing = localStorage.getItem(CID_STORAGE_KEY);
+    const storage = typeof sessionStorage !== "undefined" ? sessionStorage : null;
+    const existing = storage?.getItem(CID_STORAGE_KEY);
     if (existing && /^[A-Za-z0-9_-]{8,64}$/.test(existing)) return existing;
     const fresh = `c-${crypto.randomUUID().replace(/-/g, "")}`;
-    localStorage.setItem(CID_STORAGE_KEY, fresh);
+    storage?.setItem(CID_STORAGE_KEY, fresh);
     return fresh;
   } catch {
-    return null; // storage unavailable: relay mints one for us per connection
+    // Storage unavailable: still send a unique id for this page instance.
+    try { return `c-${crypto.randomUUID().replace(/-/g, "")}`; } catch { return null; }
   }
 }
 
@@ -244,19 +242,17 @@ export class ThreadSiteNet {
     this.rtt = null;
     this.serverTimeOffset = null; // relay clock minus local clock, ms
     // Sync health counters, all monotonic for this client instance.
-    this.dropped = 0; // events detected missing (gap between sequence numbers)
-    this.resent = 0; // events recovered via resend-req
-    this.duplicates = 0; // events re-delivered out of order / duplicated
+    this.dropped = 0; // events that arrived out of order (older than one seen)
+    this.duplicates = 0; // re-deliveries suppressed by seq dedupe
     this.rateLimited = 0; // frames the relay rejected for exceeding its rate
 
     this._peers = new Map();
-    this._peerStates = new Map(); // cid -> newest state (keyed by STABLE id)
+    this._peerStates = new Map(); // peerId -> newest live state; cid is reconnect metadata
     this._peerLastSeen = new Map(); // peerId -> epoch ms of newest inbound frame
-    this._lastSeqByPeer = new Map(); // peerId -> newest event seq seen (first delivery)
-    this._deliveredSeqsByPeer = new Map(); // peerId -> highest seq delivered, resends deduped
-    this._resendAt = new Map(); // peerId -> epoch ms until which resend-req is suppressed
+    this._lastSeqByPeer = new Map(); // peerId -> newest event seq seen (for stats)
+    this._appliedSeqsByPeer = new Map(); // peerId -> Set of applied event ids (dedupe)
     this._recentEvents = []; // [{seq, e, d}] ring of recently sent events
-    this._outbox = []; // frames queued while the socket is down
+    this._outbox = []; // event frames queued while the socket is down
     this._seq = 0;
     this._pendingPstate = null;
     this._pstateTimer = 0;
@@ -291,13 +287,13 @@ export class ThreadSiteNet {
   }
 
   /**
-   * Every peer's newest self-published state: [{ cid, id, state }]. Keyed by
-   * the stable client id, so it stays correct across peer reconnects.
+   * Every currently connected peer's newest self-published state. Live
+   * entries are keyed by peer id so simultaneous tabs never collapse.
    */
   get playerStates() {
-    return [...this._peerStates.entries()].map(([cid, state]) => {
-      const peer = this.peerByCid(cid);
-      return { cid, id: peer ? peer.id : null, state };
+    return [...this._peerStates.entries()].map(([id, state]) => {
+      const peer = this._peers.get(id);
+      return { cid: peer?.cid ?? null, id, state };
     });
   }
 
@@ -334,16 +330,19 @@ export class ThreadSiteNet {
 
   /**
    * Best estimate of the relay's current time (epoch ms), or the local clock
-   * when no pong has been answered yet. Use for shared timers so every client
-   * agrees on "when" without syncing their own clocks.
+   * before the first welcome. Seeded from the welcome's serverTs and refined
+   * on every ping/pong. Use for shared timers so every client agrees on
+   * "when" without syncing their own clocks.
    */
   serverNow() {
     return Date.now() + (this.serverTimeOffset ?? 0);
   }
 
   /**
-   * Total queued-but-undelivered frames while offline (events you called
-   * send() for during a drop; they flush automatically on reconnect).
+   * Total queued-but-undelivered event frames while offline (events you called
+   * send()/sendTo() for during a drop; they flush automatically on reconnect).
+   * Player/world state frames are never queued — they are transient and the
+   * newest one republishes itself.
    */
   get queued() {
     return this._outbox.length;
@@ -363,8 +362,9 @@ export class ThreadSiteNet {
 
   /**
    * Broadcast an application event to the rest of the room. Fire-and-forget
-   * from your code's perspective: the library stamps a sequence number,
-   * remembers the event for gap-fill resends, and queues it through brief
+   * from your code's perspective: the library stamps a sequence number (event
+   * id receivers dedupe by), remembers the event in case the relay
+   * rate-limits it and it must be requeued, and queues it through brief
    * disconnects (bounded outbox).
    */
   send(type, data) {
@@ -385,17 +385,20 @@ export class ThreadSiteNet {
    * reconnecting clients, so hosts should call this regularly (8-15 Hz) and
    * include a monotonically increasing tick. Receivers can discard snapshots
    * whose ts is older than the newest they have seen from the same source.
+   * Never queued while offline: a delayed snapshot would be stale on arrival —
+   * the next tick publishes a fresher one instead.
    */
   publishState(state) {
-    this._send({ t: "state", s: state ?? null });
+    this._send({ t: "state", s: state ?? null }, { transient: true });
   }
 
   /**
-   * Peer-owned state: broadcast YOUR OWN player's state. Coalesced to
+   * Self-published player state: broadcast YOUR OWN responsive local state. Coalesced to
    * `pstateHz` (default 15 Hz) — safe to call every render frame; the newest
-   * state always wins. No host round trip — controls stay local. The relay
-   * retains the newest state per client (keyed by cid) and hands them to late
-   * joiners; other clients receive it via onPlayerState.
+   * state always wins. No host round trip — controls stay local. Never queued
+   * while offline: replaying a stale transform after reconnect would
+   * rubber-band the player; the local simulation keeps running and the next
+   * flush carries the current transform.
    */
   publishPlayerState(state) {
     this._pendingPstate = state ?? null;
@@ -408,22 +411,22 @@ export class ThreadSiteNet {
     if (this._pendingPstate !== null) this._flushPstate();
   }
 
-  /** Newest self-published state of one peer id or cid (or undefined). */
+  /** Newest self-published state of one live peer id or cid (or undefined). */
   peerState(peerIdOrCid) {
     if (this._peerStates.has(peerIdOrCid)) return this._peerStates.get(peerIdOrCid);
-    const peer = this._peers.get(peerIdOrCid) ?? this.peerByCid(peerIdOrCid);
-    return peer ? this._peerStates.get(peer.cid) : undefined;
+    const peer = this.peerByCid(peerIdOrCid);
+    return peer ? this._peerStates.get(peer.id) : undefined;
   }
 
   /** Ask the current host for a fresh snapshot (fires onState when it replies). */
   requestState() {
-    this._send({ t: "state-req" });
+    this._send({ t: "state-req" }, { transient: true });
   }
 
   /** Measure round-trip time; the latest value is always available as net.rtt. */
   ping() {
     this._lastPingTs = Date.now();
-    this._send({ t: "ping", ts: this._lastPingTs });
+    this._send({ t: "ping", ts: this._lastPingTs }, { transient: true });
   }
 
   /** Leave the room and stop reconnecting. The socket cannot be reused afterwards. */
@@ -451,6 +454,8 @@ export class ThreadSiteNet {
   _sendSequenced(type, data, to) {
     this._seq += 1;
     const seq = this._seq;
+    // Ring buffer exists for the rate-limit requeue path: if the relay drops a
+    // frame, its echoed seq identifies the exact event to resend (r: 1).
     this._recentEvents.push({ seq, e: type, d: data, to });
     while (this._recentEvents.length > RECENT_EVENTS) this._recentEvents.shift();
     const frame = { t: "event", e: type, d: data, seq };
@@ -462,11 +467,15 @@ export class ThreadSiteNet {
     if (this._pendingPstate === null) return;
     const state = this._pendingPstate;
     this._pendingPstate = null;
-    this._send({ t: "pstate", s: state });
+    this._send({ t: "pstate", s: state }, { transient: true });
   }
 
-  _send(frame) {
+  // options.transient marks state-like frames (pstate/state/ping): while the
+  // socket is down they are dropped, not queued — only reliable sequenced
+  // events outlive a disconnect, and the newest state republishes itself.
+  _send(frame, options = {}) {
     if (this._ws === null || this._ws.readyState !== 1) {
+      if (options.transient) return;
       // Offline: queue (bounded, in order) and flush after the next welcome.
       // Note this never swallows the join frame itself — that is sent from
       // ws.onopen, when the socket is freshly open.
@@ -603,13 +612,20 @@ export class ThreadSiteNet {
         this._peerStates.clear();
         this._peerLastSeen.clear();
         this._lastSeqByPeer.clear();
-        this._deliveredSeqsByPeer.clear();
-        this._resendAt.clear();
+        this._appliedSeqsByPeer.clear();
         for (const peer of frame.peers ?? []) {
           this._peers.set(peer.id, { id: peer.id, name: peer.name, cid: peer.cid ?? null });
-          if (peer.s !== null && peer.s !== undefined && peer.cid) this._peerStates.set(peer.cid, peer.s);
+          if (peer.s !== null && peer.s !== undefined) this._peerStates.set(peer.id, peer.s);
           this._peerLastSeen.set(peer.id, Date.now());
         }
+        // Bootstrap the server clock from the welcome immediately — one-way
+        // (no RTT to halve yet), so it is accurate to within network latency —
+        // then refine with a ping right away instead of waiting for the first
+        // 10s heartbeat. serverNow() is usable from the first frame on.
+        if (typeof frame.serverTs === "number") {
+          this.serverTimeOffset = frame.serverTs - Date.now();
+        }
+        this.ping();
         clearTimeout(failTimer);
         this._attempt = 0;
         this._setStatus(NET_STATUS.ONLINE);
@@ -647,10 +663,8 @@ export class ThreadSiteNet {
         this._peers.delete(frame.id);
         this._peerLastSeen.delete(frame.id);
         this._lastSeqByPeer.delete(frame.id);
-        this._deliveredSeqsByPeer.delete(frame.id);
-        this._resendAt.delete(frame.id);
-        // NOTE: _peerStates is keyed by cid and deliberately kept — the player
-        // may reconnect and reclaim their identity and state.
+        this._appliedSeqsByPeer.delete(frame.id);
+        this._peerStates.delete(frame.id); // live cache follows live peer ids; cid remains continuity metadata
         const migrated = frame.host !== undefined && frame.host !== this.hostId;
         this.hostId = frame.host ?? null;
         this._emitPeers();
@@ -659,7 +673,7 @@ export class ThreadSiteNet {
       }
       case "pstate": {
         const cid = frame.cid ?? null;
-        if (cid) this._peerStates.set(cid, frame.s);
+        this._peerStates.set(frame.from, frame.s);
         this._touchPeer(frame.from);
         if (this.onPlayerState) {
           this.onPlayerState({ from: frame.from, cid, state: frame.s, ts: frame.ts ?? null });
@@ -674,9 +688,6 @@ export class ThreadSiteNet {
         return;
       case "state-req":
         if (this.onStateRequest) this.onStateRequest(frame.from);
-        return;
-      case "resend-req":
-        this._answerResend(frame);
         return;
       case "pong":
         if (typeof frame.ts === "number" && frame.ts === this._lastPingTs) {
@@ -751,63 +762,39 @@ export class ThreadSiteNet {
   _receiveSequenced(frame) {
     const peerId = frame.from;
     this._touchPeer(peerId);
-    const isResend = frame.r === 1;
     const seq = typeof frame.seq === "number" ? frame.seq : null;
-    let deliver = true;
     if (seq !== null) {
-      const last = this._lastSeqByPeer.get(peerId) ?? null;
-      if (last !== null && !isResend) {
-        if (seq > last + 1) {
-          // Gap: events were lost in transit. Ask the sender to re-transmit
-          // (rate-limited to one request per peer per cooldown window) while
-          // still delivering what did arrive so play continues.
-          const missing = seq - last - 1;
-          this.dropped += missing;
-          this._requestResend(peerId, last, seq);
-        }
+      // WebSocket delivery is ordered per connection and the relay never
+      // reorders per sender, so there is no gap detection or resend: seq is an
+      // event id. Applied ids are remembered (bounded) so a retried event —
+      // e.g. one the relay rate-limited and the sender requeued — is delivered
+      // exactly once, and a re-delivery of an already-applied id never
+      // double-applies. A retry can legitimately arrive AFTER newer seqs.
+      const applied = this._appliedSeqsByPeer.get(peerId);
+      if (applied !== undefined && applied.has(seq)) {
+        this.duplicates += 1;
+        return;
       }
-      if (isResend) {
-        // A recovered or requeued event: deliver only if we never saw this seq
-        // from this peer, and remember it so it cannot double-apply.
-        const highest = this._deliveredSeqsByPeer.get(peerId);
-        if (highest !== undefined && seq <= highest) deliver = false;
-        else this._deliveredSeqsByPeer.set(peerId, Math.max(highest ?? -Infinity, seq));
-      }
-      if (!isResend && (last === null || seq > last)) this._lastSeqByPeer.set(peerId, seq);
-      if (!isResend && seq <= (last ?? -Infinity)) this.duplicates += 1;
+      this._rememberAppliedSeq(peerId, seq, applied);
+      if (seq <= (this._lastSeqByPeer.get(peerId) ?? -Infinity)) this.dropped += 1; // late arrival
+      else this._lastSeqByPeer.set(peerId, seq);
     }
-    if (deliver && this.onEvent) {
+    if (this.onEvent) {
       this.onEvent({ from: peerId, cid: frame.cid ?? null, type: frame.e, data: frame.d, seq, ts: frame.ts ?? null });
     }
   }
 
-  _requestResend(peerId, after, before) {
-    const now = Date.now();
-    const until = this._resendAt.get(peerId) ?? 0;
-    if (now < until) return;
-    this._resendAt.set(peerId, now + RESEND_COOLDOWN_MS);
-    try {
-      this._send({ t: "resend-req", to: peerId, after, before });
-    } catch {
-      // Queued for when the socket returns; best effort.
-    }
-  }
-
-  _answerResend(frame) {
-    const requester = frame.from;
-    const after = frame.after;
-    const before = frame.before;
-    for (const event of this._recentEvents) {
-      if (event.seq > after && event.seq < before) {
-        // Marked r:1 so the receiver's gap detection does not re-trigger.
-        const resend = { t: "event", e: event.e, d: event.d, seq: event.seq, r: 1 };
-        if (event.to !== null && event.to !== undefined) resend.to = event.to;
-        try {
-          this._send(resend);
-        } catch {
-          // connection gone; the outbox path in _send handles it
-        }
-      }
+  _rememberAppliedSeq(peerId, seq, applied) {
+    const set = applied ?? new Set();
+    if (applied === undefined) this._appliedSeqsByPeer.set(peerId, set);
+    set.add(seq);
+    if (set.size <= RECENT_APPLIED) return;
+    // Bound the bookkeeping: senders only retry recent seqs, so anything far
+    // behind the newest id is gone for good.
+    let newest = 0;
+    for (const value of set) newest = Math.max(newest, value);
+    for (const value of set) {
+      if (value <= newest - Math.floor(RECENT_APPLIED / 2)) set.delete(value);
     }
   }
 
@@ -815,7 +802,7 @@ export class ThreadSiteNet {
     const event = this._recentEvents.find((candidate) => candidate.seq === seq);
     if (!event) return;
     // Requeue the exact original event (same audience, marked r:1 so the
-    // receiver treats it as a recovery re-delivery and dedupes by seq).
+    // receiver treats it as a retry and dedupes by seq).
     const resend = { t: "event", e: event.e, d: event.d, seq: event.seq, r: 1 };
     if (event.to !== null && event.to !== undefined) resend.to = event.to;
     setTimeout(() => {

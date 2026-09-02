@@ -58,7 +58,7 @@ await sleep(300);
 assert.equal(typeof host.rtt, "number");
 console.log("rtt:", host.rtt, "ms");
 
-// Peer-owned state: your own entity publishes directly, no host round trip.
+// Self-published player transform: your own entity publishes directly, no host round trip.
 let gotP = null;
 guest.onPlayerState = (ps) => { gotP = ps; };
 host.publishPlayerState({ x: 5, y: 6, anim: "run" });
@@ -121,8 +121,9 @@ assert.ok(pstateCount >= 1 && pstateCount <= 10, `throttled to ${pstateCount} se
 assert.deepEqual(guest.peerState(sender.cid), { i: 49 }, "newest state wins");
 console.log("publishPlayerState throttling OK:", pstateCount, "sends for 50 calls");
 
-// v3: sequenced events + gap recovery. The receiving side sees consecutive
-// seqs, detects a simulated gap, requests a resend, and never double-delivers.
+// v3: sequenced events — the receiving side sees consecutive seqs, dedupes
+// by seq, and never double-delivers. (No gap-resend exists: WebSocket
+// delivery is ordered, so recovery is event ids + snapshots.)
 const seqCollector = [];
 const gapVictim = await ThreadSiteNet.connect({
   game: "client-test-game-01",
@@ -136,16 +137,14 @@ sender.send("tick", null); // seq 2
 sender.send("tick", null); // seq 3
 sender.send("tick", null); // seq 4
 await sleep(300);
-assert.deepEqual(seqCollector, [1, 2, 3, 4], "no spurious gaps in clean delivery");
+assert.deepEqual(seqCollector, [1, 2, 3, 4], "clean sequenced delivery");
 assert.equal(gapVictim.dropped, 0);
 assert.equal(gapVictim.duplicates, 0);
 console.log("clean sequenced delivery OK");
 
-// True gap: swallow one frame on the wire and confirm automatic recovery.
-// (Patch the raw socket's send so the relay — and therefore the receiver —
-// genuinely never sees seq 6's first delivery. The library's own resend goes
-// through the same patched send, so only swallow the frame once; the resend
-// (marked r:1) must be allowed through.)
+// Retry dedupe: swallowing a frame on the wire simulates a rate-limited
+// event that the sender requeues (marked r:1). The receiver must deliver it
+// exactly once and never double-apply.
 const realSend = sender._ws.send.bind(sender._ws);
 let swallowed = false;
 sender._ws.send = (data) => {
@@ -163,15 +162,20 @@ sender.send("gap-tick", null); // seq 5
 sender.send("gap-tick", null); // seq 6 — dropped on the wire
 sender.send("gap-tick", null); // seq 7
 await sleep(150);
-assert.ok(gapCollector.includes(5) && gapCollector.includes(7), "later events delivered around the gap");
-assert.ok(gapVictim.dropped >= 1, "drop counted");
-await sleep(700); // resend-req travels; sender answers from its buffer
-assert.ok(gapCollector.includes(6), `gap-tick seq 6 recovered: [${gapCollector.join(",")}]`);
-assert.equal(gapCollector.filter((s) => s === 6).length, 1, "recovered event delivered exactly once");
+assert.ok(gapCollector.includes(5) && gapCollector.includes(7), "later events delivered around the drop");
+// Simulate the sender's rate-limit requeue of seq 6 (what _requeueBySeq does).
+sender._requeueBySeq(6);
+await sleep(500);
+assert.ok(gapCollector.includes(6), `gap-tick seq 6 requeued and delivered: [${gapCollector.join(",")}]`);
+assert.equal(gapCollector.filter((s) => s === 6).length, 1, "requeued event delivered exactly once");
 assert.equal(gapVictim.duplicates, 0, "no duplicate deliveries");
+// A duplicate retry of an already-delivered event is suppressed by seq.
+sender._requeueBySeq(5);
+await sleep(500);
+assert.equal(gapCollector.filter((s) => s === 5).length, 1, "retry of a delivered event suppressed");
 sender._ws.send = realSend;
 gapVictim.onEvent = null;
-console.log("automatic gap recovery OK: recovered seq 6, no duplicates");
+console.log("rate-limit requeue dedupe OK: seq 6 delivered once, stale retry suppressed");
 
 // v3: frame size guard fails loudly instead of getting the socket killed.
 assert.throws(
@@ -181,8 +185,10 @@ assert.throws(
 assert.equal(sender.status, "online", "connection survives an oversized attempt");
 console.log("frame size guard OK");
 
-// v3: offline outbox — events sent while the socket is down are queued and
-// flushed in order once reconnected.
+// v3: offline outbox — reliable event frames sent while the socket is down
+// are queued and flushed in order once reconnected. Transient frames (player
+// state, snapshots) are dropped instead: replaying them after a reconnect
+// would rubber-band players with stale transforms.
 const outboxPeer = await ThreadSiteNet.connect({
   game: "client-test-game-01",
   url: "ws://127.0.0.1:8090/ws",
@@ -191,18 +197,36 @@ const outboxPeer = await ThreadSiteNet.connect({
 });
 const outboxEvents = [];
 gapVictim.onEvent = (ev) => { if (ev.type === "offline-msg") outboxEvents.push(ev.seq); };
+let stalePstate = 0;
+gapVictim.onPlayerState = () => { stalePstate += 1; };
 outboxPeer._ws.close(); // simulated drop
 await sleep(300);
 assert.equal(outboxPeer.status, "reconnecting");
 outboxPeer.send("offline-msg", { n: 1 });
 outboxPeer.send("offline-msg", { n: 2 });
-assert.ok(outboxPeer.queued >= 2, "frames queued while offline");
+outboxPeer.publishPlayerState({ x: 99, y: 99 }); // transient: must NOT queue
+outboxPeer.publishState({ tick: 999 }); // transient: must NOT queue
+assert.ok(outboxPeer.queued >= 2, "events queued while offline");
 await sleep(4000); // reconnect backoff + flush
 assert.equal(outboxPeer.status, "online");
 assert.ok(outboxEvents.length >= 2, "queued events delivered after reconnect");
-console.log("offline outbox OK:", outboxEvents.length, "events replayed");
+assert.equal(stalePstate, 0, "stale player state not replayed after reconnect");
+console.log("offline outbox OK:", outboxEvents.length, "events replayed, no stale state replayed");
 
-// v3: server clock — pongs carry relay time, so serverNow() tracks it.
+// v3: server clock — serverNow() is seeded from the welcome's serverTs (no
+// waiting for the first ping) and refined by pongs thereafter.
+{
+  const fresh = await ThreadSiteNet.connect({
+    game: "client-test-game-01",
+    url: "ws://127.0.0.1:8090/ws",
+    room: host.room,
+    name: "Clock",
+  });
+  assert.equal(typeof fresh.serverTimeOffset, "number", "clock offset seeded from welcome");
+  const skew = Math.abs(fresh.serverNow() - Date.now());
+  assert.ok(skew < 2000, `serverNow() available immediately (skew ${skew}ms)`);
+  fresh.close();
+}
 outboxPeer.ping();
 await sleep(300);
 assert.equal(typeof outboxPeer.rtt, "number");

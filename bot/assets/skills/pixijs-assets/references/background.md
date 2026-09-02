@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Background Loading
 
 Background loading lets PixiJS fetch and prepare assets passively while other work happens. Use it to prime the next level while the current one is playing, preload assets during a splash screen, or prepare UI assets during initial load. `backgroundLoad` and `backgroundLoadBundle` are non-blocking and return immediately.
@@ -11,7 +13,7 @@ showMenu();
 Assets.backgroundLoadBundle("level1");
 
 playerClicksStart(() => {
-  Assets.loadBundle("level1").then(() => startLevel());
+ Assets.loadBundle("level1").then(() => startLevel());
 });
 ```
 
@@ -34,9 +36,9 @@ Fire-and-forget. Background loading happens one asset at a time to avoid blockin
 
 ```ts
 Assets.backgroundLoad([
-  "images/sprite1.png",
-  "images/sprite2.png",
-  "images/background.png",
+ "images/sprite1.png",
+ "images/sprite2.png",
+ "images/background.png",
 ]);
 ```
 
@@ -46,12 +48,12 @@ Queues multiple assets for background loading. They're processed sequentially.
 
 ```ts
 await Assets.init({
-  manifest: {
-    bundles: [
-      { name: "home", assets: [{ alias: "bg", src: "home-bg.png" }] },
-      { name: "level-1", assets: [{ alias: "map", src: "level1-map.json" }] },
-    ],
-  },
+ manifest: {
+ bundles: [
+ { name: "home", assets: [{ alias: "bg", src: "home-bg.png" }] },
+ { name: "level-1", assets: [{ alias: "map", src: "level1-map.json" }] },
+ ],
+ },
 });
 
 await Assets.loadBundle("home");
@@ -60,8 +62,8 @@ showHome();
 Assets.backgroundLoadBundle("level-1");
 
 onPlayClicked(async () => {
-  await Assets.loadBundle("level-1");
-  startLevel();
+ await Assets.loadBundle("level-1");
+ startLevel();
 });
 ```
 
@@ -73,7 +75,7 @@ Same idea for bundles. Bundle assets are queued one at a time. Requires the bund
 Assets.backgroundLoadBundle("level-2");
 
 onPlayerDecidedLevel3(async () => {
-  await Assets.loadBundle("level-3");
+ await Assets.loadBundle("level-3");
 });
 ```
 
@@ -118,8 +120,8 @@ Correct:
 Assets.backgroundLoadBundle("level-2");
 
 onStart(async () => {
-  await Assets.loadBundle("level-2");
-  startLevel2();
+ await Assets.loadBundle("level-2");
+ startLevel2();
 });
 ```
 

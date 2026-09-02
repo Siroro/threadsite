@@ -1,3 +1,5 @@
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Save versioning, migration, and robustness
 
 Saves outlive the code that wrote them. A player who saved in v1.0 expects to
@@ -10,9 +12,9 @@ you need it). On load:
 
 1. Read `version`.
 2. If it is **newer** than the running build → refuse with a clear message
-   ("This save is from a newer version"). Do not guess at fields you don't know.
+ ("This save is from a newer version"). Do not guess at fields you don't know.
 3. If it is **older** → run migrations in sequence until it matches the current
-   version.
+ version.
 4. Validate, then instantiate.
 
 Prefer a single monotonic integer. Semantic two-part versions are only worth it
@@ -28,40 +30,40 @@ giant "convert anything to latest" function.
 SAVE_VERSION = 4
 
 MIGRATIONS = {
-    1: migrate_1_to_2,   # added "flags" map
-    2: migrate_2_to_3,   # split "name" into first/last
-    3: migrate_3_to_4,   # inventory items gained a "durability" field
+ 1: migrate_1_to_2, # added "flags" map
+ 2: migrate_2_to_3, # split "name" into first/last
+ 3: migrate_3_to_4, # inventory items gained a "durability" field
 }
 
 def upgrade(data):
-    v = data.get("version", 1)
-    while v < SAVE_VERSION:
-        data = MIGRATIONS[v](data)
-        v += 1
-        data["version"] = v
-    return data
+ v = data.get("version", 1)
+ while v < SAVE_VERSION:
+ data = MIGRATIONS[v](data)
+ v += 1
+ data["version"] = v
+ return data
 ```
 
 Guidelines:
 
 - **Additive changes are easy**: new field with a default. The migration just
-  inserts the default for old saves.
+ inserts the default for old saves.
 - **Renames/restructures**: move/transform in the migration; never read both old
-  and new names in game code.
+ and new names in game code.
 - **Removed fields**: drop them in the migration so later steps see a clean shape.
 - **Keep old migrations forever.** Deleting `migrate_1_to_2` strands every v1
-  save. They are cheap to keep and must remain a faithful record.
+ save. They are cheap to keep and must remain a faithful record.
 - **Test the chain**: keep a corpus of real saves from each shipped version and
-  assert they load after every change (this is your regression net).
+ assert they load after every change (this is your regression net).
 
 ## Backups and rollback
 
 - Before overwriting, copy the current save to `*.bak`. On a failed load of the
-  primary, try the backup automatically.
+ primary, try the backup automatically.
 - For autosaves, rotate a small ring (autosave_0..2) so a bad autosave doesn't
-  destroy the only recent state.
+ destroy the only recent state.
 - Consider a checksum/hash of the payload to detect truncation or corruption
-  (distinct from anti-tamper, which a determined local player can always defeat).
+ (distinct from anti-tamper, which a determined local player can always defeat).
 
 ## Format trade-offs
 
@@ -81,15 +83,15 @@ that neutral shape, not on format-specific bytes.
 - Required keys present; types correct (string vs number vs bool).
 - Numbers within sane ranges (no NaN/Infinity; hp ≥ 0; indices in bounds).
 - Enum/id values still exist in current content (an item id removed in a patch
-  must be handled — drop it or substitute, don't crash).
+ must be handled — drop it or substitute, don't crash).
 - References resolve (a quest id points to a known quest).
 - On any failure: log, fall back to backup, and if all else fails, fail *loudly*
-  to the player rather than silently loading a broken state.
+ to the player rather than silently loading a broken state.
 
 ## What to store vs recompute
 
 - **Store** authoritative, non-derivable state: choices, unlocked flags, RNG
-  seed, inventory, positions.
+ seed, inventory, positions.
 - **Recompute** derived data on load (full stat tables from base + modifiers,
-  procedural maps from the seed). Saving derived data invites desync when the
-  formula changes in a patch — and bloats the file.
+ procedural maps from the seed). Saving derived data invites desync when the
+ formula changes in a patch — and bloats the file.

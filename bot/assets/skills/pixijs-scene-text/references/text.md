@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Text (Canvas Text)
 
 The primary text renderer in PixiJS v8. Rasterizes strings to an off-screen canvas via the native Canvas API, then uploads the result as a GPU texture. Use `Text` for high-quality typography, styled labels, UI text, and anything where visual fidelity matters more than update speed. For frequently-changing numeric displays (scores, timers), prefer `BitmapText`.
@@ -6,22 +8,22 @@ The primary text renderer in PixiJS v8. Rasterizes strings to an off-screen canv
 
 ```ts
 const text = new Text({
-  text: "Hello PixiJS",
-  style: {
-    fontFamily: "Arial",
-    fontSize: 36,
-    fill: 0xffffff,
-    stroke: { color: "#4a1850", width: 5 },
-    dropShadow: {
-      color: "#000000",
-      blur: 4,
-      distance: 6,
-      angle: Math.PI / 6,
-    },
-  },
-  anchor: 0.5,
-  x: 400,
-  y: 40,
+ text: "Hello PixiJS",
+ style: {
+ fontFamily: "Arial",
+ fontSize: 36,
+ fill: 0xffffff,
+ stroke: { color: "#4a1850", width: 5 },
+ dropShadow: {
+ color: "#000000",
+ blur: 4,
+ distance: 6,
+ angle: Math.PI / 6,
+ },
+ },
+ anchor: 0.5,
+ x: 400,
+ y: 40,
 });
 
 app.stage.addChild(text);
@@ -35,18 +37,18 @@ Text is a leaf (`allowChildren = false`). It uses an options-object constructor;
 const minimal = new Text({ text: "Hello" });
 
 const styled = new Text({
-  text: "Styled Text",
-  style: { fontSize: 24, fill: 0xff1010 },
-  anchor: 0.5,
-  resolution: 2,
-  roundPixels: true,
+ text: "Styled Text",
+ style: { fontSize: 24, fill: 0xff1010 },
+ anchor: 0.5,
+ resolution: 2,
+ roundPixels: true,
 });
 
 const crisp = new Text({
-  text: "Crisp Text",
-  style: { fontSize: 32 },
-  textureStyle: { scaleMode: "nearest" },
-  autoGenerateMipmaps: true,
+ text: "Crisp Text",
+ style: { fontSize: 32 },
+ textureStyle: { scaleMode: "nearest" },
+ autoGenerateMipmaps: true,
 });
 ```
 
@@ -54,15 +56,15 @@ const crisp = new Text({
 
 These are the options accepted by `new Text({ ... })`. The concrete `Text` constructor takes `CanvasTextOptions`, which extends the base `TextOptions` with the canvas-specific `textureStyle` and `autoGenerateMipmaps` fields.
 
-| Option                | Type                                                        | Default                                            | Description                                                                                                                                                               |
+| Option | Type | Default | Description |
 | --------------------- | ----------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `text`                | `TextString` (`string \| number \| { toString(): string }`) | `''`                                               | Text content to display; `'\n'` inserts a line break.                                                                                                                     |
-| `style`               | `TextStyle \| TextStyleOptions`                             | `new TextStyle()`                                  | Text style object or options. See the existing TextStyle docs below for field details.                                                                                    |
-| `anchor`              | `PointData \| number`                                       | `0`                                                | Draw origin in `[0, 1]`; `0.5` is center, `1` is bottom-right.                                                                                                            |
-| `resolution`          | `number`                                                    | `null` (auto)                                      | Pixel density of the rasterized texture; `null` follows the renderer's resolution (setting to `null` at runtime enables auto-resolution; the interface type is `number`). |
-| `roundPixels`         | `boolean`                                                   | `false`                                            | Snap rendered x/y to whole pixels to avoid sub-pixel anti-aliasing.                                                                                                       |
-| `textureStyle`        | `TextureStyle \| TextureStyleOptions`                       | `undefined`                                        | Override the generated texture's scale mode, wrap, etc. (@advanced)                                                                                                       |
-| `autoGenerateMipmaps` | `boolean`                                                   | `TextureSource.defaultOptions.autoGenerateMipmaps` | Generate mipmaps for the text texture; improves quality when scaled down.                                                                                                 |
+| `text` | `TextString` (`string \| number \| { toString(): string }`) | `''` | Text content to display; `'\n'` inserts a line break. |
+| `style` | `TextStyle \| TextStyleOptions` | `new TextStyle()` | Text style object or options. See the existing TextStyle docs below for field details. |
+| `anchor` | `PointData \| number` | `0` | Draw origin in `[0, 1]`; `0.5` is center, `1` is bottom-right. |
+| `resolution` | `number` | `null` (auto) | Pixel density of the rasterized texture; `null` follows the renderer's resolution (setting to `null` at runtime enables auto-resolution; the interface type is `number`). |
+| `roundPixels` | `boolean` | `false` | Snap rendered x/y to whole pixels to avoid sub-pixel anti-aliasing. |
+| `textureStyle` | `TextureStyle \| TextureStyleOptions` | `undefined` | Override the generated texture's scale mode, wrap, etc. (@advanced) |
+| `autoGenerateMipmaps` | `boolean` | `TextureSource.defaultOptions.autoGenerateMipmaps` | Generate mipmaps for the text texture; improves quality when scaled down. |
 
 All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zIndex`, etc.) are also valid here — see `skills/pixijs-scene-core-concepts/references/constructor-options.md`.
 
@@ -74,28 +76,28 @@ The `style` field is a rich nested type; the rest of this document covers its ke
 
 ```ts
 const styled = new Text({
-  text: "Styled",
-  style: {
-    fontFamily: "Arial",
-    fontSize: 32,
-    fontWeight: "bold",
-    fontStyle: "italic",
-    fill: 0xff1010,
-    stroke: { color: "#4a1850", width: 5 },
-    dropShadow: {
-      color: "#000000",
-      blur: 4,
-      distance: 6,
-      angle: Math.PI / 6,
-      alpha: 0.8,
-    },
-    align: "center",
-    wordWrap: true,
-    wordWrapWidth: 300,
-    lineHeight: 45,
-    letterSpacing: 2,
-    padding: 4,
-  },
+ text: "Styled",
+ style: {
+ fontFamily: "Arial",
+ fontSize: 32,
+ fontWeight: "bold",
+ fontStyle: "italic",
+ fill: 0xff1010,
+ stroke: { color: "#4a1850", width: 5 },
+ dropShadow: {
+ color: "#000000",
+ blur: 4,
+ distance: 6,
+ angle: Math.PI / 6,
+ alpha: 0.8,
+ },
+ align: "center",
+ wordWrap: true,
+ wordWrapWidth: 300,
+ lineHeight: 45,
+ letterSpacing: 2,
+ padding: 4,
+ },
 });
 ```
 
@@ -121,15 +123,15 @@ Key TextStyle properties:
 
 ```ts
 const alert = new Text({
-  text: "<red>Warning:</red> system <b>overloaded</b>",
-  style: {
-    fontSize: 24,
-    fill: 0xffffff,
-    tagStyles: {
-      red: { fill: 0xff0000 },
-      b: { fontWeight: "bold" },
-    },
-  },
+ text: "<red>Warning:</red> system <b>overloaded</b>",
+ style: {
+ fontSize: 24,
+ fill: 0xffffff,
+ tagStyles: {
+ red: { fill: 0xff0000 },
+ b: { fontWeight: "bold" },
+ },
+ },
 });
 ```
 
@@ -139,13 +141,13 @@ Tags are parsed only when `tagStyles` has entries; without entries, `<` is treat
 
 ```ts
 await Assets.load({
-  src: "my-font.woff2",
-  data: { family: "MyFont" },
+ src: "my-font.woff2",
+ data: { family: "MyFont" },
 });
 
 const text = new Text({
-  text: "Custom Font",
-  style: { fontFamily: "MyFont", fontSize: 36, fill: 0xffffff },
+ text: "Custom Font",
+ style: { fontFamily: "MyFont", fontSize: 36, fill: 0xffffff },
 });
 ```
 
@@ -153,8 +155,8 @@ Supported formats: `woff2` (preferred), `woff`, `ttf`, `otf`. The `data` object 
 
 ```ts
 await Assets.load({
-  src: "titan-one.woff",
-  data: { family: "Titan One", weights: ["normal", "bold"] },
+ src: "titan-one.woff",
+ data: { family: "Titan One", weights: ["normal", "bold"] },
 });
 ```
 
@@ -162,10 +164,10 @@ await Assets.load({
 
 ```ts
 const sharp = new Text({
-  text: "Crisp on retina",
-  style: { fontSize: 36, fill: 0xffffff },
-  resolution: 2,
-  autoGenerateMipmaps: true,
+ text: "Crisp on retina",
+ style: { fontSize: 36, fill: 0xffffff },
+ resolution: 2,
+ autoGenerateMipmaps: true,
 });
 ```
 
@@ -176,10 +178,10 @@ const sharp = new Text({
 
 ```ts
 app.ticker.add(() => {
-  const next = `Score: ${score}`;
-  if (scoreText.text !== next) {
-    scoreText.text = next;
-  }
+ const next = `Score: ${score}`;
+ if (scoreText.text !== next) {
+ scoreText.text = next;
+ }
 });
 ```
 
@@ -191,16 +193,16 @@ Guard text updates with an equality check when using `Text` for live values. Eve
 import { FillGradient } from "pixi.js";
 
 const gradient = new FillGradient({
-  end: { x: 0, y: 1 },
-  colorStops: [
-    { color: 0xff0000, offset: 0 },
-    { color: 0x0000ff, offset: 1 },
-  ],
+ end: { x: 0, y: 1 },
+ colorStops: [
+ { color: 0xff0000, offset: 0 },
+ { color: 0x0000ff, offset: 1 },
+ ],
 });
 
 const title = new Text({
-  text: "Gradient",
-  style: { fontSize: 64, fill: gradient },
+ text: "Gradient",
+ style: { fontSize: 64, fill: gradient },
 });
 ```
 
@@ -210,13 +212,13 @@ For a texture fill, pass a `FillPattern`. Its constructor takes an options objec
 import { Assets, FillPattern } from "pixi.js";
 
 const pattern = new FillPattern({
-  texture: await Assets.load("bricks.png"),
-  repetition: "repeat",
+ texture: await Assets.load("bricks.png"),
+ repetition: "repeat",
 });
 
 const label = new Text({
-  text: "PixiJS",
-  style: { fontSize: 64, fill: pattern },
+ text: "PixiJS",
+ style: { fontSize: 64, fill: pattern },
 });
 ```
 
@@ -232,7 +234,7 @@ Wrong:
 
 ```ts
 app.ticker.add(() => {
-  scoreText.text = `Score: ${score}`;
+ scoreText.text = `Score: ${score}`;
 });
 ```
 
@@ -241,7 +243,7 @@ Correct:
 ```ts
 const scoreText = new BitmapText({ text: "Score: 0", style });
 app.ticker.add(() => {
-  scoreText.text = `Score: ${score}`;
+ scoreText.text = `Score: ${score}`;
 });
 ```
 
@@ -271,8 +273,8 @@ Wrong:
 
 ```ts
 const text = new Text({
-  text: "Hello",
-  style: { stroke: { color: "red", width: 10 } },
+ text: "Hello",
+ style: { stroke: { color: "red", width: 10 } },
 });
 ```
 
@@ -280,8 +282,8 @@ Correct:
 
 ```ts
 const text = new Text({
-  text: "Hello",
-  style: { stroke: { color: "red", width: 10 }, padding: 10 },
+ text: "Hello",
+ style: { stroke: { color: "red", width: 10 }, padding: 10 },
 });
 ```
 

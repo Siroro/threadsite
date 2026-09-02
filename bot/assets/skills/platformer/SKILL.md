@@ -4,7 +4,7 @@ description: "Build a 2D platformer: run/jump control with coyote time, jump buf
 license: Apache-2.0
 ---
 
-<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/pixi.js) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
 
 
 # Platformer
@@ -17,13 +17,13 @@ it tells you what to build and how to make jumping feel good.
 ## When to use
 
 - Use when building a side-scrolling or single-screen platformer, a "Mario-like" /
-  "Celeste-like", or any game whose core verb is **jump between surfaces**.
+ "Celeste-like", or any game whose core verb is **jump between surfaces**.
 - Use when a jump feels floaty, unresponsive, or "unfair" and you need feel fixes
-  (coyote time, jump buffering, variable height, corner correction).
+ (coyote time, jump buffering, variable height, corner correction).
 
 **When *not* to use:** top-down movement with no gravity → use the engine movement skill
 directly. 3D first-person traversal → `fps-shooter`. Grid/turn movement → `roguelike`.
-For the raw kinematic body API, use `godot-2d-movement` (or your engine's controller skill).
+For the raw kinematic body API, use the engine's equivalent API (or your engine's controller skill).
 
 ## Core loop
 
@@ -65,13 +65,13 @@ Derive gravity and jump velocity from the *feel* values rather than guessing —
 
 ```python
 # Pseudocode. Pick the FEEL you want, then derive the physics. y-axis points DOWN.
-# From kinematics: h = (g * t^2) / 2  and  v0 = g * t.
-JUMP_HEIGHT   = 3.5 * TILE      # how high, in world units
-TIME_TO_APEX  = 0.35            # seconds to reach the top
+# From kinematics: h = (g * t^2) / 2 and v0 = g * t.
+JUMP_HEIGHT = 3.5 * TILE # how high, in world units
+TIME_TO_APEX = 0.35 # seconds to reach the top
 
-gravity       = (2 * JUMP_HEIGHT) / (TIME_TO_APEX ** 2)   # rising gravity
-jump_velocity = -(2 * JUMP_HEIGHT) / TIME_TO_APEX         # negative = upward
-fall_gravity  = gravity * 1.8   # heavier on the way down → less floaty
+gravity = (2 * JUMP_HEIGHT) / (TIME_TO_APEX ** 2) # rising gravity
+jump_velocity = -(2 * JUMP_HEIGHT) / TIME_TO_APEX # negative = upward
+fall_gravity = gravity * 1.8 # heavier on the way down → less floaty
 ```
 
 ### 2. Coyote time + jump buffer + variable height (the feel core)
@@ -80,21 +80,21 @@ fall_gravity  = gravity * 1.8   # heavier on the way down → less floaty
 # Pseudocode in the per-frame update. dt = seconds since last frame.
 # Timers count DOWN; refresh coyote while grounded, buffer on a fresh press.
 if on_floor:
-    coyote_timer = COYOTE_TIME           # 0.1
+ coyote_timer = COYOTE_TIME # 0.1
 if jump_pressed_this_frame:
-    buffer_timer = JUMP_BUFFER           # 0.12
+ buffer_timer = JUMP_BUFFER # 0.12
 coyote_timer -= dt
 buffer_timer -= dt
 
 # A jump is allowed if we pressed recently AND were grounded recently.
 if buffer_timer > 0 and coyote_timer > 0:
-    velocity.y   = jump_velocity
-    buffer_timer = 0
-    coyote_timer = 0                     # consume both so we can't double-jump
+ velocity.y = jump_velocity
+ buffer_timer = 0
+ coyote_timer = 0 # consume both so we can't double-jump
 
 # Variable height: releasing jump early while still rising cuts the arc short.
 if jump_released_this_frame and velocity.y < 0:
-    velocity.y *= 0.45
+ velocity.y *= 0.45
 
 # Asymmetric gravity: snappier fall than rise.
 g = fall_gravity if velocity.y > 0 else gravity
@@ -110,23 +110,23 @@ for a few frames when the player holds Down + Jump. Do not re-implement collisio
 ## Pitfalls / failure modes
 
 - **Per-frame movement not scaled by `dt`** → speed changes with frame rate. Every velocity
-  integration and timer must use `dt`. (See `physics-tuning`.)
+ integration and timer must use `dt`. (See `physics-tuning`.)
 - **Floaty jumps** → symmetric gravity. Make fall gravity heavier than rise gravity.
 - **"The jump didn't register"** → no input buffering. Buffer presses for ~0.1 s before landing.
 - **"I fell off and couldn't jump"** → no coyote time. Allow a jump for ~0.1 s after leaving ground.
 - **Sticking to walls / catching on tile seams** → use a single capsule/box collider, not
-  per-tile colliders, and add corner correction.
+ per-tile colliders, and add corner correction.
 - **Tunneling through floors at high speed** → enable continuous collision / smaller fixed
-  timestep for fast bodies (see `physics-tuning`).
+ timestep for fast bodies (see `physics-tuning`).
 - **Camera snaps and induces nausea** → smooth/lerp the follow, add a deadzone, clamp to bounds.
 - **Difficulty wall from bad teaching** → introduce one mechanic per area before combining them.
 
 ## Composition (build it from these skills)
 
-- **Controller body:** `godot-2d-movement` (Godot `CharacterBody2D`); for other engines use
-  the engine core + physics skill (`unity-physics`, `phaser-arcade-physics`, `pygame-core`).
-- **Levels:** `godot-tilemap` / `unity-tilemap-2d` for geometry; `level-design` for layout,
-  pacing, and teaching order.
+- **Controller body:** the engine's equivalent API (Godot `CharacterBody2D`); for other engines use
+ the engine core + physics skill.
+- **Levels:** the engine's equivalent API for geometry; `level-design` for layout,
+ pacing, and teaching order.
 - **Feel/physics:** `physics-tuning` for timestep, CCD, and stability.
 - **Input:** `input-systems` for buffering, rebinding, and gamepad support.
 - **Polish:** `audio-design` for SFX/music; the engine animation skill for squash/stretch.
@@ -135,4 +135,4 @@ for a few frames when the player holds Down + Jump. Do not re-implement collisio
 ## References
 
 - For jump math derivation, a full feel-tuning table, corner correction, moving/one-way
-  platforms, and camera follow, read `references/feel-tuning.md`.
+ platforms, and camera follow, read `references/feel-tuning.md`.

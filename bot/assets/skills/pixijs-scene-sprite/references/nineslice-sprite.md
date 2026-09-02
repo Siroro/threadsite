@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # NineSliceSprite
 
 A sprite variant that stretches a texture using 9-slice scaling. The four corner regions stay unscaled, the top and bottom edges stretch horizontally, the left and right edges stretch vertically, and the center stretches both ways. Use this for resizable UI panels, buttons, and dialog frames where you want the border art to remain crisp at any size.
@@ -8,13 +10,13 @@ A sprite variant that stretches a texture using 9-slice scaling. The four corner
 const texture = await Assets.load("panel.png");
 
 const panel = new NineSliceSprite({
-  texture,
-  leftWidth: 20,
-  topHeight: 20,
-  rightWidth: 20,
-  bottomHeight: 20,
-  width: 400,
-  height: 200,
+ texture,
+ leftWidth: 20,
+ topHeight: 20,
+ rightWidth: 20,
+ bottomHeight: 20,
+ width: 400,
+ height: 200,
 });
 
 app.stage.addChild(panel);
@@ -26,30 +28,30 @@ All four border values default to `10`. Assign `width` / `height` on the sprite 
 
 ```ts
 const panel = new NineSliceSprite({
-  texture,
-  leftWidth: 20,
-  topHeight: 20,
-  rightWidth: 20,
-  bottomHeight: 20,
-  width: 400,
-  height: 200,
-  anchor: 0.5,
+ texture,
+ leftWidth: 20,
+ topHeight: 20,
+ rightWidth: 20,
+ bottomHeight: 20,
+ width: 400,
+ height: 200,
+ anchor: 0.5,
 });
 ```
 
 ### NineSliceSpriteOptions
 
-| Option         | Type                  | Default                       | Description                                                        |
+| Option | Type | Default | Description |
 | -------------- | --------------------- | ----------------------------- | ------------------------------------------------------------------ |
-| `texture`      | `Texture`             | `Texture.EMPTY`               | Source texture for the 9-slice.                                    |
-| `leftWidth`    | `number`              | `10`                          | Width of the left border column that stays unscaled.               |
-| `topHeight`    | `number`              | `10`                          | Height of the top border row that stays unscaled.                  |
-| `rightWidth`   | `number`              | `10`                          | Width of the right border column that stays unscaled.              |
-| `bottomHeight` | `number`              | `10`                          | Height of the bottom border row that stays unscaled.               |
-| `width`        | `number`              | `texture.width` (else `100`)  | Width of the stretched sprite region; modifies vertices, not UVs.  |
-| `height`       | `number`              | `texture.height` (else `100`) | Height of the stretched sprite region; modifies vertices, not UVs. |
-| `anchor`       | `PointData \| number` | `0`                           | Normalized draw origin in `[0, 1]`.                                |
-| `roundPixels`  | `boolean`             | `false`                       | Snap rendering coordinates to integers for crisp pixel art.        |
+| `texture` | `Texture` | `Texture.EMPTY` | Source texture for the 9-slice. |
+| `leftWidth` | `number` | `10` | Width of the left border column that stays unscaled. |
+| `topHeight` | `number` | `10` | Height of the top border row that stays unscaled. |
+| `rightWidth` | `number` | `10` | Width of the right border column that stays unscaled. |
+| `bottomHeight` | `number` | `10` | Height of the bottom border row that stays unscaled. |
+| `width` | `number` | `texture.width` (else `100`) | Width of the stretched sprite region; modifies vertices, not UVs. |
+| `height` | `number` | `texture.height` (else `100`) | Height of the stretched sprite region; modifies vertices, not UVs. |
+| `anchor` | `PointData \| number` | `0` | Normalized draw origin in `[0, 1]`. |
+| `roundPixels` | `boolean` | `false` | Snap rendering coordinates to integers for crisp pixel art. |
 
 All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zIndex`, etc.) are also valid here — see `skills/pixijs-scene-core-concepts/references/constructor-options.md`.
 
@@ -60,16 +62,16 @@ Border values fall back to `texture.defaultBorders` if set on the texture; see t
 ### The 9-slice grid
 
 ```
-         leftWidth                rightWidth
-    +---+--------------------+---+
-    | 1 |         2          | 3 |   topHeight
-    +---+--------------------+---+
-    |   |                    |   |
-    | 4 |         5          | 6 |
-    |   |                    |   |
-    +---+--------------------+---+
-    | 7 |         8          | 9 |   bottomHeight
-    +---+--------------------+---+
+ leftWidth rightWidth
+ +---+--------------------+---+
+ | 1 | 2 | 3 | topHeight
+ +---+--------------------+---+
+ | | | |
+ | 4 | 5 | 6 |
+ | | | |
+ +---+--------------------+---+
+ | 7 | 8 | 9 | bottomHeight
+ +---+--------------------+---+
 ```
 
 - Corners (1, 3, 7, 9): unscaled
@@ -93,8 +95,8 @@ Setting `width` / `height` modifies the sprite's vertices directly. It does not 
 
 ```ts
 const texture = new Texture({
-  source: baseSource,
-  defaultBorders: { left: 15, top: 15, right: 15, bottom: 15 },
+ source: baseSource,
+ defaultBorders: { left: 15, top: 15, right: 15, bottom: 15 },
 });
 
 const panel = new NineSliceSprite({ texture, width: 400, height: 200 });
@@ -135,12 +137,12 @@ NineSliceSprite.defaultOptions.texture = Texture.from("defaultPanel.png");
 
 ```ts
 const panel = new NineSliceSprite({
-  texture,
-  leftWidth: 10,
-  topHeight: 10,
-  rightWidth: 10,
-  bottomHeight: 10,
-  roundPixels: true,
+ texture,
+ leftWidth: 10,
+ topHeight: 10,
+ rightWidth: 10,
+ bottomHeight: 10,
+ roundPixels: true,
 });
 ```
 
@@ -162,11 +164,11 @@ Correct:
 ```ts
 import { NineSliceSprite } from "pixi.js";
 const panel = new NineSliceSprite({
-  texture,
-  leftWidth: 10,
-  topHeight: 10,
-  rightWidth: 10,
-  bottomHeight: 10,
+ texture,
+ leftWidth: 10,
+ topHeight: 10,
+ rightWidth: 10,
+ bottomHeight: 10,
 });
 ```
 

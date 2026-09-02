@@ -25,7 +25,7 @@ export class ThreadSiteNetError extends Error {
   code: string;
 }
 
-/** A peer in the room. `id` is per-connection (changes on every reconnect); `cid` is stable forever. */
+/** A peer in the room. `id` is the live per-connection identity; `cid` is stable for reconnect/reload within the current browser tab session. */
 export interface NetPeer {
   id: string;
   name: string | null;
@@ -34,22 +34,22 @@ export interface NetPeer {
 
 /** onPlayerState payload: another player's newest self-published state. */
 export interface NetPlayerState {
-  /** Sender's per-connection peer id — changes on reconnect; key entities by `cid` instead. */
+  /** Sender's live per-connection peer id — use for active avatars, routing, and self-filtering. */
   from: string;
   cid: string | null;
   /** Game-defined state the peer published via publishPlayerState(). */
   state: any;
-  /** Relay receive time, epoch ms — use for staleness, not interpolation ordering. */
+  /** Relay receive time, epoch ms. Compare/order it against net.serverNow(), never Date.now(). */
   ts: number | null;
 }
 
-/** onEvent payload: a sequenced application event, already deduped and gap-recovered. */
+/** onEvent payload: a sequenced application event, already deduped by seq. */
 export interface NetEvent {
   from: string;
   cid: string | null;
   type: string;
   data: any;
-  /** Sender's sequence number — keep handlers idempotent by seq. */
+  /** Sender's sequence number (event id) — keep handlers idempotent by seq. */
   seq: number | null;
   ts: number | null;
 }
@@ -63,10 +63,10 @@ export interface NetSnapshot {
   ts: number | null;
 }
 
-/** Every peer's newest self-published state, keyed by stable client id. */
+/** Every currently connected peer's newest self-published state. */
 export interface NetPlayerStateEntry {
-  cid: string;
-  id: string | null;
+  cid: string | null;
+  id: string;
   state: any;
 }
 
@@ -133,16 +133,16 @@ export class ThreadSiteNet {
   readonly status: string;
   /** Other peers in the room, excluding yourself. */
   readonly peers: NetPeer[];
-  /** Every peer's newest self-published state, keyed by stable cid. */
+  /** Every currently connected peer's newest self-published state. */
   readonly playerStates: NetPlayerStateEntry[];
   /** True while this client is the room's host. */
   readonly isHost: boolean;
-  /** Frames queued-but-undelivered while offline (flushed on reconnect). */
+  /** Frames queued-but-undelivered while offline (events only; flushed on reconnect). */
   readonly queued: number;
 
   /** Your per-connection peer id (null before the first welcome). */
   id: string | null;
-  /** Your stable client id — survives reconnects; the key for remote entities. */
+  /** Your tab-session client id — survives reconnect/reload in this tab; use peer ids for live remote entities. */
   cid: string | null;
   /** Joined room code (null in "single" mode / before welcome). */
   room: string | null;
@@ -152,7 +152,6 @@ export class ThreadSiteNet {
   serverTimeOffset: number | null;
   /** Sync-health counters, monotonic for this client instance. */
   dropped: number;
-  resent: number;
   duplicates: number;
   rateLimited: number;
 
@@ -169,13 +168,13 @@ export class ThreadSiteNet {
   /** Shareable invite URL ("…#room=CODE"), or null with no room/page URL. */
   inviteUrl(): string | null;
 
-  /** Broadcast an application event to the room (sequenced, gap-recovered). */
+  /** Broadcast an application event to the room (sequenced; dedupe by seq). */
   send(type: string, data?: any): void;
   /** Send an application event to one peer only. */
   sendTo(peerId: string, type: string, data?: any): void;
-  /** Publish an authoritative room snapshot (hosts, 8-15 Hz, increasing tick). */
+  /** Publish an authoritative room snapshot (hosts, 8-15 Hz, increasing tick). Never queued while offline. */
   publishState(state: any): void;
-  /** Publish YOUR OWN player's state (coalesced to pstateHz; per-frame safe). */
+  /** Publish YOUR OWN player's state (coalesced to pstateHz; per-frame safe). Never queued while offline. */
   publishPlayerState(state: any): void;
   /** Immediately push the pending player state (e.g. after a teleport). */
   flushPlayerState(): void;

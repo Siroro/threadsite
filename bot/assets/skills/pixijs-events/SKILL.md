@@ -18,21 +18,21 @@ button.cursor = "pointer";
 app.stage.addChild(button);
 
 button.on("pointertap", (event) => {
-  console.log("clicked at", event.global.x, event.global.y);
+ console.log("clicked at", event.global.x, event.global.y);
 });
 
 let dragging = false;
 button.on("pointerdown", () => {
-  dragging = true;
+ dragging = true;
 });
 button.on("pointerup", () => {
-  dragging = false;
+ dragging = false;
 });
 button.on("pointerupoutside", () => {
-  dragging = false;
+ dragging = false;
 });
 button.on("globalpointermove", (event) => {
-  if (dragging) button.parent.toLocal(event.global, undefined, button.position);
+ if (dragging) button.parent.toLocal(event.global, undefined, button.position);
 });
 ```
 
@@ -104,16 +104,16 @@ sprite.off("pointerdown", handler);
 
 // DOM style
 sprite.addEventListener(
-  "click",
-  (event) => {
-    console.log("Clicked!", event.detail);
-  },
-  { once: true },
+ "click",
+ (event) => {
+ console.log("Clicked!", event.detail);
+ },
+ { once: true },
 );
 
 // Property-based handlers
 sprite.onclick = (event) => {
-  console.log("Clicked!", event.detail);
+ console.log("Clicked!", event.detail);
 };
 ```
 
@@ -130,12 +130,12 @@ child.eventMode = "static";
 parent.addChild(child);
 
 child.on("pointerdown", (event) => {
-  console.log("child pressed");
-  event.stopPropagation(); // prevent parent from receiving this event
+ console.log("child pressed");
+ event.stopPropagation(); // prevent parent from receiving this event
 });
 
 parent.on("pointerdown", () => {
-  console.log("parent pressed (only if child did not stop propagation)");
+ console.log("parent pressed (only if child did not stop propagation)");
 });
 ```
 
@@ -145,11 +145,11 @@ All events support capture phase by appending `capture` to the event name (e.g.,
 
 ```ts
 container.addEventListener(
-  "pointerdown",
-  (event) => {
-    event.stopImmediatePropagation(); // blocks event from reaching children
-  },
-  { capture: true },
+ "pointerdown",
+ (event) => {
+ event.stopImmediatePropagation(); // blocks event from reaching children
+ },
+ { capture: true },
 );
 ```
 
@@ -181,9 +181,9 @@ sprite.hitArea = new Polygon([0, 0, 100, 0, 50, 100]);
 
 // Custom hit test via contains()
 sprite.hitArea = {
-  contains(x: number, y: number): boolean {
-    return x >= 0 && x <= 100 && y >= 0 && y <= 100;
-  },
+ contains(x: number, y: number): boolean {
+ return x >= 0 && x <= 100 && y >= 0 && y <= 100;
+ },
 };
 ```
 
@@ -199,25 +199,25 @@ sprite.cursor = "grab";
 let dragging = false;
 
 sprite.on("pointerdown", (event: FederatedPointerEvent) => {
-  dragging = true;
-  sprite.cursor = "grabbing";
+ dragging = true;
+ sprite.cursor = "grabbing";
 });
 
 // globalpointermove fires even when pointer leaves the object
 sprite.on("globalpointermove", (event: FederatedPointerEvent) => {
-  if (dragging) {
-    sprite.position.set(event.global.x, event.global.y);
-  }
+ if (dragging) {
+ sprite.position.set(event.global.x, event.global.y);
+ }
 });
 
 sprite.on("pointerup", () => {
-  dragging = false;
-  sprite.cursor = "grab";
+ dragging = false;
+ sprite.cursor = "grab";
 });
 
 sprite.on("pointerupoutside", () => {
-  dragging = false;
-  sprite.cursor = "grab";
+ dragging = false;
+ sprite.cursor = "grab";
 });
 ```
 
@@ -241,27 +241,27 @@ Cursor styles can be strings (CSS cursor values), objects (applied as CSS styles
 
 ```ts
 sprite.on("pointerdown", (event: FederatedPointerEvent) => {
-  event.global; // scene-space Point where the event happened
-  event.client; // CSS-pixel Point relative to the viewport
-  event.offset; // Point w.r.t. target Container in world space (not supported at the moment)
-  event.target; // the Container that received the event
-  event.currentTarget; // the Container whose listener is running
+ event.global; // scene-space Point where the event happened
+ event.client; // CSS-pixel Point relative to the viewport
+ event.offset; // Point w.r.t. target Container in world space (not supported at the moment)
+ event.target; // the Container that received the event
+ event.currentTarget; // the Container whose listener is running
 
-  event.pointerType; // 'mouse' | 'pen' | 'touch'
-  event.pointerId; // unique id for multi-touch tracking
-  event.isPrimary; // first pointer in a multi-pointer gesture
-  event.pressure; // 0-1 pen/touch pressure
-  event.button; // 0 left, 1 middle, 2 right
-  event.buttons; // bitmask of held buttons
-  event.altKey; // modifier key state
-  event.ctrlKey;
-  event.shiftKey;
-  event.metaKey;
+ event.pointerType; // 'mouse' | 'pen' | 'touch'
+ event.pointerId; // unique id for multi-touch tracking
+ event.isPrimary; // first pointer in a multi-pointer gesture
+ event.pressure; // 0-1 pen/touch pressure
+ event.button; // 0 left, 1 middle, 2 right
+ event.buttons; // bitmask of held buttons
+ event.altKey; // modifier key state
+ event.ctrlKey;
+ event.shiftKey;
+ event.metaKey;
 
-  event.nativeEvent; // the underlying DOM PointerEvent / MouseEvent / Touch
-  event.preventDefault();
-  event.stopPropagation();
-  event.stopImmediatePropagation();
+ event.nativeEvent; // the underlying DOM PointerEvent / MouseEvent / Touch
+ event.preventDefault();
+ event.stopPropagation();
+ event.stopImmediatePropagation();
 });
 ```
 
@@ -273,12 +273,12 @@ Toggle event categories globally for performance:
 
 ```ts
 await app.init({
-  eventFeatures: {
-    move: true, // pointer/mouse/touch move events
-    globalMove: true, // global move events (globalpointermove, etc.)
-    click: true, // click/tap/press events
-    wheel: true, // mouse wheel events
-  },
+ eventFeatures: {
+ move: true, // pointer/mouse/touch move events
+ globalMove: true, // global move events (globalpointermove, etc.)
+ click: true, // click/tap/press events
+ wheel: true, // mouse wheel events
+ },
 });
 
 // or configure after init
@@ -302,7 +302,7 @@ Wrong:
 ```ts
 const sprite = new Sprite(texture);
 sprite.on("pointerdown", () => {
-  console.log("clicked");
+ console.log("clicked");
 });
 ```
 
@@ -312,7 +312,7 @@ Correct:
 const sprite = new Sprite(texture);
 sprite.eventMode = "static";
 sprite.on("pointerdown", () => {
-  console.log("clicked");
+ console.log("clicked");
 });
 ```
 
@@ -345,8 +345,8 @@ Wrong:
 ```ts
 sprite.eventMode = "static";
 sprite.on("pointermove", (event) => {
-  // expects to fire everywhere; only fires inside sprite bounds
-  updateDrag(event.global.x, event.global.y);
+ // expects to fire everywhere; only fires inside sprite bounds
+ updateDrag(event.global.x, event.global.y);
 });
 ```
 
@@ -355,8 +355,8 @@ Correct:
 ```ts
 sprite.eventMode = "static";
 sprite.on("globalpointermove", (event) => {
-  // fires everywhere, even outside sprite bounds
-  updateDrag(event.global.x, event.global.y);
+ // fires everywhere, even outside sprite bounds
+ updateDrag(event.global.x, event.global.y);
 });
 ```
 

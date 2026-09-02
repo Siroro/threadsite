@@ -4,7 +4,7 @@ description: "Build a survival-crafting game: resource gathering, inventory, cra
 license: Apache-2.0
 ---
 
-<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/pixi.js) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
 
 
 # Survival Crafting
@@ -18,13 +18,12 @@ tense rather than tedious.
 ## When to use
 
 - Use when the player **gathers resources, crafts items/structures, manages survival needs, and
-  builds a base** against escalating threats: survival sandbox, crafting/base-building game.
+ builds a base** against escalating threats: survival sandbox, crafting/base-building game.
 - Use when designing needs (hunger/thirst/temperature), a crafting tech tree, gathering loops,
-  or base placement/building.
+ or base placement/building.
 
 **When *not* to use:** crafting as a minor RPG feature → `rpg`. Permadeath grid dungeon →
-`roguelike`. For inventory/items as data assets, use `godot-resources` /
-`unity-scriptableobjects`; for world generation, `procedural-gen`.
+`roguelike`. For inventory/items as data assets, use the engine's equivalent API; for world generation, `procedural-gen`.
 
 ## Core loop
 
@@ -64,17 +63,17 @@ better crafts). When that ladder breaks, the game becomes a grind.
 ```python
 # Pseudocode in the per-frame/per-tick update. dt = seconds. Needs fall; failure bleeds HP.
 def update_needs(p, dt):
-    p.hunger = max(0, p.hunger - HUNGER_RATE * dt)
-    p.thirst = max(0, p.thirst - THIRST_RATE * dt)
-    p.temp   = approach(p.temp, ambient_temperature(p), TEMP_RATE * dt)
+ p.hunger = max(0, p.hunger - HUNGER_RATE * dt)
+ p.thirst = max(0, p.thirst - THIRST_RATE * dt)
+ p.temp = approach(p.temp, ambient_temperature(p), TEMP_RATE * dt)
 
-    # Consequences are graded, not binary: warnings, then attrition — never instant death.
-    if p.hunger == 0 or p.thirst == 0:
-        p.hp -= STARVE_DAMAGE * dt          # damage over time creates urgency with recovery room
-    if p.temp < COLD_THRESHOLD or p.temp > HEAT_THRESHOLD:
-        p.hp -= EXPOSURE_DAMAGE * dt
-    if p.hunger > 0 and p.thirst > 0 and not exposed(p):
-        p.hp = min(p.max_hp, p.hp + REGEN_RATE * dt)   # safe + fed => heal
+ # Consequences are graded, not binary: warnings, then attrition — never instant death.
+ if p.hunger == 0 or p.thirst == 0:
+ p.hp -= STARVE_DAMAGE * dt # damage over time creates urgency with recovery room
+ if p.temp < COLD_THRESHOLD or p.temp > HEAT_THRESHOLD:
+ p.hp -= EXPOSURE_DAMAGE * dt
+ if p.hunger > 0 and p.thirst > 0 and not exposed(p):
+ p.hp = min(p.max_hp, p.hp + REGEN_RATE * dt) # safe + fed => heal
 ```
 
 ### 2. Crafting: validate, then atomically consume inputs
@@ -82,19 +81,19 @@ def update_needs(p, dt):
 ```python
 # Pseudocode. Recipes are data: inputs -> output, with an optional station/tech requirement.
 recipe = {"id": "stone_axe",
-          "inputs": {"wood": 3, "stone": 2}, "output": ("stone_axe", 1),
-          "station": "workbench", "requires_tech": "basic_tools"}
+ "inputs": {"wood": 3, "stone": 2}, "output": ("stone_axe", 1),
+ "station": "workbench", "requires_tech": "basic_tools"}
 
 def can_craft(recipe, inv, tech, station):
-    if recipe.get("requires_tech") and recipe["requires_tech"] not in tech: return False
-    if recipe.get("station") and recipe["station"] != station: return False
-    return all(inv.count(item) >= n for item, n in recipe["inputs"].items())
+ if recipe.get("requires_tech") and recipe["requires_tech"] not in tech: return False
+ if recipe.get("station") and recipe["station"] != station: return False
+ return all(inv.count(item) >= n for item, n in recipe["inputs"].items())
 
 def craft(recipe, inv, tech, station):
-    if not can_craft(recipe, inv, tech, station): return False
-    for item, n in recipe["inputs"].items(): inv.remove(item, n)   # consume all, then add
-    inv.add(*recipe["output"])                                     # atomic: no partial craft
-    return True
+ if not can_craft(recipe, inv, tech, station): return False
+ for item, n in recipe["inputs"].items(): inv.remove(item, n) # consume all, then add
+ inv.add(*recipe["output"]) # atomic: no partial craft
+ return True
 ```
 
 ### 3. Gathering gated by tool tier
@@ -102,42 +101,42 @@ def craft(recipe, inv, tech, station):
 ```python
 # Pseudocode. A node yields only if the held tool meets its required tier.
 def harvest(node, tool):
-    if tool.tier < node.required_tier:
-        return notify("Need a better tool")        # e.g. stone node needs a pickaxe, not fists
-    node.hp -= tool.power
-    if node.hp <= 0:
-        spawn_drops(node.drop_table)               # weighted drops (see roguelike loot pattern)
-        node.start_respawn(node.respawn_time)      # node returns later; world isn't depleted forever
+ if tool.tier < node.required_tier:
+ return notify("Need a better tool") # e.g. stone node needs a pickaxe, not fists
+ node.hp -= tool.power
+ if node.hp <= 0:
+ spawn_drops(node.drop_table) # weighted drops (see roguelike loot pattern)
+ node.start_respawn(node.respawn_time) # node returns later; world isn't depleted forever
 ```
 
 ## Pitfalls / failure modes
 
 - **Needs that kill instantly** → frustration and save-scumming. Make failure damage over time,
-  with clear warnings and a recovery path (Pattern 1).
+ with clear warnings and a recovery path (Pattern 1).
 - **Grind without a ladder** → gathering that never unlocks new gathering. Each tier must open
-  the next (better tool → new node → new resource → better craft).
+ the next (better tool → new node → new resource → better craft).
 - **Non-atomic crafting** → inputs consumed but output not granted on an edge case. Validate
-  first, then consume-and-add as one step (Pattern 2).
+ first, then consume-and-add as one step (Pattern 2).
 - **Inventory with no limits** → no logistics tension and no reason for a base/storage. Cap by
-  slots or weight.
+ slots or weight.
 - **Permanently depleting the world** → players strip the map and quit. Respawn nodes or
-  regenerate resources over time.
+ regenerate resources over time.
 - **Per-frame decay unscaled by `dt`** → needs drain at different speeds on different hardware.
-  Scale by `dt`.
+ Scale by `dt`.
 - **No save / fragile save of a large world** → a crash wipes hours. Persist world+base+needs
-  incrementally; version it (see `save-systems`).
+ incrementally; version it (see `save-systems`).
 - **Flat threat curve** → no late-game pressure. Escalate via night/season/event tiers.
 
 ## Composition (build it from these skills)
 
-- **Items/recipes as data:** `godot-resources` / `unity-scriptableobjects` — items, recipes, tech tree, drop tables.
+- **Items/recipes as data:** the engine's equivalent API — items, recipes, tech tree, drop tables.
 - **World:** `procedural-gen` for biomes/resource placement; `level-design` for authored areas.
 - **Persistence:** `save-systems` for large-world state, base, inventory, needs, and versioning.
 - **Threats:** `game-ai` for creatures; the engine physics skill for melee/collision.
-- **Building/placement:** `godot-tilemap` / `unity-tilemap-2d` (2D) or `godot-3d-essentials` (3D) plus UI snapping.
-- **UI:** `game-ui-ux` for inventory/crafting/HUD layout and scaling; `godot-ui-control` for the concrete inventory, crafting menu, needs HUD, and build mode.
+- **Building/placement:** the engine's equivalent API (2D) or the engine's equivalent API (3D) plus UI snapping.
+- **UI:** `game-ui-ux` for inventory/crafting/HUD layout and scaling; the engine's equivalent API for the concrete inventory, crafting menu, needs HUD, and build mode.
 
 ## References
 
 - For the full needs model and thresholds, the crafting tech-tree graph, gather/respawn tuning,
-  base-building grids, and threat escalation, read `references/needs-and-crafting.md`.
+ base-building grids, and threat escalation, read `references/needs-and-crafting.md`.

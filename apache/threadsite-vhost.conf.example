@@ -22,6 +22,12 @@
     <FilesMatch "\.html?$">
         Header set Cache-Control "no-cache"
     </FilesMatch>
+    # The deploy-identity file the injected update checker polls on every
+    # published page. It must never be cached (not even revalidated): a cached
+    # copy delays or silently breaks the "new version shipped" reload.
+    <FilesMatch "^threadsite-version\.json$">
+        Header set Cache-Control "no-store"
+    </FilesMatch>
 
     # If a CDN such as Cloudflare fronts this host, set its "Browser Cache
     # TTL" to "Respect Existing Headers". Otherwise the CDN's default (four

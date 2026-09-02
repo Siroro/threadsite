@@ -55,12 +55,12 @@ export function notesSection(notes: string | undefined): string {
 }
 
 export function initialProjectInstruction(kind: ProjectKind, userPrompt: string, notes?: string): string {
-  const common = `Read the project-root AGENTS.md first. Inspect the starter files, make a short todo plan for nontrivial work, research the web when it will materially improve the result, and implement the deliverable rather than only describing it. Browser code is authored in TypeScript under site/src/; the harness compiles and bundles it after your reply. Prefer a clear multi-file structure over one giant index.html.`;
+  const common = `Read the project-root AGENTS.md first — it is the authoritative brief for engine usage and multiplayer architecture. Inspect the starter files, make a short todo plan for nontrivial work, research the web when it will materially improve the result, and implement the deliverable rather than only describing it. Browser code is authored in TypeScript under site/src/; the harness compiles and bundles it after your reply. Prefer a clear multi-file structure over one giant index.html.`;
   if (kind === "game-2d") {
-    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below, following AGENTS.md's 2D rules and building on the installed PixiJS engine (\`import * as PIXI from "pixi.js"\`) unless DOM/SVG genuinely fits better. Build it **multiplayer-first** exactly as AGENTS.md's multiplayer section describes (net client from \`site/net/\`, room create/join, peer-owned-state sync, playable solo fallback). Use asset_download for suitable reusable media.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below, following AGENTS.md's 2D and multiplayer sections exactly (installed engine, multiplayer-first through the harness relay, solo fallback). Use asset_download for suitable reusable media.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
   if (kind === "game-3d") {
-    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below, following AGENTS.md's 3D rules and building on the installed three.js engine (\`import * as THREE from "three"\` — never hand-roll WebGL or download another copy). Build it **multiplayer-first** exactly as AGENTS.md's multiplayer section describes (net client from \`site/net/\`, room create/join, peer-owned-state sync, playable solo fallback). Use asset_download for suitable media/models/textures/audio.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below, following AGENTS.md's 3D and multiplayer sections exactly (installed engine, multiplayer-first through the harness relay, solo fallback). Use asset_download for suitable media/models/textures/audio.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
   return `${common}\n\nCreate the static website described below. Make it feel intentionally designed and interactive where appropriate. Use real researched/reusable media when it improves the result, otherwise tasteful local CSS/SVG/Canvas visuals.${notesSection(notes)}\n\nSITE REQUEST:\n${userPrompt}`;
 }
@@ -70,7 +70,7 @@ export function mutationInstruction(kind: ProjectKind, userPrompt: string, notes
   const multiplayerClause = kind === "site"
     ? ""
     : " Preserve working multiplayer (rooms, sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client.";
-  return `Read AGENTS.md and inspect the current project before editing. Revise the existing ${noun} according to the Discord request below. Preserve working features/mechanics unless the request changes them.${multiplayerClause} Keep browser code in TypeScript under site/src/ (never hand-edit the generated bundles under site/js/ — see AGENTS.md's legacy section if authored .js is still there), use websearch and asset_download when they would materially improve the result, and leave a complete directly runnable deliverable.${notesSection(notes)}\n\nDISCORD REQUEST:\n${userPrompt}`;
+  return `Read AGENTS.md and inspect the current project before editing. Revise the existing ${noun} according to the Discord request below. Preserve working features/mechanics unless the request changes them.${multiplayerClause} Keep browser code in TypeScript under site/src/ (never hand-edit the generated bundles under site/js/ — if authored .js is still there, migrate it to src/ as .ts), use websearch and asset_download when they would materially improve the result, and leave a complete directly runnable deliverable.${notesSection(notes)}\n\nDISCORD REQUEST:\n${userPrompt}`;
 }
 
 export function repairInstruction(validationError: string): string {

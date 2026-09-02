@@ -17,9 +17,9 @@ Assumes familiarity with `pixijs-scene-core-concepts`. All sprite classes are le
 const texture = await Assets.load("bunny.png");
 
 const sprite = new Sprite({
-  texture,
-  anchor: 0.5,
-  tint: 0xff8888,
+ texture,
+ anchor: 0.5,
+ tint: 0xff8888,
 });
 sprite.x = app.screen.width / 2;
 sprite.y = app.screen.height / 2;
@@ -33,12 +33,12 @@ Position is set after construction because `app.screen.width / 2` depends on the
 
 ## Variants
 
-| Variant           | Use when                                                  | Trade-offs                                      | Reference                                                        |
+| Variant | Use when | Trade-offs | Reference |
 | ----------------- | --------------------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------- |
-| `Sprite`          | Draw a single texture at a position                       | Fixed size = texture size                       | [references/sprite.md](references/sprite.md)                     |
-| `AnimatedSprite`  | Frame-based animation from a texture array or spritesheet | Pre-rendered frames only; no tweening           | [references/animated-sprite.md](references/animated-sprite.md)   |
-| `NineSliceSprite` | Resizable UI panels, buttons, dialog frames               | Border width is fixed; center stretches         | [references/nineslice-sprite.md](references/nineslice-sprite.md) |
-| `TilingSprite`    | Scrolling backgrounds, parallax, repeating patterns       | Single texture repeated; `tilePosition` scrolls | [references/tiling-sprite.md](references/tiling-sprite.md)       |
+| `Sprite` | Draw a single texture at a position | Fixed size = texture size | [references/sprite.md](references/sprite.md) |
+| `AnimatedSprite` | Frame-based animation from a texture array or spritesheet | Pre-rendered frames only; no tweening | [references/animated-sprite.md](references/animated-sprite.md) |
+| `NineSliceSprite` | Resizable UI panels, buttons, dialog frames | Border width is fixed; center stretches | [references/nineslice-sprite.md](references/nineslice-sprite.md) |
+| `TilingSprite` | Scrolling backgrounds, parallax, repeating patterns | Single texture repeated; `tilePosition` scrolls | [references/tiling-sprite.md](references/tiling-sprite.md) |
 
 `AnimatedSprite` is a subclass of `Sprite`; all `Sprite` properties (anchor, tint, position) apply.
 

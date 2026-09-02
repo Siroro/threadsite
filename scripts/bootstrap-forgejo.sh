@@ -90,6 +90,21 @@ umask 077
 printf '%s\n' "$TOKEN" > secrets/forgejo-token
 chmod 600 secrets/forgejo-token
 
+# A second token, from the admin account, solely for creating the restricted
+# per-repo push accounts that /site pushkey hands out. The service token cannot
+# create users; this one must never be used for anything else.
+ADMIN_TOKEN_NAME="threadsite-admin-$(date +%s)"
+ADMIN_TOKEN="$(docker compose exec -T forgejo "${FJ[@]}" admin user generate-access-token \
+  --username "$ADMIN_USER" --token-name "$ADMIN_TOKEN_NAME" --raw --scopes all | tr -d '\r\n')"
+
+if [[ -n "$ADMIN_TOKEN" ]]; then
+  printf '%s\n' "$ADMIN_TOKEN" > secrets/forgejo-admin-token
+  chmod 600 secrets/forgejo-admin-token
+  echo "Wrote secrets/forgejo-admin-token for push-account creation."
+else
+  echo "WARNING: Forgejo did not return an admin access token; /site pushkey will not work until this script succeeds." >&2
+fi
+
 echo "Wrote secrets/forgejo-token for the non-admin '$OWNER' account. Restarting bot if it already exists..."
 docker compose restart bot >/dev/null 2>&1 || true
 echo "Done."

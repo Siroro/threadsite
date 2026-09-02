@@ -15,14 +15,14 @@ Assumes familiarity with `pixijs-scene-core-concepts`. All text classes are leaf
 
 ```ts
 const text = new Text({
-  text: "Hello PixiJS",
-  style: {
-    fontFamily: "Arial",
-    fontSize: 36,
-    fill: 0xffffff,
-    stroke: { color: 0x4a1850, width: 5 },
-    dropShadow: { color: 0x000000, blur: 4, distance: 6 },
-  },
+ text: "Hello PixiJS",
+ style: {
+ fontFamily: "Arial",
+ fontSize: 36,
+ fill: 0xffffff,
+ stroke: { color: 0x4a1850, width: 5 },
+ dropShadow: { color: 0x000000, blur: 4, distance: 6 },
+ },
 });
 
 text.anchor.set(0.5);
@@ -38,13 +38,13 @@ All text classes use options-object constructors; positional `(string, style)` f
 
 ## Variants
 
-| Variant           | Use when                                                           | Trade-offs                                                            | Reference                                                          |
+| Variant | Use when | Trade-offs | Reference |
 | ----------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `Text`            | High-quality static or infrequent-update labels                    | Expensive to update (canvas re-draw + GPU upload)                     | [references/text.md](references/text.md)                           |
-| `BitmapText`      | Scores, timers, gameplay labels, anything that changes every frame | Limited styling; fixed glyph atlas; requires MSDF for crisp scaling   | [references/bitmap-text.md](references/bitmap-text.md)             |
-| `HTMLText`        | Rich formatted text, mixed styles, real HTML tags                  | Async rendering (one frame delay); similar update cost to `Text`      | [references/html-text.md](references/html-text.md)                 |
-| `SplitText`       | Per-character animation with rich styling                          | Each char is a full `Text`; expensive for long strings                | [references/split-text.md](references/split-text.md)               |
-| `SplitBitmapText` | Per-character animation on long strings or dynamic content         | Inherits BitmapText limitations (glyph atlas, no MSDF-free crispness) | [references/split-bitmap-text.md](references/split-bitmap-text.md) |
+| `Text` | High-quality static or infrequent-update labels | Expensive to update (canvas re-draw + GPU upload) | [references/text.md](references/text.md) |
+| `BitmapText` | Scores, timers, gameplay labels, anything that changes every frame | Limited styling; fixed glyph atlas; requires MSDF for crisp scaling | [references/bitmap-text.md](references/bitmap-text.md) |
+| `HTMLText` | Rich formatted text, mixed styles, real HTML tags | Async rendering (one frame delay); similar update cost to `Text` | [references/html-text.md](references/html-text.md) |
+| `SplitText` | Per-character animation with rich styling | Each char is a full `Text`; expensive for long strings | [references/split-text.md](references/split-text.md) |
+| `SplitBitmapText` | Per-character animation on long strings or dynamic content | Inherits BitmapText limitations (glyph atlas, no MSDF-free crispness) | [references/split-bitmap-text.md](references/split-bitmap-text.md) |
 
 ## When to use what
 
@@ -58,12 +58,12 @@ All text classes use options-object constructors; positional `(string, style)` f
 
 ## Update cost comparison
 
-| Update trigger      | Text | BitmapText | HTMLText | SplitText                     | SplitBitmapText          |
+| Update trigger | Text | BitmapText | HTMLText | SplitText | SplitBitmapText |
 | ------------------- | ---- | ---------- | -------- | ----------------------------- | ------------------------ |
-| Changing `.text`    | High | Very low   | High     | Very high (N text re-renders) | Low (N quad repositions) |
-| Changing `.style`   | High | Medium     | High     | Very high                     | Medium                   |
-| Moving (`.x`, `.y`) | Free | Free       | Free     | Free                          | Free                     |
-| Rotating / scaling  | Free | Free       | Free     | Free                          | Free                     |
+| Changing `.text` | High | Very low | High | Very high (N text re-renders) | Low (N quad repositions) |
+| Changing `.style` | High | Medium | High | Very high | Medium |
+| Moving (`.x`, `.y`) | Free | Free | Free | Free | Free |
+| Rotating / scaling | Free | Free | Free | Free | Free |
 
 "Free" = normal Container transform cost. "High" = new canvas draw + GPU upload. "Very low" = quad reposition only. Update strings that change per-frame only on `BitmapText` or `SplitBitmapText`.
 
@@ -82,7 +82,7 @@ Wrong:
 
 ```ts
 app.ticker.add(() => {
-  scoreText.text = `Score: ${score}`;
+ scoreText.text = `Score: ${score}`;
 });
 ```
 
@@ -91,7 +91,7 @@ Correct:
 ```ts
 const scoreText = new BitmapText({ text: "Score: 0", style });
 app.ticker.add(() => {
-  scoreText.text = `Score: ${score}`;
+ scoreText.text = `Score: ${score}`;
 });
 ```
 

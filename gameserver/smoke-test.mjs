@@ -57,7 +57,7 @@ console.log("health OK:", JSON.stringify(health));
 
 // 1. host creates a room in game A
 const host = await connect();
-host.send({ t: "join", v: 3, game: "capy-courier-ab12cd", create: true, name: "Ana" });
+host.send({ t: "join", v: 3, game: "capy-courier-ab12cd", create: true, name: "Ana", cid: "shared-tab-cid" });
 const welcome = await host.next((f) => f.t === "welcome", "host welcome");
 assert.equal(welcome.you.startsWith("p-"), true);
 assert.equal(welcome.host, welcome.you);
@@ -69,7 +69,7 @@ console.log("host joined room", room);
 
 // 2. guest joins by code
 const guest = await connect();
-guest.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room, name: "Bo" });
+guest.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room, name: "Bo", cid: "shared-tab-cid" });
 const guestWelcome = await guest.next((f) => f.t === "welcome", "guest welcome");
 assert.equal(guestWelcome.room, room);
 assert.equal(guestWelcome.host, welcome.you);
@@ -93,12 +93,25 @@ assert.equal(guestState.from, welcome.you);
 assert.equal(guestState.s.tick, 42);
 console.log("state relay OK");
 
-// 4b. peer-owned state: direct relay to the room, no host involvement
+// 4b. self-published player transform: direct relay to the room, no host involvement
 host.send({ t: "pstate", s: { x: 1, y: 2 } });
 const guestP = await guest.next((f) => f.t === "pstate", "pstate at guest");
 assert.equal(guestP.from, welcome.you);
 assert.deepEqual(guestP.s, { x: 1, y: 2 });
 console.log("pstate relay OK");
+
+// 4c. room snapshots are host-only: a guest state publish is rejected and
+// must not replace the cached snapshot (pstate is per-player traffic and
+// stays allowed for everyone).
+guest.send({ t: "state", s: { tick: 777, poisoned: true } });
+const guestStateRejection = await guest.next((f) => f.t === "error" && f.code === "not_host", "guest state rejected");
+assert.ok(guestStateRejection, "guest publishState rejected");
+const lateProbe = await connect();
+lateProbe.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room });
+const lateProbeWelcome = await lateProbe.next((f) => f.t === "welcome", "late probe welcome");
+assert.equal(lateProbeWelcome.s.s.tick, 42, "cached snapshot untouched by the guest publish");
+lateProbe.close();
+console.log("guest publishState rejected, snapshot intact OK");
 
 // 5. guest event broadcast + targeted event
 guest.send({ t: "event", e: "input", d: { seq: 1, move: "left" } });
@@ -121,7 +134,7 @@ const lateHost = lateWelcome.peers.find((p) => p.id === welcome.you);
 assert.deepEqual(lateHost.s, { x: 1, y: 2 });
 const lateGuest = lateWelcome.peers.find((p) => p.id === guestWelcome.you);
 assert.equal(lateGuest.s, null);
-console.log("late-join snapshot + peer states OK");
+console.log("late-join snapshot + peer-id-keyed states OK (duplicate cid safe)");
 
 // 7. state-req goes to the host (v3: the relay also answers from its cache
 // immediately, so expect the cached copy first and the host's fresh one after)
@@ -173,17 +186,12 @@ assert.ok(hostReq2);
 cacheless.close();
 console.log("state-req cache fallback OK");
 
-// 9d. v3: resend-req is forwarded to the original sender
+// 9d. v3: resend-req is gone from the protocol (ordered delivery + seq dedupe
+// + snapshots replaced it); sending it must fail visibly.
 guest.send({ t: "resend-req", to: welcome.you, after: 0, before: 5 });
-const resendForward = await host.next((f) => f.t === "resend-req", "resend-req forward");
-assert.equal(resendForward.from, guestWelcome.you);
-assert.equal(resendForward.after, 0);
-assert.equal(resendForward.before, 5);
-// malformed resend-req is rejected
-guest.send({ t: "resend-req", to: welcome.you, after: 9, before: 2 });
-const badResend = await guest.next((f) => f.t === "error" && f.code === "bad_frame", "bad resend-req");
-assert.ok(badResend);
-console.log("resend-req forwarding OK");
+const rejectedResend = await guest.next((f) => f.t === "error" && f.code === "unsupported_frame", "resend-req rejection");
+assert.ok(rejectedResend.message.includes("seq"), "rejection points at the recovery model");
+console.log("resend-req rejected OK");
 
 // 9e. v3: old protocol versions are rejected outright
 const oldClient = await connect();
@@ -193,24 +201,47 @@ assert.ok(versionError.message.includes("v3"), "error names the supported versio
 oldClient.close();
 console.log("protocol version enforcement OK");
 
-// 9f. v3: retained player state survives disconnect and is reclaimed by cid
+// 9f. v3: transforms do NOT survive disconnect. The relay deletes peer state
+// on disconnect; a reconnecting player is restored from the authoritative
+// host snapshot (welcome.s / state-req), never from a retained transform —
+// replaying one would rubber-band them from a stale position.
 guest.send({ t: "pstate", s: { x: 9, y: 9, hp: 3 } });
 await host.next((f) => f.t === "pstate" && f.s.hp === 3, "pstate before drop");
 guest.close();
 await host.next((f) => f.t === "peer-leave" && f.id === guestWelcome.you, "guest leave");
-// reconnect with the SAME cid: the retained state must come back in welcome
+// reconnect with the SAME cid: identity is honored, but the stale transform is gone
 const returning = await connect();
 returning.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room, name: "Bo", cid: guestWelcome.cid });
 const returnWelcome = await returning.next((f) => f.t === "welcome", "returning welcome");
 assert.equal(returnWelcome.cid, guestWelcome.cid, "cid honored on rejoin");
+assert.equal(returnWelcome.s.s.tick, 43, "reconnecting player gets the authoritative snapshot");
 const observer = await connect();
 observer.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room });
 const observerWelcome = await observer.next((f) => f.t === "welcome", "observer welcome");
-const boEntry = observerWelcome.peers.find((p) => p.cid === guestWelcome.cid);
-assert.ok(boEntry, "reconnected player appears under their cid");
-assert.deepEqual(boEntry.s, { x: 9, y: 9, hp: 3 }, "retained player state reclaimed after reconnect");
+// Key by live peer id: this room deliberately has two connections sharing a
+// cid, so a cid lookup alone could match either one.
+const boEntry = observerWelcome.peers.find((p) => p.id === returnWelcome.you);
+assert.ok(boEntry, "reconnected player appears with their new peer id");
+assert.equal(boEntry.cid, guestWelcome.cid, "reconnected player still carries their cid");
+assert.equal(boEntry.s, null, "no stale transform retained across the disconnect");
 observer.close();
-console.log("cid retention across reconnect OK");
+console.log("cid identity kept, stale transforms dropped on disconnect OK");
+
+// 9g. v3: authoritative room state is host-only — a guest publish is rejected
+// and must not replace the relay's cached snapshot.
+const returningGuest = await connect();
+returningGuest.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room, name: "Imposter", cid: "imposter-cid-01" });
+const imposterWelcome = await returningGuest.next((f) => f.t === "welcome", "imposter welcome");
+returningGuest.send({ t: "state", s: { tick: 999, poisoned: true } });
+const notHost = await returningGuest.next((f) => f.t === "error" && f.code === "not_host", "not_host rejection");
+assert.ok(notHost, "guest state publish rejected");
+const snapshotCheck = await connect();
+snapshotCheck.send({ t: "join", v: 3, game: "capy-courier-ab12cd", room });
+const snapshotWelcome = await snapshotCheck.next((f) => f.t === "welcome", "snapshot check welcome");
+assert.equal(snapshotWelcome.s.s.tick, 43, "cached snapshot untouched by the guest publish");
+returningGuest.close();
+snapshotCheck.close();
+console.log("guest publishState rejected, snapshot intact OK");
 
 // 10. host leaves => host migration announced to remaining peers
 host.close();
@@ -218,12 +249,15 @@ const migrationAtLate = await late.next((f) => f.t === "peer-leave" && f.id === 
 assert.ok(migrationAtLate.host, "new host announced");
 console.log("host migration OK ->", migrationAtLate.host);
 
-// 11. promoted host can publish state to the room (guest left and reconnected
-// in 9f, so `returning` — the promoted oldest peer — publishes)
-returning.send({ t: "state", s: { tick: 44, note: "new host" } });
-const lateState2 = await late.next((f) => f.t === "state" && f.s.tick === 44, "state from new host");
+// 11. the promoted host (the oldest remaining peer — `late`, joined in 6)
+// publishes state to the room; `returning` as a guest only receives.
+late.send({ t: "state", s: { tick: 44, note: "new host" } });
+const lateState2 = await returning.next((f) => f.t === "state" && f.s.tick === 44, "state from new host");
 assert.ok(lateState2);
-console.log("promoted-host publish OK");
+returning.send({ t: "state", s: { tick: 45, note: "guest attempt" } });
+const demoted = await returning.next((f) => f.t === "error" && f.code === "not_host", "ex-host rejected");
+assert.ok(demoted, "non-host cannot publish state");
+console.log("promoted-host publish OK; guests still rejected");
 
 // 12. bad frames rejected politely
 returning.send("this is not json");
@@ -271,6 +305,14 @@ arenaB.send({ t: "event", e: "hello", d: { to: "everyone" } });
 const arenaEvent = await arenaA.next((f) => f.t === "event" && f.e === "hello", "event inside shared arena");
 assert.equal(arenaEvent.from, arenaWelcomeB.you);
 console.log("single-server isolation OK: separate game and rooms unaffected");
+
+// 14b. the ARENA namespace is reserved: code-addressed joins cannot touch it
+const arenaSquatter = await connect();
+arenaSquatter.send({ t: "join", v: 3, game: "arena-game-01", room: "ARENA", create: true, name: "Squatter" });
+const reservedError = await arenaSquatter.next((f) => f.t === "error" && f.code === "reserved_room", "reserved_room rejection");
+assert.ok(reservedError.message.includes("single"), "rejection names the single-server mode");
+arenaSquatter.close();
+console.log("ARENA reserved against code-addressed joins OK");
 
 arenaA.close();
 arenaB.close();

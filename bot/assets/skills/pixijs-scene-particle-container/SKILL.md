@@ -19,23 +19,23 @@ The Particle API is new in v8 but is stable for production use.
 const texture = await Assets.load("particle.png");
 
 const container = new ParticleContainer({
-  texture,
-  boundsArea: new Rectangle(0, 0, app.screen.width, app.screen.height),
-  dynamicProperties: {
-    position: true,
-    rotation: false,
-    color: false,
-  },
+ texture,
+ boundsArea: new Rectangle(0, 0, app.screen.width, app.screen.height),
+ dynamicProperties: {
+ position: true,
+ rotation: false,
+ color: false,
+ },
 });
 
 for (let i = 0; i < 10000; i++) {
-  container.addParticle(
-    new Particle({
-      texture,
-      x: Math.random() * app.screen.width,
-      y: Math.random() * app.screen.height,
-    }),
-  );
+ container.addParticle(
+ new Particle({
+ texture,
+ x: Math.random() * app.screen.width,
+ y: Math.random() * app.screen.height,
+ }),
+ );
 }
 
 app.stage.addChild(container);
@@ -49,13 +49,13 @@ app.stage.addChild(container);
 
 All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zIndex`, etc.) are also valid here — see `skills/pixijs-scene-core-concepts/references/constructor-options.md`. Note that `children` is omitted: use `particles` instead.
 
-| Option              | Type                 | Default                                                                        | Description                                                                                                                                                                     |
+| Option | Type | Default | Description |
 | ------------------- | -------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `texture`           | `Texture`            | `null`                                                                         | Shared base texture for all particles. If omitted, the container falls back to the texture of the first particle added; every particle must share the same base texture source. |
-| `particles`         | `T[]`                | `[]`                                                                           | Initial array of `Particle` (or `IParticle`) instances. Equivalent to calling `addParticle` for each, but skips per-call view updates.                                          |
-| `dynamicProperties` | `ParticleProperties` | `{ vertex: false, position: true, rotation: false, uvs: false, color: false }` | Flags for which particle attributes re-upload to the GPU every frame. Only `position` is dynamic by default; mark what you animate, leave the rest static for speed.            |
-| `roundPixels`       | `boolean`            | `false`                                                                        | Rounds particle positions to the nearest pixel. Produces crisper rendering for pixel-art styles at the cost of smooth sub-pixel motion.                                         |
-| `shader`            | `Shader`             | default particle shader                                                        | Replaces the default particle shader. The custom shader must declare `aPosition`, `aUV`, `aColor`, plus any dynamic-only attributes enabled via `dynamicProperties`.            |
+| `texture` | `Texture` | `null` | Shared base texture for all particles. If omitted, the container falls back to the texture of the first particle added; every particle must share the same base texture source. |
+| `particles` | `T[]` | `[]` | Initial array of `Particle` (or `IParticle`) instances. Equivalent to calling `addParticle` for each, but skips per-call view updates. |
+| `dynamicProperties` | `ParticleProperties` | `{ vertex: false, position: true, rotation: false, uvs: false, color: false }` | Flags for which particle attributes re-upload to the GPU every frame. Only `position` is dynamic by default; mark what you animate, leave the rest static for speed. |
+| `roundPixels` | `boolean` | `false` | Rounds particle positions to the nearest pixel. Produces crisper rendering for pixel-art styles at the cost of smooth sub-pixel motion. |
+| `shader` | `Shader` | default particle shader | Replaces the default particle shader. The custom shader must declare `aPosition`, `aUV`, `aColor`, plus any dynamic-only attributes enabled via `dynamicProperties`. |
 
 `boundsArea` is inherited from `Container` but is effectively required on `ParticleContainer`: the container returns empty bounds `(0, 0, 0, 0)` by default for performance, so without `boundsArea` it is culled as invisible when culling is active and `containsPoint` always misses.
 
@@ -63,18 +63,18 @@ All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zInde
 
 `Particle` is a lightweight struct, not a `Container` subclass — none of the `ContainerOptions` fields apply. The full option list:
 
-| Option     | Type          | Default    | Description                                                                                                                            |
+| Option | Type | Default | Description |
 | ---------- | ------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `texture`  | `Texture`     | —          | Required. Texture used to render this particle. All particles in the same `ParticleContainer` must share the same base texture source. |
-| `x`        | `number`      | `0`        | X position in the container's local space.                                                                                             |
-| `y`        | `number`      | `0`        | Y position in the container's local space.                                                                                             |
-| `scaleX`   | `number`      | `1`        | Horizontal scale factor.                                                                                                               |
-| `scaleY`   | `number`      | `1`        | Vertical scale factor.                                                                                                                 |
-| `anchorX`  | `number`      | `0`        | Horizontal anchor in 0–1 range; `0` is left, `0.5` is center, `1` is right.                                                            |
-| `anchorY`  | `number`      | `0`        | Vertical anchor in 0–1 range; `0` is top, `0.5` is center, `1` is bottom.                                                              |
-| `rotation` | `number`      | `0`        | Rotation in radians.                                                                                                                   |
-| `tint`     | `ColorSource` | `0xffffff` | Tint color as hex number or CSS color string. Combined with `alpha` into the internal `color` field.                                   |
-| `alpha`    | `number`      | `1`        | Transparency (0–1). Values outside the range are clamped. Combined with `tint` into the internal `color` field.                        |
+| `texture` | `Texture` | — | Required. Texture used to render this particle. All particles in the same `ParticleContainer` must share the same base texture source. |
+| `x` | `number` | `0` | X position in the container's local space. |
+| `y` | `number` | `0` | Y position in the container's local space. |
+| `scaleX` | `number` | `1` | Horizontal scale factor. |
+| `scaleY` | `number` | `1` | Vertical scale factor. |
+| `anchorX` | `number` | `0` | Horizontal anchor in 0–1 range; `0` is left, `0.5` is center, `1` is right. |
+| `anchorY` | `number` | `0` | Vertical anchor in 0–1 range; `0` is top, `0.5` is center, `1` is bottom. |
+| `rotation` | `number` | `0` | Rotation in radians. |
+| `tint` | `ColorSource` | `0xffffff` | Tint color as hex number or CSS color string. Combined with `alpha` into the internal `color` field. |
+| `alpha` | `number` | `1` | Transparency (0–1). Values outside the range are clamped. Combined with `tint` into the internal `color` field. |
 
 The constructor also accepts a bare `Texture` as its sole argument (`new Particle(texture)`), which is shorthand for `new Particle({ texture })` using the defaults above.
 
@@ -86,16 +86,16 @@ The constructor also accepts a bare `Texture` as its sole argument (`new Particl
 
 ```ts
 const particle = new Particle({
-  texture,
-  x: 100,
-  y: 200,
-  scaleX: 0.5,
-  scaleY: 0.5,
-  anchorX: 0.5,
-  anchorY: 0.5,
-  rotation: Math.PI / 4,
-  tint: 0xff0000,
-  alpha: 0.8,
+ texture,
+ x: 100,
+ y: 200,
+ scaleX: 0.5,
+ scaleY: 0.5,
+ anchorX: 0.5,
+ anchorY: 0.5,
+ rotation: Math.PI / 4,
+ tint: 0xff0000,
+ alpha: 0.8,
 });
 
 container.addParticle(particle);
@@ -109,9 +109,9 @@ Override `Particle.defaultOptions` to change defaults globally:
 
 ```ts
 Particle.defaultOptions = {
-  ...Particle.defaultOptions,
-  anchorX: 0.5,
-  anchorY: 0.5,
+ ...Particle.defaultOptions,
+ anchorX: 0.5,
+ anchorY: 0.5,
 };
 ```
 
@@ -119,19 +119,19 @@ Particle.defaultOptions = {
 
 ```ts
 const particles = Array.from(
-  { length: 10000 },
-  () =>
-    new Particle({
-      texture,
-      x: Math.random() * 800,
-      y: Math.random() * 600,
-    }),
+ { length: 10000 },
+ () =>
+ new Particle({
+ texture,
+ x: Math.random() * 800,
+ y: Math.random() * 600,
+ }),
 );
 
 const container = new ParticleContainer({
-  texture,
-  boundsArea: new Rectangle(0, 0, 800, 600),
-  particles,
+ texture,
+ boundsArea: new Rectangle(0, 0, 800, 600),
+ particles,
 });
 ```
 
@@ -141,9 +141,9 @@ Passing `particles` in the constructor is equivalent to creating the container e
 
 ```ts
 const container = new ParticleContainer({
-  dynamicProperties: {
-    rotation: true,
-  },
+ dynamicProperties: {
+ rotation: true,
+ },
 });
 ```
 
@@ -165,7 +165,7 @@ Mark only what you animate; static properties are cheaper. If you change a stati
 
 ```ts
 container.particleChildren.forEach((p) => {
-  p.tint = 0x00ff00;
+ p.tint = 0x00ff00;
 });
 container.update();
 ```
@@ -176,9 +176,9 @@ container.update();
 // Bulk add
 const batch = [];
 for (let i = 0; i < 5000; i++) {
-  batch.push(
-    new Particle({ texture, x: Math.random() * 800, y: Math.random() * 600 }),
-  );
+ batch.push(
+ new Particle({ texture, x: Math.random() * 800, y: Math.random() * 600 }),
+ );
 }
 container.particleChildren.push(...batch);
 container.update();
@@ -218,16 +218,16 @@ const container = new ParticleContainer({ texture, shader: myCustomShader });
 
 `ParticleContainer` uses a separate child management API optimized for GPU buffer updates. The standard `Container` child methods throw when called on a `ParticleContainer`.
 
-| Standard Container method    | ParticleContainer equivalent                        |
+| Standard Container method | ParticleContainer equivalent |
 | ---------------------------- | --------------------------------------------------- |
-| `addChild(child)`            | `addParticle(particle)`                             |
-| `removeChild(child)`         | `removeParticle(particle)`                          |
-| `addChildAt(child, index)`   | `addParticleAt(particle, index)`                    |
-| `removeChildAt(index)`       | `removeParticleAt(index)`                           |
-| `removeChildren(begin, end)` | `removeParticles(begin, end)`                       |
-| `getChildAt(index)`          | Access `container.particleChildren[index]` directly |
-| `swapChildren()`             | Not available                                       |
-| `reparentChild()`            | Not available                                       |
+| `addChild(child)` | `addParticle(particle)` |
+| `removeChild(child)` | `removeParticle(particle)` |
+| `addChildAt(child, index)` | `addParticleAt(particle, index)` |
+| `removeChildAt(index)` | `removeParticleAt(index)` |
+| `removeChildren(begin, end)` | `removeParticles(begin, end)` |
+| `getChildAt(index)` | Access `container.particleChildren[index]` directly |
+| `swapChildren()` | Not available |
+| `reparentChild()` | Not available |
 
 ## Common Mistakes
 
@@ -265,7 +265,7 @@ Correct:
 
 ```ts
 const container = new ParticleContainer({
-  boundsArea: new Rectangle(0, 0, 800, 600),
+ boundsArea: new Rectangle(0, 0, 800, 600),
 });
 ```
 

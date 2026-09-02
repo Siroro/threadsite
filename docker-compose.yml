@@ -62,6 +62,7 @@ services:
       OPENCODE_URL: ${OPENCODE_URL:-http://opencode:4096}
       FORGEJO_INTERNAL_URL: ${FORGEJO_INTERNAL_URL:-http://forgejo:3000}
       FORGEJO_TOKEN_FILE: ${FORGEJO_TOKEN_FILE:-/run/secrets/forgejo-token}
+      FORGEJO_ADMIN_TOKEN_FILE: ${FORGEJO_ADMIN_TOKEN_FILE:-/run/secrets/forgejo-admin-token}
       MULTIPLAYER_ENABLED: ${MULTIPLAYER_ENABLED:-true}
       GAMESERVER_PUBLIC_URL: ${GAMESERVER_PUBLIC_URL:-ws://localhost:8090/ws}
       GAMESERVER_INTERNAL_URL: ${GAMESERVER_INTERNAL_URL:-http://gameserver:8090}
@@ -73,6 +74,7 @@ services:
       - ${SITES_HOST_PATH:-./data/sites}:/srv/sites
       - ./data/bot:/data
       - ./secrets/forgejo-token:/run/secrets/forgejo-token:ro
+      - ./secrets/forgejo-admin-token:/run/secrets/forgejo-admin-token:ro
     depends_on:
       - forgejo
       - opencode

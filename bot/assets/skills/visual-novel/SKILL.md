@@ -4,7 +4,7 @@ description: "Build a visual novel: a branching script, character and background
 license: Apache-2.0
 ---
 
-<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/pixi.js) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
 
 
 # Visual Novel
@@ -18,9 +18,9 @@ conveniences that make a VN pleasant to read.
 ## When to use
 
 - Use when the game is **mostly reading branching text** with character art and backgrounds:
-  visual novel, dating sim, branching interactive fiction, story-choice game.
+ visual novel, dating sim, branching interactive fiction, story-choice game.
 - Use when designing a choice/route structure, story flags, or VN conveniences (backlog,
-  skip, auto-advance, save-anywhere).
+ skip, auto-advance, save-anywhere).
 
 **When *not* to use:** dialogue as one feature inside a larger game → `rpg` consuming
 `dialogue-systems`. Card/board play → other genres. For the branching-script engine itself,
@@ -66,12 +66,12 @@ feel consequential; everything else is presentation and convenience.
 # through by that runtime. The engine asks the script for "the next thing to show".
 node = script.current()
 if node.kind == "line":
-    show_text(node.speaker, node.text)        # wait for advance input
+ show_text(node.speaker, node.text) # wait for advance input
 elif node.kind == "choice":
-    options = [o for o in node.options if condition_met(o.condition, flags)]  # gate by flags
-    show_choices(options)                      # wait for selection
+ options = [o for o in node.options if condition_met(o.condition, flags)] # gate by flags
+ show_choices(options) # wait for selection
 elif node.kind == "set":
-    flags[node.var] = eval_expr(node.expr, flags)
+ flags[node.var] = eval_expr(node.expr, flags)
 script.advance(selected_option_or_none)
 ```
 
@@ -80,15 +80,15 @@ script.advance(selected_option_or_none)
 ```python
 # Pseudocode. Reveal characters over time; a click first completes the line, then advances.
 def show_text(speaker, text):
-    name_label.text = speaker
-    revealed = 0
-    while revealed < len(text):
-        if advance_pressed():                  # first press: reveal the whole line instantly
-            revealed = len(text); break
-        revealed += chars_per_second * dt
-        body_label.text = text[:int(revealed)]
-        push_to_backlog_when_complete(speaker, text)
-    wait_for_advance()                          # second press: go to the next line
+ name_label.text = speaker
+ revealed = 0
+ while revealed < len(text):
+ if advance_pressed(): # first press: reveal the whole line instantly
+ revealed = len(text); break
+ revealed += chars_per_second * dt
+ body_label.text = text[:int(revealed)]
+ push_to_backlog_when_complete(speaker, text)
+ wait_for_advance() # second press: go to the next line
 ```
 
 ### 3. Choice sets a flag that branches later content
@@ -96,8 +96,8 @@ def show_text(speaker, text):
 ```python
 # Pseudocode. Choices write flags; later conditions read them — that is "reactivity".
 def on_choice(option):
-    if option.set: flags[option.set] = True     # e.g. flags["helped_npc"] = True
-    script.jump(option.target)                   # follow the branch
+ if option.set: flags[option.set] = True # e.g. flags["helped_npc"] = True
+ script.jump(option.target) # follow the branch
 
 # Elsewhere, a line/choice/ending checks the flag:
 if flags.get("helped_npc"): play_route("good_ending") else: play_route("neutral_ending")
@@ -106,30 +106,30 @@ if flags.get("helped_npc"): play_route("good_ending") else: play_route("neutral_
 ## Pitfalls / failure modes
 
 - **Save that only stores a checkpoint** → VNs need **save-anywhere**. Persist the exact script
-  position *and* all flags/variables (and seen-text data) so a load resumes the same line.
+ position *and* all flags/variables (and seen-text data) so a load resumes the same line.
 - **Presentation logic baked into the script** → unmaintainable. Keep *content* (text, choices)
-  in the script and *how it looks* (sprites, transitions) in the engine layer.
+ in the script and *how it looks* (sprites, transitions) in the engine layer.
 - **No skip/auto/backlog** → readers feel trapped, especially on replays. These are expected
-  baseline features, not extras.
+ baseline features, not extras.
 - **Skipping unread text** → players miss content. Skip should fast-forward **read** text only.
 - **Choices with no consequence** → branches that reconverge instantly feel fake. Set flags that
-  visibly change later lines, choices, or endings.
+ visibly change later lines, choices, or endings.
 - **Combinatorial branch explosion** → unshippable. Prefer branch-and-merge with a few flagged
-  variations over fully distinct trees (refs).
+ variations over fully distinct trees (refs).
 - **Lost reading context** → no backlog to re-read the last lines. Keep a history buffer.
 - **Hardcoded language** → no localization path. Keep text in data keyed for translation.
 
 ## Composition (build it from these skills)
 
 - **Script engine:** `dialogue-systems` (Ink / Yarn Spinner) — branching, conditions, variables, localization hooks.
-- **Presentation:** `game-ui-ux` for text-box/choice-menu layout, scaling, and safe areas; `godot-ui-control` for the concrete text box, choice menu, name plate, and backlog UI.
+- **Presentation:** `game-ui-ux` for text-box/choice-menu layout, scaling, and safe areas; the engine's equivalent API for the concrete text box, choice menu, name plate, and backlog UI.
 - **Persistence:** `save-systems` for save-anywhere slots, seen-text/skip data, and settings.
 - **Audio:** `audio-design` for per-scene music, SFX, and voice playback.
-- **Visuals:** the engine animation/`Tween` skill for sprite/background transitions; `shader-programming` for dissolves.
+- **Visuals:** the engine animation/`Tween` skill for sprite/background transitions; a GPU shader reference for dissolves.
 - **Process:** `prototype-fast` to test the branch structure in plain text before adding art.
 
 ## References
 
 - For the branching data model, route structures (branch-and-merge vs. routes), flags/variables,
-  save-anywhere + backlog/skip data, and the content/presentation split, read
-  `references/script-and-flow.md`.
+ save-anywhere + backlog/skip data, and the content/presentation split, read
+ `references/script-and-flow.md`.

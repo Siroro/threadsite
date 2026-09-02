@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # BitmapText
 
 Text rendered from a pre-generated texture atlas of glyphs. Updating the text string only repositions quads; no canvas re-render, no GPU upload per change. Use `BitmapText` for scores, timers, gameplay labels, and any text whose content changes frequently. Trade-off: limited styling, fixed glyph set, pixel-perfect only at the font's native size (unless you use MSDF).
@@ -6,18 +8,18 @@ Text rendered from a pre-generated texture atlas of glyphs. Updating the text st
 
 ```ts
 const score = new BitmapText({
-  text: "Score: 0",
-  style: {
-    fontFamily: "Arial",
-    fontSize: 32,
-    fill: 0xffffff,
-  },
+ text: "Score: 0",
+ style: {
+ fontFamily: "Arial",
+ fontSize: 32,
+ fill: 0xffffff,
+ },
 });
 
 app.stage.addChild(score);
 
 app.ticker.add(() => {
-  score.text = `Score: ${Math.floor(performance.now() / 100)}`;
+ score.text = `Score: ${Math.floor(performance.now() / 100)}`;
 });
 ```
 
@@ -29,10 +31,10 @@ When you pass a system font family without calling `BitmapFont.install`, the tex
 const minimal = new BitmapText({ text: "Score: 0" });
 
 const styled = new BitmapText({
-  text: "Hello",
-  style: { fontFamily: "GameFont", fontSize: 48, fill: 0xff0000 },
-  anchor: 0.5,
-  roundPixels: true,
+ text: "Hello",
+ style: { fontFamily: "GameFont", fontSize: 48, fill: 0xff0000 },
+ anchor: 0.5,
+ roundPixels: true,
 });
 ```
 
@@ -40,13 +42,13 @@ const styled = new BitmapText({
 
 `BitmapText`'s constructor accepts the base `TextOptions` directly (no additional bitmap-specific fields). Fields match `references/text.md` with two caveats: `style` is still `TextStyle \| TextStyleOptions` (the same class `Text` uses, but many style fields are ignored by the bitmap pipeline), and `resolution` is managed by the underlying `BitmapFont` at install time rather than per-instance.
 
-| Option        | Type                            | Default                                  | Description                                                                                                                                                                                                                                      |
+| Option | Type | Default | Description |
 | ------------- | ------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `text`        | `TextString`                    | `''`                                     | Text content. Same as `Text`.                                                                                                                                                                                                                    |
-| `style`       | `TextStyle \| TextStyleOptions` | `new TextStyle()` with `fill = 0xffffff` | Shared TextStyle type; fields like `fontFamily`, `fontSize`, `fill`, `stroke`, `align`, `wordWrap`, `wordWrapWidth`, and `lineHeight` are respected. Gradients as fill and filters are not. See the TextStyle reference in `references/text.md`. |
-| `anchor`      | `PointData \| number`           | `0`                                      | Same as `Text`.                                                                                                                                                                                                                                  |
-| `resolution`  | `number \| null`                | `null`                                   | Accepted but ignored at runtime — set resolution on the `BitmapFont` via `BitmapFont.install({ resolution })` instead. Passing a non-null value logs a warning.                                                                                  |
-| `roundPixels` | `boolean`                       | `false`                                  | Same as `Text`.                                                                                                                                                                                                                                  |
+| `text` | `TextString` | `''` | Text content. Same as `Text`. |
+| `style` | `TextStyle \| TextStyleOptions` | `new TextStyle()` with `fill = 0xffffff` | Shared TextStyle type; fields like `fontFamily`, `fontSize`, `fill`, `stroke`, `align`, `wordWrap`, `wordWrapWidth`, and `lineHeight` are respected. Gradients as fill and filters are not. See the TextStyle reference in `references/text.md`. |
+| `anchor` | `PointData \| number` | `0` | Same as `Text`. |
+| `resolution` | `number \| null` | `null` | Accepted but ignored at runtime — set resolution on the `BitmapFont` via `BitmapFont.install({ resolution })` instead. Passing a non-null value logs a warning. |
+| `roundPixels` | `boolean` | `false` | Same as `Text`. |
 
 All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zIndex`, etc.) are also valid here — see `skills/pixijs-scene-core-concepts/references/constructor-options.md`.
 
@@ -58,8 +60,8 @@ All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zInde
 
 ```ts
 const dynamic = new BitmapText({
-  text: "Hello",
-  style: { fontFamily: "Arial", fontSize: 32, fill: 0xff1010 },
+ text: "Hello",
+ style: { fontFamily: "Arial", fontSize: 32, fill: 0xff1010 },
 });
 ```
 
@@ -71,18 +73,18 @@ The first `BitmapText` with a given `fontFamily` + `fontSize` generates an atlas
 import { BitmapFont } from "pixi.js";
 
 BitmapFont.install({
-  name: "GameFont",
-  style: {
-    fontFamily: "Arial",
-    fontSize: 48,
-    fill: 0xffffff,
-    stroke: { color: "#000000", width: 2 },
-  },
+ name: "GameFont",
+ style: {
+ fontFamily: "Arial",
+ fontSize: 48,
+ fill: 0xffffff,
+ stroke: { color: "#000000", width: 2 },
+ },
 });
 
 const title = new BitmapText({
-  text: "Level 1",
-  style: { fontFamily: "GameFont", fontSize: 48, fill: 0x00ff00 },
+ text: "Level 1",
+ style: { fontFamily: "GameFont", fontSize: 48, fill: 0x00ff00 },
 });
 ```
 
@@ -90,36 +92,36 @@ const title = new BitmapText({
 
 #### Install options
 
-| Option         | Purpose                                                                                                                                                                                                                                               |
+| Option | Purpose |
 | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `chars`        | Character set to pre-render. Accepts a string, nested ranges, or a preset: `BitmapFontManager.ALPHA`, `BitmapFontManager.NUMERIC`, `BitmapFontManager.ALPHANUMERIC`, `BitmapFontManager.ASCII`. Essential for non-ASCII, CJK, or restricted charsets. |
-| `resolution`   | Texture atlas resolution. Default `1`. Use `window.devicePixelRatio` for HiDPI displays.                                                                                                                                                              |
-| `padding`      | Glyph padding inside the atlas. Default `4`. Raise to avoid bleeding at large scales.                                                                                                                                                                 |
-| `skipKerning`  | Skip kerning metadata to save memory and install time. Default `false`.                                                                                                                                                                               |
-| `textureStyle` | `TextureStyle`/`TextureStyleOptions` override for the generated atlas (for example `{ scaleMode: 'nearest' }` for pixel fonts).                                                                                                                       |
-| `dynamicFill`  | Allow runtime tinting via `BitmapText.tint`. Requires the font `style.fill` to be white, no stroke, no drop shadow, or a drop shadow with color `0x000000` (black). The idiomatic way to color bitmap text without generating a new atlas per color.  |
+| `chars` | Character set to pre-render. Accepts a string, nested ranges, or a preset: `BitmapFontManager.ALPHA`, `BitmapFontManager.NUMERIC`, `BitmapFontManager.ALPHANUMERIC`, `BitmapFontManager.ASCII`. Essential for non-ASCII, CJK, or restricted charsets. |
+| `resolution` | Texture atlas resolution. Default `1`. Use `window.devicePixelRatio` for HiDPI displays. |
+| `padding` | Glyph padding inside the atlas. Default `4`. Raise to avoid bleeding at large scales. |
+| `skipKerning` | Skip kerning metadata to save memory and install time. Default `false`. |
+| `textureStyle` | `TextureStyle`/`TextureStyleOptions` override for the generated atlas (for example `{ scaleMode: 'nearest' }` for pixel fonts). |
+| `dynamicFill` | Allow runtime tinting via `BitmapText.tint`. Requires the font `style.fill` to be white, no stroke, no drop shadow, or a drop shadow with color `0x000000` (black). The idiomatic way to color bitmap text without generating a new atlas per color. |
 
 ```ts
 import { BitmapFont, BitmapFontManager } from "pixi.js";
 
 BitmapFont.install({
-  name: "UIFont",
-  chars: BitmapFontManager.ALPHANUMERIC,
-  resolution: window.devicePixelRatio,
-  padding: 8,
-  skipKerning: true,
-  textureStyle: { scaleMode: "nearest" },
-  dynamicFill: true,
-  style: { fontFamily: "Arial", fontSize: 32, fill: 0xffffff },
+ name: "UIFont",
+ chars: BitmapFontManager.ALPHANUMERIC,
+ resolution: window.devicePixelRatio,
+ padding: 8,
+ skipKerning: true,
+ textureStyle: { scaleMode: "nearest" },
+ dynamicFill: true,
+ style: { fontFamily: "Arial", fontSize: 32, fill: 0xffffff },
 });
 
 const hp = new BitmapText({
-  text: "100",
-  style: { fontFamily: "UIFont", fill: "red" },
+ text: "100",
+ style: { fontFamily: "UIFont", fill: "red" },
 });
 const mp = new BitmapText({
-  text: "50",
-  style: { fontFamily: "UIFont", fill: "blue" },
+ text: "50",
+ style: { fontFamily: "UIFont", fill: "blue" },
 });
 ```
 
@@ -132,8 +134,8 @@ import { Assets, BitmapText } from "pixi.js";
 await Assets.load("fonts/arcade.fnt");
 
 const arcade = new BitmapText({
-  text: "HIGH SCORE",
-  style: { fontFamily: "arcade", fontSize: 36 },
+ text: "HIGH SCORE",
+ style: { fontFamily: "arcade", fontSize: 36 },
 });
 ```
 
@@ -147,8 +149,8 @@ Multi-channel Signed Distance Field (MSDF) fonts stay sharp at any size. Generat
 await Assets.load("fonts/msdf-hero.fnt");
 
 const heading = new BitmapText({
-  text: "Title",
-  style: { fontFamily: "msdf-hero", fontSize: 120 },
+ text: "Title",
+ style: { fontFamily: "msdf-hero", fontSize: 120 },
 });
 
 heading.scale.set(2);
@@ -160,14 +162,14 @@ MSDF fonts trade CPU rendering time for a custom fragment shader, but remain cri
 
 ```ts
 const paragraph = new BitmapText({
-  text: "A long wrapped paragraph of bitmap text",
-  style: {
-    fontFamily: "Arial",
-    fontSize: 24,
-    wordWrap: true,
-    wordWrapWidth: 300,
-    lineHeight: 30,
-  },
+ text: "A long wrapped paragraph of bitmap text",
+ style: {
+ fontFamily: "Arial",
+ fontSize: 24,
+ wordWrap: true,
+ wordWrapWidth: 300,
+ lineHeight: 30,
+ },
 });
 ```
 

@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Animated GIFs
 
 PixiJS loads animated GIFs through `Assets.load()` and returns a `GifSource` containing all decoded frames. Pass the source to `GifSprite` for playback, looping, and frame control. GIF support is opt-in via the `'pixi.js/gif'` side-effect import.
@@ -21,24 +23,24 @@ Without `'pixi.js/gif'`, the `.gif` loader parser isn't registered and `Assets.l
 
 ```ts
 const source = await Assets.load({
-  src: "pixel-art.gif",
-  data: {
-    fps: 12,
-    scaleMode: "nearest",
-    resolution: 2,
-    autoGenerateMipmaps: false,
-  },
+ src: "pixel-art.gif",
+ data: {
+ fps: 12,
+ scaleMode: "nearest",
+ resolution: 2,
+ autoGenerateMipmaps: false,
+ },
 });
 ```
 
 `data` accepts `GifBufferOptions`, which extends `CanvasSourceOptions`:
 
-| Option                | Default    | Purpose                                                          |
+| Option | Default | Purpose |
 | --------------------- | ---------- | ---------------------------------------------------------------- |
-| `fps`                 | `30`       | Fallback frame rate when the GIF has no per-frame delay metadata |
-| `scaleMode`           | `'linear'` | `'nearest'` for pixel art, `'linear'` for smooth scaling         |
-| `resolution`          | `1`        | Render resolution of the decoded frames                          |
-| `autoGenerateMipmaps` | `false`    | Generate mipmaps for downscaling                                 |
+| `fps` | `30` | Fallback frame rate when the GIF has no per-frame delay metadata |
+| `scaleMode` | `'linear'` | `'nearest'` for pixel art, `'linear'` for smooth scaling |
+| `resolution` | `1` | Render resolution of the decoded frames |
+| `autoGenerateMipmaps` | `false` | Generate mipmaps for downscaling |
 
 Any other `CanvasSourceOptions` field works here too.
 
@@ -46,15 +48,15 @@ Any other `CanvasSourceOptions` field works here too.
 
 ```ts
 const gif = new GifSprite({
-  source,
-  autoPlay: true,
-  loop: true,
-  animationSpeed: 0.5,
-  autoUpdate: true,
-  fps: 30,
-  onComplete: () => console.log("done"),
-  onLoop: () => console.log("looped"),
-  onFrameChange: (frame) => console.log(frame),
+ source,
+ autoPlay: true,
+ loop: true,
+ animationSpeed: 0.5,
+ autoUpdate: true,
+ fps: 30,
+ onComplete: () => console.log("done"),
+ onLoop: () => console.log("looped"),
+ onFrameChange: (frame) => console.log(frame),
 });
 ```
 
@@ -64,7 +66,7 @@ Construction options control playback behavior; they're independent of the load-
 
 ```ts
 const source = await Assets.load(
-  "data:image/gif;base64,R0lGODlhAQABAAAAACw...",
+ "data:image/gif;base64,R0lGODlhAQABAAAAACw...",
 );
 ```
 
@@ -115,9 +117,9 @@ If your GIF URL lacks an extension, force the parser:
 
 ```ts
 const source = await Assets.load({
-  src: "https://cdn.example.com/gif/abc123",
-  parser: "gif",
-  data: { fps: 24 },
+ src: "https://cdn.example.com/gif/abc123",
+ parser: "gif",
+ data: { fps: 24 },
 });
 ```
 
