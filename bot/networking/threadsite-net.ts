@@ -38,7 +38,7 @@ export interface TransformSampleInfo {
   mode: TransformSampleMode; renderTs: number; sourceTs: number; ageMs: number; samples: number;
 }
 export interface SampleTransformOptions {
-  /** Override the adaptive 100-150 ms interpolation delay. */
+  /** Override the adaptive 45-150 ms interpolation delay. */
   renderDelayMs?: number;
   /** Maximum velocity extrapolation when packets arrive late. Default 100 ms. */
   maxExtrapolationMs?: number;
@@ -130,7 +130,10 @@ type ReliableFrame = { frame: WireFrame; expiresAt: number };
 type RecentEvent = ReliableFrame & { id: string; retried: boolean };
 type Timer = ReturnType<typeof setTimeout>;
 
-const MAX_FRAME_BYTES = 60 * 1024;
+// 256 KB with relay headroom (relay default 264 KB): worlds with hundreds of
+// entities at 10-20 Hz fit without frame_too_large, while the cap still stops
+// runaway frames well before relay memory limits.
+const MAX_FRAME_BYTES = 256 * 1024;
 const OUTBOX_LIMIT = 128;
 const RECENT_EVENTS = 128;
 const RECENT_EVENT_IDS = 512;
@@ -477,7 +480,10 @@ export class ThreadSiteNet {
   sampleTransform<T extends NetTransform = NetTransform>(peerId: string, options: SampleTransformOptions = {}): T | null {
     const buffer = this.transformBuffers.get(peerId);
     if (!buffer?.length) return null;
-    const delay = options.renderDelayMs === undefined ? clamp(100 + this.jitterMs * 2, 100, 150) : clamp(options.renderDelayMs, 0, 500);
+    // Remote motion is rendered one interpolation window behind relay time:
+    // at least 45 ms (tight on low-jitter links, where the old 100 ms floor
+    // read as lag) growing with measured transit jitter, hard-capped at 150.
+    const delay = options.renderDelayMs === undefined ? clamp(45 + this.jitterMs * 3, 45, 150) : clamp(options.renderDelayMs, 0, 500);
     const renderTs = this.serverNow() - delay;
     const maxExtrapolation = clamp(options.maxExtrapolationMs ?? DEFAULT_MAX_EXTRAPOLATION_MS, 0, 250);
     let before: TransformPoint | undefined;
@@ -894,8 +900,9 @@ export class NetTransforms {
   teleport(transform: NetTransform): void { this.net.publishTeleport(transform); }
   /**
    * Rendering-only time-shifted transform for one remote peer: interpolated
-   * 100-150 ms in the past, extrapolating at most 100 ms past the newest
-   * sample. Never resolve gameplay from a sample; see `latest()`.
+   * 45-150 ms in the past (adaptive to transit jitter), extrapolating at
+   * most 100 ms past the newest sample. Never resolve gameplay from a
+   * sample; see `latest()`.
    */
   sample<T extends NetTransform = NetTransform>(peerId: string, options: SampleTransformOptions = {}): T | null {
     return this.net.sampleTransform<T>(peerId, options);

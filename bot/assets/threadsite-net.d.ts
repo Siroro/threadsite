@@ -321,8 +321,8 @@ export declare class NetTransforms {
     /**
      * Rendering-only time-shifted transform for one remote peer: interpolated
      * 45-150 ms in the past (adaptive to transit jitter), extrapolating at
-     * most 100 ms past the newest
-     * sample. Never resolve gameplay from a sample; see `latest()`.
+     * most 100 ms past the newest sample. Never resolve gameplay from a
+     * sample; see `latest()`.
      */
     sample<T extends NetTransform = NetTransform>(peerId: string, options?: SampleTransformOptions): T | null;
     /** Rendering-only sweep of live remote peers; see `sample()`. */
