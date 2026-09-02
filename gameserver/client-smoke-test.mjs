@@ -44,10 +44,14 @@ const sampled = guest.sampleTransform(host.id);
 assert.ok(sampled && Number.isFinite(sampled.x) && sampled.y === 5);
 assert.ok(guest.transformSampleInfo(host.id).samples >= 2, "library owns an actual transform jitter buffer");
 assert.equal(guest.sampleRemotePlayers().find((entry) => entry.peer.id === host.id).transform.y, 5);
+assert.equal(guest.transforms.latest(host.id).x, 6, "latest() returns the newest sample regardless of render delay");
 host.transforms.teleport({ x: 100, y: 25, vx: 0, vy: 0, alive: true, runId: "movement-1" });
 await sleep(80);
 assert.equal(guest.transforms.sample(host.id).x, 100);
-assert.equal(guest.transforms.info(host.id).samples, 1, "teleport resets interpolation history");
+assert.equal(guest.transforms.latest(host.id).x, 100, "latest() tracks the newest transform after teleport");
+const latestEntry = guest.transforms.latestAll().find((entry) => entry.peer.id === host.id);
+assert.ok(latestEntry && latestEntry.transform.x === 100 && Number.isFinite(latestEntry.ageMs),
+  "latestAll() pairs live peers with their newest transform and age");
 assert.equal(guest.transforms.nearest(99, 25).peer.id, host.id);
 
 const ephemerals = [];
@@ -87,6 +91,7 @@ assert.ok(host.clock.remaining(deadline) <= 1000 && host.clock.elapsed(deadline 
 const late = await ThreadSiteNet.connect({ game: GAME, url: URL, room: host.room, name: "Late" });
 assert.equal(late.peerState(host.id).x, 100, "late join receives newest player state");
 assert.ok(late.sampleTransform(host.id), "late join seeds transform sampling immediately");
+assert.equal(late.transforms.latest(host.id).x, 100, "latest() works from welcome-seeded transforms");
 assert.equal(late.presence.get(host.id).character, "ranger", "late join receives separate presence");
 
 assert.throws(

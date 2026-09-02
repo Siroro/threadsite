@@ -12,7 +12,7 @@ The client is `site/net/threadsite-net.js` (typed by `threadsite-net.d.ts`); ide
 * Reliable events live **3 s** (`eventTtlMs`, 250–30000), queue at most 128 while offline, and retry once after rate limiting. Event handling should remain idempotent.
 * Ephemeral signals coalesce latest-wins per `(type, target)` at **20 Hz**.
 * Remote transforms sample **100–150 ms in the past** using an adaptive interpolation delay and extrapolate at most **100 ms** past the newest sample by default.
-* Peers whose transforms go silent for **>2 s** vanish from `sampleAll()` / `listAlive()` / `nearest()`.
+* Peers whose transforms go silent for **>2 s** vanish from `sampleAll()` / `latestAll()` / `listAlive()` / `nearest()`.
 * Reconnect backoff is roughly 0.5–8 s; half-open sockets are detected within ~30 s.
 * `close()` is permanent. Other connection loss automatically reconnects and re-runs the bootstrap gate.
 
@@ -62,6 +62,8 @@ because `snapshot.state` is the world envelope.
 * `present` updates guest-side presentation only. It must never advance authoritative simulation.
 
 * `capture()` runs at `publishHz` while host. Keep it synchronous and cheap.
+
+* **`capture()` must return a valid world from its very first call.** Authority acquisition and the publish loop start inside `createAuthoritativeSession()` / `connect()` — during the `await`, before any code after it runs. If `capture()` depends on handlers, scenes, or state installed later (e.g. on a Play button click), it throws every publish tick while the game waits. Never gate `capture()` behind later initialization: capture an initial empty world (`tick: 0`, `state: <fresh DTO>`) until real state exists, and install world handlers before or immediately after the session promise resolves — not inside a user-triggered start handler.
 
 * Keep complete snapshots compact:
 
@@ -162,7 +164,9 @@ Silence for >2 s causes the remote player to disappear from `sampleAll()`-style 
 
 Transforms are transient/latest-wins state. Old movement is not replayed as durable gameplay after reconnect; rebuild remote movement from fresh post-reconnect transforms.
 
-* Transform samples deliberately render around **100–150 ms behind relay time**.
+* `sample()` / `sampleAll()` / `listAlive()` / `nearest()` are **rendering-only**. They return time-shifted presentation transforms, deliberately rendered around **100–150 ms behind relay time** so motion stays smooth.
+* `latest(peerId)` / `latestAll()` return the **newest received** transform — no interpolation, extrapolation, or render delay. This is the intended freshness source for host-side player-position checks (AI targeting, range and interaction validation) when the game does not maintain its own canonical guest-player position. `latest()` returns `null` and `latestAll()` omits the peer until it has published a transform — including after reconnect, until the first fresh sample arrives.
+* Peer transforms are client-reported input either way. The host validates them with game-specific tolerances and remains authoritative over gameplay outcomes; never blindly trust a claimed position or outcome.
 
 Never resolve authoritative gameplay such as:
 
@@ -173,9 +177,9 @@ Never resolve authoritative gameplay such as:
 * melee range
 * authoritative collision
 
-using sampled guest presentation transforms.
+from time-shifted `sample()` reads; use `latest()` or host-owned world state for the position input, and let the host decide the outcome.
 
-The authoritative host should validate gameplay using the state it owns, allowing reasonable tolerance for network/interpolation delay where appropriate.
+The authoritative host should validate gameplay using the state it owns, allowing reasonable tolerance for network/interpolation delay where appropriate. If shared AI needs remote player positions beyond what the complete world state already carries, read them from `latestAll()` — never from sampled presentation transforms.
 
 * Numeric transform fields interpolate.
 
@@ -228,7 +232,7 @@ For guest-side mirrors of authoritative collections such as enemies, pickups or 
 net.entities.syncCollection(...)
 ```
 
-Its `apply()` method creates missing IDs, updates existing IDs, and removes entities absent from the latest snapshot.
+Its `apply()` method creates missing IDs, updates existing IDs, and removes entities absent from the latest snapshot. The controller owns the entity map; iterate `controller.values()` for per-frame presentation. Do not create a second entity map unless necessary.
 
 Entity IDs must be stable strings or finite numbers. Duplicate IDs in one snapshot throw `duplicate_entity_id`.
 
@@ -401,6 +405,7 @@ When authority changes, the old host must stop shared simulation immediately and
 | ----------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | Remote players stop rendering                   | Transform silence >2 s                                                | Keep calling `transforms.publish()` from the player update loop             |
 | Guest world never updates                       | `capture` threw, invalid world, non-monotonic tick, or reused `runId` | Check console; use fresh `runId` and monotonically increasing integer tick  |
+| `[threadsite-net] world.capture failed` repeating from load/title screen | `capture()` (or state it reads) is installed only after a user action — the publish loop starts inside the session `await` | Make `capture()` valid from its first call (return an initial empty world) and install handlers before/just after the session resolves |
 | A run reset is ignored by guests                | Tick rewound while reusing the same `runId`                           | Generate a new `runId` for every reset                                      |
 | World wiped after rejoin                        | Fresh state was published before restored state was processed         | Initialise worlds only from the authority lifecycle; respect `not_ready`    |
 | Snapshot rejected immediately after game update | `schemaVersion` mismatch                                              | Expected for incompatible persisted state; initialise a fresh world         |

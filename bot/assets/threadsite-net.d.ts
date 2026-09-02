@@ -105,6 +105,17 @@ export interface SampleRemotePlayersOptions extends SampleTransformOptions {
     /** Hide a live peer whose transform stream has been silent this long. Default 2000 ms. */
     maxAgeMs?: number;
 }
+/** A live peer with its newest received transform: no interpolation or render delay. */
+export interface NetLatestPlayer<T extends NetTransform = NetTransform> {
+    peer: NetPeer;
+    transform: T;
+    ts: number;
+    ageMs: number;
+}
+export interface LatestRemotePlayersOptions {
+    /** Hide a live peer whose transform stream has been silent this long. Default 2000 ms. */
+    maxAgeMs?: number;
+}
 export interface NetWorldState<T = any> {
     runId: string | number;
     tick: number;
@@ -292,15 +303,50 @@ export declare class ThreadSiteNet {
     private failOrRetry;
     private scheduleReconnect;
 }
+/**
+ * Local transform publication plus remote transform reads.
+ *
+ * sample*() is time-shifted for smooth rendering.
+ * latest*() returns the newest received peer transform and is appropriate
+ * for host gameplay checks that need the freshest observed player position.
+ *
+ * Peer transforms are still client-reported input: the host remains
+ * authoritative over gameplay outcomes.
+ */
 export declare class NetTransforms {
     private readonly net;
     constructor(net: ThreadSiteNet);
     publish(transform: NetTransform): void;
     teleport(transform: NetTransform): void;
+    /**
+     * Rendering-only time-shifted transform for one remote peer: interpolated
+     * 100-150 ms in the past, extrapolating at most 100 ms past the newest
+     * sample. Never resolve gameplay from a sample; see `latest()`.
+     */
     sample<T extends NetTransform = NetTransform>(peerId: string, options?: SampleTransformOptions): T | null;
+    /** Rendering-only sweep of live remote peers; see `sample()`. */
     sampleAll<T extends NetTransform = NetTransform>(options?: SampleRemotePlayersOptions): NetRemotePlayer<T>[];
+    /** Rendering-only alive filter over `sampleAll()`; see `sample()`. */
     listAlive<T extends NetTransform = NetTransform>(options?: SampleRemotePlayersOptions): NetRemotePlayer<T>[];
+    /** Rendering-only nearest-player query built on `listAlive()`; see `sample()`. */
     nearest<T extends NetTransform = NetTransform>(x: number, y: number, options?: SampleRemotePlayersOptions): NetRemotePlayer<T> | null;
+    /**
+     * The newest received transform for one peer — no interpolation,
+     * extrapolation, or render delay.
+     *
+     * Use this rather than sample() for host-side AI/range/interaction checks
+     * when the game does not maintain its own canonical guest-player position.
+     * It is still peer-reported input, so validate it with game-specific
+     * tolerances and never blindly trust claimed outcomes.
+     *
+     * Returns null until that peer has published a transform.
+     */
+    latest<T extends NetTransform = NetTransform>(peerId: string): T | null;
+    /**
+     * Live peers with a recent newest transform.
+     * Peers that have not published yet or exceed maxAgeMs are omitted.
+     */
+    latestAll<T extends NetTransform = NetTransform>(options?: LatestRemotePlayersOptions): NetLatestPlayer<T>[];
     flush(): void;
     info(peerId: string): TransformSampleInfo | null;
 }
@@ -410,6 +456,12 @@ export declare class NetRun {
     _accept(runId: string | number, tick: number): void;
 }
 export declare class NetEntities {
+    /**
+     * Register one stable-ID presentation collection. The controller owns the
+     * entity map: iterate `collection.values()` for per-frame presentation and
+     * do not maintain a second parallel entity map unless the game truly needs
+     * one.
+     */
     syncCollection<TLocal, TSnapshot>(name: string, options: NetCollectionSyncOptions<TLocal, TSnapshot>): NetCollectionSync<TLocal, TSnapshot>;
 }
 export declare class NetCollectionSync<TLocal, TSnapshot> {
@@ -419,6 +471,7 @@ export declare class NetCollectionSync<TLocal, TSnapshot> {
     constructor(name: string, options: NetCollectionSyncOptions<TLocal, TSnapshot>);
     apply(snapshots: readonly TSnapshot[]): void;
     get(id: string | number): TLocal | undefined;
+    /** All live local entities — the per-frame presentation iteration point. */
     values(): TLocal[];
     clear(): void;
 }
