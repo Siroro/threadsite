@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import crypto from "node:crypto";
 import path from "node:path";
+import zlib from "node:zlib";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 const PROTOCOL_VERSION = 4;
@@ -457,7 +458,25 @@ const server = http.createServer((req, res) => {
   res.end("ThreadSite multiplayer relay. WebSocket endpoint: /ws\n");
 });
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES, perMessageDeflate: false });
+// permessage-deflate with a 1 KB threshold: tiny high-rate frames (25-30 Hz
+// transforms, events, pings) skip compression entirely so the hot path pays
+// nothing, while repetitive complete-world snapshots (tens of KB, 10-20 Hz,
+// nearly identical frame-to-frame) compress hard. Context takeover stays
+// enabled — it is where the 5-10x ratio on world snapshots comes from — at a
+// bounded ~256 KB per direction per connection. Kill switch for ops rollback.
+const DEFLATE_ENABLED = env("GAMESERVER_PERMESSAGE_DEFLATE", "1") !== "0";
+const DEFLATE_OPTIONS = {
+  threshold: 1024,
+  zlibDeflateOptions: { level: zlib.constants.Z_DEFAULT_COMPRESSION },
+  concurrencyLimit: 10,
+};
+const wss = new WebSocketServer({
+  noServer: true,
+  maxPayload: MAX_MESSAGE_BYTES,
+  // Browsers negotiate this automatically; clients that don't offer it
+  // (including undici-based Node WebSockets) simply stay uncompressed.
+  perMessageDeflate: DEFLATE_ENABLED ? DEFLATE_OPTIONS : false,
+});
 server.on("upgrade", (req, socket, head) => {
   let pathname = "/";
   try { pathname = new URL(req.url ?? "/", "http://internal").pathname; } catch { /* reject below */ }
