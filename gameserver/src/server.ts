@@ -33,6 +33,11 @@ const RATE_PER_SECOND = intEnv("GAMESERVER_RATE_PER_SECOND", 60);
 const RATE_BURST = intEnv("GAMESERVER_RATE_BURST", 120);
 const ROOM_TTL_MS = intEnv("GAMESERVER_ROOM_TTL_MS", 10 * 60 * 1000);
 const JOIN_TIMEOUT_MS = intEnv("GAMESERVER_JOIN_TIMEOUT_MS", 10_000);
+// A host that publishes nothing for this long while another peer waits is
+// stalled (frozen/hidden tab, crashed sim, pre-watchdog client) and loses
+// authority to that peer. Healthy hosts publish at >=1 Hz, so 15 s is ~15
+// missed publishes plus generous bootstrap headroom for the elected successor.
+const HOST_STALL_MS = intEnv("GAMESERVER_HOST_STALL_MS", 15_000);
 // ARENA (mode "single") worlds survive empty rooms and relay restarts; the
 // latest authoritative world.s is snapshotted here. Roomed games stay ephemeral.
 const STATE_DIR = env("GAMESERVER_STATE_DIR", path.join(process.cwd(), "data", "relay-state"));
@@ -90,6 +95,8 @@ class Room {
   world: WorldState | null = null;
   durableDirty = false;
   lastActivity = Date.now();
+  /** When authority last changed; the stall watchdog's grace anchor. */
+  authorityGrantedAt = Date.now();
   constructor(readonly key: string, readonly mode: "single" | "rooms") {}
   get publicCode(): string | null { return this.mode === "single" ? null : this.key; }
   touch(): void { this.lastActivity = Date.now(); }
@@ -241,6 +248,7 @@ function setAuthority(room: Room, hostId: string | null): void {
   if (room.hostId === hostId) return;
   room.hostId = hostId;
   room.authorityEpoch += 1;
+  room.authorityGrantedAt = Date.now();
   room.touch();
 }
 function chooseNextHost(room: Room, excluding: string): string | null {
@@ -521,6 +529,40 @@ const sweeper = setInterval(() => {
   }
 }, 30_000);
 sweeper.unref();
+
+// Sockets stay alive when a host tab freezes: browsers answer WebSocket pings
+// without waking throttled JS, and pre-watchdog clients never yield, so a
+// silent host would hold authority forever and every joiner would restore a
+// frozen world that never advances. The relay can't see game state, but it
+// sees publications: a host silent past HOST_STALL_MS while another peer waits
+// is demoted to guest and authority moves to that peer. The authority
+// broadcast carries the cached world, so the successor restores and resumes,
+// and the demoted peer's next publish fails `stale_authority`. A lone stalled
+// host is left alone (nobody is waiting; churn would help no one).
+const hostWatchdog = setInterval(() => {
+  const now = Date.now();
+  for (const [gameId, rooms] of games) {
+    for (const room of rooms.values()) {
+      const hostId = room.hostId;
+      if (!hostId || room.peers.size < 2) continue;
+      const lastProgress = Math.max(room.authorityGrantedAt, room.world?.ts ?? 0);
+      if (now - lastProgress < HOST_STALL_MS) continue;
+      const nextHost = chooseNextHost(room, hostId);
+      if (!nextHost) continue;
+      // Rotate the stalled host behind its successor so repeated stalls spread
+      // authority fairly instead of ping-ponging between two frozen tabs.
+      const stalled = room.peers.get(hostId);
+      if (stalled) {
+        room.peers.delete(hostId);
+        room.peers.set(hostId, stalled);
+      }
+      setAuthority(room, nextHost);
+      broadcast(room, authorityFrame(room));
+      console.warn(`[threadsite-gameserver] host_stalled game=${gameId} room=${room.key} peer=${hostId} silent=${now - lastProgress}ms authority->${nextHost}`);
+    }
+  }
+}, 2_000);
+hostWatchdog.unref();
 
 // Hosts publish at 10-20 Hz; disk must not. Coalesce dirty ARENA worlds to one
 // atomic write per game per interval. Disk persistence is independent of RAM
