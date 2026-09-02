@@ -398,6 +398,7 @@ simulation and stay gated from release.
 - Fast objects do not tunnel at maximum designed speed.
 - Low-FPS spikes do not create unbounded catch-up or divergent state.
 - Corners, simultaneous contacts, spawn overlap, and arena edges are tested.
+- Soak-test long enough to cross every lifecycle cap and expiry at least once (spawn max+1 of each pooled, capped, or retired entity kind) with a clean console — eviction-path bugs surface minutes into play, not on the first frame.
 - Results are stable under a seeded input replay when determinism matters.
 - Report collision model, timestep, counts, sweeps/substeps, and known limits.
 
@@ -410,6 +411,8 @@ simulation and stay gated from release.
 - A projectile tunnels because only its final position is tested.
 - Pair events fire once per frame instead of enter/stay/exit semantics.
 - Restart leaves stale colliders or contact caches.
+- A cap-eviction destroys a physics body but leaves it in the tracking list, so the next eviction destroys it twice and panics inside WASM.
+- A swallowed Rapier exception hides a poisoned world: the game plays on until the next physics call, then fails with `recursive use of an object…` on every frame.
 - A custom arcade solver is described as general rigid-body physics.
 
 ## Official Documentation

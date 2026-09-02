@@ -150,6 +150,44 @@ export interface NetCollectionSyncOptions<TLocal, TSnapshot> {
     create: (snapshot: TSnapshot, id: string | number) => TLocal;
     update: (entity: TLocal, snapshot: TSnapshot, id: string | number) => void;
     remove: (entity: TLocal, id: string | number) => void;
+    /**
+     * Present the listed numeric fields interpolated between the last two
+     * snapshots instead of stepping at snapshot rate. The controller writes the
+     * smooth keys onto each entity at render time, so with `smooth` set the
+     * `update` callback must not copy those keys itself — it owns the discrete
+     * fields (hp, kind, flags), the controller owns position between snapshots.
+     */
+    smooth?: NetCollectionSmoothOptions<TSnapshot>;
+}
+export interface NetCollectionSmoothOptions<TSnapshot> {
+    /** Numeric snapshot keys the controller blends between snapshots. */
+    keys: (keyof TSnapshot & string)[];
+    /**
+     * Displacement across the smooth keys above which an entity lands at its
+     * newest position unblended — teleports, spawns, large corrections.
+     * Default 10.
+     */
+    snapDistance?: number;
+    /**
+     * Override the adaptive render delay. Default: 1.25 x the measured snapshot
+     * arrival interval, clamped to 50-200 ms.
+     */
+    renderDelayMs?: number;
+}
+/** Live link diagnostics from `net.stats`, sized for a HUD readout. */
+export interface NetLinkStats {
+    /** Round-trip to the relay in ms (null before the first pong). */
+    rtt: number | null;
+    /** Measured relay-time transit jitter in ms. */
+    jitterMs: number;
+    /** Connected peers excluding this client. */
+    peers: number;
+    /** Measured complete-world cadence in Hz (null before two worlds arrive). */
+    worldHz: number | null;
+    /** Size of the last sent (host) or received (guest) world frame in bytes. */
+    lastWorldBytes: number | null;
+    /** Periodic frames dropped so far by the client-side send budget. */
+    budgetDroppedFrames: number;
 }
 export type AuthoritativeSessionOptions<T = any> = Omit<ThreadSiteNetOptions, "world" | "mode" | "onWorld" | "onWorldRequest" | "onAuthorityAcquired" | "onAuthorityLost"> & {
     /** Shared arena by default; use rooms when the game exposes room codes. */
@@ -223,6 +261,14 @@ export declare class ThreadSiteNet {
     duplicates: number;
     rateLimited: number;
     droppedTransient: number;
+    /** Periodic frames dropped by the client-side send budget (see net.stats). */
+    budgetDroppedFrames: number;
+    private worldIntervalMs;
+    private lastWorldArrivalAt;
+    private lastWorldBytesValue;
+    private sendTokens;
+    private sendTokensUpdatedAt;
+    private lastBudgetWarnAt;
     private readonly transformIntervalMs;
     private readonly peersById;
     private readonly statesByPeer;
@@ -262,6 +308,13 @@ export declare class ThreadSiteNet {
     private yieldPending;
     constructor(options?: ThreadSiteNetOptions);
     get status(): NetStatus;
+    /**
+     * Live link diagnostics for HUD display: round-trip, transit jitter, peer
+     * count, measured complete-world cadence, last world-frame size, and
+     * send-budget drops. Surface it (or a subset) near the clock so lag reports
+     * can be triaged at a glance.
+     */
+    get stats(): NetLinkStats;
     /**
      * True once the relay welcome has been fully processed, including its cached
      * world snapshot and initial authority. Authoritative publishing stays
@@ -468,6 +521,9 @@ export declare class NetEntities {
 export declare class NetCollectionSync<TLocal, TSnapshot> {
     private readonly options;
     private readonly entities;
+    private prevSnapshot;
+    private curSnapshot;
+    private intervalMs;
     readonly name: string;
     constructor(name: string, options: NetCollectionSyncOptions<TLocal, TSnapshot>);
     apply(snapshots: readonly TSnapshot[]): void;
@@ -475,6 +531,16 @@ export declare class NetCollectionSync<TLocal, TSnapshot> {
     /** All live local entities — the per-frame presentation iteration point. */
     values(): TLocal[];
     clear(): void;
+    /**
+     * Blend the smooth keys between the last two snapshots and write them onto
+     * the live entities. Rendering at `now - delay` (delay tracking the measured
+     * snapshot cadence) keeps every read between two authoritative positions, so
+     * nothing ever snaps: new entities, missing history, and displacements past
+     * `snapDistance` land unblended, everything else interpolates regardless of
+     * speed. No extrapolation past the newest snapshot — a late snapshot holds
+     * the newest position instead of predicting one.
+     */
+    private refreshSmooth;
 }
 /**
  * Owns the easy-to-get-wrong authority lifecycle for a complete shared world.

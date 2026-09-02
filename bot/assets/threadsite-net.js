@@ -9,6 +9,13 @@ export const NET_STATUS = Object.freeze({
 // 256 KB with relay headroom (relay default 264 KB): worlds with hundreds of
 // entities at 10-20 Hz fit without frame_too_large, while the cap still stops
 // runaway frames well before relay memory limits.
+// Client-side mirror of the relay's per-connection frame limiter, with
+// headroom: every frame spends a token, and once the bucket is empty the
+// periodic frames (transforms, complete worlds) are dropped with a throttled
+// warning instead of flooding into the relay's own limiter. Rare reliable
+// events still go through — reliability outranks pacing.
+const SEND_BUDGET_PER_SECOND = 55;
+const SEND_BUDGET_BURST = 100;
 const MAX_FRAME_BYTES = 256 * 1024;
 const OUTBOX_LIMIT = 128;
 const RECENT_EVENTS = 128;
@@ -153,6 +160,14 @@ export class ThreadSiteNet {
     duplicates = 0;
     rateLimited = 0;
     droppedTransient = 0;
+    /** Periodic frames dropped by the client-side send budget (see net.stats). */
+    budgetDroppedFrames = 0;
+    worldIntervalMs = 0;
+    lastWorldArrivalAt = null;
+    lastWorldBytesValue = null;
+    sendTokens = SEND_BUDGET_BURST;
+    sendTokensUpdatedAt = Date.now();
+    lastBudgetWarnAt = 0;
     transformIntervalMs;
     peersById = new Map();
     statesByPeer = new Map();
@@ -263,6 +278,22 @@ export class ThreadSiteNet {
         this.connectSocket();
     }
     get status() { return this.currentStatus; }
+    /**
+     * Live link diagnostics for HUD display: round-trip, transit jitter, peer
+     * count, measured complete-world cadence, last world-frame size, and
+     * send-budget drops. Surface it (or a subset) near the clock so lag reports
+     * can be triaged at a glance.
+     */
+    get stats() {
+        return {
+            rtt: this.rtt,
+            jitterMs: this.jitterMs,
+            peers: this.peersById.size,
+            worldHz: this.worldIntervalMs > 0 ? 1000 / this.worldIntervalMs : null,
+            lastWorldBytes: this.lastWorldBytesValue,
+            budgetDroppedFrames: this.budgetDroppedFrames,
+        };
+    }
     /**
      * True once the relay welcome has been fully processed, including its cached
      * world snapshot and initial authority. Authoritative publishing stays
@@ -546,12 +577,45 @@ export class ThreadSiteNet {
         const size = byteLength(payload);
         if (size > MAX_FRAME_BYTES)
             throw new ThreadSiteNetError(`Frame is ${size} bytes; keep frames under ${MAX_FRAME_BYTES}.`, "frame_too_large");
+        if (!this.takeSendToken() && (frame.t === "pstate" || frame.t === "world")) {
+            // The high-rate periodic frames pace down first; reliable events are
+            // rare and must not be silently lost.
+            this.budgetDroppedFrames += 1;
+            const now = Date.now();
+            if (now - this.lastBudgetWarnAt > 5000) {
+                this.lastBudgetWarnAt = now;
+                console.warn(`[threadsite-net] send budget reached (${SEND_BUDGET_PER_SECOND}/s sustained): dropping ${frame.t} frames — reduce transformHz/publishHz or event volume`);
+            }
+            return;
+        }
+        if (frame.t === "world")
+            this.lastWorldBytesValue = size;
         try {
             this.socket.send(payload);
         }
         catch (error) {
             throw new ThreadSiteNetError("Send failed; the connection is closing.", "send_failed", error);
         }
+    }
+    /** @internal Token bucket pacing sends just under the relay's frame limiter. */
+    takeSendToken() {
+        const now = Date.now();
+        this.sendTokens = Math.min(SEND_BUDGET_BURST, this.sendTokens + (now - this.sendTokensUpdatedAt) * SEND_BUDGET_PER_SECOND / 1000);
+        this.sendTokensUpdatedAt = now;
+        if (this.sendTokens < 1)
+            return false;
+        this.sendTokens -= 1;
+        return true;
+    }
+    /** @internal Track measured complete-world cadence for `net.stats`. */
+    noteWorldFrame() {
+        const now = Date.now();
+        if (this.lastWorldArrivalAt !== null) {
+            const gap = now - this.lastWorldArrivalAt;
+            if (gap > 0 && gap < 2000)
+                this.worldIntervalMs = this.worldIntervalMs === 0 ? gap : this.worldIntervalMs + (gap - this.worldIntervalMs) * 0.2;
+        }
+        this.lastWorldArrivalAt = now;
     }
     connectSocket() {
         if (this.manuallyClosed)
@@ -585,8 +649,13 @@ export class ThreadSiteNet {
         socket.onmessage = (event) => {
             try {
                 const frame = JSON.parse(String(event.data));
-                if (frame && typeof frame.t === "string")
+                if (frame && typeof frame.t === "string") {
+                    if (frame.t === "world" || frame.t === "world-ack") {
+                        this.lastWorldBytesValue = String(event.data).length;
+                        this.noteWorldFrame();
+                    }
                     this.handleFrame(frame, failTimer);
+                }
             }
             catch (error) {
                 console.error("[threadsite-net] inbound frame failed:", error);
@@ -1272,21 +1341,24 @@ export class NetEntities {
 export class NetCollectionSync {
     options;
     entities = new Map();
+    prevSnapshot = null;
+    curSnapshot = null;
+    intervalMs = 0;
     name;
     constructor(name, options) {
         this.options = options;
         this.name = cleanTypedName(name, "collection");
     }
     apply(snapshots) {
-        const seen = new Set();
+        const incoming = new Map();
         for (const snapshot of snapshots) {
             const id = this.options.getId(snapshot);
             if (!(typeof id === "string" || finite(id)))
                 throw new ThreadSiteNetError(`${this.name} snapshot has an invalid id.`, "bad_entity_id");
             const key = `${typeof id}:${String(id)}`;
-            if (seen.has(key))
+            if (incoming.has(key))
                 throw new ThreadSiteNetError(`${this.name} snapshot repeats id ${String(id)}.`, "duplicate_entity_id");
-            seen.add(key);
+            incoming.set(key, snapshot);
             const existing = this.entities.get(key);
             if (existing)
                 this.options.update(existing.entity, snapshot, id);
@@ -1294,19 +1366,96 @@ export class NetCollectionSync {
                 this.entities.set(key, { id, entity: this.options.create(snapshot, id) });
         }
         for (const [key, existing] of this.entities) {
-            if (seen.has(key))
+            if (incoming.has(key))
                 continue;
             this.options.remove(existing.entity, existing.id);
             this.entities.delete(key);
         }
+        if (!this.options.smooth)
+            return;
+        const now = Date.now();
+        if (this.curSnapshot) {
+            const gap = now - this.curSnapshot.at;
+            if (gap > 0 && gap < 2000)
+                this.intervalMs = this.intervalMs === 0 ? gap : this.intervalMs + (gap - this.intervalMs) * 0.2;
+        }
+        this.prevSnapshot = this.curSnapshot ?? { at: now, byId: incoming };
+        this.curSnapshot = { at: now, byId: incoming };
     }
-    get(id) { return this.entities.get(`${typeof id}:${String(id)}`)?.entity; }
+    get(id) {
+        this.refreshSmooth();
+        return this.entities.get(`${typeof id}:${String(id)}`)?.entity;
+    }
     /** All live local entities — the per-frame presentation iteration point. */
-    values() { return [...this.entities.values()].map(({ entity }) => entity); }
+    values() {
+        this.refreshSmooth();
+        return [...this.entities.values()].map(({ entity }) => entity);
+    }
     clear() {
         for (const { id, entity } of this.entities.values())
             this.options.remove(entity, id);
         this.entities.clear();
+        this.prevSnapshot = null;
+        this.curSnapshot = null;
+        this.intervalMs = 0;
+    }
+    /**
+     * Blend the smooth keys between the last two snapshots and write them onto
+     * the live entities. Rendering at `now - delay` (delay tracking the measured
+     * snapshot cadence) keeps every read between two authoritative positions, so
+     * nothing ever snaps: new entities, missing history, and displacements past
+     * `snapDistance` land unblended, everything else interpolates regardless of
+     * speed. No extrapolation past the newest snapshot — a late snapshot holds
+     * the newest position instead of predicting one.
+     */
+    refreshSmooth() {
+        const smooth = this.options.smooth;
+        const current = this.curSnapshot;
+        if (!smooth || !current)
+            return;
+        const previous = this.prevSnapshot;
+        const delay = smooth.renderDelayMs !== undefined
+            ? clamp(smooth.renderDelayMs, 16, 300)
+            : clamp(Math.round(this.intervalMs * 1.25), 50, 200);
+        const renderTs = Date.now() - delay;
+        const snapDistance = smooth.snapDistance ?? 10;
+        for (const [key, { entity }] of this.entities) {
+            const cur = current.byId.get(key);
+            if (cur == null || typeof entity !== "object" || entity === null)
+                continue;
+            const target = entity;
+            const prev = previous?.byId.get(key);
+            let alpha = 1;
+            if (prev != null && previous && current.at > previous.at) {
+                alpha = clamp((renderTs - previous.at) / (current.at - previous.at), 0, 1);
+                if (alpha < 1) {
+                    let displacement = 0;
+                    for (const name of smooth.keys) {
+                        const from = Number(prev[name]);
+                        const to = Number(cur[name]);
+                        if (Number.isFinite(from) && Number.isFinite(to))
+                            displacement += (to - from) * (to - from);
+                    }
+                    if (Math.sqrt(displacement) > snapDistance)
+                        alpha = 1;
+                }
+            }
+            for (const name of smooth.keys) {
+                const to = Number(cur[name]);
+                if (!Number.isFinite(to))
+                    continue;
+                if (alpha >= 1) {
+                    target[name] = to;
+                    continue;
+                }
+                const from = Number(prev?.[name]);
+                if (!Number.isFinite(from)) {
+                    target[name] = to;
+                    continue;
+                }
+                target[name] = from + (to - from) * alpha;
+            }
+        }
     }
 }
 function cleanTypedName(value, label) {

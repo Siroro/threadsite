@@ -108,6 +108,51 @@ await sleep(150);
 assert.equal(hostWorlds.at(-1)?.state.tick, 4, "200 KB world publishes under the raised cap");
 assert.equal(hostWorlds.at(-1)?.state.blob.length, 200 * 1024, "200 KB world arrives intact on the guest");
 
+// Smooth collection: positions blend between the last two applies, snap on
+// teleports, and reconcile create/remove — the presentation-safe default.
+const removedIds = [];
+const wanderers = guest.entities.syncCollection("wanderers", {
+  getId: (snapshot) => snapshot.id,
+  create: (snapshot) => ({ id: snapshot.id, x: snapshot.x, hp: snapshot.hp }),
+  update: (view, snapshot) => { view.hp = snapshot.hp; },
+  remove: (view) => { removedIds.push(view.id); },
+  smooth: { keys: ["x"], snapDistance: 10 },
+});
+wanderers.apply([{ id: "w1", x: 0, hp: 5 }]);
+assert.equal(wanderers.get("w1").x, 0, "first apply lands unblended");
+await sleep(120);
+wanderers.apply([{ id: "w1", x: 8, hp: 5 }]); // displacement 8 stays under snapDistance
+assert.ok(wanderers.get("w1").x < 2, "just after a snapshot the render point still sits near the previous one");
+await sleep(80);
+const midX = wanderers.get("w1").x;
+assert.ok(midX > 0.5 && midX < 7.5, `position blends between snapshots (x=${midX.toFixed(2)})`);
+await sleep(120);
+assert.equal(wanderers.get("w1").x, 8, "position reaches the newest snapshot");
+wanderers.apply([{ id: "w1", x: 108, hp: 5 }]); // displacement 100 is teleport-scale
+assert.equal(wanderers.get("w1").x, 108, "teleport-scale jumps land unblended");
+wanderers.apply([{ id: "w1", x: 108, hp: 4 }, { id: "w2", x: 3, hp: 1 }]);
+assert.equal(wanderers.get("w2").x, 3, "new entities appear unblended");
+assert.equal(wanderers.get("w1").hp, 4, "discrete fields still flow through update()");
+wanderers.apply([{ id: "w1", x: 108, hp: 4 }]);
+assert.deepEqual(removedIds, ["w2"], "entities missing from a snapshot are removed");
+
+// net.stats: link diagnostics for HUD readouts.
+const stats = guest.stats;
+assert.equal(typeof stats.rtt, "number", "rtt measured after ping");
+assert.equal(stats.peers, 2, "peer count excludes self (host + late joiner)");
+assert.ok(stats.lastWorldBytes > 100 * 1024, "last world frame size tracked (the 200 KB publish)");
+assert.ok(stats.worldHz === null || stats.worldHz > 0, "measured world cadence is well-formed");
+
+// Send-budget guard: a sustained over-budget flood must be paced client-side
+// (budgetDroppedFrames grows) without ever tripping the relay's own limiter.
+const rateLimitedBefore = guest.rateLimited;
+const floodEnd = Date.now() + 1200;
+let floodTick = 1000;
+while (Date.now() < floodEnd) guest.publishWorld({ tick: ++floodTick, blob: "y" });
+await sleep(300);
+assert.ok(guest.stats.budgetDroppedFrames > 0, "client-side budget drops periodic frames under sustained flood");
+assert.equal(guest.rateLimited, rateLimitedBefore, "relay limiter never fired because the client paced itself");
+
 const single = await ThreadSiteNet.connect({ game: "client-single-v4", url: URL, mode: "single", name: "Solo" });
 assert.equal(single.room, null);
 assert.equal(single.inviteUrl(), null);
