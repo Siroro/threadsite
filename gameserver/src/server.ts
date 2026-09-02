@@ -27,8 +27,14 @@ const HOST = env("GAMESERVER_HOST", "0.0.0.0");
 const PORT = intEnv("GAMESERVER_PORT", 8090);
 const MAX_PEERS_PER_ROOM = intEnv("GAMESERVER_MAX_PEERS_PER_ROOM", 16);
 const MAX_ROOMS_PER_GAME = intEnv("GAMESERVER_MAX_ROOMS_PER_GAME", 256);
-const MAX_MESSAGE_BYTES = intEnv("GAMESERVER_MAX_MESSAGE_BYTES", 64 * 1024);
-const MAX_BUFFERED_BYTES = intEnv("GAMESERVER_MAX_BUFFERED_BYTES", 512 * 1024);
+// 264 KB keeps headroom above the net client's 256 KB frame cap, so an
+// oversized world always fails as a clean client-side frame_too_large instead
+// of a relay connection drop. Worlds with hundreds of entities at 10-20 Hz fit.
+const MAX_MESSAGE_BYTES = intEnv("GAMESERVER_MAX_MESSAGE_BYTES", 264 * 1024);
+// Slow-consumer socket buffer: with 256 KB frames, 1 MB holds ~4 in-flight
+// worlds before the recoverable 1013 close, so 10-20 Hz publishing to a
+// momentarily stalled peer degrades gracefully instead of churning reconnects.
+const MAX_BUFFERED_BYTES = intEnv("GAMESERVER_MAX_BUFFERED_BYTES", 1024 * 1024);
 const RATE_PER_SECOND = intEnv("GAMESERVER_RATE_PER_SECOND", 60);
 const RATE_BURST = intEnv("GAMESERVER_RATE_BURST", 120);
 const ROOM_TTL_MS = intEnv("GAMESERVER_ROOM_TTL_MS", 10 * 60 * 1000);

@@ -95,9 +95,18 @@ assert.equal(late.transforms.latest(host.id).x, 100, "latest() works from welcom
 assert.equal(late.presence.get(host.id).character, "ranger", "late join receives separate presence");
 
 assert.throws(
-  () => guest.publishWorld({ blob: "x".repeat(80 * 1024) }),
+  () => guest.publishWorld({ blob: "x".repeat(300 * 1024) }),
   (error) => error instanceof ThreadSiteNetError && error.code === "frame_too_large",
 );
+
+// Large-but-legal worlds (256 KB client cap, 264 KB relay default) must flow.
+// After the yield above the guest publishes; the ex-host peer receives.
+const hostWorlds = [];
+host.onWorld = (world) => hostWorlds.push(world);
+guest.publishWorld({ tick: 4, blob: "x".repeat(200 * 1024) });
+await sleep(150);
+assert.equal(hostWorlds.at(-1)?.state.tick, 4, "200 KB world publishes under the raised cap");
+assert.equal(hostWorlds.at(-1)?.state.blob.length, 200 * 1024, "200 KB world arrives intact on the guest");
 
 const single = await ThreadSiteNet.connect({ game: "client-single-v4", url: URL, mode: "single", name: "Solo" });
 assert.equal(single.room, null);
