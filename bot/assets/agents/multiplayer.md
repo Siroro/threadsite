@@ -9,7 +9,7 @@ Use exactly two ownership paths:
 - Each client owns its local player's input and transform. Publish it through `net.transforms`; remote clients render sampled transforms from that same facade.
 - The current host owns every shared enemy, boss, pickup, projectile/hazard, shared timer, RNG/director, damage result, score/reward, and next-ID counter. Guests render accepted snapshots and send intents; they never simulate or mutate shared truth.
 
-Keep authoritative state, guest presentation, and local input in separate functions. Do not let a render/update loop become authoritative merely because it runs every frame.
+Keep input, simulation, presentation, and netcode in separate modules with narrow interfaces — not merely separate functions inside one growing file. Do not let a render/update loop become authoritative merely because it runs every frame.
 
 ### Connect with the safe world lifecycle
 
@@ -53,7 +53,7 @@ const net = await ThreadSiteNet.createAuthoritativeSession({
 });
 ```
 
-Use one complete serializer and one restore path; never maintain separate “join”, “reconnect”, and “migration” snapshots. `capture` must include stable entity IDs and all state needed to resume deterministically. `restore` runs before `onAuthorityStart`; it may receive the host's locally acknowledged snapshot from a previous relay generation after a relay restart. `present` runs only for guests and must update presentation without advancing authoritative simulation.
+Use one complete serializer and one restore path; never maintain separate “join”, “reconnect”, and “migration” snapshots. `capture` must include stable entity IDs and all state needed to resume deterministically, and must return a valid world (`tick: 0` with fresh state is fine) from its very first call — authority and the publish loop start inside the `createAuthoritativeSession` await, before any code after it runs, so `capture` must never throw or depend on handlers installed later (e.g. on a Play-button click). `restore` runs before `onAuthorityStart`; it may receive the host's locally acknowledged snapshot from a previous relay generation after a relay restart. `present` runs only for guests and must update presentation without advancing authoritative simulation.
 
 While `authoritative` is true, advance shared simulation using frame-rate-independent steps and `net.clock.now()` for shared time. Stop shared mutation immediately when it becomes false. The preset configures transform rate, publishes complete worlds, serves late-join requests, and publishes immediately after authority starts. Call `net.world.publishNow()` after a boss phase change or shared reset, and `net.world.yieldAuthority()` before an intentional scene transition. Do not use raw world frames or authority callbacks alongside this lifecycle.
 
@@ -80,7 +80,7 @@ for (const { peer, transform } of net.transforms.sampleAll()) {
 }
 ```
 
-`sampleAll()` returns only live peers with recent transforms. `listAlive()` filters dead players and `nearest(x, y)` handles common host-AI targeting. Call `net.transforms.teleport(transform)` for teleport, spawn/respawn, death/revive discontinuities, or changing run; it publishes immediately and resets remote interpolation history. Use live `peer.id` for avatars and routing. `cid` is reconnect metadata only; two live peers with the same cid are still distinct. Never add interpolation, timestamp comparison, or stale-avatar bookkeeping of your own.
+`sampleAll()` returns only live peers with recent transforms; `listAlive()` also filters dead players. Sampled transforms — including `nearest(x, y)`, which is built on them — are time-shifted ~100–150 ms for smooth rendering: **rendering only**, never an input to gameplay decisions. `latest(peerId)` / `latestAll()` return the newest received transform with no interpolation or render delay — the intended input for host-side player-position checks (AI targeting, range and interaction validation) when you do not maintain your own canonical guest-player position; they return nothing for a peer until it has published, including after reconnect. Peer transforms are client-reported either way: validate with game-specific tolerances and keep outcomes host-authoritative. Compose queries yourself on top of `latestAll()` (for example `latestAll().filter((p) => p.transform.alive !== false)` for AI targets) instead of expecting more query helpers. Call `net.transforms.teleport(transform)` for teleport, spawn/respawn, death/revive discontinuities, or changing run; it publishes immediately and resets remote interpolation history. Use live `peer.id` for avatars and routing. `cid` is reconnect metadata only; two live peers with the same cid are still distinct. Never add interpolation, timestamp comparison, or stale-avatar bookkeeping of your own.
 
 Keep slow-changing player metadata out of transforms:
 

@@ -429,6 +429,25 @@ export class ThreadSiteNet {
         }
         return result;
     }
+    /** @internal Use `transforms.latest()`. */
+    latestTransform(peerId) {
+        const newest = this.transformBuffers.get(peerId)?.at(-1);
+        return newest ? { ...newest.state } : null;
+    }
+    /** @internal Use `transforms.latestAll()`. */
+    latestRemotePlayers(options = {}) {
+        const maxAgeMs = clamp(options.maxAgeMs ?? 2000, 100, 30_000);
+        const result = [];
+        for (const peer of this.peersById.values()) {
+            const newest = this.transformBuffers.get(peer.id)?.at(-1);
+            if (!newest)
+                continue;
+            const ageMs = Math.max(0, this.serverNow() - newest.ts);
+            if (ageMs <= maxAgeMs)
+                result.push({ peer, transform: { ...newest.state }, ts: newest.ts, ageMs });
+        }
+        return result;
+    }
     /** @internal */ latestWorldSnapshot() { return this.latestWorld; }
     /** @internal Use `world.yieldAuthority()`. */
     yieldHost(finalWorld = this.lastPublishedWorld) {
@@ -956,6 +975,16 @@ export class ThreadSiteNet {
         this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; this.connectSocket(); }, backoff * (0.7 + Math.random() * 0.6));
     }
 }
+/**
+ * Local transform publication plus remote transform reads.
+ *
+ * sample*() is time-shifted for smooth rendering.
+ * latest*() returns the newest received peer transform and is appropriate
+ * for host gameplay checks that need the freshest observed player position.
+ *
+ * Peer transforms are still client-reported input: the host remains
+ * authoritative over gameplay outcomes.
+ */
 export class NetTransforms {
     net;
     constructor(net) {
@@ -963,15 +992,23 @@ export class NetTransforms {
     }
     publish(transform) { this.net.publishTransform(transform); }
     teleport(transform) { this.net.publishTeleport(transform); }
+    /**
+     * Rendering-only time-shifted transform for one remote peer: interpolated
+     * 100-150 ms in the past, extrapolating at most 100 ms past the newest
+     * sample. Never resolve gameplay from a sample; see `latest()`.
+     */
     sample(peerId, options = {}) {
         return this.net.sampleTransform(peerId, options);
     }
+    /** Rendering-only sweep of live remote peers; see `sample()`. */
     sampleAll(options = {}) {
         return this.net.sampleRemotePlayers(options);
     }
+    /** Rendering-only alive filter over `sampleAll()`; see `sample()`. */
     listAlive(options = {}) {
         return this.sampleAll(options).filter(({ transform }) => transform.alive !== false);
     }
+    /** Rendering-only nearest-player query built on `listAlive()`; see `sample()`. */
     nearest(x, y, options = {}) {
         let nearest = null;
         let nearestDistance = Number.POSITIVE_INFINITY;
@@ -983,6 +1020,27 @@ export class NetTransforms {
             }
         }
         return nearest;
+    }
+    /**
+     * The newest received transform for one peer — no interpolation,
+     * extrapolation, or render delay.
+     *
+     * Use this rather than sample() for host-side AI/range/interaction checks
+     * when the game does not maintain its own canonical guest-player position.
+     * It is still peer-reported input, so validate it with game-specific
+     * tolerances and never blindly trust claimed outcomes.
+     *
+     * Returns null until that peer has published a transform.
+     */
+    latest(peerId) {
+        return this.net.latestTransform(peerId);
+    }
+    /**
+     * Live peers with a recent newest transform.
+     * Peers that have not published yet or exceed maxAgeMs are omitted.
+     */
+    latestAll(options = {}) {
+        return this.net.latestRemotePlayers(options);
     }
     flush() { this.net.flushPlayerState(); }
     info(peerId) { return this.net.transformSampleInfo(peerId); }
@@ -1194,6 +1252,12 @@ export class NetRun {
     }
 }
 export class NetEntities {
+    /**
+     * Register one stable-ID presentation collection. The controller owns the
+     * entity map: iterate `collection.values()` for per-frame presentation and
+     * do not maintain a second parallel entity map unless the game truly needs
+     * one.
+     */
     syncCollection(name, options) {
         return new NetCollectionSync(name, options);
     }
@@ -1230,6 +1294,7 @@ export class NetCollectionSync {
         }
     }
     get(id) { return this.entities.get(`${typeof id}:${String(id)}`)?.entity; }
+    /** All live local entities — the per-frame presentation iteration point. */
     values() { return [...this.entities.values()].map(({ entity }) => entity); }
     clear() {
         for (const { id, entity } of this.entities.values())

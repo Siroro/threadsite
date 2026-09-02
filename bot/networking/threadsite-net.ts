@@ -50,6 +50,14 @@ export interface SampleRemotePlayersOptions extends SampleTransformOptions {
   /** Hide a live peer whose transform stream has been silent this long. Default 2000 ms. */
   maxAgeMs?: number;
 }
+/** A live peer with its newest received transform: no interpolation or render delay. */
+export interface NetLatestPlayer<T extends NetTransform = NetTransform> {
+  peer: NetPeer; transform: T; ts: number; ageMs: number;
+}
+export interface LatestRemotePlayersOptions {
+  /** Hide a live peer whose transform stream has been silent this long. Default 2000 ms. */
+  maxAgeMs?: number;
+}
 export interface NetWorldState<T = any> { runId: string | number; tick: number; state: T }
 export interface NetWorldEnvelope<T = any> extends NetWorldState<T> { schemaVersion: string | number }
 export interface NetWorldSyncOptions<T = any> {
@@ -510,6 +518,23 @@ export class ThreadSiteNet {
     }
     return result;
   }
+  /** @internal Use `transforms.latest()`. */
+  latestTransform<T extends NetTransform = NetTransform>(peerId: string): T | null {
+    const newest = this.transformBuffers.get(peerId)?.at(-1);
+    return newest ? ({ ...newest.state } as T) : null;
+  }
+  /** @internal Use `transforms.latestAll()`. */
+  latestRemotePlayers<T extends NetTransform = NetTransform>(options: LatestRemotePlayersOptions = {}): NetLatestPlayer<T>[] {
+    const maxAgeMs = clamp(options.maxAgeMs ?? 2000, 100, 30_000);
+    const result: NetLatestPlayer<T>[] = [];
+    for (const peer of this.peersById.values()) {
+      const newest = this.transformBuffers.get(peer.id)?.at(-1);
+      if (!newest) continue;
+      const ageMs = Math.max(0, this.serverNow() - newest.ts);
+      if (ageMs <= maxAgeMs) result.push({ peer, transform: { ...newest.state } as T, ts: newest.ts, ageMs });
+    }
+    return result;
+  }
   /** @internal */ latestWorldSnapshot(): NetWorldSnapshot | null { return this.latestWorld; }
 
   /** @internal Use `world.yieldAuthority()`. */
@@ -853,19 +878,37 @@ export class ThreadSiteNet {
   }
 }
 
+/**
+ * Local transform publication plus remote transform reads.
+ *
+ * sample*() is time-shifted for smooth rendering.
+ * latest*() returns the newest received peer transform and is appropriate
+ * for host gameplay checks that need the freshest observed player position.
+ *
+ * Peer transforms are still client-reported input: the host remains
+ * authoritative over gameplay outcomes.
+ */
 export class NetTransforms {
   constructor(private readonly net: ThreadSiteNet) {}
   publish(transform: NetTransform): void { this.net.publishTransform(transform); }
   teleport(transform: NetTransform): void { this.net.publishTeleport(transform); }
+  /**
+   * Rendering-only time-shifted transform for one remote peer: interpolated
+   * 100-150 ms in the past, extrapolating at most 100 ms past the newest
+   * sample. Never resolve gameplay from a sample; see `latest()`.
+   */
   sample<T extends NetTransform = NetTransform>(peerId: string, options: SampleTransformOptions = {}): T | null {
     return this.net.sampleTransform<T>(peerId, options);
   }
+  /** Rendering-only sweep of live remote peers; see `sample()`. */
   sampleAll<T extends NetTransform = NetTransform>(options: SampleRemotePlayersOptions = {}): NetRemotePlayer<T>[] {
     return this.net.sampleRemotePlayers<T>(options);
   }
+  /** Rendering-only alive filter over `sampleAll()`; see `sample()`. */
   listAlive<T extends NetTransform = NetTransform>(options: SampleRemotePlayersOptions = {}): NetRemotePlayer<T>[] {
     return this.sampleAll<T>(options).filter(({ transform }) => transform.alive !== false);
   }
+  /** Rendering-only nearest-player query built on `listAlive()`; see `sample()`. */
   nearest<T extends NetTransform = NetTransform>(x: number, y: number, options: SampleRemotePlayersOptions = {}): NetRemotePlayer<T> | null {
     let nearest: NetRemotePlayer<T> | null = null;
     let nearestDistance = Number.POSITIVE_INFINITY;
@@ -874,6 +917,27 @@ export class NetTransforms {
       if (distance < nearestDistance) { nearest = candidate; nearestDistance = distance; }
     }
     return nearest;
+  }
+  /**
+   * The newest received transform for one peer — no interpolation,
+   * extrapolation, or render delay.
+   *
+   * Use this rather than sample() for host-side AI/range/interaction checks
+   * when the game does not maintain its own canonical guest-player position.
+   * It is still peer-reported input, so validate it with game-specific
+   * tolerances and never blindly trust claimed outcomes.
+   *
+   * Returns null until that peer has published a transform.
+   */
+  latest<T extends NetTransform = NetTransform>(peerId: string): T | null {
+    return this.net.latestTransform<T>(peerId);
+  }
+  /**
+   * Live peers with a recent newest transform.
+   * Peers that have not published yet or exceed maxAgeMs are omitted.
+   */
+  latestAll<T extends NetTransform = NetTransform>(options: LatestRemotePlayersOptions = {}): NetLatestPlayer<T>[] {
+    return this.net.latestRemotePlayers<T>(options);
   }
   flush(): void { this.net.flushPlayerState(); }
   info(peerId: string): TransformSampleInfo | null { return this.net.transformSampleInfo(peerId); }
@@ -1052,6 +1116,12 @@ export class NetRun {
 }
 
 export class NetEntities {
+  /**
+   * Register one stable-ID presentation collection. The controller owns the
+   * entity map: iterate `collection.values()` for per-frame presentation and
+   * do not maintain a second parallel entity map unless the game truly needs
+   * one.
+   */
   syncCollection<TLocal, TSnapshot>(name: string, options: NetCollectionSyncOptions<TLocal, TSnapshot>): NetCollectionSync<TLocal, TSnapshot> {
     return new NetCollectionSync(name, options);
   }
@@ -1081,6 +1151,7 @@ export class NetCollectionSync<TLocal, TSnapshot> {
     }
   }
   get(id: string | number): TLocal | undefined { return this.entities.get(`${typeof id}:${String(id)}`)?.entity; }
+  /** All live local entities — the per-frame presentation iteration point. */
   values(): TLocal[] { return [...this.entities.values()].map(({ entity }) => entity); }
   clear(): void {
     for (const { id, entity } of this.entities.values()) this.options.remove(entity, id);
