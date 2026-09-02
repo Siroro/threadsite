@@ -27,7 +27,13 @@ type SharedState = {
   pickups: PickupSnapshot[];
 };
 
+// 1) Everything the lifecycle callbacks touch is created BEFORE the session:
+//    scene/renderer, HUD refs, and the shared-state store they read/write.
+const scene = createScene();
+const hud = mountHud();
+
 let authoritative = false;
+// 2) Then the session, with all world options final and inline.
 const net = await ThreadSiteNet.createAuthoritativeSession({
   ...NET_CONFIG,
   mode: "single", // the default: one game-wide shared ARENA
@@ -44,16 +50,19 @@ const net = await ThreadSiteNet.createAuthoritativeSession({
       restoreCompleteSharedWorld(restoredRun, tick, state);
     },
     present: ({ runId: presentedRun, tick, state }) => {
-      presentCompleteSharedWorld(presentedRun, tick, state);
+      scene.presentSharedWorld(presentedRun, tick, state); // scene exists already
     },
     onAuthorityStart: () => { authoritative = true; },
     onAuthorityStop: () => { authoritative = false; },
     validate: ({ state }) => isValidSharedState(state),
   },
 });
+// 3) Only now wire input, engine loop, and user-triggered start handlers.
+attachInput(scene, net);
+startEngineLoop(scene, net, hud);
 ```
 
-Use one complete serializer and one restore path; never maintain separate “join”, “reconnect”, and “migration” snapshots. `capture` must include stable entity IDs and all state needed to resume deterministically, and must return a valid world (`tick: 0` with fresh state is fine) from its very first call — authority and the publish loop start inside the `createAuthoritativeSession` await, before any code after it runs, so `capture` must never throw or depend on handlers installed later (e.g. on a Play-button click). The same applies to `restore`/`present`/`onAuthorityStart`: they can also fire during that await (a restored or persisted world), so every value they touch — scenes, UI refs, renderer state — must be initialized *before* the session is created, never after the `await` (a `ReferenceError: … before initialization` here makes the controller yield host and the game can end up hostless). `restore` runs before `onAuthorityStart`; it may receive the host's locally acknowledged snapshot from a previous relay generation after a relay restart. `present` runs only for guests and must update presentation without advancing authoritative simulation.
+**Boot order is fixed: initialize everything the callbacks touch (1), create the session (2), wire input/engine/start handlers (3).** Authority acquisition, world restore, and the publish loop all start inside the `createAuthoritativeSession` await — before any code after it runs — so the callbacks must be fully working the moment the session is created: `capture` must return a valid world (`tick: 0` with fresh state is fine) from its very first call and never depend on handlers installed later (e.g. on a Play-button click), and `restore`/`present`/`onAuthorityStart` must never read a scene, HUD, or module-level `const` that is only initialized after the `await`. These mistakes produce only runtime console errors — the harness's type checks and build cannot see them, and a clean build proves nothing — so follow the ordering above mechanically in every boot path. Use one complete serializer and one restore path; never maintain separate “join”, “reconnect”, and “migration” snapshots. `capture` must include stable entity IDs and all state needed to resume deterministically. `restore` runs before `onAuthorityStart`; it may receive the host's locally acknowledged snapshot from a previous relay generation after a relay restart. `present` runs only for guests and must update presentation without advancing authoritative simulation.
 
 While `authoritative` is true, advance shared simulation using frame-rate-independent steps and `net.clock.now()` for shared time. Stop shared mutation immediately when it becomes false. The preset configures transform rate, publishes complete worlds, serves late-join requests, and publishes immediately after authority starts. Call `net.world.publishNow()` after a boss phase change or shared reset, and `net.world.yieldAuthority()` before an intentional scene transition. Do not use raw world frames or authority callbacks alongside this lifecycle.
 

@@ -63,9 +63,17 @@ because `snapshot.state` is the world envelope.
 
 * `capture()` runs at `publishHz` while host. Keep it synchronous and cheap.
 
-* **`capture()` must return a valid world from its very first call.** Authority acquisition and the publish loop start inside `createAuthoritativeSession()` / `connect()` — during the `await`, before any code after it runs. If `capture()` depends on handlers, scenes, or state installed later (e.g. on a Play button click), it throws every publish tick while the game waits. Never gate `capture()` behind later initialization: capture an initial empty world (`tick: 0`, `state: <fresh DTO>`) until real state exists, and install world handlers before or immediately after the session promise resolves — not inside a user-triggered start handler.
+* **Boot order is fixed: initialize everything, then connect, then start.** Authority acquisition, world restore, and the publish loop all begin inside `createAuthoritativeSession()` / `connect()` — during the `await`, before any code after it runs. This yields one non-negotiable rule:
 
-* **The same rule applies to every lifecycle callback.** `restore` / `present` / `onAuthorityStart` can also fire during the session `await` (a recovered or persisted world restores before authority starts). Anything those callbacks touch — game scenes, UI refs, renderer state — must be initialized **before** the `createAuthoritativeSession()` call, never in code after the `await`. A `ReferenceError: Cannot access '…' before initialization` logged as `world authority startup failed` is this bug: the callback read a `const` declared later in the boot function. The controller then yields host authority, so the game may end up with no host at all. Initialize scene/UI state first, then create the session, then wire input and start the engine loop.
+  **Every lifecycle callback must be fully working the moment the session is created.** `capture()` must return a valid world (`tick: 0` with fresh state is fine) from its very first call — never throw or depend on handlers installed later (e.g. on a Play-button click). `restore` / `present` / `onAuthorityStart` can also fire during that `await` (a recovered or persisted world restores before authority starts), so every value they touch — game scenes, UI refs, renderer state, module-level `const`s — must already be initialized **before** the `createAuthoritativeSession()` call, never after the `await`.
+
+  Concretely, write boot as:
+
+  1. create UI / HUD / scene / renderer objects and any state the callbacks read
+  2. `await` the session with all world options inline and final
+  3. wire input, engine loop, and user-triggered start handlers
+
+  Never: declare scene/UI `const`s after the session `await` and use them inside `onSnapshot`/`present`/`restore` (a `ReferenceError: … before initialization` is logged as `world authority startup failed`, the controller yields host, and the game is left hostless — with no visible error, so validation passes), and never defer installing world handlers to a Play-button handler (`capture()` then fails every publish tick — again invisible to validation, and guests get no world). Because these failures produce only runtime console output that neither you nor the harness's checks can see, an apparently clean build proves nothing about them: the boot-order rule above is the only defense.
 
 * Keep complete snapshots compact:
 
