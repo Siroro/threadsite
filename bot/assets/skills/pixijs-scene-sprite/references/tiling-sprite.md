@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # TilingSprite
 
 A sprite variant that repeats a texture across a given area. The texture can be scrolled, scaled, and rotated independently of the sprite itself. Use for scrolling backgrounds, parallax layers, repeating ground patterns, and any surface that tiles a single texture.
@@ -8,15 +10,15 @@ A sprite variant that repeats a texture across a given area. The texture can be 
 const texture = await Assets.load("grass.png");
 
 const bg = new TilingSprite({
-  texture,
-  width: app.screen.width,
-  height: app.screen.height,
+ texture,
+ width: app.screen.width,
+ height: app.screen.height,
 });
 
 app.stage.addChild(bg);
 
 app.ticker.add((ticker) => {
-  bg.tilePosition.x -= 1 * ticker.deltaTime;
+ bg.tilePosition.x -= 1 * ticker.deltaTime;
 });
 ```
 
@@ -26,13 +28,13 @@ app.ticker.add((ticker) => {
 
 ```ts
 const bg = new TilingSprite({
-  texture,
-  width: 800,
-  height: 600,
-  tilePosition: { x: 0, y: 0 },
-  tileScale: { x: 1.5, y: 1.5 },
-  anchor: 0.5,
-  roundPixels: true,
+ texture,
+ width: 800,
+ height: 600,
+ tilePosition: { x: 0, y: 0 },
+ tileScale: { x: 1.5, y: 1.5 },
+ anchor: 0.5,
+ roundPixels: true,
 });
 
 const fromTexture = TilingSprite.from(texture, { width: 800, height: 600 });
@@ -43,17 +45,17 @@ const fromCache = TilingSprite.from("pattern.png", { width: 800, height: 600 });
 
 ### TilingSpriteOptions
 
-| Option                 | Type                  | Default          | Description                                                                        |
+| Option | Type | Default | Description |
 | ---------------------- | --------------------- | ---------------- | ---------------------------------------------------------------------------------- |
-| `texture`              | `Texture`             | `Texture.EMPTY`  | Texture repeated across the tiling region.                                         |
-| `width`                | `number`              | `256`            | Width of the visible tiling region.                                                |
-| `height`               | `number`              | `256`            | Height of the visible tiling region.                                               |
-| `anchor`               | `PointData \| number` | `{ x: 0, y: 0 }` | Normalized origin of the tiling sprite itself (not the pattern).                   |
-| `tilePosition`         | `PointData`           | `{ x: 0, y: 0 }` | Offset of the repeated pattern within the region; animate to scroll.               |
-| `tileScale`            | `PointData`           | `{ x: 1, y: 1 }` | Scale applied to the tile pattern only; sprite region stays the same size.         |
-| `tileRotation`         | `number`              | `0`              | Rotation in radians applied to the texture before tiling.                          |
-| `applyAnchorToTexture` | `boolean`             | `false`          | Shift the texture origin by the anchor instead of locking `(0,0)` to the top-left. |
-| `roundPixels`          | `boolean`             | `false`          | Snap the sprite's position (not the tile pattern) to integer coordinates.          |
+| `texture` | `Texture` | `Texture.EMPTY` | Texture repeated across the tiling region. |
+| `width` | `number` | `256` | Width of the visible tiling region. |
+| `height` | `number` | `256` | Height of the visible tiling region. |
+| `anchor` | `PointData \| number` | `{ x: 0, y: 0 }` | Normalized origin of the tiling sprite itself (not the pattern). |
+| `tilePosition` | `PointData` | `{ x: 0, y: 0 }` | Offset of the repeated pattern within the region; animate to scroll. |
+| `tileScale` | `PointData` | `{ x: 1, y: 1 }` | Scale applied to the tile pattern only; sprite region stays the same size. |
+| `tileRotation` | `number` | `0` | Rotation in radians applied to the texture before tiling. |
+| `applyAnchorToTexture` | `boolean` | `false` | Shift the texture origin by the anchor instead of locking `(0,0)` to the top-left. |
+| `roundPixels` | `boolean` | `false` | Snap the sprite's position (not the tile pattern) to integer coordinates. |
 
 All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zIndex`, etc.) are also valid here — see `skills/pixijs-scene-core-concepts/references/constructor-options.md`.
 
@@ -63,8 +65,8 @@ All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zInde
 
 ```ts
 app.ticker.add((ticker) => {
-  bg.tilePosition.x -= 2 * ticker.deltaTime;
-  bg.tilePosition.y -= 0.5 * ticker.deltaTime;
+ bg.tilePosition.x -= 2 * ticker.deltaTime;
+ bg.tilePosition.y -= 0.5 * ticker.deltaTime;
 });
 ```
 
@@ -84,10 +86,10 @@ bg.tileRotation = Math.PI / 4;
 
 ```ts
 const bg = new TilingSprite({
-  texture,
-  width: 800,
-  height: 600,
-  anchor: 0.5,
+ texture,
+ width: 800,
+ height: 600,
+ anchor: 0.5,
 });
 
 bg.x = app.screen.width / 2;
@@ -100,11 +102,11 @@ bg.y = app.screen.height / 2;
 
 ```ts
 const bg = new TilingSprite({
-  texture,
-  width: 800,
-  height: 600,
-  anchor: 0.5,
-  applyAnchorToTexture: true,
+ texture,
+ width: 800,
+ height: 600,
+ anchor: 0.5,
+ applyAnchorToTexture: true,
 });
 ```
 
@@ -119,8 +121,8 @@ const near = new TilingSprite({ texture: nearTex, width: 800, height: 600 });
 app.stage.addChild(far, near);
 
 app.ticker.add((ticker) => {
-  far.tilePosition.x -= 0.5 * ticker.deltaTime;
-  near.tilePosition.x -= 2 * ticker.deltaTime;
+ far.tilePosition.x -= 0.5 * ticker.deltaTime;
+ near.tilePosition.x -= 2 * ticker.deltaTime;
 });
 ```
 
@@ -130,10 +132,10 @@ Give each layer a different `tilePosition` scroll rate for a parallax effect. Sc
 
 ```ts
 const bg = new TilingSprite({
-  texture,
-  width: 800,
-  height: 600,
-  roundPixels: true,
+ texture,
+ width: 800,
+ height: 600,
+ roundPixels: true,
 });
 ```
 
@@ -144,7 +146,7 @@ Snaps the sprite's position (not the tile pattern) to integer coordinates. Usefu
 ```ts
 bg.eventMode = "static";
 bg.on("pointertap", (e) => {
-  console.log("tile clicked", bg.toLocal(e.global));
+ console.log("tile clicked", bg.toLocal(e.global));
 });
 ```
 

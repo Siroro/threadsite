@@ -79,9 +79,9 @@ import { Application } from "pixi.js";
 const app = new Application();
 
 await app.init({
-  gcActive: true,
-  gcMaxUnusedTime: 120000, // idle time before cleanup in ms (default: 60000)
-  gcFrequency: 60000, // check interval in ms (default: 30000)
+ gcActive: true,
+ gcMaxUnusedTime: 120000, // idle time before cleanup in ms (default: 60000)
+ gcFrequency: 60000, // check interval in ms (default: 30000)
 });
 ```
 
@@ -162,36 +162,36 @@ Reuse objects by changing their properties instead of destroy/recreate:
 import { Sprite, Container, Texture } from "pixi.js";
 
 class BulletPool {
-  private _pool: Sprite[] = [];
-  private _container: Container;
+ private _pool: Sprite[] = [];
+ private _container: Container;
 
-  constructor(container: Container) {
-    this._container = container;
-  }
+ constructor(container: Container) {
+ this._container = container;
+ }
 
-  public get(texture: Texture): Sprite {
-    let bullet = this._pool.pop();
+ public get(texture: Texture): Sprite {
+ let bullet = this._pool.pop();
 
-    if (!bullet) {
-      bullet = new Sprite(texture);
-      this._container.addChild(bullet);
-    }
+ if (!bullet) {
+ bullet = new Sprite(texture);
+ this._container.addChild(bullet);
+ }
 
-    bullet.texture = texture;
-    bullet.position.set(0, 0);
-    bullet.rotation = 0;
-    bullet.scale.set(1);
-    bullet.alpha = 1;
-    bullet.tint = 0xffffff;
-    bullet.blendMode = "normal";
-    bullet.visible = true;
-    return bullet;
-  }
+ bullet.texture = texture;
+ bullet.position.set(0, 0);
+ bullet.rotation = 0;
+ bullet.scale.set(1);
+ bullet.alpha = 1;
+ bullet.tint = 0xffffff;
+ bullet.blendMode = "normal";
+ bullet.visible = true;
+ return bullet;
+ }
 
-  public release(bullet: Sprite): void {
-    bullet.visible = false;
-    this._pool.push(bullet);
-  }
+ public release(bullet: Sprite): void {
+ bullet.visible = false;
+ this._pool.push(bullet);
+ }
 }
 ```
 
@@ -255,17 +255,17 @@ import { BitmapText, Text } from "pixi.js";
 
 // Wrong: re-renders canvas + GPU upload every frame
 app.ticker.add(() => {
-  scoreText.text = `Score: ${score}`;
+ scoreText.text = `Score: ${score}`;
 });
 
 // Correct: use BitmapText for frequently changing content
 const scoreText = new BitmapText({
-  text: "Score: 0",
-  style: { fontFamily: "Arial", fontSize: 24, fill: 0xffffff },
+ text: "Score: 0",
+ style: { fontFamily: "Arial", fontSize: 24, fill: 0xffffff },
 });
 
 app.ticker.add(() => {
-  scoreText.text = `Score: ${score}`;
+ scoreText.text = `Score: ${score}`;
 });
 ```
 
@@ -275,10 +275,10 @@ If you must use canvas Text, guard updates so they only happen when the value ch
 
 ```ts
 app.ticker.add(() => {
-  const next = `Score: ${score}`;
-  if (scoreText.text !== next) {
-    scoreText.text = next;
-  }
+ const next = `Score: ${score}`;
+ if (scoreText.text !== next) {
+ scoreText.text = next;
+ }
 });
 ```
 
@@ -333,9 +333,9 @@ const app = new Application();
 
 // Mobile-friendly: lower resolution, no antialias
 await app.init({
-  resolution: 1,
-  antialias: false,
-  backgroundAlpha: 1, // opaque background is faster
+ resolution: 1,
+ antialias: false,
+ backgroundAlpha: 1, // opaque background is faster
 });
 ```
 
@@ -345,23 +345,23 @@ await app.init({
 
 ```ts
 function staggerDestroy(textures: Texture[], perFrame: number = 5): void {
-  let index = 0;
-  const ticker = app.ticker;
+ let index = 0;
+ const ticker = app.ticker;
 
-  const destroy = () => {
-    const end = Math.min(index + perFrame, textures.length);
+ const destroy = () => {
+ const end = Math.min(index + perFrame, textures.length);
 
-    for (let i = index; i < end; i++) {
-      textures[i].destroy(true);
-    }
-    index = end;
+ for (let i = index; i < end; i++) {
+ textures[i].destroy(true);
+ }
+ index = end;
 
-    if (index >= textures.length) {
-      ticker.remove(destroy);
-    }
-  };
+ if (index >= textures.length) {
+ ticker.remove(destroy);
+ }
+ };
 
-  ticker.add(destroy);
+ ticker.add(destroy);
 }
 ```
 
@@ -388,8 +388,8 @@ Destroying while the render pipeline still holds a reference causes null-pointer
 
 ```ts
 app.ticker.addOnce(() => {
-  parent.removeChild(sprite);
-  sprite.destroy();
+ parent.removeChild(sprite);
+ sprite.destroy();
 });
 ```
 

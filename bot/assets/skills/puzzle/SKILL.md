@@ -4,7 +4,7 @@ description: "Build a puzzle game: grid/board state, move input, rule-based reso
 license: Apache-2.0
 ---
 
-<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/pixi.js) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
 
 
 # Puzzle
@@ -18,12 +18,12 @@ deterministic resolution, undo) that keep a puzzle fair and bug-free.
 ## When to use
 
 - Use when the game is a **discrete board** the player changes with moves, and the board
-  **resolves by rules**: match-3/tile-matching, sokoban/block-pusher, sliding puzzle, logic grid.
+ **resolves by rules**: match-3/tile-matching, sokoban/block-pusher, sliding puzzle, logic grid.
 - Use when designing match/cascade resolution, undo, level progression, or solvability.
 
 **When *not* to use:** real-time grid action with permadeath → `roguelike`. Card zones/turns →
 `card-game`. Physics-based "puzzle platformer" → `platformer` + `physics-tuning`. For the tile
-rendering, use `godot-tilemap` / `unity-tilemap-2d`.
+rendering, use the engine's equivalent API.
 
 ## Core loop
 
@@ -65,17 +65,17 @@ present it clearly.
 board = [[piece_or_empty for _ in range(W)] for _ in range(H)]
 
 def find_matches(board):
-    matched = set()
-    for y in range(H):                       # horizontal runs of >= 3 equal pieces
-        run = 1
-        for x in range(1, W):
-            if board[y][x] and board[y][x] == board[y][x-1]: run += 1
-            else:
-                if run >= 3: matched |= {(y, k) for k in range(x-run, x)}
-                run = 1
-        if run >= 3: matched |= {(y, k) for k in range(W-run, W)}
-    # ... repeat the same scan vertically (columns) ...
-    return matched
+ matched = set()
+ for y in range(H): # horizontal runs of >= 3 equal pieces
+ run = 1
+ for x in range(1, W):
+ if board[y][x] and board[y][x] == board[y][x-1]: run += 1
+ else:
+ if run >= 3: matched |= {(y, k) for k in range(x-run, x)}
+ run = 1
+ if run >= 3: matched |= {(y, k) for k in range(W-run, W)}
+ # ... repeat the same scan vertically (columns) ...
+ return matched
 ```
 
 ### 2. Resolve → collapse → refill → cascade (repeat to stability)
@@ -83,16 +83,16 @@ def find_matches(board):
 ```python
 # Pseudocode. One player move can trigger a chain; loop until the board stops changing.
 def resolve(board):
-    chain = 0
-    while True:
-        matches = find_matches(board)
-        if not matches: break                 # stable: resolution complete
-        chain += 1
-        score += score_for(matches, chain)    # later chain steps score more (see refs)
-        clear(board, matches)                  # remove matched pieces
-        apply_gravity(board)                   # pieces fall into the gaps
-        refill(board, rng)                      # spawn new pieces at the top (seeded RNG)
-    return chain
+ chain = 0
+ while True:
+ matches = find_matches(board)
+ if not matches: break # stable: resolution complete
+ chain += 1
+ score += score_for(matches, chain) # later chain steps score more (see refs)
+ clear(board, matches) # remove matched pieces
+ apply_gravity(board) # pieces fall into the gaps
+ refill(board, rng) # spawn new pieces at the top (seeded RNG)
+ return chain
 ```
 
 ### 3. Undo via state snapshot or command
@@ -100,12 +100,12 @@ def resolve(board):
 ```python
 # Pseudocode. Snapshot before each move; undo restores it exactly (board + score + counters).
 def make_move(move):
-    history.append(snapshot(board, score, moves_left))   # push BEFORE applying
-    apply(move); resolve(board); moves_left -= 1
+ history.append(snapshot(board, score, moves_left)) # push BEFORE applying
+ apply(move); resolve(board); moves_left -= 1
 
 def undo():
-    if history:
-        board, score, moves_left = history.pop()         # exact revert, including resolution
+ if history:
+ board, score, moves_left = history.pop() # exact revert, including resolution
 ```
 
 For large boards prefer the **command** pattern (store the move + enough to invert it) over full
@@ -114,30 +114,30 @@ snapshots to save memory; snapshots are simplest and fine for small boards.
 ## Pitfalls / failure modes
 
 - **Mixing logic and visuals** → animations desync from state and cause bugs. The board model is
-  the single source of truth; the view only renders it.
+ the single source of truth; the view only renders it.
 - **Resolving only once** → cascades/chains are missed. Loop resolution until the board is stable
-  (Pattern 2).
+ (Pattern 2).
 - **Undo that doesn't restore everything** → score/move-count/random-state drift. Snapshot *all*
-  state, or make the move fully invertible.
+ state, or make the move fully invertible.
 - **Unseeded refill RNG** → can't reproduce a level / no deterministic undo or daily puzzle. Seed it.
 - **Generated boards that aren't solvable** → unfair dead ends. Generate-and-verify, or generate
-  from a known solution backward (refs).
+ from a known solution backward (refs).
 - **No deadlock detection** (match-3) → board with no valid moves softlocks. Detect "no moves"
-  and shuffle or end the level (refs).
+ and shuffle or end the level (refs).
 - **Difficulty spikes** → too many mechanics at once. Teach one mechanic per level before combining.
 - **Resolution mid-animation accepts input** → double-moves/corruption. Lock input until the
-  board is stable.
+ board is stable.
 
 ## Composition (build it from these skills)
 
-- **Board rendering:** `godot-tilemap` / `unity-tilemap-2d` for the grid; `godot-ui-control` for HUD, score, and menus.
+- **Board rendering:** the engine's equivalent API for the grid; the engine's equivalent API for HUD, score, and menus.
 - **Levels:** `level-design` for hand-authored puzzles and difficulty pacing; `procedural-gen` for solvable generated boards.
 - **Persistence:** `save-systems` for level progress, high scores, and seeded daily puzzles.
 - **Juice:** `game-feel` for match/cascade pop, screen shake, and chain feedback; the engine animation/`Tween` skill for swaps/falls/clears; `audio-design` for match and chain cues.
-- **Scripting:** `godot-gdscript` / `unity-csharp-scripting` for the resolution loop and rules.
+- **Scripting:** the engine's equivalent API for the resolution loop and rules.
 
 ## References
 
 - For match-3 detection/gravity/refill/cascade detail, deadlock detection and reshuffles,
-  sokoban/rule-based puzzles, undo strategies, solvable generation, and scoring, read
-  `references/board-and-resolution.md`.
+ sokoban/rule-based puzzles, undo strategies, solvable generation, and scoring, read
+ `references/board-and-resolution.md`.

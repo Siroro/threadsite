@@ -14,8 +14,8 @@ export interface BuildResult {
 }
 
 /**
- * Bare engine imports (`import * as THREE from "three"`, `import * as PIXI
- * from "pixi.js"`) resolve natively: the harness seeds a curated
+ * Bare engine imports (`import * as THREE from "three"`, `import * as Phaser
+ * from "phaser"`) resolve natively: the harness seeds a curated
  * `node_modules/` at the workspace root (see engines.ts), and esbuild walks
  * up from `site/src/` to find it, bundling and tree-shaking the package into
  * the output. The validation gate maps the same names onto the packages'

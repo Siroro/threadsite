@@ -2,6 +2,19 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { PersistedState, ProjectRecord } from "./types.js";
 
+// Process-wide write queue: Discord threads mutate the store concurrently and
+// every save() writes through the same `${file}.tmp`, so unserialized writes
+// could race on the temp file or persist an older snapshot over a newer one.
+// Chaining the renames keeps them strictly ordered; the file path is part of
+// the key because tests open stores on separate files.
+const storeWriteQueues = new Map<string, Promise<unknown>>();
+
+function enqueueWrite(file: string, write: () => Promise<void>): Promise<void> {
+  const queued = (storeWriteQueues.get(file) ?? Promise.resolve()).then(write, write);
+  storeWriteQueues.set(file, queued);
+  return queued;
+}
+
 export class Store {
   private state: PersistedState;
 
@@ -80,8 +93,14 @@ export class Store {
   }
 
   private async save(): Promise<void> {
-    const tmp = `${this.file}.tmp`;
-    await fs.writeFile(tmp, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 });
-    await fs.rename(tmp, this.file);
+    const file = this.file;
+    // Snapshot the state synchronously: queued later writers must not
+    // serialize a state mutated by an even later save.
+    const payload = `${JSON.stringify(this.state, null, 2)}\n`;
+    return enqueueWrite(file, async () => {
+      const tmp = `${file}.tmp`;
+      await fs.writeFile(tmp, payload, { mode: 0o600 });
+      await fs.rename(tmp, file);
+    });
   }
 }

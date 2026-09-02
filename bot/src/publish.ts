@@ -23,6 +23,15 @@ const BLOCKED_SERVER_EXTENSIONS = new Set([
 
 export interface SiteStats { files: number; bytes: number }
 
+/**
+ * The deploy-identity file written into every published site root. Pages carry
+ * an injected loader (see injectUpdateChecker) that polls it; a changed
+ * `version` means a newer deploy is live and the page reloads itself. The name
+ * is reserved by the harness — a same-named workspace file is overwritten on
+ * publish.
+ */
+export const VERSION_FILE = "threadsite-version.json";
+
 export async function validateSite(siteDir: string): Promise<SiteStats> {
   const root = path.resolve(siteDir);
   const index = safeChild(root, "index.html");
@@ -501,7 +510,7 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
     }
 
     // The harness-seeded engine packages (workspace node_modules/) contribute
-    // their REAL TypeScript declarations: bare "three"/"pixi.js" resolve onto
+    // their REAL TypeScript declarations: bare "three"/"phaser" resolve onto
     // them through tsconfig paths (absolute, pointing into the workspace — no
     // copying), so authored engine code is type-checked against the library's
     // actual API, matching what the agent's language server sees.
@@ -820,6 +829,7 @@ export async function publishSite(siteDir: string, siteSlug: string): Promise<vo
 
   await fs.rm(staging, { recursive: true, force: true });
   await fs.cp(siteDir, staging, { recursive: true, dereference: false, force: true });
+  await stampDeployVersion(staging, await workspaceCommit(siteDir));
   await versionAssetReferences(staging);
 
   let hadOld = false;
@@ -842,6 +852,120 @@ export async function publishSite(siteDir: string, siteSlug: string): Promise<vo
 
 /** Local asset file types whose references get versioned query strings. */
 const CACHEABLE_ASSET_RE = /\.(?:css|js|mjs)$/i;
+
+/**
+ * Deploy identity for the update check: a digest over the staged tree's
+ * relative paths and file contents, computed BEFORE any rewriting so the id is
+ * a pure function of the workspace's site/ tree. Republishing an unchanged
+ * site yields the same id (no spurious reloads), and any content change — a
+ * new turn, a repair, a restamped net-config — yields a different one. The
+ * file also records the source git commit, so a live browser can be traced to
+ * the exact Forgejo commit it was deployed from.
+ */
+async function stampDeployVersion(stagingRoot: string, sourceCommit: string | null): Promise<string> {
+  const hash = crypto.createHash("sha256");
+  for (const file of (await listFiles(stagingRoot, /.*/)).sort()) {
+    hash.update(`${path.relative(stagingRoot, file).replaceAll(path.sep, "/")}\0`);
+    hash.update(await fs.readFile(file));
+    hash.update("\0");
+  }
+  const version = hash.digest("hex").slice(0, 12);
+  await fs.writeFile(
+    path.join(stagingRoot, VERSION_FILE),
+    `${JSON.stringify({ version, commit: sourceCommit, publishedAt: new Date().toISOString() }, null, 2)}\n`,
+    "utf8",
+  );
+  await injectUpdateChecker(stagingRoot, version);
+  return version;
+}
+
+/**
+ * HEAD commit of the git repo the site directory lives in (the workspace repo
+ * mirrored to Forgejo), or null when there is none — observability only; a
+ * missing repo must never block a publish.
+ */
+async function workspaceCommit(siteDir: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", siteDir, "rev-parse", "HEAD"], { timeout: 10_000 });
+    const sha = stdout.trim();
+    return /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Append the self-update loader to every published HTML page (the workspace
+ * source stays untouched — this runs on the staging copy, after validation, so
+ * generated code never sees or maintains it). The loader knows its own
+ * deploy id and the relative URL of the site root's version file (pages may
+ * sit in subdirectories, so the prefix is computed per page). It re-fetches
+ * the version file periodically and on tab focus/visibility — never before
+ * load, so the check does not compete with the game's own startup fetches —
+ * and when the live deploy id differs, reloads the page: hidden tabs reload
+ * immediately so the player comes back to the new version, visible tabs get a
+ * one-second notice first so a mid-game reload is never mistaken for a crash.
+ * Multiplayer games simply rejoin their room through the vendored client's
+ * normal connect flow, exactly like a manual refresh.
+ */
+async function injectUpdateChecker(stagingRoot: string, version: string): Promise<void> {
+  for (const html of await listFiles(stagingRoot, /\.html?$/i)) {
+    const source = await fs.readFile(html, "utf8");
+    // Relative hops from this page's directory up to the site root.
+    const up = path.relative(path.dirname(html), stagingRoot).replaceAll(path.sep, "/");
+    const versionUrl = `${up ? `${up}/` : "./"}${VERSION_FILE}`;
+    const snippet = updateCheckerSnippet(version, versionUrl);
+    // Insert before the LAST </body>: an earlier literal (e.g. inside an
+    // inline script's markup string) must not swallow the injection.
+    let insertAt = -1;
+    for (const match of source.matchAll(/<\/body>/gi)) insertAt = match.index ?? insertAt;
+    const updated = insertAt >= 0
+      ? `${source.slice(0, insertAt)}${snippet}${source.slice(insertAt)}`
+      : `${source}${snippet}`;
+    if (updated !== source) await fs.writeFile(html, updated, "utf8");
+  }
+}
+
+/** The injected loader: a classic inline <script>, stamped for one deploy. */
+function updateCheckerSnippet(version: string, versionUrl: string): string {
+  return `<script>
+(function () {
+  "use strict";
+  var DEPLOYED = ${JSON.stringify(version)};
+  var VERSION_URL = ${JSON.stringify(versionUrl)};
+  var CHECK_MS = 30000;
+  var overlay = null;
+  var checking = false;
+  function adoptNewVersion() {
+    if (document.hidden) { location.reload(); return; }
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.setAttribute("style", "position:fixed;right:16px;bottom:16px;z-index:2147483647;background:rgba(17,17,17,.92);color:#eee;font:13px/1.5 system-ui,ui-sans-serif,sans-serif;padding:10px 14px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.35);pointer-events:none");
+      overlay.textContent = "New version available — updating…";
+      (document.body || document.documentElement).appendChild(overlay);
+      setTimeout(function () { location.reload(); }, 1200);
+    }
+  }
+  function check() {
+    if (checking) return;
+    checking = true;
+    fetch(VERSION_URL, { cache: "no-store" })
+      .then(function (response) { return response.ok ? response.json() : null; })
+      .then(function (data) {
+        if (data && typeof data.version === "string" && data.version !== DEPLOYED) adoptNewVersion();
+      })
+      .catch(function () {})
+      .then(function () { checking = false; });
+  }
+  setInterval(check, CHECK_MS);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) check(); });
+  window.addEventListener("focus", check);
+  if (document.readyState === "complete") setTimeout(check, 3000);
+  else window.addEventListener("load", function () { setTimeout(check, 3000); });
+})();
+</script>`;
+}
+
 
 /**
  * Relative import/export specifiers that point at cacheable assets:

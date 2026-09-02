@@ -31,6 +31,21 @@ export interface ProjectRecord {
   /** Short hash of the commit belonging to the last accepted turn; used by /site revert. */
   lastCommit?: string;
   /**
+   * Full hash of the commit the bot last saw on the repo's main branch, set on
+   * every bot push and adoption. The external-push poller compares against it,
+   * so a mismatch means someone pushed with a repo push key.
+   */
+  lastSeenCommit?: string;
+  /**
+   * Repository-scoped push credentials issued with /site pushkey. The account
+   * is a restricted Forgejo user with Write on exactly this project's repo.
+   */
+  pushKey?: {
+    username: string;
+    password: string;
+    createdAt: string;
+  };
+  /**
    * When the last agent turn ran (success or failure). A non-initial turn
    * whose session has been idle longer than SESSION_IDLE_RESET_MS starts a
    * fresh session instead of re-reading a stale, cache-cold context.

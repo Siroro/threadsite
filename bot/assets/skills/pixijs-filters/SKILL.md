@@ -35,13 +35,13 @@ app.stage.addChild(container);
 
 ```ts
 import {
-  AlphaFilter,
-  BlurFilter,
-  ColorMatrixFilter,
-  DisplacementFilter,
-  NoiseFilter,
-  Assets,
-  Sprite,
+ AlphaFilter,
+ BlurFilter,
+ ColorMatrixFilter,
+ DisplacementFilter,
+ NoiseFilter,
+ Assets,
+ Sprite,
 } from "pixi.js";
 
 // Alpha (uniform transparency without per-child layering)
@@ -50,10 +50,10 @@ const alpha = new AlphaFilter({ alpha: 0.5 });
 // Blur — strength/quality are uniform; strengthX/strengthY split axes;
 // kernelSize must be odd (5, 7, 9, ... 15); repeatEdgePixels avoids transparent edges
 const blur = new BlurFilter({
-  strength: 4,
-  quality: 4,
-  kernelSize: 5,
-  repeatEdgePixels: false,
+ strength: 4,
+ quality: 4,
+ kernelSize: 5,
+ repeatEdgePixels: false,
 });
 
 // Color matrix — brightness is one of many presets. Others: tint, hue,
@@ -71,8 +71,8 @@ colorMatrix.alpha = 0.7; // blend at 70% strength
 const displacementTexture = await Assets.load("displacement_map.png");
 const displacementSprite = new Sprite(displacementTexture);
 const displacement = new DisplacementFilter({
-  sprite: displacementSprite,
-  scale: { x: 20, y: 10 },
+ sprite: displacementSprite,
+ scale: { x: 20, y: 10 },
 });
 
 // Noise — seed is an arbitrary number that determines the noise pattern; same seed reproduces the same pattern
@@ -89,31 +89,31 @@ The simplest way to create a custom filter. Only a fragment shader is needed; Pi
 import { Filter } from "pixi.js";
 
 const filter = Filter.from({
-  gl: {
-    fragment: `
-            in vec2 vTextureCoord;
-            out vec4 finalColor;
-            uniform sampler2D uTexture;
-            uniform float uTime;
+ gl: {
+ fragment: `
+ in vec2 vTextureCoord;
+ out vec4 finalColor;
+ uniform sampler2D uTexture;
+ uniform float uTime;
 
-            void main() {
-                vec2 uv = vTextureCoord;
-                uv.x += sin(uv.y * 10.0 + uTime) * 0.02;
-                finalColor = texture(uTexture, uv);
-            }
-        `,
-  },
-  resources: {
-    timeUniforms: {
-      uTime: { value: 0, type: "f32" },
-    },
-  },
+ void main() {
+ vec2 uv = vTextureCoord;
+ uv.x += sin(uv.y * 10.0 + uTime) * 0.02;
+ finalColor = texture(uTexture, uv);
+ }
+ `,
+ },
+ resources: {
+ timeUniforms: {
+ uTime: { value: 0, type: "f32" },
+ },
+ },
 });
 
 sprite.filters = filter;
 
 app.ticker.add((ticker) => {
-  filter.resources.timeUniforms.uniforms.uTime += 0.04 * ticker.deltaTime;
+ filter.resources.timeUniforms.uniforms.uTime += 0.04 * ticker.deltaTime;
 });
 ```
 
@@ -125,12 +125,12 @@ import { Filter, GlProgram } from "pixi.js";
 const glProgram = GlProgram.from({ fragment: fragmentSrc, vertex: vertexSrc });
 
 const filter = new Filter({
-  glProgram,
-  resources: {
-    timeUniforms: {
-      uTime: { value: 0, type: "f32" },
-    },
-  },
+ glProgram,
+ resources: {
+ timeUniforms: {
+ uTime: { value: 0, type: "f32" },
+ },
+ },
 });
 ```
 
@@ -148,14 +148,14 @@ Key points:
 import { Filter, GlProgram, Rectangle } from "pixi.js";
 
 const filter = new Filter({
-  glProgram: GlProgram.from({ fragment }),
-  resources: {},
-  resolution: 0.5, // default 1. Lower = faster, blurrier. 'inherit' matches the render target resolution
-  padding: 10, // default 0. Extra pixels for effects that extend bounds
-  antialias: "off", // default 'off'. 'on' | 'off' | 'inherit'
-  blendMode: "normal", // default 'normal'
-  blendRequired: false, // default false. true if shader samples uBackTexture
-  clipToViewport: true, // default true
+ glProgram: GlProgram.from({ fragment }),
+ resources: {},
+ resolution: 0.5, // default 1. Lower = faster, blurrier. 'inherit' matches the render target resolution
+ padding: 10, // default 0. Extra pixels for effects that extend bounds
+ antialias: "off", // default 'off'. 'on' | 'off' | 'inherit'
+ blendMode: "normal", // default 'normal'
+ blendRequired: false, // default false. true if shader samples uBackTexture
+ clipToViewport: true, // default true
 });
 
 // Optimization: set known bounds to avoid per-frame measurement
@@ -176,8 +176,8 @@ import { AdjustmentFilter } from "pixi-filters/adjustment";
 import { GlowFilter } from "pixi-filters/glow";
 
 sprite.filters = [
-  new AdjustmentFilter({ brightness: 1.2, contrast: 1.1 }),
-  new GlowFilter({ distance: 15, outerStrength: 2 }),
+ new AdjustmentFilter({ brightness: 1.2, contrast: 1.1 }),
+ new GlowFilter({ distance: 15, outerStrength: 2 }),
 ];
 ```
 
@@ -222,10 +222,10 @@ Correct:
 import { Filter, GlProgram } from "pixi.js";
 
 const filter = new Filter({
-  glProgram: GlProgram.from({ fragment, vertex }),
-  resources: {
-    timeUniforms: { uTime: { value: 0, type: "f32" } },
-  },
+ glProgram: GlProgram.from({ fragment, vertex }),
+ resources: {
+ timeUniforms: { uTime: { value: 0, type: "f32" } },
+ },
 });
 ```
 
@@ -257,7 +257,7 @@ Wrong:
 
 ```ts
 for (const child of container.children) {
-  child.filters = [new BlurFilter({ strength: 4 })];
+ child.filters = [new BlurFilter({ strength: 4 })];
 }
 ```
 

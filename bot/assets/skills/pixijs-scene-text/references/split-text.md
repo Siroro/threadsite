@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # SplitText
 
 A container that splits a canvas `Text` render into independently-animatable `lines`, `words`, and `chars`; each exposed as its own `Text` instance. Use `SplitText` for per-character intro animations, staggered reveals, or any effect where you need to transform each glyph, word, or line separately.
@@ -6,23 +8,23 @@ A container that splits a canvas `Text` render into independently-animatable `li
 
 ```ts
 const split = new SplitText({
-  text: "Animate Me",
-  style: { fontSize: 48, fill: 0xffffff },
-  charAnchor: { x: 0.5, y: 1 },
+ text: "Animate Me",
+ style: { fontSize: 48, fill: 0xffffff },
+ charAnchor: { x: 0.5, y: 1 },
 });
 
 app.stage.addChild(split);
 
 split.chars.forEach((char, i) => {
-  char.alpha = 0;
-  char.y = -40;
-  const delay = i * 80;
-  setTimeout(() => {
-    app.ticker.add(() => {
-      char.alpha = Math.min(char.alpha + 0.05, 1);
-      char.y += (0 - char.y) * 0.1;
-    });
-  }, delay);
+ char.alpha = 0;
+ char.y = -40;
+ const delay = i * 80;
+ setTimeout(() => {
+ app.ticker.add(() => {
+ char.alpha = Math.min(char.alpha + 0.05, 1);
+ char.y += (0 - char.y) * 0.1;
+ });
+ }, delay);
 });
 ```
 
@@ -32,20 +34,20 @@ split.chars.forEach((char, i) => {
 
 ```ts
 const minimal = new SplitText({
-  text: "Hello World",
-  style: { fontSize: 32, fill: 0xffffff },
+ text: "Hello World",
+ style: { fontSize: 32, fill: 0xffffff },
 });
 
 const full = new SplitText({
-  text: "Animate\nEvery Character",
-  style: { fontSize: 48, fill: "white", stroke: { color: "black", width: 2 } },
-  autoSplit: true,
-  lineAnchor: 0.5,
-  wordAnchor: { x: 0, y: 0.5 },
-  charAnchor: { x: 0.5, y: 1 },
-  x: 100,
-  y: 200,
-  alpha: 0.8,
+ text: "Animate\nEvery Character",
+ style: { fontSize: 48, fill: "white", stroke: { color: "black", width: 2 } },
+ autoSplit: true,
+ lineAnchor: 0.5,
+ wordAnchor: { x: 0, y: 0.5 },
+ charAnchor: { x: 0.5, y: 1 },
+ x: 100,
+ y: 200,
+ alpha: 0.8,
 });
 ```
 
@@ -53,14 +55,14 @@ const full = new SplitText({
 
 `SplitText` is a `Container` (not a `ViewContainer`), so unlike `Text` it does NOT take `anchor`, `resolution`, `roundPixels`, `textureStyle`, or `autoGenerateMipmaps` at the top level. Those belong on the internal per-character `Text` instances. The splitting behavior is controlled by the fields below.
 
-| Option       | Type                                     | Default | Description                                                                                                            |
+| Option | Type | Default | Description |
 | ------------ | ---------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `text`       | `string`                                 | —       | Text content to render and segment. Required.                                                                          |
-| `style`      | `TextStyle \| Partial<TextStyleOptions>` | —       | TextStyle instance or style options; the same TextStyle used by `Text`. See `references/text.md`. Required.            |
-| `autoSplit`  | `boolean`                                | `true`  | Automatically re-split when `text` or `style` changes; set `false` to batch updates and call `split.split()` manually. |
-| `lineAnchor` | `number \| PointData`                    | `0`     | Normalized transform origin (0–1) for each line container; controls the pivot of per-line rotations/scales.            |
-| `wordAnchor` | `number \| PointData`                    | `0`     | Same as `lineAnchor` but for each word container.                                                                      |
-| `charAnchor` | `number \| PointData`                    | `0`     | Same as `lineAnchor` but for each character container.                                                                 |
+| `text` | `string` | — | Text content to render and segment. Required. |
+| `style` | `TextStyle \| Partial<TextStyleOptions>` | — | TextStyle instance or style options; the same TextStyle used by `Text`. See `references/text.md`. Required. |
+| `autoSplit` | `boolean` | `true` | Automatically re-split when `text` or `style` changes; set `false` to batch updates and call `split.split()` manually. |
+| `lineAnchor` | `number \| PointData` | `0` | Normalized transform origin (0–1) for each line container; controls the pivot of per-line rotations/scales. |
+| `wordAnchor` | `number \| PointData` | `0` | Same as `lineAnchor` but for each word container. |
+| `charAnchor` | `number \| PointData` | `0` | Same as `lineAnchor` but for each character container. |
 
 All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zIndex`, etc.) are also valid here — see `skills/pixijs-scene-core-concepts/references/constructor-options.md`.
 
@@ -72,13 +74,13 @@ All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zInde
 
 ```ts
 split.lines.forEach((line) => {
-  line.alpha = 0.8;
+ line.alpha = 0.8;
 });
 split.words.forEach((word) => {
-  word.rotation = 0.1;
+ word.rotation = 0.1;
 });
 split.chars.forEach((char) => {
-  char.scale.set(1.2);
+ char.scale.set(1.2);
 });
 ```
 
@@ -88,11 +90,11 @@ split.chars.forEach((char) => {
 
 ```ts
 const split = new SplitText({
-  text: "Wave",
-  style: { fontSize: 64, fill: 0xffffff },
-  lineAnchor: 0.5,
-  wordAnchor: { x: 0, y: 0.5 },
-  charAnchor: { x: 0.5, y: 1 },
+ text: "Wave",
+ style: { fontSize: 64, fill: 0xffffff },
+ lineAnchor: 0.5,
+ wordAnchor: { x: 0, y: 0.5 },
+ charAnchor: { x: 0.5, y: 1 },
 });
 ```
 
@@ -106,10 +108,10 @@ Setting these once at construction time ensures rotations and scales pivot aroun
 
 ```ts
 split.chars.forEach((char, i) => {
-  char.onRender = () => {
-    const t = performance.now() / 200 + i;
-    char.y = Math.sin(t) * 5;
-  };
+ char.onRender = () => {
+ const t = performance.now() / 200 + i;
+ char.y = Math.sin(t) * 5;
+ };
 });
 ```
 

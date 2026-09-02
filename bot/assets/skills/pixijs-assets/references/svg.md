@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # SVG Loading
 
 PixiJS loads `.svg` files in one of two modes: rasterized to a texture (fast, fixed resolution) or parsed into a `GraphicsContext` (scalable vector, reusable across `Graphics` instances). Choose texture mode for backgrounds and decorative elements at a fixed size; choose Graphics mode for icons, UI elements, or anything that needs to scale or be modified at runtime.
@@ -9,8 +11,8 @@ const svgTexture = await Assets.load("icon.svg");
 const sprite = new Sprite(svgTexture);
 
 const svgContext = await Assets.load({
-  src: "icon.svg",
-  data: { parseAsGraphicsContext: true },
+ src: "icon.svg",
+ data: { parseAsGraphicsContext: true },
 });
 const graphic = new Graphics(svgContext);
 ```
@@ -32,8 +34,8 @@ The SVG is rasterized to a bitmap via the browser's native SVG-to-image pipeline
 
 ```ts
 const context = await Assets.load({
-  src: "logo.svg",
-  data: { parseAsGraphicsContext: true },
+ src: "logo.svg",
+ data: { parseAsGraphicsContext: true },
 });
 
 const small = new Graphics(context);
@@ -49,8 +51,8 @@ The SVG is parsed into a `GraphicsContext` (a compiled list of fill/stroke instr
 
 ```ts
 const icon = await Assets.load({
-  src: "icon.svg",
-  data: { resolution: 2 },
+ src: "icon.svg",
+ data: { resolution: 2 },
 });
 ```
 
@@ -68,9 +70,9 @@ Flip the default mode globally. Any subsequent `Assets.load('*.svg')` call parse
 
 ### When to use which mode
 
-| Mode                                      | Best for                                          | Cost                                                           |
+| Mode | Best for | Cost |
 | ----------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------- |
-| Texture (default)                         | Icons at a known size, backgrounds, complex SVGs  | One-time rasterization; fast per-frame; pixelates when scaled  |
+| Texture (default) | Icons at a known size, backgrounds, complex SVGs | One-time rasterization; fast per-frame; pixelates when scaled |
 | Graphics (`parseAsGraphicsContext: true`) | Scalable icons, UI elements, runtime modification | Higher initial parse cost; crisp at any scale; shared contexts |
 
 If you need the same SVG at multiple sizes, Graphics mode is usually faster because you parse once and scale cheaply. If you have one fixed-size SVG, texture mode is simpler and batches with other sprites.
@@ -91,8 +93,8 @@ Correct (if you need scaling):
 
 ```ts
 const context = await Assets.load({
-  src: "icon.svg",
-  data: { parseAsGraphicsContext: true },
+ src: "icon.svg",
+ data: { parseAsGraphicsContext: true },
 });
 const graphic = new Graphics(context);
 graphic.scale.set(5); // crisp
@@ -102,8 +104,8 @@ Or rasterize at higher resolution:
 
 ```ts
 const icon = await Assets.load({
-  src: "icon.svg",
-  data: { resolution: 5 },
+ src: "icon.svg",
+ data: { resolution: 5 },
 });
 ```
 

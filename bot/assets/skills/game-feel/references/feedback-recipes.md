@@ -1,3 +1,5 @@
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Feedback recipes — depth for `game-feel`
 
 Detail the `game-feel` body defers here: the shake math, easing cheat sheet, the rest of the
@@ -19,7 +21,7 @@ across time — never a fresh `rand()` per frame, which produces a harsh buzz in
 ```gdscript
 # 1D value-noise-ish sampler without an addon: layered sines at incommensurate rates.
 func _shake_axis(seed: float, t: float) -> float:
-    return 0.6 * sin(t * 11.0 + seed) + 0.4 * sin(t * 23.0 + seed * 2.0)
+ return 0.6 * sin(t * 11.0 + seed) + 0.4 * sin(t * 23.0 + seed * 2.0)
 ```
 
 Tunable starting points: `max_offset = (8..16, 6..10) px`, `max_roll = 0.05..0.12 rad`,
@@ -43,31 +45,31 @@ same regardless of tool.
 ```csharp
 // Unity 6.3 LTS: a minimal eased scale "pop" in a coroutine (no external deps).
 IEnumerator Pop(Transform t, float dur = 0.18f) {
-    t.localScale = new Vector3(1.3f, 0.7f, 1f);            // squash on the event
-    for (float e = 0; e < dur; e += Time.deltaTime) {
-        float k = e / dur;
-        float back = 1f + 2.7f * Mathf.Pow(1 - k, 2) * (k - 0); // overshoot-ish
-        t.localScale = Vector3.Lerp(t.localScale, Vector3.one, k * k);
-        yield return null;
-    }
-    t.localScale = Vector3.one;
+ t.localScale = new Vector3(1.3f, 0.7f, 1f); // squash on the event
+ for (float e = 0; e < dur; e += Time.deltaTime) {
+ float k = e / dur;
+ float back = 1f + 2.7f * Mathf.Pow(1 - k, 2) * (k - 0); // overshoot-ish
+ t.localScale = Vector3.Lerp(t.localScale, Vector3.one, k * k);
+ yield return null;
+ }
+ t.localScale = Vector3.one;
 }
 ```
 
 ## 3. The rest of the feedback menu
 
 - **Flash:** tint the sprite/material white for 1–3 frames on hit (`modulate`/material color),
-  then tween back. Cheap, hugely legible.
+ then tween back. Cheap, hugely legible.
 - **Knockback:** apply an impulse away from the hit normal, clamped and short; let
-  `physics-tuning` own stability. Pair with brief control lockout, not a long one.
+ `physics-tuning` own stability. Pair with brief control lockout, not a long one.
 - **Number/text pop:** spawn a damage number that rises, fades, and eases out; randomize the
-  horizontal drift so stacked hits fan out.
+ horizontal drift so stacked hits fan out.
 - **Particles:** a short burst at the contact point (sparks, dust, debris). Pool them
-  (`performance-optimization`) — do not instance-and-free per hit.
+ (`performance-optimization`) — do not instance-and-free per hit.
 - **Freeze frame:** the hit-stop in the body; scale duration to importance (0.04 s light →
-  0.15 s heavy). Optionally freeze only the attacker+target, not the whole world.
+ 0.15 s heavy). Optionally freeze only the attacker+target, not the whole world.
 - **Anticipation & follow-through:** a tiny wind-up before a big action and a settle after read
-  as weight; this is animation, not code (engine animation skill).
+ as weight; this is animation, not code (engine animation skill).
 - **Chromatic/▒vignette/zoom punch:** post-process nudges for big moments; keep brief.
 
 ## 4. Importance tiers (keep the whole game proportional)
@@ -92,9 +94,9 @@ These pair with `game-ui-ux` (settings menu) and `input-systems` (accessibility 
 ## 6. Per-engine binding summary
 
 - **Godot 4.7:** `create_tween()` + `tween_property().set_trans().set_ease()`; `GPUParticles2D/3D`
-  one-shot; `Engine.time_scale` + `ignore_time_scale` timer; shake on `Camera2D.offset`.
+ one-shot; `Engine.time_scale` + `ignore_time_scale` timer; shake on `Camera2D.offset`.
 - **Unity 6.3 LTS:** coroutines + `SmoothDamp`/curves (or a tween package); `ParticleSystem.Play()`;
-  `Time.timeScale` + `WaitForSecondsRealtime`; shake via `CinemachineBasicMultiChannelPerlin`
-  amplitude/frequency driven by `trauma^2` (see `camera-systems`).
-- **Web (Phaser/Pixi/three):** tween via the engine/library tween; `this.cameras.main.shake()`
-  in Phaser; `requestAnimationFrame`-driven eases elsewhere.
+ `Time.timeScale` + `WaitForSecondsRealtime`; shake via `CinemachineBasicMultiChannelPerlin`
+ amplitude/frequency driven by `trauma^2` (see `camera-systems`).
+- **Web (Phaser/three):** tween via the engine/library tween; `this.cameras.main.shake()`
+ in Phaser; `requestAnimationFrame`-driven eases elsewhere.

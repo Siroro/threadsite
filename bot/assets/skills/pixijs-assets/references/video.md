@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Video Textures
 
 PixiJS loads videos through `Assets.load()` and returns a regular `Texture`. Pass the texture to a `Sprite` and it paints the current video frame each render. Use video textures for backgrounds, cutscenes, or any animated surface driven by a video source.
@@ -20,40 +22,40 @@ The returned texture wraps a `VideoSource`. The video starts playing automatical
 
 ```ts
 const texture = await Assets.load({
-  src: "city.mp4",
-  data: {
-    autoPlay: false,
-    loop: true,
-    muted: true,
-    preload: true,
-    playsinline: true,
-    updateFPS: 30,
-    alphaMode: "premultiply-alpha-on-upload",
-  },
+ src: "city.mp4",
+ data: {
+ autoPlay: false,
+ loop: true,
+ muted: true,
+ preload: true,
+ playsinline: true,
+ updateFPS: 30,
+ alphaMode: "premultiply-alpha-on-upload",
+ },
 });
 ```
 
 `data` accepts `VideoSourceOptions` fields. Defaults come from `VideoSource.defaultOptions`.
 
-| Option        | Default                | Purpose                                                    |
+| Option | Default | Purpose |
 | ------------- | ---------------------- | ---------------------------------------------------------- |
-| `autoLoad`    | `true`                 | Start downloading the video as soon as it's assigned       |
-| `autoPlay`    | `true`                 | Start playing once `canplay` fires                         |
-| `loop`        | `false`                | Restart at the end                                         |
-| `muted`       | `true`                 | Required for autoplay on most browsers                     |
-| `playsinline` | `true`                 | Prevents iOS fullscreen takeover                           |
-| `preload`     | `false`                | Await `canplaythrough` before resolving                    |
-| `updateFPS`   | `0`                    | Texture update rate. `0` updates every render frame        |
-| `crossorigin` | `true`                 | CORS mode for cross-origin URLs                            |
-| `alphaMode`   | auto-detected          | `'no-premultiply-alpha'` for straight alpha                |
-| `mime`        | derived from extension | Force a specific MIME type when the URL lacks an extension |
+| `autoLoad` | `true` | Start downloading the video as soon as it's assigned |
+| `autoPlay` | `true` | Start playing once `canplay` fires |
+| `loop` | `false` | Restart at the end |
+| `muted` | `true` | Required for autoplay on most browsers |
+| `playsinline` | `true` | Prevents iOS fullscreen takeover |
+| `preload` | `false` | Await `canplaythrough` before resolving |
+| `updateFPS` | `0` | Texture update rate. `0` updates every render frame |
+| `crossorigin` | `true` | CORS mode for cross-origin URLs |
+| `alphaMode` | auto-detected | `'no-premultiply-alpha'` for straight alpha |
+| `mime` | derived from extension | Force a specific MIME type when the URL lacks an extension |
 
 ### Format fallback
 
 ```ts
 Assets.add({
-  alias: "clip",
-  src: "clip.{webm,mp4}",
+ alias: "clip",
+ src: "clip.{webm,mp4}",
 });
 
 const texture = await Assets.load("clip");
@@ -65,12 +67,12 @@ List multiple formats so the resolver picks the first one the browser supports. 
 
 ```ts
 const texture = await Assets.load({
-  src: "ad.mp4",
-  data: {
-    muted: true,
-    playsinline: true,
-    autoPlay: true,
-  },
+ src: "ad.mp4",
+ data: {
+ muted: true,
+ playsinline: true,
+ autoPlay: true,
+ },
 });
 ```
 
@@ -80,14 +82,14 @@ iOS and mobile Chrome only autoplay muted, inline video. Set both `muted: true` 
 
 ```ts
 const texture = await Assets.load({
-  src: "boss-fight.mp4",
-  data: { autoPlay: false, preload: true },
+ src: "boss-fight.mp4",
+ data: { autoPlay: false, preload: true },
 });
 
 const videoSource = texture.source as VideoSource;
 
 startButton.on("pointertap", () => {
-  videoSource.resource.play();
+ videoSource.resource.play();
 });
 ```
 
@@ -97,8 +99,8 @@ With `autoPlay: false`, grab the underlying `VideoSource` from `texture.source` 
 
 ```ts
 await Assets.load({
-  src: "background.mp4",
-  data: { updateFPS: 15 },
+ src: "background.mp4",
+ data: { updateFPS: 15 },
 });
 ```
 
@@ -110,9 +112,9 @@ If your video URL lacks an extension (e.g., a CDN signed URL or a blob), the loa
 
 ```ts
 const texture = await Assets.load({
-  src: "https://cdn.example.com/stream/abc123",
-  parser: "video",
-  data: { mime: "video/mp4" },
+ src: "https://cdn.example.com/stream/abc123",
+ parser: "video",
+ data: { mime: "video/mp4" },
 });
 ```
 
@@ -132,8 +134,8 @@ Correct:
 
 ```ts
 await Assets.load({
-  src: "ad.mp4",
-  data: { autoPlay: true, muted: true, playsinline: true },
+ src: "ad.mp4",
+ data: { autoPlay: true, muted: true, playsinline: true },
 });
 ```
 

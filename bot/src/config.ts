@@ -83,6 +83,12 @@ export const config = {
   forgejoOwnerType: env("FORGEJO_OWNER_TYPE", "user") as "user" | "org",
   forgejoToken: env("FORGEJO_TOKEN"),
   forgejoTokenFile: env("FORGEJO_TOKEN_FILE", "/run/secrets/forgejo-token"),
+  // Admin token, used exclusively to create the restricted per-repo push
+  // accounts that /site pushkey issues. Absent = pushkey is disabled.
+  forgejoAdminTokenFile: env("FORGEJO_ADMIN_TOKEN_FILE", "/run/secrets/forgejo-admin-token"),
+  // How often to poll each project's Forgejo main branch for commits pushed
+  // from outside the bot (push-key holders). 0 disables external-push polling.
+  externalPushPollMs: msEnv("EXTERNAL_PUSH_POLL_MS", 60 * 1000),
 
   workspaceRoot: path.resolve(env("WORKSPACE_ROOT", "/workspace")),
   publishRoot: path.resolve(env("PUBLISH_ROOT", "/srv/sites")),

@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # AnimatedSprite
 
 A `Sprite` subclass that cycles through an array of textures for frame-based animation. Use for character walk cycles, explosions, UI icon loops, or any sequence driven by pre-rendered frames from a spritesheet.
@@ -8,10 +10,10 @@ A `Sprite` subclass that cycles through an array of textures for frame-based ani
 const sheet = await Assets.load("character.json");
 
 const walk = new AnimatedSprite({
-  textures: sheet.animations["walk"],
-  animationSpeed: 0.15,
-  loop: true,
-  autoPlay: true,
+ textures: sheet.animations["walk"],
+ animationSpeed: 0.15,
+ loop: true,
+ autoPlay: true,
 });
 
 app.stage.addChild(walk);
@@ -34,29 +36,29 @@ Two constructor forms are supported. The options form accepts all `SpriteOptions
 const sheet = await Assets.load("character.json");
 
 const walk = new AnimatedSprite({
-  textures: sheet.animations["walk"],
-  animationSpeed: 0.2,
-  loop: true,
-  autoPlay: true,
-  anchor: 0.5,
-  x: 200,
-  y: 300,
+ textures: sheet.animations["walk"],
+ animationSpeed: 0.2,
+ loop: true,
+ autoPlay: true,
+ anchor: 0.5,
+ x: 200,
+ y: 300,
 });
 ```
 
 #### AnimatedSpriteOptions
 
-| Option           | Type                             | Default | Description                                                                                                       |
+| Option | Type | Default | Description |
 | ---------------- | -------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------- |
-| `textures`       | `AnimatedSpriteFrames`           | —       | Frame list: a `Texture[]` or `FrameObject[]` (each `{ texture, time }` with `time` in ms). Required.              |
-| `animationSpeed` | `number`                         | `1`     | Playback multiplier; negative values reverse direction.                                                           |
-| `autoPlay`       | `boolean`                        | `false` | Start playback immediately on construction.                                                                       |
-| `autoUpdate`     | `boolean`                        | `true`  | Drive playback from `Ticker.shared`; set `false` to call `update(ticker)` manually.                               |
-| `loop`           | `boolean`                        | `true`  | Restart after the last frame; set `false` for one-shot animations.                                                |
-| `onComplete`     | `() => void`                     | `null`  | Fires when a non-looping animation reaches its end.                                                               |
-| `onFrameChange`  | `(currentFrame: number) => void` | `null`  | Fires every time the displayed texture changes.                                                                   |
-| `onLoop`         | `() => void`                     | `null`  | Fires when a looping animation wraps back to the start.                                                           |
-| `updateAnchor`   | `boolean`                        | `false` | Copy `texture.defaultAnchor` onto the sprite's anchor on every frame change. Overrides any previously set anchor. |
+| `textures` | `AnimatedSpriteFrames` | — | Frame list: a `Texture[]` or `FrameObject[]` (each `{ texture, time }` with `time` in ms). Required. |
+| `animationSpeed` | `number` | `1` | Playback multiplier; negative values reverse direction. |
+| `autoPlay` | `boolean` | `false` | Start playback immediately on construction. |
+| `autoUpdate` | `boolean` | `true` | Drive playback from `Ticker.shared`; set `false` to call `update(ticker)` manually. |
+| `loop` | `boolean` | `true` | Restart after the last frame; set `false` for one-shot animations. |
+| `onComplete` | `() => void` | `null` | Fires when a non-looping animation reaches its end. |
+| `onFrameChange` | `(currentFrame: number) => void` | `null` | Fires every time the displayed texture changes. |
+| `onLoop` | `() => void` | `null` | Fires when a looping animation wraps back to the start. |
+| `updateAnchor` | `boolean` | `false` | Copy `texture.defaultAnchor` onto the sprite's anchor on every frame change. Overrides any previously set anchor. |
 
 Also inherits `SpriteOptions` minus `texture` (use `textures` for frames) — see `sprite.md`. All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zIndex`, etc.) are also valid here — see `skills/pixijs-scene-core-concepts/references/constructor-options.md`.
 
@@ -106,12 +108,12 @@ walk.onLoop = () => console.log("looped back to start");
 
 ```ts
 const walk = new AnimatedSprite({
-  textures: sheet.animations["walk"],
-  autoUpdate: false,
+ textures: sheet.animations["walk"],
+ autoUpdate: false,
 });
 
 app.ticker.add((ticker) => {
-  walk.update(ticker);
+ walk.update(ticker);
 });
 ```
 
@@ -121,11 +123,11 @@ app.ticker.add((ticker) => {
 
 ```ts
 const explosion = new AnimatedSprite({
-  textures: [
-    { texture: frame0, time: 100 },
-    { texture: frame1, time: 200 },
-    { texture: frame2, time: 300 },
-  ],
+ textures: [
+ { texture: frame0, time: 100 },
+ { texture: frame1, time: 200 },
+ { texture: frame2, time: 300 },
+ ],
 });
 ```
 
@@ -137,11 +139,11 @@ Spritesheets loaded via `Assets.load` expose per-frame `duration` values at `she
 const sheet = await Assets.load("0123456789.json");
 const frames = [];
 for (let i = 0; i < 10; i++) {
-  const key = `0123456789 ${i}.ase`;
-  frames.push({
-    texture: Texture.from(key),
-    time: sheet.data.frames[key].duration,
-  });
+ const key = `0123456789 ${i}.ase`;
+ frames.push({
+ texture: Texture.from(key),
+ time: sheet.data.frames[key].duration,
+ });
 }
 const sprite = new AnimatedSprite(frames);
 ```
@@ -162,8 +164,8 @@ Prefer `new AnimatedSprite({ textures: sheet.animations[...] })` after `await As
 
 ```ts
 const walk = new AnimatedSprite({
-  textures: sheet.animations["walk"],
-  updateAnchor: true,
+ textures: sheet.animations["walk"],
+ updateAnchor: true,
 });
 ```
 
@@ -177,8 +179,8 @@ Wrong:
 
 ```ts
 const walk = new AnimatedSprite([
-  Texture.from("walk0.png"),
-  Texture.from("walk1.png"),
+ Texture.from("walk0.png"),
+ Texture.from("walk1.png"),
 ]);
 ```
 
@@ -205,8 +207,8 @@ Correct:
 
 ```ts
 const walk = new AnimatedSprite({
-  textures: sheet.animations["walk"],
-  autoPlay: true,
+ textures: sheet.animations["walk"],
+ autoPlay: true,
 });
 app.stage.addChild(walk);
 ```
@@ -220,8 +222,8 @@ Wrong:
 
 ```ts
 new AnimatedSprite([
-  { texture: frame0, time: 0.1 },
-  { texture: frame1, time: 0.2 },
+ { texture: frame0, time: 0.1 },
+ { texture: frame1, time: 0.2 },
 ]);
 ```
 
@@ -229,8 +231,8 @@ Correct:
 
 ```ts
 new AnimatedSprite([
-  { texture: frame0, time: 100 },
-  { texture: frame1, time: 200 },
+ { texture: frame0, time: 100 },
+ { texture: frame1, time: 200 },
 ]);
 ```
 

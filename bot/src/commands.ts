@@ -25,6 +25,9 @@ export const siteCommand = new SlashCommandBuilder()
     .setName("republish")
     .setDescription("Republish the current checked-in static files without asking the model"))
   .addSubcommand((sub) => sub
+    .setName("sync")
+    .setDescription("Pull commits pushed to the repository from outside the bot, then rebuild and republish from them"))
+  .addSubcommand((sub) => sub
     .setName("compact")
     .setDescription("Compact this thread's agent session context now"))
   .addSubcommand((sub) => sub
@@ -32,7 +35,13 @@ export const siteCommand = new SlashCommandBuilder()
     .setDescription("Drop this thread's agent session and start fresh on the next message (site and history are kept)"))
   .addSubcommand((sub) => sub
     .setName("revert")
-    .setDescription("Undo the last accepted turn: reset git, force-push, and republish the previous version"));
+    .setDescription("Undo the last accepted turn: reset git, force-push, and republish the previous version"))
+  .addSubcommand((sub) => sub
+    .setName("pushkey")
+    .setDescription("Issue repo-scoped git push credentials for this thread's repository, or rotate the existing ones")
+    .addBooleanOption((option) => option
+      .setName("rotate")
+      .setDescription("Replace the current push key; the old credentials stop working immediately")));
 
 export const makeGameCommand = new SlashCommandBuilder()
   .setName("makegam")

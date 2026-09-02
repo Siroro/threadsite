@@ -56,8 +56,7 @@ renderer.setAnimationLoop((time) => update(time));              // one loop, sta
   }
   ```
 
-- Pause or throttle when `document.hidden` (the browser throttles rAF anyway;
-  your `dt` clamp plus an explicit visibility handler keeps timers honest).
+- For solo/local presentation you may pause or throttle when `document.hidden`. In multiplayer, never pause authoritative room time just because rAF is throttled; use relay time and the host-handoff rules from AGENTS.md. A `dt` clamp still prevents giant local physics steps after focus returns.
 - Use a fixed-step accumulator (120 Hz or 60 Hz) for physics-critical state and
   interpolate renders; render at whatever rate the display gives.
 - Keep one `update(dt)` entry that calls per-system functions — no scattered

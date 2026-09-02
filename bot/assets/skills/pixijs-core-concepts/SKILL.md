@@ -15,7 +15,7 @@ Foundational model for how PixiJS v8 gets pixels on the screen: the renderer dec
 console.log(app.renderer.name); // 'webgl' | 'webgpu' | 'canvas'
 
 app.ticker.add((ticker) => {
-  sprite.rotation += 0.01 * ticker.deltaTime;
+ sprite.rotation += 0.01 * ticker.deltaTime;
 });
 
 const tex = app.renderer.extract.texture({ target: app.stage });
@@ -29,10 +29,10 @@ app.renderer.render({ container: app.stage });
 
 ## Topics
 
-| Topic               | Reference                                              | When                                                      |
+| Topic | Reference | When |
 | ------------------- | ------------------------------------------------------ | --------------------------------------------------------- |
-| Choosing a backend  | [references/renderers.md](references/renderers.md)     | Preference forms, per-renderer options, systems and pipes |
-| Per-frame execution | [references/render-loop.md](references/render-loop.md) | Priority order, time units, manual rendering              |
+| Choosing a backend | [references/renderers.md](references/renderers.md) | Preference forms, per-renderer options, systems and pipes |
+| Per-frame execution | [references/render-loop.md](references/render-loop.md) | Priority order, time units, manual rendering |
 
 For deep dives into any single topic, open the corresponding reference file. Non-browser targets (`DOMAdapter`, `WebWorkerAdapter`, custom adapters, strict CSP) are covered in the `pixijs-environments` skill.
 
@@ -117,7 +117,7 @@ Correct:
 ```ts
 await app.init({ preference: "webgpu" });
 if (app.renderer.name === "webgpu") {
-  useWebGPUOnlyFeature(app.renderer);
+ useWebGPUOnlyFeature(app.renderer);
 }
 ```
 

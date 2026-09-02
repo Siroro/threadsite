@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Spritesheet: Texture Atlases and Animations
 
 Load and use texture atlases and animation sheets with PixiJS's `Spritesheet` class. Atlases reduce draw calls by packing many textures into a single image.
@@ -24,30 +26,30 @@ When loaded through `Assets.load()`, the JSON file is fetched, the atlas image i
 
 ```json
 {
-  "frames": {
-    "hero.png": {
-      "frame": { "x": 0, "y": 0, "w": 64, "h": 64 },
-      "sourceSize": { "w": 64, "h": 64 },
-      "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
-      "anchor": { "x": 0.5, "y": 0.5 },
-      "borders": { "left": 10, "top": 10, "right": 10, "bottom": 10 }
-    },
-    "walk_01.png": {
-      "frame": { "x": 64, "y": 0, "w": 64, "h": 64 },
-      "rotated": true,
-      "trimmed": true,
-      "sourceSize": { "w": 80, "h": 80 },
-      "spriteSourceSize": { "x": 8, "y": 8, "w": 64, "h": 64 }
-    }
-  },
-  "animations": {
-    "walk": ["walk_01.png", "walk_02.png", "walk_03.png"]
-  },
-  "meta": {
-    "image": "spritesheet.png",
-    "size": { "w": 512, "h": 256 },
-    "scale": "1"
-  }
+ "frames": {
+ "hero.png": {
+ "frame": { "x": 0, "y": 0, "w": 64, "h": 64 },
+ "sourceSize": { "w": 64, "h": 64 },
+ "spriteSourceSize": { "x": 0, "y": 0, "w": 64, "h": 64 },
+ "anchor": { "x": 0.5, "y": 0.5 },
+ "borders": { "left": 10, "top": 10, "right": 10, "bottom": 10 }
+ },
+ "walk_01.png": {
+ "frame": { "x": 64, "y": 0, "w": 64, "h": 64 },
+ "rotated": true,
+ "trimmed": true,
+ "sourceSize": { "w": 80, "h": 80 },
+ "spriteSourceSize": { "x": 8, "y": 8, "w": 64, "h": 64 }
+ }
+ },
+ "animations": {
+ "walk": ["walk_01.png", "walk_02.png", "walk_03.png"]
+ },
+ "meta": {
+ "image": "spritesheet.png",
+ "size": { "w": 512, "h": 256 },
+ "scale": "1"
+ }
 }
 ```
 
@@ -65,9 +67,9 @@ Key fields:
 ```ts
 const texture = await Assets.load("atlas.png");
 const sheet = new Spritesheet({
-  texture,
-  data: spritesheetJsonData,
-  cachePrefix: "myAtlas_",
+ texture,
+ data: spritesheetJsonData,
+ cachePrefix: "myAtlas_",
 });
 await sheet.parse();
 
@@ -84,9 +86,9 @@ const frame = new Sprite(sheet.textures["hero.png"]);
 const atlasTexture = await Assets.load("images/spritesheet.png");
 
 Assets.add({
-  alias: "atlas",
-  src: "images/spritesheet.json",
-  data: { texture: atlasTexture },
+ alias: "atlas",
+ src: "images/spritesheet.json",
+ data: { texture: atlasTexture },
 });
 const sheet = await Assets.load("atlas");
 ```

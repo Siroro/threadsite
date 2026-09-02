@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Manifests
 
 A manifest is a JSON-shaped description of every bundle in your application. Pass it to `Assets.init({ manifest })` and the resolver registers every bundle at startup, so later code can reference them by name. Use manifests when you know your asset graph upfront and want one source of truth.
@@ -6,21 +8,21 @@ A manifest is a JSON-shaped description of every bundle in your application. Pas
 
 ```ts
 await Assets.init({
-  manifest: {
-    bundles: [
-      {
-        name: "load-screen",
-        assets: [{ alias: "logo", src: "logo.png" }],
-      },
-      {
-        name: "game",
-        assets: [
-          { alias: "hero", src: "hero.{webp,png}" },
-          { alias: "enemies", src: "enemies.json" },
-        ],
-      },
-    ],
-  },
+ manifest: {
+ bundles: [
+ {
+ name: "load-screen",
+ assets: [{ alias: "logo", src: "logo.png" }],
+ },
+ {
+ name: "game",
+ assets: [
+ { alias: "hero", src: "hero.{webp,png}" },
+ { alias: "enemies", src: "enemies.json" },
+ ],
+ },
+ ],
+ },
 });
 
 await Assets.loadBundle("load-screen");
@@ -35,15 +37,15 @@ Each bundle has a `name` and an `assets` array of `UnresolvedAsset` entries. For
 
 ```ts
 const manifest = {
-  bundles: [
-    {
-      name: "ui",
-      assets: [
-        { alias: "button", src: "ui/button.png" },
-        { alias: "panel", src: "ui/panel.png" },
-      ],
-    },
-  ],
+ bundles: [
+ {
+ name: "ui",
+ assets: [
+ { alias: "button", src: "ui/button.png" },
+ { alias: "panel", src: "ui/panel.png" },
+ ],
+ },
+ ],
 };
 
 await Assets.init({ manifest });
@@ -63,12 +65,12 @@ When `manifest` is a string, PixiJS loads it as JSON first, then registers the b
 
 ```ts
 const manifest = {
-  bundles: [
-    {
-      name: "hero",
-      assets: [{ alias: "hero", src: "hero@{0.5,1,2}x.{webp,avif,png}" }],
-    },
-  ],
+ bundles: [
+ {
+ name: "hero",
+ assets: [{ alias: "hero", src: "hero@{0.5,1,2}x.{webp,avif,png}" }],
+ },
+ ],
 };
 ```
 
@@ -78,15 +80,15 @@ The resolver expands the pattern to six candidates and picks the best match base
 
 ```ts
 const manifest = {
-  bundles: [
-    {
-      name: "characters",
-      assets: [
-        { alias: ["hero", "player"], src: "hero.png" },
-        { alias: "npc1", src: "villager.png" },
-      ],
-    },
-  ],
+ bundles: [
+ {
+ name: "characters",
+ assets: [
+ { alias: ["hero", "player"], src: "hero.png" },
+ { alias: "npc1", src: "villager.png" },
+ ],
+ },
+ ],
 };
 ```
 
@@ -96,18 +98,18 @@ An asset can expose multiple aliases. `Assets.load('hero')` and `Assets.load('pl
 
 ```ts
 const manifest = {
-  bundles: [
-    {
-      name: "pixel-art",
-      assets: [
-        {
-          alias: "tile",
-          src: "tile.png",
-          data: { scaleMode: "nearest" },
-        },
-      ],
-    },
-  ],
+ bundles: [
+ {
+ name: "pixel-art",
+ assets: [
+ {
+ alias: "tile",
+ src: "tile.png",
+ data: { scaleMode: "nearest" },
+ },
+ ],
+ },
+ ],
 };
 ```
 

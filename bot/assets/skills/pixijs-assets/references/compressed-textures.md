@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Compressed Textures
 
 GPU-compressed texture formats (DDS, KTX, KTX2, Basis) use 4–8x less GPU memory than PNG/JPEG and skip runtime decoding. Use them for large textures, high-asset-count games, and anywhere memory budget matters. Each format requires a side-effect import to register its loader.
@@ -31,12 +33,12 @@ Each import registers a `LoaderParser` that can decode the matching file extensi
 
 ### Format selection matrix
 
-| Format | Platforms | Notes                                                                                                           |
+| Format | Platforms | Notes |
 | ------ | --------- | --------------------------------------------------------------------------------------------------------------- |
-| DDS    | All       | Legacy desktop formats (DXT, BC). Fast decoder; wide support.                                                   |
-| KTX    | All       | Older Khronos container. Prefer KTX2 for new projects.                                                          |
-| KTX2   | All       | Newer container; typically used with Basis Universal. GPU-native when available.                                |
-| Basis  | All       | Supercompressed; transcodes to the GPU-native format at load time. Best for "one file, any platform" workflows. |
+| DDS | All | Legacy desktop formats (DXT, BC). Fast decoder; wide support. |
+| KTX | All | Older Khronos container. Prefer KTX2 for new projects. |
+| KTX2 | All | Newer container; typically used with Basis Universal. GPU-native when available. |
+| Basis | All | Supercompressed; transcodes to the GPU-native format at load time. Best for "one file, any platform" workflows. |
 
 Use KTX2 + Basis for new projects unless you have a specific need for one of the others.
 
@@ -47,8 +49,8 @@ import "pixi.js/ktx2";
 import { Assets } from "pixi.js";
 
 Assets.add({
-  alias: "background",
-  src: "background.{ktx2,webp,png}",
+ alias: "background",
+ src: "background.{ktx2,webp,png}",
 });
 
 const texture = await Assets.load("background");

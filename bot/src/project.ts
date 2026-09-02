@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
-import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, ensureGitRepository, ensureLocalBaseline, restoreWorkingTree, undoLastCommit, workingTreeStats } from "./git.js";
+import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
 import { ensureMultiplayerFiles, multiplayerContext } from "./multiplayer.js";
 import { OpenCodeHarness, addUsage, errorUsage, type PromptResult, type TurnUsage } from "./opencode.js";
 import { publishIndex, publishSite, siteUrl, validateSite } from "./publish.js";
@@ -125,7 +125,7 @@ export class ProjectService {
     if (enginePackages(projectKind).length) {
       // The engine package is installed before the agent session starts, like
       // a dependency manager would, and re-seeded every turn if it ever goes
-      // missing — authored code just imports "three"/"pixi.js".
+      // missing — authored code just imports "three"/"phaser".
       emit(onProgress, "📦 Installing the engine package (node_modules)");
       await ensureEnginePackages(workspacePath, projectKind);
     }
@@ -569,6 +569,9 @@ export class ProjectService {
         lastError: published ? undefined : truncate(validationError || deliveryError || "the turn did not publish", 1000),
       }),
       ...(commitStats ? { lastCommit: commitStats.commit } : {}),
+      // Keep the external-push poller in sync: after the bot's own push,
+      // origin/main's tip is exactly this turn's commit.
+      ...(commitStats ? { lastSeenCommit: await currentHead(workspacePath) } : {}),
       pendingTurn: undefined,
       // Record when the session was last used and how full its context window
       // ended; the next turn's lifecycle check reads both.
@@ -962,6 +965,182 @@ export class ProjectService {
     if (!project) throw new Error("This thread is not attached to a site.");
     await restoreWorkingTree(project.workspacePath);
     log("warn", "project.rollback_requested", { threadId, sessionId: project.sessionId });
+  }
+
+  /**
+   * Issue (or rotate) repository-scoped push credentials for a project. The
+   * account is a restricted Forgejo user with Write on exactly this repo, so
+   * holders can push but see nothing else on the instance. Rotating deletes
+   * the old account — Forgejo drops its collaborations, revoking access
+   * immediately. Returns the clone URL alongside the credentials.
+   */
+  async issuePushKey(threadId: string, rotate: boolean): Promise<{ project: ProjectRecord; created: boolean }> {
+    const project = this.store.getProject(threadId);
+    if (!project) throw new Error("This thread is not attached to a site.");
+    if (!rotate && project.pushKey) {
+      return { project, created: false };
+    }
+
+    const { username, password } = generatePushCredentials();
+    const domain = new URL(config.forgejoPublicUrl).hostname;
+    await this.forgejo.createPushAccount(username, password, `${username}@noreply.${domain}`);
+    await this.forgejo.addCollaborator(project.repoName, username);
+    if (rotate && project.pushKey) {
+      // Best-effort revocation: a failure here leaves a stale account that can
+      // still push, so it is logged loudly rather than silently dropped.
+      await this.forgejo.deletePushAccount(project.pushKey.username).catch((error) => {
+        log("error", "project.pushkey_rotate_revoke_failed", {
+          threadId,
+          oldUsername: project.pushKey!.username,
+          error: serializeError(error),
+        });
+      });
+    }
+    const updated = await this.store.patchProject(threadId, {
+      pushKey: { username, password, createdAt: new Date().toISOString() },
+    });
+    log("info", "project.pushkey_issued", { threadId, repoName: project.repoName, username, rotate });
+    return { project: updated, created: true };
+  }
+
+  /**
+   * Someone pushed to the repo's main branch from outside the bot (a push-key
+   * holder). Adopt the commit and take it live: sync the workspace to
+   * origin/main, rebuild, validate, publish. A validation failure rolls the
+   * workspace back to the previously published commit and reports; the pushed
+   * commit stays in the repo, the live site keeps the older version.
+   */
+  async publishExternalPush(threadId: string): Promise<{ project: ProjectRecord; commit: string; validationError?: string }> {
+    let project = this.store.getProject(threadId);
+    if (!project) throw new Error("This thread is not attached to a site.");
+    if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
+      throw new Error("A model turn is currently running in this thread. Wait for it to finish before publishing the external push.");
+    }
+
+    const previousHead = await currentHead(project.workspacePath).catch(() => undefined);
+    const { commit } = await syncToRemote(project.workspacePath, this.forgejo);
+    const short = commit.slice(0, 10);
+    const siteDir = safeChild(project.workspacePath, "site");
+    try {
+      await buildSite(project.workspacePath);
+      await validateSite(siteDir);
+      await publishSite(siteDir, project.siteSlug);
+      project = await this.store.patchProject(threadId, {
+        status: "ready",
+        lastError: undefined,
+        lastCommit: short,
+        lastSeenCommit: commit,
+        lastTurnAt: new Date().toISOString(),
+      });
+      await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
+      log("info", "project.external_push_published", { threadId, commit: short });
+      return { project, commit: short };
+    } catch (error) {
+      // The pushed code does not validate: roll the workspace back to the last
+      // good commit so the next agent turn starts from the published state.
+      // The pushed commit stays in the repo; the live site keeps the older version.
+      if (previousHead) {
+        await resetToCommit(project.workspacePath, previousHead).catch(() => undefined);
+      }
+      const validationError = errorText(error);
+      await this.store.patchProject(threadId, {
+        status: "error",
+        lastError: truncate(`External push ${short} failed validation: ${validationError}`, 1000),
+        lastSeenCommit: commit,
+      });
+      log("warn", "project.external_push_validation_failed", { threadId, commit: short, error: truncate(validationError, 400) });
+      return { project, commit: short, validationError };
+    }
+  }
+
+  /**
+   * Dismiss an external push: adopt the commit into the workspace and git
+   * history (so the bot's next turn builds on it and its own push does not
+   * collide), but leave the published site exactly as it was.
+   */
+  async adoptExternalCommit(threadId: string): Promise<{ project: ProjectRecord; commit: string }> {
+    let project = this.store.getProject(threadId);
+    if (!project) throw new Error("This thread is not attached to a site.");
+    if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
+      throw new Error("A model turn is currently running in this thread. Wait for it to finish before adopting the external push.");
+    }
+    const { commit } = await syncToRemote(project.workspacePath, this.forgejo);
+    project = await this.store.patchProject(threadId, { lastSeenCommit: commit });
+    log("info", "project.external_push_adopted", { threadId, commit: commit.slice(0, 10) });
+    return { project, commit: commit.slice(0, 10) };
+  }
+
+  /**
+   * Manual reconciliation for the thread: pull whatever sits on the repo's
+   * main branch into the workspace, rebase any local-only commits (a turn whose
+   * push was rejected) on top, push, and republish from the result. Unlike the
+   * external-push poller this works even when the pushed commit predates
+   * lastSeenCommit or the Publish button message is gone. Validation failure
+   * keeps the previously published version live, mirroring publishExternalPush.
+   */
+  async sync(threadId: string, onProgress?: ProgressCallback): Promise<{
+    project: ProjectRecord;
+    commit: string;
+    ahead: number;
+    behind: number;
+    validationError?: string;
+  }> {
+    let project = this.store.getProject(threadId);
+    if (!project) throw new Error("This thread is not attached to a site.");
+    if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
+      throw new Error("A model turn is currently running in this thread. Wait for it to finish before syncing.");
+    }
+    // A dirty tree means a failed turn's partial edits are sitting uncommitted;
+    // rebasing would destroy them, so refuse and point at the rollback choice.
+    if (!(await workingTreeClean(project.workspacePath))) {
+      throw new Error("The workspace has uncommitted edits from a failed turn. Roll them back or ask the agent to rework them before syncing.");
+    }
+
+    emit(onProgress, "📥 Pulling the repository's main branch");
+    const { commit, ahead, behind } = await syncWithRemote(project.workspacePath, this.forgejo);
+    const short = commit.slice(0, 10);
+    if (behind === 0 && ahead === 0) {
+      emit(onProgress, "✅ Already up to date — republishing the checked-in tree");
+    } else if (ahead > 0 && behind > 0) {
+      emit(onProgress, `🔀 Rebased ${ahead} local commit${ahead === 1 ? "" : "s"} onto ${behind} pulled commit${behind === 1 ? "" : "s"}`);
+    } else if (behind > 0) {
+      emit(onProgress, `📥 Adopted ${behind} commit${behind === 1 ? "" : "s"} from the repository`);
+    }
+
+    const siteDir = safeChild(project.workspacePath, "site");
+    const previousHead = await commitHistory(project.workspacePath).then((h) => h.current).catch(() => undefined);
+    try {
+      emit(onProgress, "⚙️ Rebuilding the TypeScript bundle");
+      await buildSite(project.workspacePath);
+      emit(onProgress, "🧪 Validating checked-in static files");
+      await validateSite(siteDir);
+      emit(onProgress, "🚀 Republishing to Apache");
+      await publishSite(siteDir, project.siteSlug);
+      project = await this.store.patchProject(threadId, {
+        status: "ready",
+        lastError: undefined,
+        lastCommit: short,
+        lastSeenCommit: commit,
+        lastTurnAt: new Date().toISOString(),
+      });
+      await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
+      log("info", "project.synced", { threadId, commit: short, ahead, behind });
+      return { project, commit: short, ahead, behind };
+    } catch (error) {
+      // The synced tree does not validate: keep the live site on the last good
+      // commit and roll the workspace back to it, like publishExternalPush.
+      if (previousHead) {
+        await resetToCommit(project.workspacePath, previousHead).catch(() => undefined);
+      }
+      const validationError = errorText(error);
+      await this.store.patchProject(threadId, {
+        status: "error",
+        lastError: truncate(`Sync to ${short} failed validation: ${validationError}`, 1000),
+        lastSeenCommit: commit,
+      });
+      log("warn", "project.sync_validation_failed", { threadId, commit: short, error: truncate(validationError, 400) });
+      return { project, commit: short, ahead, behind, validationError };
+    }
   }
 
   async republish(threadId: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {

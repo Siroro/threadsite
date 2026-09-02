@@ -29,11 +29,10 @@ Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, 
 
 ## How your work ships
 
-When your reply ends the harness restores harness-owned files, bundles `src/` → `js/` (pruning outputs of deleted sources), validates, commits the tree (authored by the requesting Discord user), and publishes it with cache-busting asset hashes. Type, build, or JavaScript errors get exactly **one** automatic repair round-trip; work that still fails is committed but not published — the live site keeps the last validated version and the next reply must fix it. Leave `site/` complete and directly openable over plain HTTP(S): no deferred work, no "run this first" steps, no server.
+When your reply ends the harness restores harness-owned files, bundles `src/` → `js/` (pruning outputs of deleted sources), validates, commits the tree (authored by the requesting Discord user), and publishes it with cache-busting asset hashes. 
+Type, build, or JavaScript errors get exactly **one** automatic repair round-trip; work that still fails is committed but not published — the live site keeps the last validated version and the next reply must fix it. 
+Leave `site/` complete and directly openable over plain HTTP(S): no deferred work, no "run this first" steps, no server.
 
-## Legacy JavaScript (only pre-TypeScript projects)
-
-Hand-written `.js` under `site/js/` predates the switch. It still works, but on your next substantial change migrate it: move `js/<name>.js` to `src/<name>.ts` (the entry name and HTML reference don't change; delete the old file once its `.ts` exists) and update any `"../js/threadsite-net.js"` import to `"../net/threadsite-net.js"`. One renderer per page: the bundle or a legacy script, never both.
 
 ## Research and assets
 

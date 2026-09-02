@@ -1,3 +1,5 @@
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Behavior trees, FSMs, and the blackboard
 
 A **behavior tree** (BT) is a tree of nodes ticked from the root each frame.
@@ -31,20 +33,20 @@ actions, a composite must **remember which child was RUNNING** and resume there:
 
 ```gdscript
 class Sequence:
-    var children = []
-    var _running = 0                 # index of the child that returned RUNNING
+ var children = []
+ var _running = 0 # index of the child that returned RUNNING
 
-    func tick(agent, dt) -> int:
-        while _running < children.size():
-            var s = children[_running].tick(agent, dt)
-            if s == Status.RUNNING:
-                return Status.RUNNING        # resume here next frame
-            if s == Status.FAILURE:
-                _running = 0                 # whole sequence fails; reset
-                return Status.FAILURE
-            _running += 1                    # child SUCCESS -> advance
-        _running = 0                         # reached the end -> sequence succeeds
-        return Status.SUCCESS
+ func tick(agent, dt) -> int:
+ while _running < children.size():
+ var s = children[_running].tick(agent, dt)
+ if s == Status.RUNNING:
+ return Status.RUNNING # resume here next frame
+ if s == Status.FAILURE:
+ _running = 0 # whole sequence fails; reset
+ return Status.FAILURE
+ _running += 1 # child SUCCESS -> advance
+ _running = 0 # reached the end -> sequence succeeds
+ return Status.SUCCESS
 ```
 
 A Selector is the mirror image: it advances on `FAILURE`, returns on `SUCCESS`
@@ -55,28 +57,28 @@ or `RUNNING`, and resets its index when a child succeeds.
 ```gdscript
 # Condition leaf: pure test, no side effects.
 class CanSeePlayer:
-    func tick(agent, dt) -> int:
-        return Status.SUCCESS if agent.can_see(agent.blackboard.player) else Status.FAILURE
+ func tick(agent, dt) -> int:
+ return Status.SUCCESS if agent.can_see(agent.blackboard.player) else Status.FAILURE
 
 # Action leaf: multi-frame, returns RUNNING until it arrives.
 class MoveTo:
-    var key  # blackboard key holding the destination
-    func tick(agent, dt) -> int:
-        var dest = agent.blackboard.get(key)
-        if dest == null: return Status.FAILURE
-        agent.move_toward(dest, dt)
-        return Status.SUCCESS if agent.position.distance_to(dest) < 4.0 else Status.RUNNING
+ var key # blackboard key holding the destination
+ func tick(agent, dt) -> int:
+ var dest = agent.blackboard.get(key)
+ if dest == null: return Status.FAILURE
+ agent.move_toward(dest, dt)
+ return Status.SUCCESS if agent.position.distance_to(dest) < 4.0 else Status.RUNNING
 ```
 
 A complete guard, as a tree:
 
 ```
 Selector
-├── Sequence            # attack branch (highest priority)
-│   ├── CanSeePlayer
-│   ├── MoveTo(player)
-│   └── Attack
-└── Patrol              # fallback when nothing else applies
+├── Sequence # attack branch (highest priority)
+│ ├── CanSeePlayer
+│ ├── MoveTo(player)
+│ └── Attack
+└── Patrol # fallback when nothing else applies
 ```
 
 ## The blackboard
@@ -89,9 +91,9 @@ what lets the same `MoveTo` action serve chase, patrol, and flee subtrees.
 ```gdscript
 # A blackboard is just a typed key/value store on the agent.
 agent.blackboard = {
-    "player": null,            # set by perception each tick
-    "home": Vector2(100, 100),
-    "path": [],                # filled by the pathfinder
+ "player": null, # set by perception each tick
+ "home": Vector2(100, 100),
+ "path": [], # filled by the pathfinder
 }
 ```
 

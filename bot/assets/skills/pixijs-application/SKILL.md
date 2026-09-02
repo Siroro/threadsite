@@ -17,12 +17,12 @@ import { Application } from "pixi.js";
 const app = new Application();
 
 await app.init({
-  resizeTo: window,
-  background: "#1099bb",
-  antialias: true,
-  preference: "webgl",
-  autoDensity: true,
-  resolution: window.devicePixelRatio,
+ resizeTo: window,
+ background: "#1099bb",
+ antialias: true,
+ preference: "webgl",
+ autoDensity: true,
+ resolution: window.devicePixelRatio,
 });
 
 document.body.appendChild(app.canvas);
@@ -45,8 +45,8 @@ document.body.appendChild(app.canvas);
 // ... run scene, ticker drives app.render() automatically ...
 
 app.destroy(
-  { removeView: true, releaseGlobalResources: true },
-  { children: true, texture: true, textureSource: true },
+ { removeView: true, releaseGlobalResources: true },
+ { children: true, texture: true, textureSource: true },
 );
 ```
 
@@ -59,23 +59,23 @@ app.destroy(
 
 ```ts
 await app.init({
-  width: 800,
-  height: 600,
-  background: 0x1099bb,
-  backgroundAlpha: 1,
+ width: 800,
+ height: 600,
+ background: 0x1099bb,
+ backgroundAlpha: 1,
 
-  antialias: true,
-  resolution: window.devicePixelRatio,
-  autoDensity: true,
+ antialias: true,
+ resolution: window.devicePixelRatio,
+ autoDensity: true,
 
-  preference: "webgpu",
+ preference: "webgpu",
 
-  autoStart: true,
-  sharedTicker: false,
+ autoStart: true,
+ sharedTicker: false,
 
-  resizeTo: window,
+ resizeTo: window,
 
-  canvas: document.querySelector("#game-canvas") as HTMLCanvasElement,
+ canvas: document.querySelector("#game-canvas") as HTMLCanvasElement,
 });
 ```
 
@@ -119,11 +119,11 @@ The TickerPlugin creates `app.ticker` and registers `app.render()` on it at `UPD
 
 ```ts
 app.ticker.add((ticker) => {
-  sprite.rotation += 0.01 * ticker.deltaTime;
+ sprite.rotation += 0.01 * ticker.deltaTime;
 });
 
 app.ticker.addOnce(() => {
-  console.log("runs once on the next frame, then removes itself");
+ console.log("runs once on the next frame, then removes itself");
 });
 
 app.stop(); // pause the render loop (e.g. tab hidden)
@@ -139,9 +139,9 @@ await app.init({ autoStart: false, width: 800, height: 600 });
 document.body.appendChild(app.canvas);
 
 function frame() {
-  updateScene();
-  app.render();
-  requestAnimationFrame(frame);
+ updateScene();
+ app.render();
+ requestAnimationFrame(frame);
 }
 frame();
 ```
@@ -154,12 +154,12 @@ The CullerPlugin skips rendering containers that fall outside `app.renderer.scre
 
 ```ts
 import {
-  Application,
-  Container,
-  Sprite,
-  extensions,
-  CullerPlugin,
-  Rectangle,
+ Application,
+ Container,
+ Sprite,
+ extensions,
+ CullerPlugin,
+ Rectangle,
 } from "pixi.js";
 
 extensions.add(CullerPlugin);
@@ -185,23 +185,23 @@ Extend `Application` by registering a class with `static init`, `static destroy`
 
 ```ts
 import {
-  Application,
-  ExtensionType,
-  extensions,
-  type ApplicationOptions,
+ Application,
+ ExtensionType,
+ extensions,
+ type ApplicationOptions,
 } from "pixi.js";
 
 class FpsOverlay {
-  public static extension = ExtensionType.Application;
+ public static extension = ExtensionType.Application;
 
-  public static init(this: Application, options: Partial<ApplicationOptions>) {
-    // runs inside app.init() after the renderer is created
-    // attach props/methods to `this` to expose them on the app
-  }
+ public static init(this: Application, options: Partial<ApplicationOptions>) {
+ // runs inside app.init() after the renderer is created
+ // attach props/methods to `this` to expose them on the app
+ }
 
-  public static destroy(this: Application) {
-    // runs inside app.destroy() — tear down anything you attached
-  }
+ public static destroy(this: Application) {
+ // runs inside app.destroy() — tear down anything you attached
+ }
 }
 
 extensions.add(FpsOverlay);
@@ -211,11 +211,11 @@ Plugins initialize in registration order and destroy in reverse. To add typed op
 
 ```ts
 declare global {
-  namespace PixiMixins {
-    interface ApplicationOptions {
-      fpsOverlay?: { visible?: boolean };
-    }
-  }
+ namespace PixiMixins {
+ interface ApplicationOptions {
+ fpsOverlay?: { visible?: boolean };
+ }
+ }
 }
 
 await app.init({ fpsOverlay: { visible: true } });

@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Bundles
 
 A bundle is a named group of assets you can load or unload as a unit. Use bundles to batch assets per game level, UI screen, or feature so that a single `loadBundle(name)` call resolves everything needed for that context. Bundles play well with background loading and manifest-based workflows.
@@ -6,9 +8,9 @@ A bundle is a named group of assets you can load or unload as a unit. Use bundle
 
 ```ts
 Assets.addBundle("level1", [
-  { alias: "bg", src: "level1/background.png" },
-  { alias: "tileset", src: "level1/tiles.json" },
-  { alias: "theme", src: "level1/music.mp3" },
+ { alias: "bg", src: "level1/background.png" },
+ { alias: "tileset", src: "level1/tiles.json" },
+ { alias: "theme", src: "level1/music.mp3" },
 ]);
 
 const resources = await Assets.loadBundle("level1");
@@ -23,9 +25,9 @@ const bg = Sprite.from("bg");
 
 ```ts
 Assets.addBundle("ui", [
-  { alias: "button", src: "ui/button.png" },
-  { alias: "panel", src: "ui/panel.png" },
-  { alias: "cursor", src: "ui/cursor.png" },
+ { alias: "button", src: "ui/button.png" },
+ { alias: "panel", src: "ui/panel.png" },
+ { alias: "cursor", src: "ui/cursor.png" },
 ]);
 
 await Assets.loadBundle("ui");
@@ -45,7 +47,7 @@ Pass an array of bundle names to load them in parallel. The returned object is k
 
 ```ts
 await Assets.loadBundle("level1", (progress) => {
-  loadingBar.width = progress * maxBarWidth;
+ loadingBar.width = progress * maxBarWidth;
 });
 ```
 

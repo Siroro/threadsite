@@ -132,7 +132,56 @@ client.once(Events.ClientReady, (ready) => {
     errorRecipients: config.errorReportUserIds.size,
   });
   void recoverInterruptedTurns();
+  startExternalPushPoller();
 });
+
+// Push-key holders push straight to the repo's main branch; the bot only finds
+// out by comparing Forgejo's main tip against the last commit it saw. Each new
+// external commit gets one message in the thread with Publish/Dismiss buttons.
+function startExternalPushPoller(): void {
+  if (config.externalPushPollMs <= 0) return;
+  let scanning = false;
+  setInterval(() => {
+    if (scanning) return;
+    scanning = true;
+    void scanForExternalPushes().finally(() => { scanning = false; });
+  }, config.externalPushPollMs).unref();
+}
+
+async function scanForExternalPushes(): Promise<void> {
+  const candidates = store.listProjects().filter((project) => project.status === "ready");
+  for (const project of candidates) {
+    try {
+      if (await projects.agentBusy(project.threadId)) continue;
+      const sha = await forgejo.mainCommitSha(project.repoName);
+      if (!sha || sha === project.lastSeenCommit) continue;
+      // The bot's own push sets lastSeenCommit on success, but a turn that
+      // committed and then failed before patching the store could leave the
+      // poller one commit behind; a busy check right now closes that window.
+      if (await projects.agentBusy(project.threadId)) continue;
+      await store.patchProject(project.threadId, { lastSeenCommit: sha });
+      const channel = await client.channels.fetch(project.threadId).catch(() => undefined);
+      const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
+      if (!thread) continue;
+      await thread.send({
+        content:
+          `📥 **External push detected** on \`${project.repoName}\` · commit \`${sha.slice(0, 10)}\` — pushed with a repo push key.\n` +
+          "Publish it to the live site, or dismiss it (the commit stays in git history either way).",
+        components: [externalPushRow()],
+      }).catch(() => undefined);
+      log("info", "project.external_push_detected", { threadId: project.threadId, commit: sha.slice(0, 10) });
+    } catch (error) {
+      logError("project.external_push_scan_failed", error, { threadId: project.threadId });
+    }
+  }
+}
+
+function externalPushRow(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId("threadsite:extpub").setLabel("Publish").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId("threadsite:extdismiss").setLabel("Dismiss").setStyle(ButtonStyle.Secondary),
+  );
+}
 
 // Turns that were in flight when the bot stopped are marked in the store.
 // Resume each one (continue the agent work, then commit and publish) now that
@@ -199,6 +248,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       if (interaction.customId.startsWith("q:") || interaction.customId.startsWith("qskip:")) {
         await handleQuestionButton(interaction);
+      } else if (interaction.customId.startsWith("threadsite:ext")) {
+        await handleExternalPushButton(interaction);
       } else {
         await handleFailureButton(interaction);
       }
@@ -426,6 +477,34 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     return;
   }
 
+  if (sub === "sync") {
+    await interaction.deferReply();
+    const status = await interaction.channel?.send("📥 Syncing the workspace with the repository…").catch(() => undefined);
+    const progress = status ? new DiscordProgress(status, `📥 Syncing ${project.displayName}`) : undefined;
+    try {
+      const result = await projects.enqueue(project.threadId, () => projects.sync(project.threadId, progress?.callback));
+      progress?.close();
+      if (result.validationError) {
+        await interaction.editReply(
+          `⚠️ Synced to \`${result.commit}\`, but validation failed — the live site keeps the previous version.\n` +
+          `${truncate(result.validationError, 1200)}\n` +
+          "The commits remain in the repository; reply in this thread to have the agent fix them.",
+        );
+      } else {
+        const detail = result.behind === 0 && result.ahead === 0
+          ? "the repository had nothing new — republished the checked-in tree"
+          : `pulled ${result.behind} commit${result.behind === 1 ? "" : "s"}, rebased ${result.ahead} local commit${result.ahead === 1 ? "" : "s"}`;
+        await interaction.editReply(
+          `✅ **${result.project.displayName}** synced on \`${result.commit}\` — ${detail}.\n` +
+          `[open site](${projects.siteLink(result.project)}) · [source](${projects.repoLink(result.project)})`,
+        );
+      }
+    } finally {
+      progress?.close();
+    }
+    return;
+  }
+
   if (sub === "compact") {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const result = await projects.enqueue(project.threadId, () => projects.compact(project.threadId));
@@ -456,6 +535,25 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     await interaction.editReply(
       `${body}${result.conversationReverted ? "" : "\n⚠️ The agent conversation revert failed (see the bot log); files and git were still reverted."}\n` +
       `[open site](${projects.siteLink(updated)}) · [source](${projects.repoLink(updated)})`,
+    );
+    return;
+  }
+
+  if (sub === "pushkey") {
+    const rotate = interaction.options.getBoolean("rotate") ?? false;
+    await interaction.deferReply();
+    const { project: updated, created } = await projects.enqueue(project.threadId, () => projects.issuePushKey(project.threadId, rotate));
+    if (!updated.pushKey) throw new Error("Push key issuance failed.");
+    await interaction.editReply(
+      (created
+        ? `🔑 ${rotate ? "Rotated" : "Issued"} repository push credentials for **${updated.displayName}**:\n`
+        : "🔑 A push key already exists for this thread (use `rotate: true` to replace it):\n") +
+      "```\n" +
+      `git clone ${forgejo.repoGitPublicUrl(updated.repoName)}\n` +
+      `username: ${updated.pushKey.username}\n` +
+      `password: ${updated.pushKey.password}\n` +
+      "```\n" +
+      "These credentials can push to this project's repository only. A push does not go live until someone publishes it here in the thread.",
     );
     return;
   }
@@ -837,6 +935,44 @@ async function offerEditsChoice(project: ProjectRecord | undefined, error: unkno
   } catch {
     return false;
   }
+}
+
+// Publish/Dismiss on an external-push prompt. Publish adopts the pushed commit
+// and takes it live through the normal build/validate/publish path; Dismiss
+// adopts it into git history only. Both must go through the project queue so
+// they cannot race an in-flight agent turn.
+async function handleExternalPushButton(interaction: ButtonInteraction): Promise<void> {
+  if (!interaction.inGuild() || !interaction.channel?.isThread()) {
+    throw new Error("This button only works inside a project thread.");
+  }
+  const publish = interaction.customId === "threadsite:extpub";
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (await projects.agentBusy(interaction.channel.id)) {
+    throw new Error("An agent turn is currently running in this thread. Wait for it to finish before deciding.");
+  }
+  // One decision per prompt: strip the buttons before the queued work runs.
+  await interaction.message.edit({ components: [] }).catch(() => undefined);
+
+  if (publish) {
+    const result = await projects.enqueue(interaction.channel.id, () => projects.publishExternalPush(interaction.channel!.id));
+    if (result.validationError) {
+      await interaction.editReply(
+        `⚠️ The pushed commit \`${result.commit}\` failed validation and was **not** published — the live site keeps the previous version.\n` +
+        `${truncate(result.validationError, 1200)}\n` +
+        "The commit remains in the repository; reply in this thread to have the agent fix it.",
+      );
+    } else {
+      await interaction.editReply(
+        `✅ Published external commit \`${result.commit}\` — [open site](${projects.siteLink(result.project)})`,
+      );
+    }
+  } else {
+    const result = await projects.enqueue(interaction.channel.id, () => projects.adoptExternalCommit(interaction.channel!.id));
+    await interaction.editReply(
+      `🗂️ Adopted external commit \`${result.commit}\` into the workspace without publishing. The next message in this thread builds on it.`,
+    );
+  }
+  log("info", "discord.external_push_button_used", { action: publish ? "publish" : "dismiss", threadId: interaction.channel.id, userId: interaction.user.id });
 }
 
 async function handleFailureButton(interaction: ButtonInteraction): Promise<void> {

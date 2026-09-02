@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # SplitBitmapText (experimental)
 
 The bitmap counterpart to `SplitText`. Wraps a `BitmapText` and exposes `lines`, `words`, and `chars` as independently-animatable containers. Use `SplitBitmapText` when you want per-character animation on long strings, many simultaneous instances, or text that changes frequently; scenarios where `SplitText`'s per-char canvas rasterization would be too expensive.
@@ -8,23 +10,23 @@ The bitmap counterpart to `SplitText`. Wraps a `BitmapText` and exposes `lines`,
 import { BitmapFont, SplitBitmapText } from "pixi.js";
 
 BitmapFont.install({
-  name: "GameFont",
-  style: { fontFamily: "Arial", fontSize: 48 },
+ name: "GameFont",
+ style: { fontFamily: "Arial", fontSize: 48 },
 });
 
 const split = new SplitBitmapText({
-  text: "Fast Animate",
-  style: { fontFamily: "GameFont", fontSize: 48 },
-  charAnchor: { x: 0.5, y: 1 },
+ text: "Fast Animate",
+ style: { fontFamily: "GameFont", fontSize: 48 },
+ charAnchor: { x: 0.5, y: 1 },
 });
 
 app.stage.addChild(split);
 
 split.chars.forEach((char, i) => {
-  char.onRender = () => {
-    const t = performance.now() / 200 + i;
-    char.y = Math.sin(t) * 5;
-  };
+ char.onRender = () => {
+ const t = performance.now() / 200 + i;
+ char.y = Math.sin(t) * 5;
+ };
 });
 ```
 
@@ -34,19 +36,19 @@ The API mirrors `SplitText` exactly; the only difference is the underlying text 
 
 ```ts
 const minimal = new SplitBitmapText({
-  text: "Hello World",
-  style: { fontFamily: "GameFont", fontSize: 32 },
+ text: "Hello World",
+ style: { fontFamily: "GameFont", fontSize: 32 },
 });
 
 const full = new SplitBitmapText({
-  text: "Fast\nPer-char",
-  style: { fontFamily: "GameFont", fontSize: 48, fill: 0xffffff },
-  autoSplit: true,
-  lineAnchor: 0.5,
-  wordAnchor: { x: 0, y: 0.5 },
-  charAnchor: { x: 0.5, y: 1 },
-  x: 100,
-  y: 200,
+ text: "Fast\nPer-char",
+ style: { fontFamily: "GameFont", fontSize: 48, fill: 0xffffff },
+ autoSplit: true,
+ lineAnchor: 0.5,
+ wordAnchor: { x: 0, y: 0.5 },
+ charAnchor: { x: 0.5, y: 1 },
+ x: 100,
+ y: 200,
 });
 ```
 
@@ -54,14 +56,14 @@ const full = new SplitBitmapText({
 
 `SplitBitmapText` uses the same option shape as `SplitText`: all splitting fields are inherited from `AbstractSplitOptions`, and the only concrete difference is that `style` drives a `BitmapText` render instead of a `Text` render. Like `SplitText`, it is a `Container`, not a `ViewContainer`; the top-level options do NOT include `anchor`, `resolution`, `roundPixels`, `textureStyle`, or `autoGenerateMipmaps`.
 
-| Option       | Type                                     | Default | Description                                                                                                                                                                                    |
+| Option | Type | Default | Description |
 | ------------ | ---------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `text`       | `string`                                 | —       | Text content to render and segment. Required.                                                                                                                                                  |
-| `style`      | `TextStyle \| Partial<TextStyleOptions>` | —       | TextStyle instance or style options; `fill` defaults to `0xffffff` when unset, matching `BitmapText`. See `references/bitmap-text.md` for which fields the bitmap pipeline respects. Required. |
-| `autoSplit`  | `boolean`                                | `true`  | Automatically re-split when `text` or `style` changes; set `false` to batch updates and call `split.split()` manually.                                                                         |
-| `lineAnchor` | `number \| PointData`                    | `0`     | Normalized transform origin (0–1) for each line container.                                                                                                                                     |
-| `wordAnchor` | `number \| PointData`                    | `0`     | Normalized transform origin for each word container.                                                                                                                                           |
-| `charAnchor` | `number \| PointData`                    | `0`     | Normalized transform origin for each character container.                                                                                                                                      |
+| `text` | `string` | — | Text content to render and segment. Required. |
+| `style` | `TextStyle \| Partial<TextStyleOptions>` | — | TextStyle instance or style options; `fill` defaults to `0xffffff` when unset, matching `BitmapText`. See `references/bitmap-text.md` for which fields the bitmap pipeline respects. Required. |
+| `autoSplit` | `boolean` | `true` | Automatically re-split when `text` or `style` changes; set `false` to batch updates and call `split.split()` manually. |
+| `lineAnchor` | `number \| PointData` | `0` | Normalized transform origin (0–1) for each line container. |
+| `wordAnchor` | `number \| PointData` | `0` | Normalized transform origin for each word container. |
+| `charAnchor` | `number \| PointData` | `0` | Normalized transform origin for each character container. |
 
 All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zIndex`, etc.) are also valid here — see `skills/pixijs-scene-core-concepts/references/constructor-options.md`.
 
@@ -73,13 +75,13 @@ All `Container` options (`position`, `scale`, `tint`, `label`, `filters`, `zInde
 
 ```ts
 split.lines.forEach((line) => {
-  line.alpha = 0.9;
+ line.alpha = 0.9;
 });
 split.words.forEach((word) => {
-  word.scale.set(1.1);
+ word.scale.set(1.1);
 });
 split.chars.forEach((char) => {
-  char.rotation = 0.05;
+ char.rotation = 0.05;
 });
 ```
 
@@ -89,11 +91,11 @@ Each `lines[i]`, `words[i]`, `chars[i]` is a Container wrapping a `BitmapText` i
 
 ```ts
 const split = new SplitBitmapText({
-  text: "Wave motion",
-  style: { fontFamily: "GameFont", fontSize: 48 },
-  lineAnchor: 0.5,
-  wordAnchor: { x: 0, y: 0.5 },
-  charAnchor: { x: 0.5, y: 1 },
+ text: "Wave motion",
+ style: { fontFamily: "GameFont", fontSize: 48 },
+ lineAnchor: 0.5,
+ wordAnchor: { x: 0, y: 0.5 },
+ charAnchor: { x: 0.5, y: 1 },
 });
 ```
 
@@ -103,15 +105,15 @@ Same normalized 0–1 anchors as `SplitText`: line, word, and char containers ea
 
 ```ts
 split.chars.forEach((char, i) => {
-  char.alpha = 0;
+ char.alpha = 0;
 });
 
 let elapsed = 0;
 app.ticker.add((ticker) => {
-  elapsed += ticker.deltaMS;
-  split.chars.forEach((char, i) => {
-    if (elapsed > i * 50) char.alpha = Math.min(char.alpha + 0.05, 1);
-  });
+ elapsed += ticker.deltaMS;
+ split.chars.forEach((char, i) => {
+ if (elapsed > i * 50) char.alpha = Math.min(char.alpha + 0.05, 1);
+ });
 });
 ```
 
@@ -121,8 +123,8 @@ Reveal characters one at a time. Because each char is a cheap BitmapText, this s
 
 ```ts
 const label = new BitmapText({
-  text: "Press start",
-  style: { fontFamily: "GameFont", fontSize: 32 },
+ text: "Press start",
+ style: { fontFamily: "GameFont", fontSize: 32 },
 });
 
 const animatable = SplitBitmapText.from(label);
@@ -146,8 +148,8 @@ Wrong:
 
 ```ts
 const split = new SplitBitmapText({
-  text: "Hello",
-  style: { fontFamily: "Arial", fontSize: 48 },
+ text: "Hello",
+ style: { fontFamily: "Arial", fontSize: 48 },
 });
 ```
 
@@ -157,12 +159,12 @@ Correct:
 
 ```ts
 BitmapFont.install({
-  name: "GameFont",
-  style: { fontFamily: "Arial", fontSize: 48 },
+ name: "GameFont",
+ style: { fontFamily: "Arial", fontSize: 48 },
 });
 const split = new SplitBitmapText({
-  text: "Hello",
-  style: { fontFamily: "GameFont", fontSize: 48 },
+ text: "Hello",
+ style: { fontFamily: "GameFont", fontSize: 48 },
 });
 ```
 

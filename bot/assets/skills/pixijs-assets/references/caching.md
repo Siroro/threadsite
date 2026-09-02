@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Caching
 
 Every asset loaded through `Assets` is cached until you explicitly unload it. The cache is a global singleton keyed by the resolved URL, alias, and any bundle identifier. Use the cache to avoid double-loading, retrieve loaded assets synchronously, and reclaim GPU memory when an asset is no longer needed.
@@ -26,7 +28,7 @@ const hero = Assets.get("hero");
 const enemy = Assets.get("enemy");
 
 if (hero) {
-  app.stage.addChild(new Sprite(hero));
+ app.stage.addChild(new Sprite(hero));
 }
 ```
 
@@ -78,7 +80,7 @@ import { Cache } from "pixi.js";
 
 const key = "hero.png";
 if (Cache.has(key)) {
-  const texture = Cache.get(key);
+ const texture = Cache.get(key);
 }
 ```
 

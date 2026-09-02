@@ -1,3 +1,5 @@
+<!-- Vendored from pixijs/pixijs-skills (MIT) by scripts/fetch-skills.mjs. ThreadSite context: pixi.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm, never vendor a second copy, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+
 # Fonts
 
 PixiJS loads two kinds of fonts through `Assets`: web fonts (TTF/OTF/WOFF/WOFF2) via `loadWebFont`, and bitmap fonts (FNT/XML) via `loadBitmapFont`. Use web fonts for `Text` and `HTMLText`; use bitmap fonts for `BitmapText` when you need GPU-friendly rendering without runtime text layout.
@@ -10,8 +12,8 @@ PixiJS loads two kinds of fonts through `Assets`: web fonts (TTF/OTF/WOFF/WOFF2)
 await Assets.load("fonts/titan-one.woff2");
 
 const text = new Text({
-  text: "Hello world",
-  style: { fontFamily: "Titan One", fontSize: 48 },
+ text: "Hello world",
+ style: { fontFamily: "Titan One", fontSize: 48 },
 });
 ```
 
@@ -20,9 +22,9 @@ Once the font is loaded, reference it by its derived family name in any `TextSty
 ### Family name derivation
 
 ```ts
-// Loaded URL               → Derived family name
-// fonts/titan-one.woff     → 'Titan One'
-// fonts/open_sans.ttf      → 'Open Sans'
+// Loaded URL → Derived family name
+// fonts/titan-one.woff → 'Titan One'
+// fonts/open_sans.ttf → 'Open Sans'
 // fonts/my-custom-font.otf → 'My Custom Font'
 ```
 
@@ -32,42 +34,42 @@ By default, the family name is the filename without extension, with dashes and u
 
 ```ts
 await Assets.load({
-  alias: "hero-font",
-  src: "fonts/hero.woff2",
-  data: {
-    family: "HeroFont",
-    weights: ["normal", "bold"],
-    style: "italic",
-    display: "swap",
-    unicodeRange: "U+0000-00FF",
-    stretch: "expanded",
-    featureSettings: '"liga" 1',
-  },
+ alias: "hero-font",
+ src: "fonts/hero.woff2",
+ data: {
+ family: "HeroFont",
+ weights: ["normal", "bold"],
+ style: "italic",
+ display: "swap",
+ unicodeRange: "U+0000-00FF",
+ stretch: "expanded",
+ featureSettings: '"liga" 1',
+ },
 });
 ```
 
 Fields on `data` map directly to FontFace descriptors:
 
-| Option            | Purpose                                                                                                                                |
+| Option | Purpose |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `family`          | Override the derived font family name                                                                                                  |
-| `weights`         | Array of weights to register. One `FontFace` per weight, all sharing the same URL. Valid values: `'normal'`, `'bold'`, `'100'`–`'900'` |
-| `style`           | `'normal'`, `'italic'`, `'oblique'`                                                                                                    |
-| `display`         | CSS `font-display` (`'auto'`, `'block'`, `'swap'`, `'fallback'`, `'optional'`)                                                         |
-| `unicodeRange`    | Restrict which codepoints the font covers                                                                                              |
-| `stretch`         | `'normal'`, `'condensed'`, `'expanded'`, etc.                                                                                          |
-| `variant`         | CSS font-variant value                                                                                                                 |
-| `featureSettings` | OpenType feature settings like `'"liga" 1, "dlig" 1'`                                                                                  |
+| `family` | Override the derived font family name |
+| `weights` | Array of weights to register. One `FontFace` per weight, all sharing the same URL. Valid values: `'normal'`, `'bold'`, `'100'`–`'900'` |
+| `style` | `'normal'`, `'italic'`, `'oblique'` |
+| `display` | CSS `font-display` (`'auto'`, `'block'`, `'swap'`, `'fallback'`, `'optional'`) |
+| `unicodeRange` | Restrict which codepoints the font covers |
+| `stretch` | `'normal'`, `'condensed'`, `'expanded'`, etc. |
+| `variant` | CSS font-variant value |
+| `featureSettings` | OpenType feature settings like `'"liga" 1, "dlig" 1'` |
 
 ### Loading multiple weights
 
 ```ts
 await Assets.load({
-  src: "fonts/inter.woff2",
-  data: {
-    family: "Inter",
-    weights: ["400", "700"],
-  },
+ src: "fonts/inter.woff2",
+ data: {
+ family: "Inter",
+ weights: ["400", "700"],
+ },
 });
 ```
 
@@ -87,8 +89,8 @@ import "pixi.js/text-bitmap";
 await Assets.load("fonts/arial.fnt");
 
 const text = new BitmapText({
-  text: "Score: 9999",
-  style: { fontFamily: "Arial", fontSize: 32 },
+ text: "Score: 9999",
+ style: { fontFamily: "Arial", fontSize: 32 },
 });
 ```
 
@@ -96,10 +98,10 @@ The side-effect import registers the `CanvasBitmapTextPipe` and `BitmapTextPipe`
 
 ### Supported formats
 
-| Extension | Format             |
+| Extension | Format |
 | --------- | ------------------ |
-| `.fnt`    | BMFont text or XML |
-| `.xml`    | BMFont XML         |
+| `.fnt` | BMFont text or XML |
+| `.xml` | BMFont XML |
 
 The parser sniffs the content to pick between text and XML automatically.
 
@@ -134,14 +136,14 @@ If your font URL lacks an extension, force the loader:
 
 ```ts
 await Assets.load({
-  src: "https://cdn.example.com/fonts/abc123",
-  parser: "web-font",
-  data: { family: "Hero", weights: ["400", "700"] },
+ src: "https://cdn.example.com/fonts/abc123",
+ parser: "web-font",
+ data: { family: "Hero", weights: ["400", "700"] },
 });
 
 await Assets.load({
-  src: "https://cdn.example.com/fonts/hero-bmfont",
-  parser: "bitmap-font",
+ src: "https://cdn.example.com/fonts/hero-bmfont",
+ parser: "bitmap-font",
 });
 ```
 
