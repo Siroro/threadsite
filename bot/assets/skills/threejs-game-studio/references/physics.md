@@ -1,15 +1,17 @@
-<!-- Vendored from chrislaupama/threejs-game-studio (MIT) by scripts/fetch-skills.mjs. ThreadSite context: three.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name ("three") with full TypeScript types. This workspace has NO npm, NO Vite, NO dev server, and NO project scaffold: author TypeScript under site/src, keep assets under site/assets, and the harness runs the only build (site/src TypeScript -> site/js ESM via esbuild). Map every project-setup/scaffold/build step of this skill onto the existing ThreadSite workspace layout; skip its npm/Vite instructions entirely. Verification happens in a real browser via the preview URL; see AGENTS.md. -->
+<!-- Vendored from chrislaupama/threejs-game-studio (MIT) by scripts/fetch-skills.mjs. ThreadSite context: three.js, @dimforge/rapier3d-compat (physics, WASM inlined), and three-mesh-bvh (BVH queries on static geometry) are preinstalled in this workspace's harness-managed node_modules — import them by bare name with full TypeScript types. This workspace has NO npm, NO Vite, NO dev server, and NO project scaffold: author TypeScript under site/src, keep assets under site/assets, and the harness runs the only build (site/src TypeScript -> site/js ESM via esbuild). Map every project-setup/scaffold/build step of this skill onto the existing ThreadSite workspace layout; skip its npm/Vite instructions entirely. The hand-rolled collision techniques below are the right tool for simple arcade games; when a design needs real rigid-body dynamics, use the preinstalled Rapier rather than vendoring any other engine. Verification happens in a real browser via the preview URL; see AGENTS.md. -->
 
 # Physics And Collision
 
 Use this reference before changing collision-heavy gameplay, projectiles,
 vehicles, ball games, platforms, sensors, or fast movement. Start with Three.js
-math, official math addons, and project code when those honestly fit. Adding a
-physics engine is an architecture and dependency decision: obtain explicit
-approval, pin and host it according to the project's local-first policy, and
-define its world, stepping, synchronization, teardown, and asset ownership.
-Preserve an engine already owned by an existing project unless migration is in
-scope; do not expand it merely to avoid a small, well-bounded collision query.
+math, official math addons, and project code when those honestly fit. When a
+design genuinely needs a general physics engine, the decision is already made
+for this workspace: use the **preinstalled `@dimforge/rapier3d-compat`**
+(`await RAPIER.init()` once at boot). Do not vendor Ammo, Cannon, Jolt, or any
+second engine, and define the world's stepping, synchronization, teardown, and
+asset ownership up front. Preserve an engine already owned by an existing
+project unless migration is in scope; do not expand it merely to avoid a
+small, well-bounded collision query.
 
 ## Contents
 
@@ -40,13 +42,15 @@ requested design fundamentally needs those features, choose deliberately:
 | triggers, pickups, simple projectiles, rails, authored movement | project-owned overlap/sweep code using `Box3`, `Sphere`, `Ray`, and planes |
 | character against a static triangle world | official `Capsule` plus `Octree`, built from a simplified collision-only scene |
 | rotated rigid bounds without dynamics | official `OBB`, transformed from canonical local bounds |
-| stacks, joints, ragdolls, arbitrary convex dynamics, robust vehicles | explicitly approved and locally pinned physics engine |
+| stacks, joints, ragdolls, arbitrary convex dynamics, robust vehicles | preinstalled Rapier (`@dimforge/rapier3d-compat`) |
+| fast queries against complex static meshes (hitscan, LOS, ground, picking) | preinstalled `three-mesh-bvh` on the static geometry |
 
 Three.js also ships `AmmoPhysics`, `JoltPhysics`, and `RapierPhysics` convenience
 addons. In r185 these automatically import their engines from a CDN. That
 violates an offline/local-first runtime unless the external engine is deliberately
 vendored and the integration adapted. Do not copy those wrappers unchanged into
-a project that promises local-only runtime assets.
+a project that promises local-only runtime assets — Rapier itself is already
+preinstalled here, so there is no gap for them to fill.
 
 ## One Simulation Owner
 

@@ -1,6 +1,6 @@
 ---
 name: game-3d
-description: three.js playbook for this repository's 3D games — renderer and scene bootstrap, frame-loop discipline, physically-based lighting, materials and geometry budgets, GLB/GLTF asset loading, addon vendoring, disposal, picking, simple collision, and performance patterns for the pinned three 0.185 engine package. Load before building or substantially revising 3D rendering, scenes, cameras, models, or effects.
+description: three.js playbook for this repository's 3D games — renderer and scene bootstrap, frame-loop discipline, physically-based lighting, materials and geometry budgets, GLB/GLTF asset loading, addon vendoring, disposal, picking, Rapier physics, BVH spatial queries, and performance patterns for the pinned three 0.185 engine package. Load before building or substantially revising 3D rendering, scenes, cameras, models, physics, or effects.
 ---
 
 # three.js playbook (game-3d)
@@ -10,7 +10,10 @@ validation) live in the project-root `AGENTS.md` — this skill is the engine
 how-to layer beneath them. The engine is **three.js r185**, installed as a real
 package in the harness-managed `node_modules/`: `import * as THREE from "three"`
 gives you the full API with real TypeScript types, tree-shaken into your bundle
-at build time. Never vendor a second copy and never hand-roll WebGL.
+at build time. Two more real packages are seeded alongside it:
+**`@dimforge/rapier3d-compat`** (physics) and **`three-mesh-bvh`** (BVH
+acceleration for static-geometry queries). Never vendor a second copy of any of
+them and never hand-roll WebGL.
 
 ## Renderer bootstrap
 
@@ -143,17 +146,48 @@ renderer.setAnimationLoop((time) => update(time));              // one loop, sta
   workspace package at build time (see AGENTS.md's engine-packages section).
   Subpath imports like `"three/addons/*"` do **not** resolve; adapt them.
 
-## Picking and collision
+## Picking, collision, and physics
 
 - Pointer/world picking: `raycaster.setFromCamera(ndc, camera)` then
   `intersectObjects(scene.children, true)`; build the NDC point from the event
   offset relative to the canvas rect.
-- Gameplay collision: simple volumes are usually right — sphere–sphere
-  (`distanceToSquared < r1*r1 + ...`), capsule for the player against
-  AABB/spheres, `Box3`/`Sphere` helpers for static level geometry. Fast
-  projectiles need swept (segment) tests, not per-frame overlap.
-- Avoid vendoring a physics engine unless the game genuinely needs rigid-body
-  dynamics; if it does, keep player control kinematic on top of it.
+- Gameplay collision: simple volumes are usually right for arcade games —
+  sphere–sphere (`distanceToSquared < r1*r1 + ...`), capsule for the player
+  against AABB/spheres, `Box3`/`Sphere` helpers for static level geometry.
+  Fast projectiles need swept (segment) tests, not per-frame overlap.
+- Anything with rigid bodies, stacking, joints, or robust character-vs-world
+  collision uses the **preinstalled Rapier** package instead
+  (`@dimforge/rapier3d-compat`, WASM inlined — no vendoring, no CDN helper
+  wrappers, never a second engine). Initialize once before use:
+
+  ```ts
+  import RAPIER from "@dimforge/rapier3d-compat";
+  await RAPIER.init();                    // during boot, before any World use
+  const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+  ```
+
+- Rapier discipline: `Object3D` is the visual, `RigidBody`/`Collider` the
+  physical truth — after each step, copy body transforms onto meshes and never
+  move a physics-driven mesh by hand. Step the world at a fixed timestep from
+  an accumulator (`world.timestep = 1/60`, one `world.step()` per accumulator
+  tick) and interpolate rendering between the last two states. Players are a
+  kinematic capsule plus `world.createCharacterController(offset)` with
+  `computeColliderMovement` → `setNextKinematicTranslation`, not a dynamic
+  body. Prefer primitive/convex colliders; triangle meshes only for static
+  levels; never dynamic triangle-mesh bodies. Map collision/sensor events
+  back to gameplay through stable entity IDs.
+- Complex **static** meshes (hitscan, line-of-sight, ground queries, picking
+  in dense scenes) use the preinstalled `three-mesh-bvh`: build once, query
+  many times; dynamic objects stay in Rapier:
+
+  ```ts
+  import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
+  THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+  THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+  THREE.Mesh.prototype.raycast = acceleratedRaycast as unknown as typeof THREE.Mesh.prototype.raycast;
+  levelGeometry.computeBoundsTree();
+  raycaster.firstHitOnly = true;          // BVH-accelerated casts
+  ```
 
 ## Performance checklist before finishing
 

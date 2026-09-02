@@ -1,14 +1,22 @@
 {
   "name": "threadsite-gameserver",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.mjs",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
     "test:relay": "node smoke-test.mjs",
-    "test:client": "node client-smoke-test.mjs"
+    "test:client": "node client-smoke-test.mjs",
+    "test:restart": "node restart-test.mjs",
+    "test:durable": "node durability-test.mjs"
   },
   "dependencies": {
     "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/ws": "8.18.1",
+    "typescript": "5.9.3"
   }
 }

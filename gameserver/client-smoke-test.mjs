@@ -1,327 +1,189 @@
-// Smoke test for the vendored browser client (bot/assets/threadsite-net.js)
-// against a live relay. Start the relay first: node server.mjs
-import { ThreadSiteNet, ThreadSiteNetError, NET_STATUS } from "../bot/assets/threadsite-net.js";
+// Generated v4 browser-client conformance tests against a live relay.
+import assert from "node:assert/strict";
+import { NET_STATUS, ThreadSiteNet, ThreadSiteNetError } from "../bot/assets/threadsite-net.js";
 
-const assert = (await import("node:assert")).default;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const URL = "ws://127.0.0.1:8090/ws";
+const GAME = "client-v4-test";
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const events = [];
-const states = [];
-let hostChange = { hostId: null, isHost: null };
-const statuses = [];
-
+let hostAcquired = null;
+let hostLost = null;
 const host = await ThreadSiteNet.connect({
-  game: "client-test-game-01",
-  url: "ws://127.0.0.1:8090/ws",
-  createRoom: true,
-  name: "HostAna",
-  onEvent: (ev) => events.push(["host", ev]),
-  onState: (snap) => states.push(["host", snap]),
-  onHostChange: (hostId, isHost) => { hostChange = { hostId, isHost }; },
-  onStatus: (s) => statuses.push(s),
+  game: GAME, url: URL, createRoom: true, name: "Host",
+  onAuthorityAcquired: (snapshot, epoch) => { hostAcquired = { snapshot, epoch }; },
+  onAuthorityLost: (epoch) => { hostLost = epoch; },
 });
+await Promise.resolve(); // initial callbacks run after await assigns `host`
 assert.equal(host.status, NET_STATUS.ONLINE);
 assert.equal(host.isHost, true);
-assert.match(host.room, /^[A-Z2-9]{5}$/);
-console.log("host connected, room", host.room);
+assert.equal(hostAcquired.epoch, 1);
+assert.equal(typeof host.authorityGeneration, "string");
 
-let guestPeers = null;
+const worlds = [];
+const events = [];
+let guestAcquired = null;
 const guest = await ThreadSiteNet.connect({
-  game: "client-test-game-01",
-  url: "ws://127.0.0.1:8090/ws",
-  room: host.room,
-  name: "GuestBo",
-  onPeers: (peers) => { guestPeers = peers; },
-  onEvent: (ev) => events.push(["guest", ev]),
-  onState: (snap) => states.push(["guest", snap]),
+  game: GAME, url: URL, room: host.room, name: "Guest",
+  onWorld: (world) => worlds.push(world),
+  onEvent: (event) => events.push(event),
+  onAuthorityAcquired: (snapshot, epoch) => { guestAcquired = { snapshot, epoch }; },
 });
-assert.equal(guest.isHost, false);
 assert.equal(guest.hostId, host.id);
-await sleep(200);
-assert.equal(guestPeers.length, 1);
-assert.equal(guestPeers[0].name, "HostAna");
-assert.equal(host.peers.length, 1);
-console.log("guest connected; rosters agree");
 
-host.publishState({ tick: 7, world: "calm" });
-await sleep(200);
-assert.ok(states.some(([, snap]) => snap.state.tick === 7));
-console.log("publishState -> onState OK");
+host.publishWorld({ tick: 1, enemies: [{ id: "e1", hp: 3 }] });
+await sleep(80);
+assert.equal(worlds.at(-1).state.tick, 1);
+assert.deepEqual([worlds.at(-1).authorityEpoch, worlds.at(-1).stateSeq], [1, 1]);
+assert.throws(() => guest.publishWorld({ tick: 2 }), (error) => error instanceof ThreadSiteNetError && error.code === "not_host");
 
-guest.send("input", { seq: 1, move: "north" });
-await sleep(200);
-assert.ok(events.some(([, ev]) => ev.type === "input" && ev.data.seq === 1));
-console.log("send -> onEvent OK");
+host.publishTransform({ x: 0, y: 5, vx: 100, vy: 0, facing: "right" });
+await sleep(60);
+host.publishTransform({ x: 6, y: 5, vx: 100, vy: 0, facing: "right" });
+await sleep(80);
+const sampled = guest.sampleTransform(host.id);
+assert.ok(sampled && Number.isFinite(sampled.x) && sampled.y === 5);
+assert.ok(guest.transformSampleInfo(host.id).samples >= 2, "library owns an actual transform jitter buffer");
+assert.equal(guest.sampleRemotePlayers().find((entry) => entry.peer.id === host.id).transform.y, 5);
+host.transforms.teleport({ x: 100, y: 25, vx: 0, vy: 0, alive: true, runId: "movement-1" });
+await sleep(80);
+assert.equal(guest.transforms.sample(host.id).x, 100);
+assert.equal(guest.transforms.info(host.id).samples, 1, "teleport resets interpolation history");
+assert.equal(guest.transforms.nearest(99, 25).peer.id, host.id);
+
+const ephemerals = [];
+guest.events.onEphemeral("aim", (event) => { ephemerals.push(event); });
+host.events.sendEphemeral("aim", { angle: 1 }, guest.id);
+host.events.sendEphemeral("aim", { angle: 1.25 }, guest.id);
+host.events.sendEphemeral("aim", { angle: 1.5 }, guest.id);
+const eventId = host.events.sendReliable("damage", { amount: 2 }, guest.id);
+await sleep(80);
+assert.equal(events.at(-1).id, eventId);
+assert.equal(events.at(-1).type, "damage");
+assert.ok(eventId.split(".").length >= 3, "event ids include a reload-unique instance nonce");
+assert.equal(ephemerals.at(-1).data.angle, 1.5);
+assert.equal(ephemerals.length, 2, "ephemeral updates coalesce latest-wins at 20 Hz");
+host.presence.set({ character: "ranger", ready: true });
+await sleep(80);
+assert.equal(guest.presence.get(host.id).character, "ranger");
+
+host.publishWorld({ tick: 2, enemies: [{ id: "e1", hp: 1 }] });
+await sleep(50);
+assert.equal(host.yieldHost(), true);
+await sleep(120);
+assert.equal(hostLost, 1);
+assert.equal(guest.isHost, true);
+assert.equal(guestAcquired.epoch, 2);
+assert.equal(guestAcquired.snapshot.state.tick, 2, "authority acquired only after cached world is available");
+guest.publishWorld({ tick: 3, enemies: [] });
 
 host.ping();
-await sleep(300);
+await sleep(80);
 assert.equal(typeof host.rtt, "number");
-console.log("rtt:", host.rtt, "ms");
+assert.equal(typeof host.serverTimeOffset, "number");
+assert.ok(Math.abs(host.serverNow() - Date.now()) < 2000);
+const deadline = host.clock.after(1000);
+assert.ok(host.clock.remaining(deadline) <= 1000 && host.clock.elapsed(deadline - 1000) >= 0);
 
-// Self-published player transform: your own entity publishes directly, no host round trip.
-let gotP = null;
-guest.onPlayerState = (ps) => { gotP = ps; };
-host.publishPlayerState({ x: 5, y: 6, anim: "run" });
-await sleep(200);
-assert.equal(gotP.from, host.id);
-assert.equal(gotP.cid, host.cid);
-assert.deepEqual(gotP.state, { x: 5, y: 6, anim: "run" });
-assert.ok(typeof gotP.ts === "number");
-assert.deepEqual(guest.peerState(host.id), { x: 5, y: 6, anim: "run" });
-console.log("publishPlayerState -> onPlayerState OK");
+const late = await ThreadSiteNet.connect({ game: GAME, url: URL, room: host.room, name: "Late" });
+assert.equal(late.peerState(host.id).x, 100, "late join receives newest player state");
+assert.ok(late.sampleTransform(host.id), "late join seeds transform sampling immediately");
+assert.equal(late.presence.get(host.id).character, "ranger", "late join receives separate presence");
 
-// A late joiner immediately sees every peer's latest player state.
-const late = await ThreadSiteNet.connect({
-  game: "client-test-game-01",
-  url: "ws://127.0.0.1:8090/ws",
-  room: host.room,
-  name: "LateLad",
-});
-assert.deepEqual(late.peerState(host.id), { x: 5, y: 6, anim: "run" });
-assert.equal(late.playerStates.length, 1); // guest has not published anything
-late.close();
-console.log("late joiner gets peer states OK");
-
-// Solo-fallback shape: connecting to a dead relay rejects with a usable error
-// and the instance attached for later manual retry handling.
-await assert.rejects(
-  ThreadSiteNet.connect({ game: "client-test-game-01", url: "ws://127.0.0.1:9/ws", room: "ABCDX", autoReconnect: false, connectTimeoutMs: 1200 }),
-  (error) => {
-    assert.ok(error instanceof ThreadSiteNetError);
-    assert.ok(["connect_timeout", "connect_failed", "bad_url"].includes(error.code));
-    assert.ok(error.net);
-    return true;
-  },
-);
-console.log("unreachable relay -> rejected with", "error.net attached");
-
-// Host leaving promotes the guest.
-host.close();
-await sleep(300);
-assert.equal(guest.hostId, guest.id);
-assert.equal(guest.isHost, true);
-console.log("client-side host migration OK");
-
-// v3: publishPlayerState throttling — per-frame calls coalesce to ~pstateHz,
-// and only the newest state is actually sent.
-let pstateCount = 0;
-guest.onPlayerState = () => { pstateCount += 1; };
-const sender = await ThreadSiteNet.connect({
-  game: "client-test-game-01",
-  url: "ws://127.0.0.1:8090/ws",
-  room: host.room,
-  name: "Throttler",
-  pstateHz: 10,
-});
-for (let i = 0; i < 50; i += 1) sender.publishPlayerState({ i });
-sender.flushPlayerState();
-await sleep(350);
-// 50 per-frame calls: ~1 immediate flush + ~3 timer ticks at 10 Hz, never 50.
-assert.ok(pstateCount >= 1 && pstateCount <= 10, `throttled to ${pstateCount} sends, not 50`);
-assert.deepEqual(guest.peerState(sender.cid), { i: 49 }, "newest state wins");
-console.log("publishPlayerState throttling OK:", pstateCount, "sends for 50 calls");
-
-// v3: sequenced events — the receiving side sees consecutive seqs, dedupes
-// by seq, and never double-delivers. (No gap-resend exists: WebSocket
-// delivery is ordered, so recovery is event ids + snapshots.)
-const seqCollector = [];
-const gapVictim = await ThreadSiteNet.connect({
-  game: "client-test-game-01",
-  url: "ws://127.0.0.1:8090/ws",
-  room: host.room,
-  name: "GapVictim",
-  onEvent: (ev) => { if (ev.type === "tick") seqCollector.push(ev.seq); },
-});
-sender.send("tick", null); // seq 1
-sender.send("tick", null); // seq 2
-sender.send("tick", null); // seq 3
-sender.send("tick", null); // seq 4
-await sleep(300);
-assert.deepEqual(seqCollector, [1, 2, 3, 4], "clean sequenced delivery");
-assert.equal(gapVictim.dropped, 0);
-assert.equal(gapVictim.duplicates, 0);
-console.log("clean sequenced delivery OK");
-
-// Retry dedupe: swallowing a frame on the wire simulates a rate-limited
-// event that the sender requeues (marked r:1). The receiver must deliver it
-// exactly once and never double-apply.
-const realSend = sender._ws.send.bind(sender._ws);
-let swallowed = false;
-sender._ws.send = (data) => {
-  const frame = JSON.parse(data);
-  const isTarget = frame.t === "event" && frame.e === "gap-tick" && frame.seq === 6 && frame.r !== 1;
-  if (isTarget && !swallowed) {
-    swallowed = true;
-    return; // dropped on the wire
-  }
-  realSend(data);
-};
-const gapCollector = [];
-gapVictim.onEvent = (ev) => { if (ev.type === "gap-tick") gapCollector.push(ev.seq); };
-sender.send("gap-tick", null); // seq 5
-sender.send("gap-tick", null); // seq 6 — dropped on the wire
-sender.send("gap-tick", null); // seq 7
-await sleep(150);
-assert.ok(gapCollector.includes(5) && gapCollector.includes(7), "later events delivered around the drop");
-// Simulate the sender's rate-limit requeue of seq 6 (what _requeueBySeq does).
-sender._requeueBySeq(6);
-await sleep(500);
-assert.ok(gapCollector.includes(6), `gap-tick seq 6 requeued and delivered: [${gapCollector.join(",")}]`);
-assert.equal(gapCollector.filter((s) => s === 6).length, 1, "requeued event delivered exactly once");
-assert.equal(gapVictim.duplicates, 0, "no duplicate deliveries");
-// A duplicate retry of an already-delivered event is suppressed by seq.
-sender._requeueBySeq(5);
-await sleep(500);
-assert.equal(gapCollector.filter((s) => s === 5).length, 1, "retry of a delivered event suppressed");
-sender._ws.send = realSend;
-gapVictim.onEvent = null;
-console.log("rate-limit requeue dedupe OK: seq 6 delivered once, stale retry suppressed");
-
-// v3: frame size guard fails loudly instead of getting the socket killed.
 assert.throws(
-  () => sender.publishState({ blob: "x".repeat(80 * 1024) }),
-  (error) => error.code === "frame_too_large",
+  () => guest.publishWorld({ blob: "x".repeat(80 * 1024) }),
+  (error) => error instanceof ThreadSiteNetError && error.code === "frame_too_large",
 );
-assert.equal(sender.status, "online", "connection survives an oversized attempt");
-console.log("frame size guard OK");
 
-// v3: offline outbox — reliable event frames sent while the socket is down
-// are queued and flushed in order once reconnected. Transient frames (player
-// state, snapshots) are dropped instead: replaying them after a reconnect
-// would rubber-band players with stale transforms.
-const outboxPeer = await ThreadSiteNet.connect({
-  game: "client-test-game-01",
-  url: "ws://127.0.0.1:8090/ws",
-  room: host.room,
-  name: "Outbox",
-});
-const outboxEvents = [];
-gapVictim.onEvent = (ev) => { if (ev.type === "offline-msg") outboxEvents.push(ev.seq); };
-let stalePstate = 0;
-gapVictim.onPlayerState = () => { stalePstate += 1; };
-outboxPeer._ws.close(); // simulated drop
-await sleep(300);
-assert.equal(outboxPeer.status, "reconnecting");
-outboxPeer.send("offline-msg", { n: 1 });
-outboxPeer.send("offline-msg", { n: 2 });
-outboxPeer.publishPlayerState({ x: 99, y: 99 }); // transient: must NOT queue
-outboxPeer.publishState({ tick: 999 }); // transient: must NOT queue
-assert.ok(outboxPeer.queued >= 2, "events queued while offline");
-await sleep(4000); // reconnect backoff + flush
-assert.equal(outboxPeer.status, "online");
-assert.ok(outboxEvents.length >= 2, "queued events delivered after reconnect");
-assert.equal(stalePstate, 0, "stale player state not replayed after reconnect");
-console.log("offline outbox OK:", outboxEvents.length, "events replayed, no stale state replayed");
+const single = await ThreadSiteNet.connect({ game: "client-single-v4", url: URL, mode: "single", name: "Solo" });
+assert.equal(single.room, null);
+assert.equal(single.inviteUrl(), null);
 
-// v3: server clock — serverNow() is seeded from the welcome's serverTs (no
-// waiting for the first ping) and refined by pongs thereafter.
-{
-  const fresh = await ThreadSiteNet.connect({
-    game: "client-test-game-01",
-    url: "ws://127.0.0.1:8090/ws",
-    room: host.room,
-    name: "Clock",
-  });
-  assert.equal(typeof fresh.serverTimeOffset, "number", "clock offset seeded from welcome");
-  const skew = Math.abs(fresh.serverNow() - Date.now());
-  assert.ok(skew < 2000, `serverNow() available immediately (skew ${skew}ms)`);
-  fresh.close();
-}
-outboxPeer.ping();
-await sleep(300);
-assert.equal(typeof outboxPeer.rtt, "number");
-assert.equal(typeof outboxPeer.serverTimeOffset, "number");
-const skew = Math.abs(outboxPeer.serverNow() - Date.now());
-assert.ok(skew < 2000, `serverNow() within 2s of local clock (skew ${skew}ms)`);
-console.log("server clock sync OK: rtt", outboxPeer.rtt, "ms");
-
-// v3: staleness bookkeeping — peerLastSeen/isStale reflect inbound traffic.
-assert.ok(gapVictim.peerLastSeen(outboxPeer.id) !== null);
-assert.equal(gapVictim.isStale(outboxPeer.id, 5000), false);
-assert.equal(gapVictim.isStale(outboxPeer.id, -1), true, "isStale true past the age cutoff");
-console.log("staleness tracking OK");
-
-outboxPeer.close();
-gapVictim.close();
-sender.close();
-
-// An unexpected socket drop (bypassing close()) reconnects into the SAME room
-// code instead of hosting a new one — simulate by closing the raw socket
-// directly, so the client never sets its manually-closed flag.
-const rejoinStatuses = [];
-guest.onStatus = (s) => rejoinStatuses.push(s);
-const rejoinEvents = [];
-guest.onPeers = (peers) => rejoinEvents.push(peers);
-guest._ws.close(); // simulated network drop
-await sleep(2500);
-assert.equal(guest.status, "online");
-assert.equal(guest.room, host.room); // same room, not a fresh code
-assert.ok(rejoinStatuses.includes("reconnecting"));
-console.log("drop -> auto-reconnect into same room OK");
-
-// Joining an unknown code is terminal: rejects, ends CLOSED, does not retry.
-let closedStatus = null;
-await assert.rejects(
-  ThreadSiteNet.connect({ game: "client-test-game-01", url: "ws://127.0.0.1:8090/ws", room: "ZZ9QZ" }),
-  (error) => error.code === "room_not_found",
+assert.throws(
+  () => new ThreadSiteNet({
+    game: "invalid-world-v4", url: URL, createRoom: true, onWorld: () => undefined,
+    world: {
+      schemaVersion: 1, capture: () => ({ runId: 1, tick: 1, state: {} }),
+      restore: () => undefined, present: () => undefined,
+      onAuthorityStart: () => undefined, onAuthorityStop: () => undefined,
+    },
+  }),
+  (error) => error instanceof ThreadSiteNetError && error.code === "bad_world_sync",
+  "safe and raw authority lifecycles cannot be combined",
 );
-const stray = new ThreadSiteNet({ game: "client-test-game-01", url: "ws://127.0.0.1:8090/ws", room: "ZZ8QZ" });
-stray.onStatus = (s, detail) => { closedStatus = [s, detail]; };
-await stray.opened.catch(() => undefined);
-await sleep(600);
-assert.equal(stray.status, "closed");
-assert.deepEqual(closedStatus, ["closed", "room_not_found"]);
-console.log("room_not_found is terminal (no retry loop) OK");
 
-// Single-server mode: two clients with mode "single" land in the same room,
-// see each other, and no room code or createRoom is involved.
-const arena1 = await ThreadSiteNet.connect({
-  game: "client-arena-game-01",
-  url: "ws://127.0.0.1:8090/ws",
-  mode: "single",
-  name: "ArenaOne",
+let safeTick = 1;
+let safeAuthority = false;
+const safeHost = await ThreadSiteNet.createAuthoritativeSession({
+  game: "safe-world-v4", url: URL, mode: "rooms", createRoom: true, name: "SafeHost",
+  world: {
+    schemaVersion: 1,
+    capture: () => ({ runId: "run-1", tick: safeTick++, state: { bossHp: 10 } }),
+    restore: () => assert.fail("a new room has no recovery snapshot"),
+    present: () => assert.fail("the host never presents guest snapshots"),
+    onAuthorityStart: ({ recovered }) => { assert.equal(recovered, false); safeAuthority = true; },
+    onAuthorityStop: () => { safeAuthority = false; },
+    publishHz: 5,
+  },
 });
-assert.equal(arena1.mode, "single");
-assert.equal(arena1.room, "ARENA");
-assert.equal(arena1.isHost, true);
-
-let arenaPeers = [];
-const arena2 = await ThreadSiteNet.connect({
-  game: "client-arena-game-01",
-  url: "ws://127.0.0.1:8090/ws",
-  mode: "single",
-  name: "ArenaTwo",
-  onPeers: (peers) => { arenaPeers = peers; },
+let facadeAcquire = null;
+safeHost.authority.onAcquire((_snapshot, epoch) => { facadeAcquire = epoch; });
+await Promise.resolve();
+assert.equal(safeAuthority, true);
+assert.equal(facadeAcquire, 1);
+let presented = null;
+let restored = null;
+const safeGuest = await ThreadSiteNet.createAuthoritativeSession({
+  game: "safe-world-v4", url: URL, mode: "rooms", room: safeHost.room, name: "SafeGuest",
+  world: {
+    schemaVersion: 1,
+    capture: () => ({ runId: "run-1", tick: safeTick++, state: { bossHp: 10 } }),
+    restore: (world) => { restored = world; },
+    present: (world) => { presented = world; },
+    onAuthorityStart: () => undefined,
+    onAuthorityStop: () => undefined,
+    publishHz: 5,
+  },
 });
-assert.equal(arena2.room, "ARENA");
-assert.equal(arena2.isHost, false);
-assert.equal(arenaPeers.length, 1);
-assert.equal(arenaPeers[0].id, arena1.id);
-console.log("client single-server mode OK: shared room", arena1.room);
+let facadeWorld = null;
+let runChange = null;
+safeGuest.world.onSnapshot((snapshot) => { facadeWorld = snapshot; });
+safeGuest.run.onChanged((change) => { runChange = change; });
+await sleep(250);
+assert.equal(presented.state.bossHp, 10, "late join is presented a validated cached complete world");
+assert.equal(facadeWorld.state.state.bossHp, 10);
+assert.equal(runChange.current, "run-1");
+assert.equal(safeGuest.run.current, "run-1");
+let receivedIntent = null;
+safeHost.intents.on("try-pickup", (intent) => { receivedIntent = intent; });
+const intentId = safeGuest.intents.send("try-pickup", { entityId: "gem-1" });
+await sleep(80);
+assert.equal(receivedIntent.id, intentId);
+assert.equal(receivedIntent.runId, "run-1");
+assert.equal(receivedIntent.payload.entityId, "gem-1");
+receivedIntent = null;
+safeGuest.events.sendReliable("@intent:try-pickup", { runId: "old-run", payload: { entityId: "gem-old" } }, safeHost.id);
+await sleep(80);
+assert.equal(receivedIntent, null, "host intent router rejects a stale run before game code");
 
-// inviteUrl()/roomFromUrl() round-trip via a simulated page location. Use a
-// plain stub (not a URL instance) so the client's ws->wss upgrade logic does
-// not kick in against the local plain-WS test relay.
-const pageUrl = "https://sites.example.com/capy-courier-ab12cd/";
-globalThis.location = { hash: "", href: pageUrl, origin: "https://sites.example.com", pathname: "/capy-courier-ab12cd/", search: "", protocol: "http:" };
-assert.equal(ThreadSiteNet.roomFromUrl(), null);
-globalThis.location.hash = `#room=${host.room}`;
-assert.equal(ThreadSiteNet.roomFromUrl(), host.room);
-const invitee = await ThreadSiteNet.connect({
-  game: "client-test-game-01",
-  url: "ws://127.0.0.1:8090/ws",
-  room: ThreadSiteNet.roomFromUrl(),
-  name: "Invitee",
+const removed = [];
+const enemiesSync = safeGuest.entities.syncCollection("enemies", {
+  getId: (snapshot) => snapshot.id,
+  create: (snapshot) => ({ ...snapshot }),
+  update: (enemy, snapshot) => Object.assign(enemy, snapshot),
+  remove: (_enemy, id) => removed.push(id),
 });
-assert.equal(invitee.room, host.room);
-const hostInvite = host.inviteUrl();
-assert.ok(hostInvite.endsWith(`#room=${host.room}`), `invite url carries room: ${hostInvite}`);
-delete globalThis.location;
-invitee.close();
-arena1.close();
-arena2.close();
-console.log("invite URL round-trip OK:", hostInvite);
+enemiesSync.apply([{ id: "e1", hp: 3 }, { id: "e2", hp: 5 }]);
+enemiesSync.apply([{ id: "e1", hp: 1 }]);
+assert.equal(enemiesSync.get("e1").hp, 1);
+assert.deepEqual(removed, ["e2"]);
+assert.throws(
+  () => enemiesSync.apply([{ id: "dup", hp: 1 }, { id: "dup", hp: 2 }]),
+  (error) => error instanceof ThreadSiteNetError && error.code === "duplicate_entity_id",
+);
+safeHost.close();
+await sleep(200);
+assert.equal(safeGuest.isHost, true);
+assert.equal(restored.state.bossHp, 10, "new authority restores the latest accepted complete world before starting");
 
-guest.close();
-console.log("\nALL CLIENT SMOKE TESTS PASSED");
-process.exit(0);
+for (const net of [host, guest, late, single, safeGuest]) net.close();
+console.log("ALL CLIENT V4 CONFORMANCE TESTS PASSED");

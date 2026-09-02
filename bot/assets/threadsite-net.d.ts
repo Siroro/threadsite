@@ -1,189 +1,458 @@
-// Type declarations for the ThreadSite Multiplayer Protocol v3 browser client
-// (threadsite-net.js). The payload envelopes — from/cid/seq/ts — are typed
-// exactly; the application-defined `state`/`data` contents are intentionally
-// `any`, because each game defines its own shapes.
-
-/** Wire protocol version this client speaks; must match the relay. */
-export const PROTOCOL_VERSION: number;
-
-/**
- * Connection status values. Typed as plain strings (not literals) on purpose:
- * authored code copying a constant (`let s = NET_STATUS.CONNECTING`) widens
- * to `string` instead of pinning a singleton literal type.
- */
-export const NET_STATUS: {
-  readonly CONNECTING: string;
-  readonly ONLINE: string;
-  readonly RECONNECTING: string;
-  readonly DEGRADED: string;
-  readonly CLOSED: string;
-};
-
-/** Relay/client error carrying a stable machine-readable code. */
-export class ThreadSiteNetError extends Error {
-  name: "ThreadSiteNetError";
-  code: string;
-}
-
-/** A peer in the room. `id` is the live per-connection identity; `cid` is stable for reconnect/reload within the current browser tab session. */
+export declare const PROTOCOL_VERSION = 4;
+export type NetStatus = "connecting" | "online" | "reconnecting" | "degraded" | "closed";
+export type NetMode = "single" | "rooms";
+export type TransformSampleMode = "interpolated" | "extrapolated" | "held";
+export declare const NET_STATUS: Readonly<{
+    CONNECTING: "connecting";
+    ONLINE: "online";
+    RECONNECTING: "reconnecting";
+    DEGRADED: "degraded";
+    CLOSED: "closed";
+}>;
 export interface NetPeer {
-  id: string;
-  name: string | null;
-  cid: string | null;
+    id: string;
+    name: string | null;
+    cid: string | null;
 }
-
-/** onPlayerState payload: another player's newest self-published state. */
-export interface NetPlayerState {
-  /** Sender's live per-connection peer id — use for active avatars, routing, and self-filtering. */
-  from: string;
-  cid: string | null;
-  /** Game-defined state the peer published via publishPlayerState(). */
-  state: any;
-  /** Relay receive time, epoch ms. Compare/order it against net.serverNow(), never Date.now(). */
-  ts: number | null;
+export interface NetPlayerState<T = any> {
+    from: string;
+    cid: string | null;
+    state: T;
+    ts: number;
 }
-
-/** onEvent payload: a sequenced application event, already deduped by seq. */
-export interface NetEvent {
-  from: string;
-  cid: string | null;
-  type: string;
-  data: any;
-  /** Sender's sequence number (event id) — keep handlers idempotent by seq. */
-  seq: number | null;
-  ts: number | null;
+export interface NetEvent<T = any> {
+    id: string;
+    from: string;
+    cid: string | null;
+    type: string;
+    data: T;
+    ts: number;
 }
-
-/** onState payload: a room snapshot from a peer or the relay's late-joiner cache. */
-export interface NetSnapshot {
-  from: string;
-  cid: string | null;
-  state: any;
-  /** Relay receive time — discard snapshots older than the newest seen from the same source. */
-  ts: number | null;
+export interface NetEphemeralEvent<T = any> {
+    from: string;
+    cid: string | null;
+    type: string;
+    data: T;
+    ts: number;
 }
-
-/** Every currently connected peer's newest self-published state. */
-export interface NetPlayerStateEntry {
-  cid: string | null;
-  id: string;
-  state: any;
+export interface NetIntent<T = any> {
+    id: string;
+    from: string;
+    cid: string | null;
+    type: string;
+    payload: T;
+    runId: string | number;
+    ts: number;
 }
-
+export interface NetRunChange {
+    previous: string | number | null;
+    current: string | number;
+    tick: number;
+}
+export interface NetWorldSnapshot<T = any> {
+    from: string;
+    cid: string | null;
+    state: T;
+    ts: number;
+    authorityGeneration: string;
+    authorityEpoch: number;
+    stateSeq: number;
+}
+export interface NetPlayerStateEntry<T = any> {
+    id: string;
+    cid: string | null;
+    state: T;
+}
+export interface NetPresenceEntry<T = any> {
+    id: string;
+    cid: string | null;
+    state: T;
+}
+/** Engine-neutral 2D/3D transform. Extra game fields pass through unchanged. */
+export interface NetTransform {
+    x: number;
+    y: number;
+    z?: number;
+    vx?: number;
+    vy?: number;
+    vz?: number;
+    rotation?: number;
+    angle?: number;
+    facing?: number | string;
+    alive?: boolean;
+    runId?: string | number;
+    [key: string]: any;
+}
+export interface TransformSampleInfo {
+    mode: TransformSampleMode;
+    renderTs: number;
+    sourceTs: number;
+    ageMs: number;
+    samples: number;
+}
+export interface SampleTransformOptions {
+    /** Override the adaptive 100-150 ms interpolation delay. */
+    renderDelayMs?: number;
+    /** Maximum velocity extrapolation when packets arrive late. Default 100 ms. */
+    maxExtrapolationMs?: number;
+}
+export interface NetRemotePlayer<T extends NetTransform = NetTransform> {
+    peer: NetPeer;
+    transform: T;
+    sample: TransformSampleInfo;
+}
+export interface SampleRemotePlayersOptions extends SampleTransformOptions {
+    /** Hide a live peer whose transform stream has been silent this long. Default 2000 ms. */
+    maxAgeMs?: number;
+}
+export interface NetWorldState<T = any> {
+    runId: string | number;
+    tick: number;
+    state: T;
+}
+export interface NetWorldEnvelope<T = any> extends NetWorldState<T> {
+    schemaVersion: string | number;
+}
+export interface NetWorldSyncOptions<T = any> {
+    /** Bump when the complete snapshot shape changes. Mismatched snapshots are ignored. */
+    schemaVersion: string | number;
+    /** Capture the complete authoritative world. Called only while this client is host. */
+    capture: () => NetWorldState<T>;
+    /** Restore a complete snapshot before authoritative simulation starts or resumes. */
+    restore: (world: NetWorldState<T>, snapshot: NetWorldSnapshot<NetWorldEnvelope<T>>) => void;
+    /** Apply a complete accepted snapshot to guest presentation (never to host simulation). */
+    present: (world: NetWorldState<T>, snapshot: NetWorldSnapshot<NetWorldEnvelope<T>>) => void;
+    onAuthorityStart: (context: {
+        epoch: number;
+        recovered: boolean;
+    }) => void;
+    onAuthorityStop: (context: {
+        epoch: number;
+    }) => void;
+    /** Complete-snapshot publication rate. Default 10 Hz, clamped to 1-30. */
+    publishHz?: number;
+    /** Extra game-specific validation after schema/run/tick validation. */
+    validate?: (world: NetWorldState<T>) => boolean;
+}
+export interface NetCollectionSyncOptions<TLocal, TSnapshot> {
+    getId: (snapshot: TSnapshot) => string | number;
+    create: (snapshot: TSnapshot, id: string | number) => TLocal;
+    update: (entity: TLocal, snapshot: TSnapshot, id: string | number) => void;
+    remove: (entity: TLocal, id: string | number) => void;
+}
+export type AuthoritativeSessionOptions<T = any> = Omit<ThreadSiteNetOptions, "world" | "mode" | "onWorld" | "onWorldRequest" | "onAuthorityAcquired" | "onAuthorityLost"> & {
+    /** Shared arena by default; use rooms when the game exposes room codes. */
+    mode?: NetMode;
+    world: NetWorldSyncOptions<T>;
+};
 export interface ThreadSiteNetOptions {
-  /** Tenant id — pass NET_CONFIG.game unchanged. */
-  game?: string;
-  /** Relay WebSocket URL — pass NET_CONFIG.url unchanged. */
-  url?: string;
-  /** Pass-through from spreading NET_CONFIG; the client pins the protocol itself. */
-  protocol?: number;
-  /** "single": one shared arena for the whole game, no room codes. Default "rooms". */
-  mode?: "single" | "rooms";
-  /** Room code to join (e.g. ThreadSiteNet.roomFromUrl()); null hosts fresh. */
-  room?: string | null;
-  /** True to host a new room; the code lands in `net.room`. */
-  createRoom?: boolean;
-  /** Display name for this peer (max 32 chars). */
-  name?: string;
-  /** Default true: keep retrying with backoff after drops. */
-  autoReconnect?: boolean;
-  /** Default 10000: how long connect() waits before rejecting. */
-  connectTimeoutMs?: number;
-  /** publishPlayerState coalescing rate, 1-60 (default 15). */
-  pstateHz?: number;
-  onStatus?: ((status: string, detail: unknown) => void) | null;
-  onPeers?: ((peers: NetPeer[]) => void) | null;
-  onPlayerState?: ((playerState: NetPlayerState) => void) | null;
-  onEvent?: ((event: NetEvent) => void) | null;
-  onState?: ((snapshot: NetSnapshot) => void) | null;
-  onHostChange?: ((hostId: string | null, isHost: boolean) => void) | null;
-  onStateRequest?: ((from: string) => void) | null;
+    /** Tenant id; spread NET_CONFIG rather than inventing one. */
+    game?: string;
+    /** Relay WebSocket URL; spread NET_CONFIG rather than inventing one. */
+    url?: string;
+    /** NET_CONFIG protocol guard. */
+    protocol?: number;
+    /** `single` joins one game-wide arena; `rooms` uses invite codes. */
+    mode?: NetMode;
+    /** Existing room to join. Use roomFromUrl() for invite links. */
+    room?: string | null;
+    /** Create a fresh code-addressed room. */
+    createRoom?: boolean;
+    name?: string;
+    autoReconnect?: boolean;
+    connectTimeoutMs?: number;
+    /** Coalesced transform/player-state rate, 1-60 Hz. Default 25. */
+    transformHz?: number;
+    /** Reliable-event lifetime through a disconnect, 250-30000 ms. Default 3000. */
+    eventTtlMs?: number;
+    /** Automatically yield host authority when the tab is hidden. Default true. */
+    autoYieldOnHidden?: boolean;
+    /** Safe, high-level complete-world replication lifecycle. */
+    world?: NetWorldSyncOptions;
+    onStatus?: ((status: NetStatus, detail: unknown) => void) | null;
+    onPeers?: ((peers: NetPeer[]) => void) | null;
 }
-
-export class ThreadSiteNet {
-  /** Connect and join a room; resolves once the room is joined. */
-  static connect(options?: ThreadSiteNetOptions): Promise<ThreadSiteNet>;
-  /** Room code from the page URL's "#room=CODE" fragment, or null. */
-  static roomFromUrl(): string | null;
-
-  constructor(options?: ThreadSiteNetOptions);
-
-  /** Resolves to the connected client; rejects on unreachable relay / bad room. */
-  opened: Promise<ThreadSiteNet>;
-
-  game: string;
-  url: string;
-  mode: "single" | "rooms";
-  requestedRoom: string;
-  createRoom: boolean;
-  name: string;
-  autoReconnect: boolean;
-  connectTimeoutMs: number;
-
-  /** Callbacks are plain mutable properties — reassignable after connecting. */
-  onStatus: ((status: string, detail: unknown) => void) | null;
-  onPeers: ((peers: NetPeer[]) => void) | null;
-  onPlayerState: ((playerState: NetPlayerState) => void) | null;
-  onEvent: ((event: NetEvent) => void) | null;
-  onState: ((snapshot: NetSnapshot) => void) | null;
-  onHostChange: ((hostId: string | null, isHost: boolean) => void) | null;
-  onStateRequest: ((from: string) => void) | null;
-
-  /** Current NET_STATUS value. */
-  readonly status: string;
-  /** Other peers in the room, excluding yourself. */
-  readonly peers: NetPeer[];
-  /** Every currently connected peer's newest self-published state. */
-  readonly playerStates: NetPlayerStateEntry[];
-  /** True while this client is the room's host. */
-  readonly isHost: boolean;
-  /** Frames queued-but-undelivered while offline (events only; flushed on reconnect). */
-  readonly queued: number;
-
-  /** Your per-connection peer id (null before the first welcome). */
-  id: string | null;
-  /** Your tab-session client id — survives reconnect/reload in this tab; use peer ids for live remote entities. */
-  cid: string | null;
-  /** Joined room code (null in "single" mode / before welcome). */
-  room: string | null;
-  hostId: string | null;
-  /** Latest ping round-trip time, epoch-ms (null before the first pong). */
-  rtt: number | null;
-  serverTimeOffset: number | null;
-  /** Sync-health counters, monotonic for this client instance. */
-  dropped: number;
-  duplicates: number;
-  rateLimited: number;
-
-  /** Peer record (or undefined) for a stable client id. */
-  peerByCid(cid: string): NetPeer | undefined;
-  /** Epoch-ms of the peer's newest inbound frame (null when unknown). */
-  peerLastSeen(peerId: string): number | null;
-  /** True when the peer's newest update is older than maxAgeMs (default 5s). */
-  isStale(peerId: string, maxAgeMs?: number): boolean;
-  /** Newest event sequence number received from a peer (null when none). */
-  lastSeqFrom(peerId: string): number | null;
-  /** Best estimate of the relay's current time (epoch ms) for shared timers. */
-  serverNow(): number;
-  /** Shareable invite URL ("…#room=CODE"), or null with no room/page URL. */
-  inviteUrl(): string | null;
-
-  /** Broadcast an application event to the room (sequenced; dedupe by seq). */
-  send(type: string, data?: any): void;
-  /** Send an application event to one peer only. */
-  sendTo(peerId: string, type: string, data?: any): void;
-  /** Publish an authoritative room snapshot (hosts, 8-15 Hz, increasing tick). Never queued while offline. */
-  publishState(state: any): void;
-  /** Publish YOUR OWN player's state (coalesced to pstateHz; per-frame safe). Never queued while offline. */
-  publishPlayerState(state: any): void;
-  /** Immediately push the pending player state (e.g. after a teleport). */
-  flushPlayerState(): void;
-  /** A peer's newest self-published state by peer id or cid (or undefined). */
-  peerState(peerIdOrCid: string): any;
-  /** Ask the current host for a fresh snapshot (fires onState on reply). */
-  requestState(): void;
-  /** Measure RTT; the latest value is always available as `net.rtt`. */
-  ping(): void;
-  /** Leave the room and stop reconnecting; the socket cannot be reused. */
-  close(): void;
+export declare class ThreadSiteNetError extends Error {
+    readonly code: string;
+    cause?: unknown;
+    net?: ThreadSiteNet;
+    constructor(message: string, code?: string, cause?: unknown);
 }
+export declare class ThreadSiteNet {
+    static roomFromUrl(): string | null;
+    static connect(options?: ThreadSiteNetOptions): Promise<ThreadSiteNet>;
+    static createAuthoritativeSession<T>(options: AuthoritativeSessionOptions<T>): Promise<ThreadSiteNet>;
+    readonly opened: Promise<ThreadSiteNet>;
+    readonly game: string;
+    readonly url: string;
+    readonly autoReconnect: boolean;
+    readonly connectTimeoutMs: number;
+    readonly eventTtlMs: number;
+    readonly autoYieldOnHidden: boolean;
+    mode: NetMode;
+    requestedRoom: string;
+    createRoom: boolean;
+    name: string;
+    onStatus: ((status: NetStatus, detail: unknown) => void) | null;
+    onPeers: ((peers: NetPeer[]) => void) | null;
+    readonly transforms: NetTransforms;
+    readonly authority: NetAuthority;
+    readonly world: NetWorld;
+    readonly clock: NetClock;
+    readonly events: NetEvents;
+    readonly intents: NetIntents;
+    readonly presence: NetPresence;
+    readonly entities: NetEntities;
+    readonly run: NetRun;
+    id: string | null;
+    cid: string | null;
+    room: string | null;
+    rtt: number | null;
+    serverTimeOffset: number | null;
+    duplicates: number;
+    rateLimited: number;
+    droppedTransient: number;
+    private readonly transformIntervalMs;
+    private readonly peersById;
+    private readonly statesByPeer;
+    private readonly lastSeenByPeer;
+    private readonly transformBuffers;
+    private readonly transformInfo;
+    private readonly appliedEventIds;
+    private readonly recentEvents;
+    private outbox;
+    private eventCounter;
+    private readonly eventInstance;
+    private transformTick;
+    private pendingPlayerState;
+    private playerStateTimer;
+    private socket;
+    private currentStatus;
+    private attempt;
+    private reconnectTimer;
+    private heartbeatTimer;
+    private lastPingTs;
+    private lastPongAt;
+    private manuallyClosed;
+    private openedSettled;
+    private resolveOpened;
+    private rejectOpened;
+    private latestWorld;
+    private latestWorldKey;
+    private lastPublishedWorld;
+    private jitterMs;
+    private lastTransformArrival;
+    /** True once the welcome's cached world and authority have been processed. */
+    private bootstrapDone;
+    private readonly visibilityHandler;
+    private readonly onlineHandler;
+    private resumeRequested;
+    private hasJoined;
+    private yieldPending;
+    constructor(options?: ThreadSiteNetOptions);
+    get status(): NetStatus;
+    /**
+     * True once the relay welcome has been fully processed, including its cached
+     * world snapshot and initial authority. Authoritative publishing stays
+     * blocked (`not_ready`) until then, so a freshly elected host can never
+     * overwrite a persisted/restored world before restoring it.
+     */
+    get bootstrapped(): boolean;
+    get peers(): NetPeer[];
+    get playerStates(): NetPlayerStateEntry[];
+    get queued(): number;
+    peerState(peerId: string): any;
+    peerLastSeen(peerId: string): number | null;
+    isStale(peerId: string, maxAgeMs?: number): boolean;
+    inviteUrl(): string | null;
+    close(): void;
+    private emitEvent;
+    private queuePlayerState;
+    private sendReliable;
+    private sendFrame;
+    private connectSocket;
+    private handleFrame;
+    private acceptWelcomePeer;
+    private acceptPlayerState;
+    private acceptPresence;
+    private acceptEphemeral;
+    private addTransform;
+    private acceptEvent;
+    private parseWorld;
+    private acceptWorld;
+    private adoptGeneration;
+    private applyAuthority;
+    private removePeer;
+    private handleError;
+    private retryEvent;
+    private flushOutbox;
+    private pruneOutbox;
+    private emitPeers;
+    private setStatus;
+    private failOrRetry;
+    private scheduleReconnect;
+}
+export declare class NetTransforms {
+    private readonly net;
+    constructor(net: ThreadSiteNet);
+    publish(transform: NetTransform): void;
+    teleport(transform: NetTransform): void;
+    sample<T extends NetTransform = NetTransform>(peerId: string, options?: SampleTransformOptions): T | null;
+    sampleAll<T extends NetTransform = NetTransform>(options?: SampleRemotePlayersOptions): NetRemotePlayer<T>[];
+    listAlive<T extends NetTransform = NetTransform>(options?: SampleRemotePlayersOptions): NetRemotePlayer<T>[];
+    nearest<T extends NetTransform = NetTransform>(x: number, y: number, options?: SampleRemotePlayersOptions): NetRemotePlayer<T> | null;
+    flush(): void;
+    info(peerId: string): TransformSampleInfo | null;
+}
+export declare class NetAuthority {
+    private readonly net;
+    private readonly acquireHandlers;
+    private readonly loseHandlers;
+    constructor(net: ThreadSiteNet);
+    isHost(): boolean;
+    /**
+     * False until the relay welcome — including its cached or persisted world —
+     * has been processed. Authoritative publishing throws `not_ready` before
+     * this flips true, so restored arenas cannot be wiped by an eager host.
+     */
+    get ready(): boolean;
+    epoch(): number;
+    generation(): string | null;
+    yield(): boolean;
+    onAcquire(handler: (snapshot: NetWorldSnapshot | null, epoch: number) => void): Unsubscribe;
+    onLose(handler: (epoch: number) => void): Unsubscribe;
+    _acquire(snapshot: NetWorldSnapshot | null, epoch: number): void;
+    _lose(epoch: number): void;
+}
+export declare class NetWorld {
+    private readonly net;
+    private readonly handlers;
+    constructor(net: ThreadSiteNet);
+    sync<T>(options: NetWorldSyncOptions<T>): NetWorldSyncController<T>;
+    latest<T = any>(): NetWorldSnapshot<T> | null;
+    /** The newest accepted complete world; alias of `latest()`. */
+    get snapshot(): NetWorldSnapshot | null;
+    /**
+     * True when this client's host authority began from an existing snapshot
+     * (relay cache or the relay's persisted arena world) rather than a fresh
+     * world — check it inside `onAuthorityAcquired`/`onAuthorityStart`.
+     */
+    get restored(): boolean;
+    get generation(): string | null;
+    get epoch(): number;
+    publishNow(): boolean;
+    yieldAuthority(): boolean;
+    /** Publish one complete world immediately (host only, raw lifecycle only). */
+    publish(state: any): void;
+    /** Publish a brand-new world, replacing any restored/cached one (raw lifecycle only). */
+    reset(state: any): void;
+    onSnapshot<T = any>(handler: (snapshot: NetWorldSnapshot<T>) => void): Unsubscribe;
+    _accept(snapshot: NetWorldSnapshot): void;
+}
+export declare class NetClock {
+    private readonly net;
+    constructor(net: ThreadSiteNet);
+    now(): number;
+    after(ms: number): number;
+    elapsed(startTs: number): number;
+    remaining(targetTs: number): number;
+}
+type Unsubscribe = () => void;
+export declare class NetEvents {
+    private readonly net;
+    private readonly reliableHandlers;
+    private readonly ephemeralHandlers;
+    private readonly ephemeralLastSent;
+    private readonly ephemeralPending;
+    private readonly ephemeralTimers;
+    constructor(net: ThreadSiteNet);
+    sendReliable(type: string, data?: any, peerId?: string | null): string;
+    sendEphemeral(type: string, data?: any, peerId?: string | null): void;
+    onReliable(type: string, handler: (event: NetEvent) => void): Unsubscribe;
+    onEphemeral(type: string, handler: (event: NetEphemeralEvent) => void): Unsubscribe;
+    _acceptReliable(event: NetEvent): void;
+    _acceptEphemeral(event: NetEphemeralEvent): void;
+    private sendEphemeralNow;
+}
+export declare class NetIntents {
+    private readonly net;
+    private readonly handlers;
+    constructor(net: ThreadSiteNet);
+    send<T>(type: string, payload: T): string;
+    on<T = any>(type: string, handler: (intent: NetIntent<T>) => void): Unsubscribe;
+    _accept(event: NetEvent): void;
+}
+export declare class NetPresence {
+    private readonly net;
+    private readonly remote;
+    private readonly handlers;
+    private localState;
+    constructor(net: ThreadSiteNet);
+    set<T>(state: T): void;
+    get<T = any>(peerId: string): T | undefined;
+    list<T = any>(): NetPresenceEntry<T>[];
+    onChange(handler: (presence: NetPlayerState) => void): Unsubscribe;
+    _setLocal(state: any): void;
+    _resend(): void;
+    _accept(presence: NetPlayerState): void;
+    _remove(peerId: string): void;
+}
+export declare class NetRun {
+    private readonly net;
+    private currentRun;
+    private currentRunTick;
+    private readonly handlers;
+    constructor(net: ThreadSiteNet);
+    get current(): string | number | null;
+    get tick(): number | null;
+    isCurrent(runId: unknown): boolean;
+    onChanged(handler: (change: NetRunChange) => void): Unsubscribe;
+    _accept(runId: string | number, tick: number): void;
+}
+export declare class NetEntities {
+    syncCollection<TLocal, TSnapshot>(name: string, options: NetCollectionSyncOptions<TLocal, TSnapshot>): NetCollectionSync<TLocal, TSnapshot>;
+}
+export declare class NetCollectionSync<TLocal, TSnapshot> {
+    private readonly options;
+    private readonly entities;
+    readonly name: string;
+    constructor(name: string, options: NetCollectionSyncOptions<TLocal, TSnapshot>);
+    apply(snapshots: readonly TSnapshot[]): void;
+    get(id: string | number): TLocal | undefined;
+    values(): TLocal[];
+    clear(): void;
+}
+/**
+ * Owns the easy-to-get-wrong authority lifecycle for a complete shared world.
+ * It restores before starting a new host, publishes periodically, serves late
+ * join requests, presents accepted snapshots only to guests, and stops the
+ * host loop immediately when authority is lost.
+ */
+export declare class NetWorldSyncController<T = any> {
+    private readonly net;
+    private readonly options;
+    private timer;
+    private disposed;
+    private lastPresented;
+    private readonly previousWorld;
+    private readonly previousRequest;
+    private readonly previousAcquired;
+    private readonly previousLost;
+    private readonly worldHandler;
+    private readonly requestHandler;
+    private readonly acquiredHandler;
+    private readonly lostHandler;
+    constructor(net: ThreadSiteNet, options: NetWorldSyncOptions<T>);
+    get currentRunId(): string | number | null;
+    get currentTick(): number | null;
+    /** Publish a fresh complete world immediately when host. */
+    publishNow(): boolean;
+    /** Publish the final complete world and ask the relay to migrate authority. */
+    yieldAuthority(): boolean;
+    dispose(): void;
+    private decode;
+    private validWorld;
+    private captureEnvelope;
+    private stopTimer;
+}
+export {};

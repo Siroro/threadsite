@@ -461,7 +461,7 @@ async function validateScriptTypes(root: string, scripts: string[], tsSources: s
 
 /**
  * Type-check the authored TypeScript sources of a bundled project: a temp
- * mirror carries site/src/ verbatim and the harness-owned js/ files verbatim
+ * mirror carries site/src/ verbatim and the harness-owned net files verbatim
  * (real types for call sites, never inputs); the harness-seeded engine
  * packages contribute their REAL declarations through absolute tsconfig
  * `paths`, and hand-downloaded vendored files under assets/ become any-typed
@@ -828,7 +828,20 @@ export async function publishSite(siteDir: string, siteSlug: string): Promise<vo
   const backup = safeChild(config.publishRoot, `.backup-${siteSlug}-${suffix}`);
 
   await fs.rm(staging, { recursive: true, force: true });
-  await fs.cp(siteDir, staging, { recursive: true, dereference: false, force: true });
+  // Apache receives runtime files only. Authored TypeScript and the unbundled
+  // harness net client are build inputs; esbuild has already folded them into
+  // the minified site/js bundles.
+  await fs.cp(siteDir, staging, {
+    recursive: true,
+    dereference: false,
+    force: true,
+    filter: (source) => {
+      const relative = path.relative(siteDir, source);
+      if (!relative) return true;
+      const root = relative.split(path.sep)[0];
+      return root !== "src" && root !== "net";
+    },
+  });
   await stampDeployVersion(staging, await workspaceCommit(siteDir));
   await versionAssetReferences(staging);
 

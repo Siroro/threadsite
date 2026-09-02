@@ -11,9 +11,10 @@ import os from "node:os";
 import { buildSite } from "./src/build.js";
 import { validateSite, publishSite } from "./src/publish.js";
 import { ensureEnginePackages } from "./src/engines.js";
-import { ensureMultiplayerFiles } from "./src/multiplayer.js";
+import { ensureMultiplayerFiles, PROTOCOL_VERSION } from "./src/multiplayer.js";
 import { ensureSkillFiles, skillNames } from "./src/skills.js";
 import { starterSource } from "./src/starter.js";
+import { untrackGeneratedArtifacts } from "./src/git.js";
 
 let passed = 0;
 let failed = 0;
@@ -38,8 +39,19 @@ async function expectThrow(name: string, fn: () => Promise<unknown>, match: RegE
   }
 }
 
-async function scaffold(kind: "site" | "game-2d" | "game-3d"): Promise<string> {
-  const ws = await fs.mkdtemp(path.join(os.tmpdir(), `threadsite-e2e-${kind}-`));
+/** Contents of every .js file under dir, recursively — bundle assertions must
+ * cover split chunks, not just the entry that pulled them in. */
+async function readJsTree(dir: string): Promise<string[]> {
+  const chunks: string[] = [];
+  for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) chunks.push(...await readJsTree(full));
+    else if (entry.name.endsWith(".js")) chunks.push(await fs.readFile(full, "utf8"));
+  }
+  return chunks;
+}
+
+async function scaffold(kind: "site" | "game-2d" | "game-3d"): Promise<string> {  const ws = await fs.mkdtemp(path.join(os.tmpdir(), `threadsite-e2e-${kind}-`));
   const site = path.join(ws, "site");
   await fs.mkdir(path.join(site, "src"), { recursive: true });
   await fs.mkdir(path.join(site, "js"), { recursive: true });
@@ -50,7 +62,7 @@ async function scaffold(kind: "site" | "game-2d" | "game-3d"): Promise<string> {
   await fs.writeFile(path.join(site, "css", "s.css"), "main{font-family:sans-serif}\n");
   await fs.writeFile(path.join(site, "src", "main.ts"), starterSource(kind));
   if (kind !== "site") {
-    await ensureMultiplayerFiles(ws, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: 3 }, kind);
+    await ensureMultiplayerFiles(ws, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: PROTOCOL_VERSION }, kind);
   }
   await ensureEnginePackages(ws, kind);
   await ensureSkillFiles(ws, kind);
@@ -66,6 +78,10 @@ async function main(): Promise<void> {
   check("one output emitted", built3d.emitted === 1, JSON.stringify(built3d));
   const bundle = await fs.readFile(path.join(site3d, "js", "main.js"), "utf8");
   check("bundle exists and contains three boot log", bundle.includes("[boot] three.js r"));
+  // Three.js embeds multiline shader strings, so total line count remains high
+  // even after minification; the generated JS itself is packed onto a long line.
+  check("browser bundle is minified", (bundle.split(/\r?\n/, 1)[0]?.length ?? 0) > 1000,
+    `first generated line ${(bundle.split(/\r?\n/, 1)[0]?.length ?? 0)} chars`);
   check("three tree-shaken (no WebGLRenderer)", !bundle.includes("WebGLRenderer"), `${(bundle.length / 1024).toFixed(0)}KB bundle`);
   check("MIT legal comment kept", bundle.includes("MIT") || bundle.includes("Three.js Authors"));
   const manifest3d = JSON.parse(await fs.readFile(path.join(ws3d, "build-manifest.json"), "utf8"));
@@ -76,6 +92,9 @@ async function main(): Promise<void> {
   await publishSite(site3d, "e2e-3d");
   const publishedIndex = await fs.readFile(path.join(publishRoot, "e2e-3d", "index.html"), "utf8");
   check("published index cache-busts the bundle", /js\/main\.js\?v=[0-9a-f]{10}/.test(publishedIndex), publishedIndex.slice(0, 200));
+  check("published runtime excludes authored src", !(await fs.stat(path.join(publishRoot, "e2e-3d", "src")).then(() => true, () => false)));
+  check("published runtime excludes unbundled net inputs", !(await fs.stat(path.join(publishRoot, "e2e-3d", "net")).then(() => true, () => false)));
+  check("published runtime keeps minified bundle", await fs.stat(path.join(publishRoot, "e2e-3d", "js", "main.js")).then(() => true, () => false));
 
   console.log("\n== 1b. publish stamps a deploy version and injects the update checker ==");
   const readVersion = async (): Promise<{ version: string; commit?: string | null }> => JSON.parse(
@@ -100,6 +119,31 @@ async function main(): Promise<void> {
       await fs.readFile(path.join(publishRoot, "e2e-git", "threadsite-version.json"), "utf8"),
     ) as { version: string; commit?: string | null };
     check("git workspace stamps its HEAD commit", /^[0-9a-f]{40}$/.test(stamped.commit ?? ""), JSON.stringify(stamped));
+  }
+  // Existing repositories may already track generated files. Migration removes
+  // them from the index while preserving workspace copies for the live build.
+  {
+    const execFileSync = (await import("node:child_process")).execFileSync;
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-e2e-untrack-"));
+    await fs.mkdir(path.join(workspace, "site", "src"), { recursive: true });
+    await fs.mkdir(path.join(workspace, "site", "js"), { recursive: true });
+    await fs.mkdir(path.join(workspace, "site", "net"), { recursive: true });
+    await fs.writeFile(path.join(workspace, "site", "src", "main.ts"), "console.log('source');\n");
+    await fs.writeFile(path.join(workspace, "site", "js", "main.js"), "console.log('built');\n");
+    await fs.writeFile(path.join(workspace, "site", "net", "threadsite-net.js"), "export {};\n");
+    await fs.writeFile(path.join(workspace, "build-manifest.json"), "{}\n");
+    await fs.writeFile(path.join(workspace, ".gitignore"), "site/js/\nsite/net/\nbuild-manifest.json\n");
+    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
+    execFileSync("git", ["add", "-f", "."], { cwd: workspace });
+    execFileSync("git", ["-c", "user.email=e2e@local", "-c", "user.name=e2e", "commit", "--quiet", "-m", "old boundary"], { cwd: workspace });
+    await untrackGeneratedArtifacts(workspace);
+    const tracked = execFileSync("git", ["ls-files"], { cwd: workspace, encoding: "utf8" }) as string;
+    check("migration untracks generated bundles/net/manifest but keeps source",
+      tracked.includes("site/src/main.ts") && !tracked.includes("site/js/") && !tracked.includes("site/net/") && !tracked.includes("build-manifest.json"),
+      tracked.replaceAll("\n", ", "));
+    check("untracking preserves runtime workspace files",
+      await fs.stat(path.join(workspace, "site", "js", "main.js")).then(() => true, () => false)
+      && await fs.stat(path.join(workspace, "site", "net", "threadsite-net.js")).then(() => true, () => false));
   }
   check("page carries the update checker for its deploy",
     publishedIndex.includes("threadsite-version.json") && publishedIndex.includes(`var DEPLOYED = "${deployed.version}"`),
@@ -138,6 +182,53 @@ async function main(): Promise<void> {
     && (await fs.readFile(skill3dPath, "utf8")) === skill3d);
   check("skill seed idempotent", (await ensureSkillFiles(ws3d, "game-3d")) === false);
 
+  console.log("\n== 1d. 3D physics stack: Rapier compat + three-mesh-bvh ==");
+  const rapierDir = path.join(ws3d, "node_modules", "@dimforge", "rapier3d-compat");
+  check("Rapier compat ESM seeded", await fs.stat(path.join(rapierDir, "rapier.es.js")).then(() => true, () => false));
+  check("Rapier real declarations seeded", await fs.stat(path.join(rapierDir, "rapier.d.ts")).then(() => true, () => false));
+  const bvhDir = path.join(ws3d, "node_modules", "three-mesh-bvh");
+  check("three-mesh-bvh ESM seeded", await fs.stat(path.join(bvhDir, "src", "index.js")).then(() => true, () => false));
+  check("three-mesh-bvh declarations seeded", await fs.stat(path.join(bvhDir, "src", "index.d.ts")).then(() => true, () => false));
+  // Seeded directories are freshness-checked per file: a deleted module inside
+  // one must reseed, not fail the next build while looking fresh.
+  await fs.rm(path.join(bvhDir, "src", "core", "MeshBVH.js"));
+  check("deleted file inside a seeded dir reseeds", (await ensureEnginePackages(ws3d, "game-3d")) === true
+    && await fs.stat(path.join(bvhDir, "src", "core", "MeshBVH.js")).then(() => true, () => false));
+  check("3D engine seed idempotent", (await ensureEnginePackages(ws3d, "game-3d")) === false);
+  // Authored code across all three packages type-checks against the real
+  // declarations (validateSite's tsc gate) and bundles with the compat build's
+  // WASM inlined into the minified output.
+  await fs.writeFile(path.join(site3d, "src", "physics.ts"), [
+    `import * as THREE from "three";`,
+    `import RAPIER from "@dimforge/rapier3d-compat";`,
+    `import { computeBoundsTree, acceleratedRaycast, MeshBVH } from "three-mesh-bvh";`,
+    ``,
+    `THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;`,
+    `THREE.Mesh.prototype.raycast = acceleratedRaycast as unknown as typeof THREE.Mesh.prototype.raycast;`,
+    ``,
+    `export async function physicsBoot(): Promise<void> {`,
+    `  await RAPIER.init();`,
+    `  const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });`,
+    `  const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(0, 10, 0));`,
+    `  world.createCollider(RAPIER.ColliderDesc.cuboid(0.5, 0.5, 0.5), body);`,
+    `  for (let i = 0; i < 120; i++) world.step();`,
+    `  const bvh = new MeshBVH(new THREE.BoxGeometry(2, 2, 2));`,
+    `  bvh.raycast(new THREE.Ray(new THREE.Vector3(0, 5, 0), new THREE.Vector3(0, -1, 0)), THREE.DoubleSide);`,
+    `  console.log("physics settled y", body.translation().y.toFixed(2));`,
+    `}`,
+    ``,
+  ].join("\n"));
+  await fs.writeFile(path.join(site3d, "src", "main.ts"), `import { physicsBoot } from "./physics.js";\nvoid physicsBoot();\n`);
+  const builtPhysics = await buildSite(ws3d);
+  check("physics entry builds", builtPhysics.skipped === false, JSON.stringify(builtPhysics));
+  // With code splitting the engine graph lands in shared chunks, not just
+  // main.js — scan every emitted JavaScript output.
+  const physicsJs = (await readJsTree(path.join(site3d, "js"))).join("");
+  check("rapier wasm inlined into the bundle", physicsJs.includes("AGFzbQ"), `${(physicsJs.length / 1024).toFixed(0)}KB across js/`);
+  check("three-mesh-bvh bundled", physicsJs.includes("MeshBVH"));
+  await validateSite(site3d);
+  check("physics game-3d validates against real declarations", true);
+
   console.log("\n== 2. net client import bundles cleanly; multiplayer game-2d ==");
   const ws2d = await scaffold("game-2d");
   const site2d = path.join(ws2d, "site");
@@ -164,18 +255,45 @@ async function main(): Promise<void> {
     `import { ThreadSiteNet } from "../net/threadsite-net.js";`,
     `const app = document.getElementById("app");`,
     `if (app) app.textContent = \`phaser \${Phaser.VERSION} relay \${NET_CONFIG.url}\`;`,
-    `// Typed envelope: ps.from/ps.cid/ps.state/ps.ts all resolve from the d.ts.`,
-    `void ThreadSiteNet.connect({`,
+    `// Typed envelopes: status/peer/event/intent/remote-player fields all resolve from the d.ts.`,
+    `void ThreadSiteNet.createAuthoritativeSession({`,
     `  ...NET_CONFIG,`,
     `  mode: "single",`,
     `  name: "e2e",`,
-    `  onPlayerState: (ps) => console.log(ps.cid, ps.state, ps.ts),`,
-    `  onEvent: (ev) => console.log(ev.from, ev.type, ev.seq),`,
+    `  onStatus: (status, detail) => console.log(status, detail),`,
+    `  onPeers: (peers) => console.log(peers.length),`,
+    `  world: {`,
+    `    schemaVersion: 1,`,
+    `    capture: () => ({ runId: "run", tick: 1, state: { enemies: [] as { id: string; hp: number }[] } }),`,
+    `    restore: ({ state }) => console.log(state.enemies),`,
+    `    present: ({ state }) => console.log(state.enemies),`,
+    `    onAuthorityStart: () => undefined,`,
+    `    onAuthorityStop: () => undefined,`,
+    `  },`,
+    `}).then((net) => {`,
+    `  net.transforms.publish({ x: 0, y: 0, alive: true, runId: net.run.current ?? "run" });`,
+    `  net.presence.set({ ready: true });`,
+    `  net.events.onReliable("hit", (ev) => console.log(ev.from, ev.cid, ev.type, ev.id));`,
+    `  net.events.sendReliable("hit", { dmg: 1 });`,
+    `  net.intents.on("move", (intent) => console.log(intent.from, intent.runId, intent.payload));`,
+    `  const remote = net.transforms.sampleAll()[0];`,
+    `  if (remote) console.log(remote.peer.id, remote.transform.x, remote.sample.ageMs);`,
+    `  const sync = net.entities.syncCollection("enemies", {`,
+    `    getId: (enemy: { id: string; hp: number }) => enemy.id,`,
+    `    create: (enemy) => ({ ...enemy }),`,
+    `    update: (local, enemy) => Object.assign(local, enemy),`,
+    `    remove: () => undefined,`,
+    `  });`,
+    `  sync.apply([{ id: "e1", hp: 1 }]);`,
     `});`,
     ``,
   ].join("\n"));
   const built2d = await buildSite(ws2d);
   check("game-2d builds", built2d.skipped === false && built2d.emitted === 1, JSON.stringify(built2d));
+  const ignored = (await fs.readFile(path.join(ws2d, ".gitignore"), "utf8")).split(/\r?\n/);
+  check("generated build and net paths are gitignored",
+    ["node_modules/", "site/js/", "site/net/", "build-manifest.json"].every((line) => ignored.includes(line)),
+    ignored.join(", "));
   const bundle2d = await fs.readFile(path.join(site2d, "js", "main.js"), "utf8");
   check("phaser bundled", bundle2d.includes("Phaser") || bundle2d.includes("Scene"), `${(bundle2d.length / 1024).toFixed(0)}KB`);
   check("net client bundled", bundle2d.includes("ThreadSiteNet"));
@@ -412,12 +530,14 @@ async function main(): Promise<void> {
   // harness, with the net/ files (including declarations) taking their place.
   await fs.writeFile(path.join(siteNet, "js", "threadsite-net.js"), "// stale legacy copy\n");
   await fs.writeFile(path.join(siteNet, "js", "net-config.js"), "// stale legacy copy\n");
-  await ensureMultiplayerFiles(wsNet, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: 3 }, "game-3d");
+  await ensureMultiplayerFiles(wsNet, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: PROTOCOL_VERSION }, "game-3d");
   check("stale js/threadsite-net.js removed", await fs.access(path.join(siteNet, "js", "threadsite-net.js")).then(() => false, () => true));
   check("stale js/net-config.js removed", await fs.access(path.join(siteNet, "js", "net-config.js")).then(() => false, () => true));
   check("net client seeded in site/net", await fs.access(path.join(siteNet, "net", "threadsite-net.js")).then(() => true, () => false));
   check("net declarations seeded in site/net", await fs.access(path.join(siteNet, "net", "threadsite-net.d.ts")).then(() => true, () => false));
   check("net-config declarations seeded", await fs.access(path.join(siteNet, "net", "net-config.d.ts")).then(() => true, () => false));
+  check("NETWORKING.md gotcha guide seeded at root", await fs.access(path.join(wsNet, "NETWORKING.md")).then(() => true, () => false));
+  check("AGENTS.md references the networking guide", (await fs.readFile(path.join(wsNet, "AGENTS.md"), "utf8")).includes("NETWORKING.md"));
   await buildSite(wsNet);
   await validateSite(siteNet);
   check("net files validate (d.ts exempt from the src/-only rule)", true);
@@ -456,7 +576,7 @@ async function main(): Promise<void> {
   const legacyNet = await fs.readFile(path.join(siteLive, "net", "threadsite-net.js"), "utf8");
   await fs.writeFile(path.join(siteLive, "js", "threadsite-net.js"), legacyNet);
   await fs.writeFile(path.join(siteLive, "js", "net-config.js"),
-    "/** @type {{protocol: number, game: string, url: string}} */\nexport const NET_CONFIG = Object.freeze({ protocol: 3, game: \"e2e\", url: \"ws://localhost:8090/ws\" });\n");
+    `/** @type {{protocol: number, game: string, url: string}} */\nexport const NET_CONFIG = Object.freeze({ protocol: ${PROTOCOL_VERSION}, game: \"e2e\", url: \"ws://localhost:8090/ws\" });\n`);
   await fs.writeFile(path.join(siteLive, "js", "main.js"),
     `import { NET_CONFIG } from "./net-config.js";\nimport { ThreadSiteNet } from "./threadsite-net.js";\nconst app = document.getElementById("app");\nif (app) app.textContent = \`legacy \${NET_CONFIG.game}\`;\nconsole.log(typeof ThreadSiteNet.connect);\n`);
   await fs.writeFile(path.join(siteLive, "index.html"),
@@ -465,7 +585,7 @@ async function main(): Promise<void> {
   // The update turn: harness restore runs (removes the old js/ net copies,
   // seeds site/net/), then the deploy-tail build+validate — exactly what
   // completeTurn does before the agent is even prompted.
-  await ensureMultiplayerFiles(wsLive, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: 3 }, "game-2d");
+  await ensureMultiplayerFiles(wsLive, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: PROTOCOL_VERSION }, "game-2d");
   check("legacy game's js/net client removed by restore", await fs.access(path.join(siteLive, "js", "threadsite-net.js")).then(() => false, () => true));
   const liveBuilt = await buildSite(wsLive);
   check("legacy project builds skipped (no src/)", liveBuilt.skipped === true, JSON.stringify(liveBuilt));

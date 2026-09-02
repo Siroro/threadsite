@@ -4,7 +4,7 @@ ThreadSite is a small Discord harness for an AI coding agent. One Discord thread
 
 - `/site start prompt:"..."` in a text channel creates a Discord thread, a workspace, an agent session, a public Forgejo repository, the first git commit, and a live static site.
 - `/makegam dimension:<2d|3d> prompt:"..."` does the same for a **static browser game** and writes a mode-specific `AGENTS.md` before the agent session starts.
-- Every game is built **multiplayer-first**: the harness provides one shared multi-tenant WebSocket relay, a documented wire protocol (ThreadSite Multiplayer Protocol v3), and a vendored browser client, so games get rooms, live sync, and host migration with zero server code and zero per-game instances (see below).
+- Every game is built **multiplayer-first**: the harness provides one shared multi-tenant WebSocket relay, ThreadSite Multiplayer Protocol v4, and a TypeScript-authored browser client, so games get rooms, authoritative host migration, buffered transforms, shared clocks and reconnect safety with zero game server code (see below).
 - Every normal message in that registered thread becomes the next mutation of the same site.
 - The harness validates the result, commits and **pushes git first**, and only then publishes it to Apache. A failed push does not replace the previously published site. Each publish also stamps a content-derived deploy id into the site and pages reload themselves when a newer deploy goes live.
 - `/site-admin model` changes the model globally for the next turn in every thread.
@@ -49,9 +49,9 @@ This harness intentionally does **not** let the model run `npm install`, shell c
 
 ### TypeScript sources, harness-owned build
 
-Projects are authored in **TypeScript under `site/src/`**. The model never runs a build; the *harness* runs the only one, as the final step of deployment: when the agent's turn ends, the bot bundles every top-level `site/src/*.ts` entry into plain browser JavaScript under `site/js/` with **esbuild** (TypeScript compiled, the import graph followed, modules merged and tree-shaken, code-split chunks under `js/chunks/`). Sources and compiled output are committed together, and the published artifact is still an ordinary static tree served verbatim by Apache — no runtime build, no deferred work. Bundler failures (unresolved imports, misspelled exports, syntax damage) surface as code-framed `file:line:col` errors and feed the same one-shot automatic repair round-trip as validation errors.
+Projects are authored in **TypeScript under `site/src/`**. The model never runs a build; the *harness* runs the only one before every publish. It bundles and minifies each top-level `site/src/*.ts` entry into browser JavaScript under the gitignored `site/js/` workspace directory with **esbuild** (imports followed, modules merged and tree-shaken, code-split chunks under `js/chunks/`). Forgejo stores authored source, HTML/CSS and assets—not compiler output. Apache receives the runtime boundary: minified bundles, HTML/CSS and assets, with `site/src/` and the unbundled networking client excluded. There is no runtime or deferred build. Bundler failures surface as code-framed `file:line:col` errors and feed the same one-shot repair round-trip as validation errors.
 
-Game repos get their **engine installed the way a dependency manager would**: three.js (r185) for 3D games and Phaser 4.2.1 for 2D games live in a harness-managed `node_modules/` at the workspace root (gitignored, never published, re-seeded on drift). Authored code imports the bare package names (`import * as THREE from "three"`, `import * as Phaser from "phaser"`) and esbuild resolves them by walking up from `site/src/` exactly like normal npm usage. Three.js remains tree-shakeable; Phaser is seeded from its official minified ESM distribution so its framework baseline stays well inside the static-site budget. Both engines ship their **real TypeScript declarations**, so the agent's editor and the validation gate check engine usage against the actual APIs — wrong argument types and misspelled members fail the turn. Each game repo also carries a per-kind **engine playbook as an OpenCode skill** — `.opencode/skills/game-2d` + `phaser-4` for Phaser, `game-3d` for three.js — seeded, re-checked, and committed on the same schedule as the engine package, so the agent loads the deep engine how-to (bootstrap patterns, lighting and batching budgets, disposal, asset pipelines) on demand while AGENTS.md stays the compact rulebook; site projects get no skill.
+Game repos get their **engine installed the way a dependency manager would**: 3D games get a curated stack — three.js (r185) plus `@dimforge/rapier3d-compat` (0.12) for physics and `three-mesh-bvh` (0.9) for BVH-accelerated queries against static geometry — and 2D games get Phaser 4.2.1, all in a harness-managed `node_modules/` at the workspace root (gitignored, never published, re-seeded on drift). Authored code imports the bare package names (`import * as THREE from "three"`, `import RAPIER from "@dimforge/rapier3d-compat"`, `import * as Phaser from "phaser"`) and esbuild resolves them by walking up from `site/src/` exactly like normal npm usage. Three.js remains tree-shakeable; Phaser is seeded from its official minified ESM distribution so its framework baseline stays well inside the static-site budget; Rapier is the `-compat` build whose WASM is base64-inlined into the single ESM file, so it bundles with no `.wasm` asset handling. Every package ships its **real TypeScript declarations**, so the agent's editor and the validation gate check engine usage against the actual APIs — wrong argument types and misspelled members fail the turn. Each game repo also carries a per-kind **engine playbook as an OpenCode skill** — `.opencode/skills/game-2d` + `phaser-4` for Phaser, `game-3d` for three.js — seeded, re-checked, and committed on the same schedule as the engine package, so the agent loads the deep engine how-to (bootstrap patterns, lighting and batching budgets, physics and character-controller discipline, disposal, asset pipelines) on demand while AGENTS.md stays the compact rulebook; site projects get no skill.
 
 The one deliberate runtime exception is the **harness-owned multiplayer relay**: the model never writes server code, it only uses the vendored browser client (`site/net/threadsite-net.js`) pointed at the shared relay whose URL and game id the harness injects. The relay is part of the infrastructure, not part of any generated deliverable, and games must stay fully playable solo when it is unreachable.
 
@@ -276,12 +276,11 @@ Discord thread message
   -> load persistent project AGENTS.md when present (2D/3D game + multiplayer rules)
   -> harness re-checks the multiplayer client/config files, the engine packages in node_modules, and the engine playbook skill under .opencode/skills/
   -> edit site/** only (browser code authored in TypeScript under site/src/)
-  -> harness build: bundle site/src/ -> static site/js/ (esbuild, tree-shaken)
+  -> harness build: bundle/minify site/src/ -> gitignored site/js/ (esbuild, tree-shaken)
   -> validate static tree (bundle errors and type errors get one repair round-trip)
   -> bot writes README metadata
-  -> git commit --allow-empty
-  -> git push to public Forgejo
-  -> atomically replace the published Apache directory
+  -> commit/push authored source to public Forgejo (no site/js, site/net, or build manifest)
+  -> atomically replace the published Apache directory with runtime files (no site/src or site/net)
   -> refresh the public all-sites index
 ```
 
@@ -292,7 +291,7 @@ The git commit is deliberately performed by the harness rather than by the model
 Both profiles are deliberately **static-web only** and go through the same validation, git-push-first, and Apache publication boundary as normal sites. Both are also built **multiplayer-first** through the shared relay (see the next section): the agent gets the vendored net client, this game's tenant config, and the full sync guide in its `AGENTS.md`.
 
 - **2D**: builds on the installed Phaser 4.2.1 engine package by default for action/arcade/sprite-heavy games, using its Scenes/input/cameras/Arcade Physics before hand-rolling engine infrastructure, with Canvas 2D or DOM/SVG also allowed for board/puzzle/UI-heavy games. Its `AGENTS.md` asks for responsive controls, game states, scoring/progression, collision discipline, frame-rate-independent animation, and lightweight game feel.
-- **3D**: requires a genuine 3D play space using WebGL, built on the installed three.js engine package. It forbids npm/Vite/webpack/build pipelines of the agent's own, asks for conservative geometry/effects, camera and input guidance, and a visible fallback when WebGL cannot initialize.
+- **3D**: requires a genuine 3D play space using WebGL, built on the installed three.js engine package, with Rapier (`@dimforge/rapier3d-compat`) for anything needing rigid bodies or robust character collision and `three-mesh-bvh` for fast raycasts/spatial queries on complex static meshes. It forbids npm/Vite/webpack/build pipelines of the agent's own and vendoring second physics engines, asks for conservative geometry/effects, camera and input guidance, fixed-timestep physics with interpolated rendering, and a visible fallback when WebGL cannot initialize.
 
 The generated `AGENTS.md` is committed to the public project repository but is outside `site/`, so the agent can read it but cannot edit it under the supplied permissions. The agent platform discovers project-root `AGENTS.md` files as persistent project instructions.
 
@@ -309,20 +308,19 @@ A single relay therefore serves any number of games and any number of rooms per 
 
 On creation — and re-checked before every mutation, in case the agent removed them:
 
-- `site/net/threadsite-net.js` + `threadsite-net.d.ts` — a vendored, zero-dependency browser client for the protocol (connect/reconnect, room join, peer roster, host flag, snapshots, events, RTT), shipped with full TypeScript declarations so authored game code is type-checked against the real client API. `net-config.js` (+ its own declarations) carries this game's tenant identity.
-- the engine package in the harness-managed workspace `node_modules/` — three.js (r185) for 3D projects, Phaser 4.2.1 for 2D projects — imported by its bare package name and type-checked against its real declarations; the harness seeds Phaser's official compact ESM build into the published bundle.
+- gitignored `site/net/threadsite-net.js` + declarations — regenerated from the harness's TypeScript networking source and bundled into the minified game output. The zero-dependency client owns reconnects, half-open detection, bounded backpressure, expiring reliable events, relay clocks, transform interpolation/extrapolation, room generations, authority epochs and safe host handoff. `createAuthoritativeSession()` and the typed `world`, `transforms`, `intents`, `events`, `presence`, `clock`, `run`, and `entities` facades remove routine synchronization decisions and stable-ID reconciliation from generated games. `net-config.js` carries this game's tenant identity. Neither the unbundled client nor config is committed or copied to Apache.
+- the engine packages in the harness-managed workspace `node_modules/` — three.js (r185) + Rapier compat + three-mesh-bvh for 3D projects, Phaser 4.2.1 for 2D projects — imported by bare package name and type-checked against their real declarations; the harness seeds Phaser's official compact ESM build into the published bundle.
 - the `AGENTS.md` multiplayer section — the full protocol reference, the authority-selection rules (host-authoritative shared world by default for real-time action games with shared enemies/damage/pickups while player controls stay locally responsive; peer-owned state only when players are genuinely independent), stable live peer identity vs reconnect cid, relay-time interpolation, background-tab host handoff, host-migration notes, untrusted-input validation rules, and the required lobby/room-code/offline-fallback UX. Agents are told to design **multiplayer-first**, treating solo play as the same game with one player.
 
 The first-turn prompt and the `sitebuilder` agent configuration both reinforce this: use the provided client, never write server code, and never invent other runtime network endpoints.
 
 ### ThreadSite Multiplayer Protocol (summary)
 
-JSON text frames over one WebSocket per player:
+Protocol v4 uses JSON text frames over one WebSocket per player. The relay owns a random room generation, explicit `hostId`, monotonically increasing authority epoch and world-state sequence. Only the current host for that generation and epoch can publish the shared world. Host disconnect and `yield-host` both migrate authority with the latest cached snapshot attached, so the new host restores before simulating. Hosts receive cache acknowledgements too, allowing a reconnecting client to restore and republish the last complete world if a relay restart erased room memory.
 
-- client → relay: `join` (game/room/create/name), `pstate` (publish **your own** player's state — no host round trip), `event` (broadcast or `to` a peer), `state` (publish a shared-world room snapshot), `state-req`, `ping`;
-- relay → client: `welcome` (your id, room code, peers with their latest player states, host, newest room snapshot for late joiners), `peer-join`/`peer-leave` (with automatic **host migration** to the oldest remaining peer), relayed `pstate`/`event`/`state`/`state-req`, `pong`, `error`, `bye`.
+Player transforms are transient latest-wins state with monotonic relay timestamps and are never replayed after reconnect. Application events carry reload-safe unique IDs, expire after a short TTL, retry once after rate limiting, and are deduplicated per sender without a gap/resend protocol. The relay remains game-agnostic: it stores the newest complete world and live peers' newest player state, stamps relay time, and never interprets or simulates gameplay.
 
-The relay stores only the newest room snapshot and each peer's newest player state (in memory) and hands them to late joiners; it never interprets game state.
+Generated games use explicit channels: reliable events are TTL/retry/dedupe protected, ephemeral signals drop instead of building stale backlogs, host-routed intents automatically carry the accepted run ID and are rejected before game code when stale, and slow-changing presence is cached separately from high-frequency transforms. Stable-ID `syncCollection()` controllers reconcile guest entity views from complete snapshots without embedding game rules in the relay.
 
 ### Operating the relay
 
@@ -334,10 +332,13 @@ GAMESERVER_PORT=8090
 GAMESERVER_MAX_PEERS_PER_ROOM=16
 GAMESERVER_MAX_ROOMS_PER_GAME=256
 GAMESERVER_MAX_MESSAGE_BYTES=65536
+GAMESERVER_MAX_BUFFERED_BYTES=524288
 GAMESERVER_RATE_PER_SECOND=60
 GAMESERVER_RATE_BURST=120
 GAMESERVER_ROOM_TTL_MS=600000
 GAMESERVER_ALLOWED_ORIGINS=
+GAMESERVER_STATE_DIR=/data/threadsite-relay
+GAMESERVER_PERSIST_INTERVAL_MS=1000
 ```
 
 - The bundled/local default `ws://localhost:8090/ws` works out of the box next to the bundled static Apache profile.
@@ -378,8 +379,8 @@ Same drill as the Forgejo vhost, for a new hostname such as `games.siroro.co.uk`
    `GAMESERVER_ALLOWED_ORIGINS` is a comma-separated list of browser origins (scheme + host, no path) — normally just your `PUBLIC_SITES_BASE_URL` origin. Leave it blank to allow any origin.
 5. Verify with `./scripts/check-gameserver-proxy.sh`; it reports the internal health check and the public WebSocket upgrade separately, so a failure tells you whether to look at Docker or at the vhost.
 - `GET /health` and `GET /stats` on the relay return games/rooms/clients counts; `/site-admin status` shows a one-line summary.
-- Every connection is token-bucket rate-limited, frames are size-capped, rooms have peer caps, and empty rooms are garbage-collected after `GAMESERVER_ROOM_TTL_MS`.
-- Room state is in-memory only: a relay restart clears rooms. Games recover through the client's auto-reconnect plus snapshot resync, or fall back to solo play — by design, not data loss worth paging anyone over.
+- Every connection is token-bucket rate-limited, frames and pending send buffers are size-capped, rooms have peer caps, and empty rooms are garbage-collected after `GAMESERVER_ROOM_TTL_MS`. Slow consumers are disconnected and recover through the normal reconnect/latest-state path rather than accumulating an obsolete relay backlog.
+- **Shared arenas are durable; private rooms are not.** The relay periodically snapshots the latest authoritative world of each game's single-mode arena (one small JSON file per game under `GAMESERVER_STATE_DIR`, written atomically via temp-file + rename) and replays it to the first joiner after the room empties or the relay restarts. Only the opaque game snapshot is kept — peer ids, authority epochs, generations and sequences die with the session that created them, so stale pre-restart frames never validate. The compose file binds `./data/gameserver` so arena worlds survive container recreation; room-code sessions stay in-memory only and recover through the client's auto-reconnect plus snapshot resync, or fall back to solo play.
 
 Set `MULTIPLAYER_ENABLED=false` to stop provisioning multiplayer files and rules into new game projects (existing published games keep working against the relay if it still runs).
 

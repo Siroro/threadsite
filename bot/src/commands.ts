@@ -23,7 +23,7 @@ export const siteCommand = new SlashCommandBuilder()
     .setDescription("Show the live site and source repository for this thread"))
   .addSubcommand((sub) => sub
     .setName("republish")
-    .setDescription("Republish the current checked-in static files without asking the model"))
+    .setDescription("Rebuild and republish the current authored source without asking the model"))
   .addSubcommand((sub) => sub
     .setName("sync")
     .setDescription("Pull commits pushed to the repository from outside the bot, then rebuild and republish from them"))

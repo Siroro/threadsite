@@ -334,12 +334,28 @@ export interface CommitStats {
   deletions: number;
 }
 
+/**
+ * Migrate generated runtime files out of an existing repository's index while
+ * leaving the workspace copies intact for validation and publication.
+ */
+export async function untrackGeneratedArtifacts(workspace: string): Promise<void> {
+  await git(workspace, [
+    "rm", "-r", "-f", "--cached", "--ignore-unmatch", "--",
+    "site/js", "site/net", "build-manifest.json",
+  ]);
+}
+
 export async function commitAndPush(
   workspace: string,
   summary: string,
   forgejo: ForgejoClient,
   author?: CommitAuthor,
 ): Promise<CommitStats | null> {
+  // Generated runtime and harness-owned net inputs used to be committed.
+  // Keep the files in the workspace for validation/publish, but stage their
+  // removal from existing repositories so the new ignore boundary migrates
+  // cleanly in one normal turn.
+  await untrackGeneratedArtifacts(workspace);
   await git(workspace, ["add", "-A"]);
   // A turn that only asks a question (or answers without edits) stages nothing;
   // committing then would push an empty commit to Forgejo. Null tells the
