@@ -103,6 +103,9 @@ services:
       # A host silent this long while another peer waits loses authority.
       GAMESERVER_HOST_STALL_MS: ${GAMESERVER_HOST_STALL_MS:-15000}
       GAMESERVER_ALLOWED_ORIGINS: ${GAMESERVER_ALLOWED_ORIGINS:-}
+      # permessage-deflate kill switch (0 = off); 1 KB threshold keeps the
+      # transform hot path uncompressed while world snapshots compress.
+      GAMESERVER_PERMESSAGE_DEFLATE: ${GAMESERVER_PERMESSAGE_DEFLATE:-1}
       # ARENA (single-mode) worlds are persisted here and survive restarts.
       GAMESERVER_STATE_DIR: ${GAMESERVER_STATE_DIR:-/data/threadsite-relay}
       GAMESERVER_PERSIST_INTERVAL_MS: ${GAMESERVER_PERSIST_INTERVAL_MS:-1000}
