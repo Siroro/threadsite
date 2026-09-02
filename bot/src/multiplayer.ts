@@ -10,6 +10,7 @@ export const PROTOCOL_VERSION = MULTIPLAYER_PROTOCOL_VERSION;
 const ASSETS_DIR = path.join(process.cwd(), "assets");
 const NET_CLIENT_STEM = "threadsite-net.js";
 const NET_CLIENT_TYPES_STEM = "threadsite-net.d.ts";
+const NETWORKING_GUIDE = path.join(ASSETS_DIR, "agents", "networking.md");
 
 /**
  * Games are multi-tenant clients of the shared relay: the tenant key is simply
@@ -27,10 +28,11 @@ export function multiplayerContext(kind: ProjectKind, siteSlug: string): Multipl
 /**
  * Keep the harness-owned multiplayer files in a game workspace current under
  * `site/net/`: the vendored protocol client with its full TypeScript
- * declarations (threadsite-net.js + threadsite-net.d.ts — authored code gets
- * real types for the whole sync API), and this game's tenant config
+ * declarations generated from the TypeScript source (authored code gets real
+ * types for the whole sync API), and this game's tenant config
  * (net-config.js + net-config.d.ts). The project AGENTS.md multiplayer
- * section is rewritten alongside. Runs on project creation, before every
+ * section is rewritten alongside, plus the NETWORKING.md gotcha guide at the
+ * workspace root. Runs on project creation, before every
  * mutation, and again after each agent turn (before validation), so agent
  * deletions/drift are repaired within the same turn. Writes are
  * content-compared so an unchanged tree stays untouched; legacy copies of the
@@ -92,6 +94,13 @@ export async function ensureMultiplayerFiles(
   changed = (await writeIfChanged(
     safeChild(workspacePath, "AGENTS.md"),
     await projectAgents(kind, multiplayer),
+  )) || changed;
+  // The on-demand companion to AGENTS.md's multiplayer section: budgets,
+  // gotchas, and a symptom->fix table. Written to the project root so agents
+  // can read it when debugging sync without paying its tokens every turn.
+  changed = (await writeIfChanged(
+    safeChild(workspacePath, "NETWORKING.md"),
+    `${(await fs.readFile(NETWORKING_GUIDE, "utf8")).trimEnd()}\n`,
   )) || changed;
   return changed;
 }

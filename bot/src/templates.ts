@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { MultiplayerContext, ProjectKind } from "./types.js";
 
-export const MULTIPLAYER_PROTOCOL_VERSION = 3;
+export const MULTIPLAYER_PROTOCOL_VERSION = 4;
 
 const AGENTS_DIR = path.join(process.cwd(), "assets", "agents");
 
@@ -70,7 +70,7 @@ export function mutationInstruction(kind: ProjectKind, userPrompt: string, notes
   const multiplayerClause = kind === "site"
     ? ""
     : " Preserve working multiplayer (rooms, sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client.";
-  return `Read AGENTS.md and inspect the current project before editing. Revise the existing ${noun} according to the Discord request below. Preserve working features/mechanics unless the request changes them.${multiplayerClause} Keep browser code in TypeScript under site/src/ (never hand-edit the generated bundles under site/js/ — if authored .js is still there, migrate it to src/ as .ts), use websearch and asset_download when they would materially improve the result, and leave a complete directly runnable deliverable.${notesSection(notes)}\n\nDISCORD REQUEST:\n${userPrompt}`;
+  return `Read AGENTS.md and inspect the current project before editing. Revise the existing ${noun} according to the Discord request below. Preserve working features/mechanics unless the request changes them.${multiplayerClause} Keep browser code in TypeScript under site/src/ (never hand-edit the generated, gitignored bundles under site/js/ — if authored .js is still there, migrate it to src/ as .ts), use websearch and asset_download when they would materially improve the result, and leave a complete buildable deliverable.${notesSection(notes)}\n\nDISCORD REQUEST:\n${userPrompt}`;
 }
 
 export function repairInstruction(validationError: string): string {

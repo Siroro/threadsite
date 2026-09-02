@@ -6,7 +6,7 @@ import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, 
 import { ensureMultiplayerFiles, multiplayerContext } from "./multiplayer.js";
 import { OpenCodeHarness, addUsage, errorUsage, type PromptResult, type TurnUsage } from "./opencode.js";
 import { publishIndex, publishSite, siteUrl, validateSite } from "./publish.js";
-import { buildSite } from "./build.js";
+import { buildSite, GENERATED_GITIGNORE } from "./build.js";
 import { enginePackages, ensureEnginePackages } from "./engines.js";
 import { ensureSkillFiles, skillNames } from "./skills.js";
 import { Store } from "./store.js";
@@ -62,6 +62,13 @@ export class ProjectService {
     readonly usageLog: UsageLog,
   ) {}
 
+  /** Recreate ignored harness build inputs after a checkout/clean or on a fresh host. */
+  private async ensureHarnessBuildInputs(project: ProjectRecord, siteSlug = project.siteSlug): Promise<void> {
+    await ensureEnginePackages(project.workspacePath, project.projectKind ?? "site");
+    const multiplayer = multiplayerContext(project.projectKind ?? "site", siteSlug);
+    if (multiplayer) await ensureMultiplayerFiles(project.workspacePath, multiplayer, project.projectKind ?? "site");
+  }
+
   enqueue<T>(threadId: string, work: () => Promise<T>): Promise<T> {
     const previous = this.queues.get(threadId) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(work);
@@ -109,9 +116,9 @@ export class ProjectService {
     await fs.mkdir(srcDir, { recursive: true });
     await fs.writeFile(path.join(siteDir, "index.html"), starterHtml(input.displayName), "utf8");
     await fs.writeFile(path.join(srcDir, "main.ts"), starterSource(projectKind), "utf8");
-    // The harness-managed node_modules stays out of git; the manifest,
-    // sources, and compiled bundles are the committed record.
-    await fs.writeFile(path.join(workspacePath, ".gitignore"), "node_modules/\n", "utf8");
+    // Authored source is the Git record. Harness build inputs and generated
+    // bundles are recreated locally and never enter Forgejo.
+    await fs.writeFile(path.join(workspacePath, ".gitignore"), `${GENERATED_GITIGNORE.join("\n")}\n`, "utf8");
     const multiplayer = multiplayerContext(projectKind, siteSlug);
     if (multiplayer) {
       // Games are multi-tenant clients of the shared relay: vendored protocol
@@ -135,8 +142,8 @@ export class ProjectService {
       emit(onProgress, "🎓 Installing the curated game skills (.opencode/skills)");
       await ensureSkillFiles(workspacePath, projectKind);
     }
-    // Compile the starter so the baseline commit and the initial turn both
-    // carry the runnable js/ output that index.html references.
+    // Compile the ignored starter bundle so validation/publish have runnable
+    // output; the baseline commit intentionally records only authored source.
     await buildSite(workspacePath);
 
     emit(onProgress, "🌱 Creating/checking Forgejo repository");
@@ -248,11 +255,15 @@ export class ProjectService {
           await ensureMultiplayerFiles(project.workspacePath, multiplayer, project.projectKind ?? "site");
         }
         await this.writeReadme({ ...project, displayName: title, siteSlug, repoName });
+        await this.ensureHarnessBuildInputs(project, siteSlug);
+        await buildSite(project.workspacePath);
+        await validateSite(safeChild(project.workspacePath, "site"));
+        // Commit the restamped README before publishing so the deploy stamp
+        // names the exact Forgejo commit. Ignored tenant config/bundles remain
+        // in the workspace for the runtime copy.
+        await commitAndPush(project.workspacePath, `Rename project to ${title}`, this.forgejo);
         await publishSite(safeChild(project.workspacePath, "site"), siteSlug);
         await fs.rm(safeChild(config.publishRoot, project.siteSlug), { recursive: true, force: true }).catch(() => undefined);
-        // Commit the restamped README/net-config now so the Forgejo page and
-        // git history carry the new name instead of waiting for the next turn.
-        await commitAndPush(project.workspacePath, `Rename project to ${title}`, this.forgejo);
         log("info", "project.renamed_slug", { threadId: project.threadId, from: project.siteSlug, to: siteSlug, repoName });
         return true;
       } catch (error) {
@@ -1022,6 +1033,7 @@ export class ProjectService {
     const short = commit.slice(0, 10);
     const siteDir = safeChild(project.workspacePath, "site");
     try {
+      await this.ensureHarnessBuildInputs(project);
       await buildSite(project.workspacePath);
       await validateSite(siteDir);
       await publishSite(siteDir, project.siteSlug);
@@ -1111,8 +1123,9 @@ export class ProjectService {
     const previousHead = await commitHistory(project.workspacePath).then((h) => h.current).catch(() => undefined);
     try {
       emit(onProgress, "⚙️ Rebuilding the TypeScript bundle");
+      await this.ensureHarnessBuildInputs(project);
       await buildSite(project.workspacePath);
-      emit(onProgress, "🧪 Validating checked-in static files");
+      emit(onProgress, "🧪 Validating rebuilt runtime files");
       await validateSite(siteDir);
       emit(onProgress, "🚀 Republishing to Apache");
       await publishSite(siteDir, project.siteSlug);
@@ -1148,8 +1161,9 @@ export class ProjectService {
     if (!project) throw new Error("This thread is not attached to a site.");
     const siteDir = safeChild(project.workspacePath, "site");
     emit(onProgress, "⚙️ Rebuilding the TypeScript bundle");
+    await this.ensureHarnessBuildInputs(project);
     await buildSite(project.workspacePath);
-    emit(onProgress, "🧪 Validating checked-in static files");
+    emit(onProgress, "🧪 Validating rebuilt runtime files");
     await validateSite(siteDir);
     emit(onProgress, "🚀 Republishing to Apache");
     await publishSite(siteDir, project.siteSlug);
@@ -1210,6 +1224,8 @@ export class ProjectService {
 
     if (keptCommit) {
       const siteDir = safeChild(project.workspacePath, "site");
+      await this.ensureHarnessBuildInputs(project);
+      await buildSite(project.workspacePath);
       await validateSite(siteDir);
       await publishSite(siteDir, project.siteSlug);
     }
@@ -1232,7 +1248,7 @@ export class ProjectService {
   }
 
   private async writeReadme(project: ProjectRecord): Promise<void> {
-    const readme = `# ${project.displayName}\n\nThis is a ${projectKindLabel(project.projectKind)} maintained by the ThreadSite Discord harness.\n\n- Live site: ${this.siteLink(project)}\n\nEvery accepted Discord mutation is committed automatically before publication.\n`;
+    const readme = `# ${project.displayName}\n\nThis is a ${projectKindLabel(project.projectKind)} maintained by the ThreadSite Discord harness.\n\n- Live site: ${this.siteLink(project)}\n\nForgejo contains the authored source. Every accepted mutation is committed, then the harness builds a minified runtime-only deployment; generated bundles and harness networking inputs are not committed.\n`;
     await fs.writeFile(safeChild(project.workspacePath, "README.md"), readme, "utf8");
   }
 }

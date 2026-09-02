@@ -1,6 +1,6 @@
 # ThreadSite Project Rules
 
-Maintained by the ThreadSite Discord harness. You author **TypeScript under `site/src/`**; when your reply ends the harness compiles and bundles it into static JavaScript under `site/js/`, validates, commits, and publishes `site/` to be served by Apache under an arbitrary path prefix.
+Maintained by the ThreadSite Discord harness. You author **TypeScript under `site/src/`**; when your reply ends the harness builds minified JavaScript under gitignored `site/js/`, validates it, commits authored source, and publishes only runtime files to Apache under an arbitrary path prefix. `site/src/` and unbundled `site/net/` are never deployed.
 
 ## Boundaries
 
@@ -18,7 +18,7 @@ Maintained by the ThreadSite Discord harness. You author **TypeScript under `sit
 
 ## Verification
 
-Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, unzip/tar (npm, curl, rm, and git writes are blocked). Keep scratch files in `/tmp` — the workspace is committed and `site/` is published.
+Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, unzip/tar (npm, curl, rm, and git writes are blocked). Keep scratch files in `/tmp` — authored workspace files are committed, while the harness selects the runtime-only deployment.
 
 - While editing: use `js_syntax_check` on files you change, and heed the attached language servers — they surface the same diagnostics the gate will.
 - Before finishing, run the gate's own check yourself (it type-checks the whole import graph against the engines' and net client's real declarations):
@@ -29,8 +29,8 @@ Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, 
 
 ## How your work ships
 
-When your reply ends the harness restores harness-owned files, bundles `src/` → `js/` (pruning outputs of deleted sources), validates, commits the tree (authored by the requesting Discord user), and publishes it with cache-busting asset hashes. 
-Type, build, or JavaScript errors get exactly **one** automatic repair round-trip; work that still fails is committed but not published — the live site keeps the last validated version and the next reply must fix it. 
+When your reply ends the harness restores ignored build inputs, bundles/minifies `src/` → ignored `js/` (pruning stale outputs), validates, commits only authored files (authored by the requesting Discord user), and publishes the runtime tree with cache-busting asset hashes.
+Type, build, or JavaScript errors get exactly **one** automatic repair round-trip; work that still fails is committed but not published — the live site keeps the last validated version and the next reply must fix it.
 Leave `site/` complete and directly openable over plain HTTP(S): no deferred work, no "run this first" steps, no server.
 
 

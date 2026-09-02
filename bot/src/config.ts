@@ -98,7 +98,9 @@ export const config = {
   publicSitesBaseUrl: env("PUBLIC_SITES_BASE_URL", "http://localhost:8080").replace(/\/$/, ""),
   publicIndexEnabled: boolEnv("PUBLIC_INDEX_ENABLED", true),
 
-  maxSiteBytes: intEnv("MAX_SITE_BYTES", 10 * 1024 * 1024),
+  // 3D games bundling Rapier (~2.5MB minified with inlined WASM) plus real
+  // GLB/texture/audio assets need headroom well past the old 10MB.
+  maxSiteBytes: intEnv("MAX_SITE_BYTES", 32 * 1024 * 1024),
   maxSiteFiles: intEnv("MAX_SITE_FILES", 500),
   maxPromptChars: intEnv("MAX_PROMPT_CHARS", 12000),
 

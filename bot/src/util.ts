@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs/promises";
 import type { CommitAuthor } from "./types.js";
 
 /** Discord rejects message content over 2000 chars; ThreadSite renders stay under it. */
@@ -20,6 +21,18 @@ export function safeChild(root: string, ...parts: string[]): string {
   const prefix = `${path.resolve(root)}${path.sep}`;
   if (target !== path.resolve(root) && !target.startsWith(prefix)) throw new Error("Unsafe path traversal");
   return target;
+}
+
+/** Add harness-owned/generated paths to a workspace .gitignore without clobbering user rules. */
+export async function ensureGitignoreLines(workspacePath: string, required: readonly string[]): Promise<boolean> {
+  const file = path.join(workspacePath, ".gitignore");
+  const current = await fs.readFile(file, "utf8").catch(() => "");
+  const present = new Set(current.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+  const missing = required.filter((line) => !present.has(line));
+  if (!missing.length) return false;
+  const prefix = current && !current.endsWith("\n") ? `${current}\n` : current;
+  await fs.writeFile(file, `${prefix}${missing.join("\n")}\n`, "utf8");
+  return true;
 }
 
 /**

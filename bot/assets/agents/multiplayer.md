@@ -1,67 +1,142 @@
 ## Multiplayer first
 
-Networked play is the primary experience; solo is the same simulation with one human. **The harness-owned ThreadSite relay is the only runtime networking transport.** Do not add WebRTC, PeerJS, Socket.IO, Colyseus, Firebase, Supabase, third-party multiplayer SDKs, custom WebSockets, server code, or any other network endpoint. If the relay is unreachable, keep solo playable.
+Build multiplayer as the primary game mode; solo is the same simulation with one human. Use only the harness-owned, fully typed ThreadSite client and relay. Never add WebSocket/WebRTC code, another multiplayer SDK/server, retry or heartbeat logic, clock sync, host election, snapshot ordering, or transform interpolation. Import from `../net/threadsite-net.js`; never edit `site/net/`. A companion guide — `NETWORKING.md` at the project root — lists the client's rates, limits, and sync gotchas with a symptom→fix debugging table; read it before implementing netcode and whenever synchronization misbehaves.
 
-Pick one join model and keep every button/link consistent: **shared arena** (`mode: "single"`) or **room codes** (host with `createRoom: true`, join by code, invite via `net.inviteUrl()`, auto-join `ThreadSiteNet.roomFromUrl()`). Never silently connect to `single` while presenting room-code host/join UI.
+### Choose ownership before writing gameplay
 
-### Harness client
+Use exactly two ownership paths:
 
-`site/net/threadsite-net.js` + `.d.ts` and `net-config.js` are harness-owned: import them; never edit, recreate, or bypass them.
+- Each client owns its local player's input and transform. Publish it through `net.transforms`; remote clients render sampled transforms from that same facade.
+- The current host owns every shared enemy, boss, pickup, projectile/hazard, shared timer, RNG/director, damage result, score/reward, and next-ID counter. Guests render accepted snapshots and send intents; they never simulate or mutate shared truth.
+
+Keep authoritative state, guest presentation, and local input in separate functions. Do not let a render/update loop become authoritative merely because it runs every frame.
+
+### Connect with the safe world lifecycle
+
+Real-time games with any shared state must use the high-level `world` option. It centrally handles late join, reconnect, relay-room recreation, host migration, complete-snapshot publication, world requests, schema rejection, and stale generation/epoch/sequence/run/tick rejection:
 
 ```ts
 import { NET_CONFIG } from "../net/net-config.js";
-import { ThreadSiteNet } from "../net/threadsite-net.js";
+import { ThreadSiteNet, type NetWorldState } from "../net/threadsite-net.js";
 
-const net = await ThreadSiteNet.connect({
+type SharedState = {
+  simElapsedMs: number; // simulation-relative time, never a wall-clock start
+  rngState: number;
+  nextEntityId: number;
+  enemies: EnemySnapshot[];
+  pickups: PickupSnapshot[];
+};
+
+let authoritative = false;
+const net = await ThreadSiteNet.createAuthoritativeSession({
   ...NET_CONFIG,
-  room: ThreadSiteNet.roomFromUrl(),
-  createRoom: !ThreadSiteNet.roomFromUrl(),
+  mode: "single", // the default: one game-wide shared ARENA
   name,
-  pstateHz: 25,
-  onPlayerState, onEvent, onState, onStateRequest, onHostChange, onPeers,
+  world: {
+    schemaVersion: 1,
+    publishHz: 10,
+    capture: (): NetWorldState<SharedState> => ({
+      runId,
+      tick: simulationTick,
+      state: serializeCompleteSharedWorld(),
+    }),
+    restore: ({ runId: restoredRun, tick, state }) => {
+      restoreCompleteSharedWorld(restoredRun, tick, state);
+    },
+    present: ({ runId: presentedRun, tick, state }) => {
+      presentCompleteSharedWorld(presentedRun, tick, state);
+    },
+    onAuthorityStart: () => { authoritative = true; },
+    onAuthorityStop: () => { authoritative = false; },
+    validate: ({ state }) => isValidSharedState(state),
+  },
 });
 ```
 
-### Identity: live peer vs reconnect identity
+Use one complete serializer and one restore path; never maintain separate “join”, “reconnect”, and “migration” snapshots. `capture` must include stable entity IDs and all state needed to resume deterministically. `restore` runs before `onAuthorityStart`; it may receive the host's locally acknowledged snapshot from a previous relay generation after a relay restart. `present` runs only for guests and must update presentation without advancing authoritative simulation.
 
-- **Active avatars/routing are keyed by per-connection peer id** (`ps.from`, `peer.id`, `net.id`). `sendTo()` always takes a peer id. Self-filter with `ps.from === net.id`.
-- `cid` is reconnect continuity metadata, not a live routing key. A reconnect may have the same cid with a new peer id; reattach persistent game identity where useful. Never collapse two currently connected peer ids merely because their cids match.
-- Remove/freeze live remotes by peer leave/staleness. Do not call `peerByCid()` with a peer id.
+While `authoritative` is true, advance shared simulation using frame-rate-independent steps and `net.clock.now()` for shared time. Stop shared mutation immediately when it becomes false. The preset configures transform rate, publishes complete worlds, serves late-join requests, and publishes immediately after authority starts. Call `net.world.publishNow()` after a boss phase change or shared reset, and `net.world.yieldAuthority()` before an intentional scene transition. Do not use raw world frames or authority callbacks alongside this lifecycle.
 
-### Choose authority from the mechanics
+For games with genuinely no shared state, omit `world`. Default to `mode: "single"`: one game-wide shared arena with no room UI (`net.room` is intentionally `null`) — this is the preferred topology for generated games. Reach for `mode: "rooms"` only when the request explicitly calls for private invite-coded sessions; then pass `room: ThreadSiteNet.roomFromUrl()` and `createRoom: !invitedRoom`, show the room code plus `net.inviteUrl()`, and handle missing/full/expired rooms. If the initial relay connection fails, keep the same game playable solo and show a small offline indicator.
 
-For **real-time action games with shared enemies, bosses, pickups, projectiles, hazards, physics, damage or score**, default to a **host-authoritative shared world**:
+### Durable arenas
 
-- Host owns run phase/time, RNG/director, shared entity spawn/despawn, enemy/boss AI, shared projectiles/hazards, pickups/chests, authoritative HP/death, rewards and stable shared IDs. Guests must not independently spawn or mutate those and hope snapshots converge.
-- Players keep controls responsive locally and publish their own transform/input-facing state with `publishPlayerState`. The host uses those states for targeting/collision and validates hit/pickup intents. Guest weapon VFX may predict immediately, but shared enemy HP/death/rewards change only on host approval.
-- Resolve attacks against **all alive players**, not host-local coordinates. Targeted damage/reward events use `sendTo(peerId, ...)`. Route every damage source through one downed/death path.
-- Shared world snapshots use one `buildWorldSnapshot()` shape for periodic publishing and state-request replies. Include `runId`, monotonic `tick`, relay-clock anchor, next-ID counters, director/RNG state needed to resume, and every live shared entity/hazard with stable IDs.
+Shared arenas survive having zero players and relay restarts: the relay periodically snapshots the latest authoritative world (`mode: "single"` only; private rooms stay ephemeral) and hands it back in the first joiner's welcome. Four rules keep that safe:
 
-Peer-owned state is appropriate when each player can be simulated independently (presence, avatars, isolated racing ghosts, etc.). Last-writer-wins room state is for turn-based/shared-canvas data. Do not choose peer-owned combat merely because it is simpler.
+- Never create or publish a fresh world before the restored one is applied. The `world` lifecycle already sequences this (`restore` → `onAuthorityStart` → first publish), and the client hard-refuses early publishes with a `not_ready` error until `net.authority.ready` is true — do not work around it. `onAuthorityStart`'s `recovered` flag and `net.world.restored` tell you whether you resumed an existing world.
+- Persist simulation-relative durations, not absolute start timestamps: snapshot `simElapsedMs`, remaining cooldowns, wave/boss timers, and buff/respawn timers as elapsed or remaining simulation time, then rebase (`deadline = net.clock.now() + remaining`) on restore. An absolute `runStartedAt` makes an offline gap of hours instantly "end" every timer when someone returns.
+- World snapshots must carry a `schemaVersion` (the lifecycle enforces this and rejects mismatches). When you change the snapshot shape, bump it and restore only versions you still understand; treat an unreadable snapshot as "start a fresh world", never as corrupt input to half-apply.
+- An empty arena resumes paused, not fast-forwarded: whatever timers, boss state, or health existed in the snapshot simply continue from that snapshot when somebody returns. Do not simulate offline elapsed time.
 
-### Player transform sync
+### Player transforms are already safe
 
-For action games publish roughly 20–30 Hz (the client coalesces): `x,y,vx,vy,facing,alive,downed,char/runId` plus a local monotonic player tick. Flush immediately after teleport/dash/death/revive/respawn/run start.
+Publish the local transform every update. The client coalesces to 25 Hz, relay-stamps it monotonically, rejects stale/out-of-order ticks, and maintains the jitter buffer:
 
-Remote rendering uses a jitter buffer, not "lerp to latest": keep ~300–500 ms of timestamped samples, render ~100–150 ms behind, interpolate between surrounding samples, briefly extrapolate velocity when late, then hold. Reject stale/out-of-order ticks. **`ps.ts` is relay time: compare it with `net.serverNow()`, never `Date.now()`.**
+```ts
+net.transforms.publish({ x, y, vx, vy, facing, alive, runId });
 
-### Events, pickups and snapshots
+for (const { peer, transform } of net.transforms.sampleAll()) {
+  renderRemotePlayer(peer.id, transform);
+}
+```
 
-Validate every inbound shape/range/id; peer input is untrusted. Use stable IDs for enemies, bosses, shots, hazards, gems/chests and other shared entities. Pickup claims reference IDs, never approximate x/y matching. Guests do not grant/remove authoritative rewards before approval. Event handlers must be idempotent: events carry the sender's `seq` (an event id), a rate-limited event is retried by the net client, and a retry must never double-apply.
+`sampleAll()` returns only live peers with recent transforms. `listAlive()` filters dead players and `nearest(x, y)` handles common host-AI targeting. Call `net.transforms.teleport(transform)` for teleport, spawn/respawn, death/revive discontinuities, or changing run; it publishes immediately and resets remote interpolation history. Use live `peer.id` for avatars and routing. `cid` is reconnect metadata only; two live peers with the same cid are still distinct. Never add interpolation, timestamp comparison, or stale-avatar bookkeeping of your own.
 
-Hosts answer `onStateRequest` immediately. Late join/reconnect applies the newest full snapshot before participating. Reject stale snapshots by `tick`/`runId` (and relay timestamp where appropriate), then interpolate presentation rather than hard-snap hot entities.
+Keep slow-changing player metadata out of transforms:
 
-### Host migration and background tabs
+```ts
+net.presence.set({ name, character, ready, alive, downed, cosmetic });
+const remotePresence = net.presence.get(peer.id);
+```
 
-Browser tabs can throttle or stop RAF/timers. **Never implement multiplayer authority as `if (document.hidden) return` or assume Phaser/RAF keeps running in background.**
+Presence is cached for late join and automatically republished after reconnect.
 
-- Shared timers derive from `net.serverNow()`, not accumulated render frames.
-- A host becoming hidden while other peers exist must publish a final complete snapshot and deliberately relinquish authority through the ThreadSite relay's normal peer-leave/host-migration path; when visible it reconnects to the same room and reattaches by cid. A newly promoted host rebuilds from the newest snapshot before simulating.
-- If no other peer exists, pausing local presentation is fine; on return reconcile elapsed shared time deliberately instead of applying an enormous physics delta.
-- Host migration must restore run state, counters, cooldowns/attack phases, hazards/projectiles/pickups and clock — not restart the run.
+### Reconcile snapshot collections centrally
 
-### Net UX and verification
+Do not hand-write repeated find/create/update/remove loops for snapshot entities. Register a stable-ID collection once:
 
-Show connection status/player list and make invalid/expired codes graceful. Keep a development-only network HUD/log toggle with local `net.id/cid`, remote peer id/cid, state age, RTT, received Hz, sample count and interpolation/extrapolation mode.
+```ts
+const enemiesSync = net.entities.syncCollection("enemies", {
+  getId: (snapshot) => snapshot.id,
+  create: (snapshot) => spawnEnemyView(snapshot),
+  update: (enemy, snapshot) => updateEnemyView(enemy, snapshot),
+  remove: (enemy) => destroyEnemyView(enemy),
+});
 
-Before claiming multiplayer is done, test at least: two physical devices; two tabs in one browser profile; 2–4 peers moving simultaneously; guest and host taking contact/projectile/boss damage; both sides downing/reviving; simultaneous pickup claims; late join; short disconnect/reconnect; host leave/migration; and host tab hidden/backgrounded. Success means no merged/missing avatars, HP snapback, duplicate rewards, divergent timer/world, invisible telegraphs or room freeze.
+// Inside guest world presentation:
+enemiesSync.apply(sharedState.enemies);
+```
+
+Use one collection controller per entity kind. Duplicate or invalid IDs fail loudly; entities missing from the next complete snapshot are removed automatically. This is presentation reconciliation, not authority: the host still owns the source collection.
+
+### Events are intents or confirmed results
+
+Send guest actions through the host-routed intent helper:
+
+```ts
+net.intents.send("try-pickup", { entityId });
+
+net.intents.on("try-pickup", (intent) => {
+  // Runs only on the current host and only for the current run.
+  if (canClaim(intent.from, intent.payload.entityId)) acceptClaim(intent);
+});
+```
+
+The helper attaches collision-proof intent ID, sender, current run ID and relay timestamp, routes to the current host, deduplicates, and drops intents from stale runs. The host must still validate payload shape, sender, entity existence, eligibility, distance/range, cooldown, and current state before mutating shared truth. Never grant damage, pickups, currency, score, or achievements directly from a guest request or approximate x/y matching.
+
+For other discrete messages choose reliability explicitly:
+
+```ts
+net.events.sendReliable("revive-approved", { playerId }, peerId); // TTL/retry/dedupe
+net.events.sendEphemeral("aim-preview", { angle });               // drop if late/offline
+```
+
+Use `onReliable` and `onEphemeral` to subscribe. Reliable handlers remain idempotent by event ID and stable entity ID. Ephemeral is only for replaceable presentation hints—not damage, claims, rewards, phase changes, or anything that must survive loss. Events never replace complete worlds or transforms. Treat all inbound values as untrusted.
+
+Use `net.clock.after(ms)`, `elapsed(startTs)`, and `remaining(targetTs)` for deadlines. Never mix relay timestamps with `Date.now()`. `net.run.current`, `net.run.tick`, and `net.run.isCurrent(id)` expose the accepted complete-world run; do not maintain a second networking run ID.
+
+### Connection UX and acceptance checks
+
+Arena games (the default) show connection status and the peer list, with no room UI. Room games additionally show the room code and `net.inviteUrl()`. Reconnect is automatic, detects half-open sockets, resumes/recreates the same room after relay memory loss, and isolates stale snapshots with a room generation. A peer leaving must never break local play. Handle invalid, missing, full, and expired rooms cleanly.
+
+Before calling multiplayer complete, test two tabs and two physical devices; 2-4 moving peers; late join; network loss/reconnect; relay restart; host disconnect; explicit and background-tab authority yield; simultaneous pickup claims; every damage/down/revive path; scene/run reset; and reconnect after the event TTL. For an arena, also test everyone leaving and one player returning later — the world must resume from the persisted snapshot (correct HP, entities, and rebased timers), never reset to a fresh run. Success means one avatar per live peer, one shared outcome per intent, no stale transform replay, no HP/clock/entity snapback, no guest world writes, and continued play after authority or relay migration.
