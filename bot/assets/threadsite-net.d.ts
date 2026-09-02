@@ -91,7 +91,7 @@ export interface TransformSampleInfo {
     samples: number;
 }
 export interface SampleTransformOptions {
-    /** Override the adaptive 100-150 ms interpolation delay. */
+    /** Override the adaptive 45-150 ms interpolation delay. */
     renderDelayMs?: number;
     /** Maximum velocity extrapolation when packets arrive late. Default 100 ms. */
     maxExtrapolationMs?: number;
@@ -320,7 +320,8 @@ export declare class NetTransforms {
     teleport(transform: NetTransform): void;
     /**
      * Rendering-only time-shifted transform for one remote peer: interpolated
-     * 100-150 ms in the past, extrapolating at most 100 ms past the newest
+     * 45-150 ms in the past (adaptive to transit jitter), extrapolating at
+     * most 100 ms past the newest
      * sample. Never resolve gameplay from a sample; see `latest()`.
      */
     sample<T extends NetTransform = NetTransform>(peerId: string, options?: SampleTransformOptions): T | null;

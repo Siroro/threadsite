@@ -7,11 +7,11 @@ The client is `site/net/threadsite-net.js` (typed by `threadsite-net.d.ts`); ide
 ## Budgets and numbers (defaults)
 
 * Player transforms coalesce to **25 Hz** (`transformHz`, 1–60). Complete worlds publish at **10 Hz** (`publishHz`, 1–30).
-* One client frame must stay under **60 KB** — `publishWorld` throws `frame_too_large` beyond it. The relay itself allows up to 64 KiB; the lower client cap provides headroom.
+* One client frame must stay under **256 KB** — `publishWorld` throws `frame_too_large` beyond it. The relay accepts up to 264 KiB by default; the lower client cap provides headroom so an oversized world fails locally instead of dropping the relay connection.
 * The relay rate-limits every connection to **60 frames/s** (burst 120), shared by *all* sends. `transformHz` + `publishHz` + events must stay comfortably below it. 60 Hz transforms plus 30 Hz worlds will trip `rate_limited` and updates will start dropping.
 * Reliable events live **3 s** (`eventTtlMs`, 250–30000), queue at most 128 while offline, and retry once after rate limiting. Event handling should remain idempotent.
 * Ephemeral signals coalesce latest-wins per `(type, target)` at **20 Hz**.
-* Remote transforms sample **100–150 ms in the past** using an adaptive interpolation delay and extrapolate at most **100 ms** past the newest sample by default.
+* Remote transforms sample **45–150 ms in the past** using an interpolation delay adaptive to measured transit jitter, and extrapolate at most **100 ms** past the newest sample by default.
 * Peers whose transforms go silent for **>2 s** vanish from `sampleAll()` / `latestAll()` / `listAlive()` / `nearest()`.
 * Reconnect backoff is roughly 0.5–8 s; half-open sockets are detected within ~30 s.
 * The relay re-elects a **stalled host**: a host that publishes no world for **15 s** (`GAMESERVER_HOST_STALL_MS`) while another peer is connected is demoted to guest and authority moves to that peer. Healthy hosts publish at 1 Hz minimum, so this never fires in normal play; a lone silent host (nobody waiting) is left alone.
@@ -176,7 +176,7 @@ Silence for >2 s causes the remote player to disappear from `sampleAll()`-style 
 
 Transforms are transient/latest-wins state. Old movement is not replayed as durable gameplay after reconnect; rebuild remote movement from fresh post-reconnect transforms.
 
-* `sample()` / `sampleAll()` / `listAlive()` / `nearest()` are **rendering-only**. They return time-shifted presentation transforms, deliberately rendered around **100–150 ms behind relay time** so motion stays smooth.
+* `sample()` / `sampleAll()` / `listAlive()` / `nearest()` are **rendering-only**. They return time-shifted presentation transforms, deliberately rendered **45–150 ms behind relay time** (adaptive to jitter) so motion stays smooth.
 * `latest(peerId)` / `latestAll()` return the **newest received** transform — no interpolation, extrapolation, or render delay. This is the intended freshness source for host-side player-position checks (AI targeting, range and interaction validation) when the game does not maintain its own canonical guest-player position. `latest()` returns `null` and `latestAll()` omits the peer until it has published a transform — including after reconnect, until the first fresh sample arrives.
 * Peer transforms are client-reported input either way. The host validates them with game-specific tolerances and remains authoritative over gameplay outcomes; never blindly trust a claimed position or outcome.
 
@@ -251,6 +251,16 @@ Entity IDs must be stable strings or finite numbers. Duplicate IDs in one snapsh
 This helper manages local presentation objects only; it does not make those entities authoritative or transmit them.
 
 Prefer it over hand-written create/update/remove loops when presenting snapshot collections, as those commonly cause ghosts or duplicates after restore and host migration.
+
+### Smooth guest presentation of snapshot entities
+
+How a guest moves entities between snapshots (arriving at `publishHz`, say 10 Hz) decides whether the game feels smooth or "laggy":
+
+* **Interpolate between the last two snapshots at a fixed render delay.** Render each entity at `now - renderDelayMs` where `renderDelayMs` is ~1 to 1.5 snapshot intervals (10 Hz → 100–150 ms), blending position between the previous and current snapshot by elapsed fraction. Both endpoints are authoritative, so motion is smooth by construction and never snaps.
+* **Never extrapolate to "now" from the newest snapshot as the default presentation.** Forward-predicting each entity by a full snapshot interval is wrong after every bounce, impulse, or turn — physics-driven and chasing entities then visibly snap at snapshot rate, which players read as severe lag even on a 10 ms connection.
+* **Do not disable interpolation for fast entities.** A speed cap is only meaningful for extrapolation beyond the newest snapshot; between two known positions any speed interpolates cleanly. Zeroing interpolation above a speed threshold makes the fastest entities — explosions, debris, knockbacks — step at discrete snapshot positions.
+* Keep a small optional extrapolation (≤ one snapshot interval) only to cover gaps while the next snapshot is late, and accept the tiny correction when it lands.
+* The same trade-off already exists for remote players: `transforms.sample()` implements it; reuse it rather than re-deriving.
 
 ## Events, intents and signals
 
@@ -423,7 +433,8 @@ When authority changes, the old host must stop shared simulation immediately and
 | World wiped after rejoin                        | Fresh state was published before restored state was processed         | Initialise worlds only from the authority lifecycle; respect `not_ready`    |
 | Snapshot rejected immediately after game update | `schemaVersion` mismatch                                              | Expected for incompatible persisted state; initialise a fresh world         |
 | Ghost/duplicate entities after host migration   | `restore` merged instead of replacing                                 | Fully replace authoritative shared state                                    |
-| `frame_too_large`                               | Serialized client frame exceeded 60 KB                                | Slim snapshot, round values, remove transient data, cap collections         |
+| `frame_too_large`                               | Serialized client frame exceeded 256 KB                               | Slim snapshot, round values, remove transient data, cap collections         |
+| Guest entities jitter, rubber-band or "fly around" at snapshot rate | Guest presentation extrapolates to now from the newest snapshot (wrong after every bounce/turn) or disables interpolation for fast entities | Interpolate between the last two snapshots at a fixed render delay; cap extrapolation, never zero interpolation |
 | `rate_limited`, choppy networking               | Combined transforms/world/events too close to 60 frames/s             | Reduce `transformHz`, `publishHz`, or unnecessary events                    |
 | An intent does nothing                          | No active run yet or stale `runId` caused safe rejection              | Send after world exists; tolerate actions crossing run resets               |
 | Reliable event affects a new run                | Generic reliable event survived reconnect without run scoping         | Include `runId` in run-specific reliable events and validate it             |
