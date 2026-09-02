@@ -100,6 +100,8 @@ services:
       GAMESERVER_RATE_PER_SECOND: ${GAMESERVER_RATE_PER_SECOND:-60}
       GAMESERVER_RATE_BURST: ${GAMESERVER_RATE_BURST:-120}
       GAMESERVER_ROOM_TTL_MS: ${GAMESERVER_ROOM_TTL_MS:-600000}
+      # A host silent this long while another peer waits loses authority.
+      GAMESERVER_HOST_STALL_MS: ${GAMESERVER_HOST_STALL_MS:-15000}
       GAMESERVER_ALLOWED_ORIGINS: ${GAMESERVER_ALLOWED_ORIGINS:-}
       # ARENA (single-mode) worlds are persisted here and survive restarts.
       GAMESERVER_STATE_DIR: ${GAMESERVER_STATE_DIR:-/data/threadsite-relay}

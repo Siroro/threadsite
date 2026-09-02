@@ -9,7 +9,8 @@
     "test:relay": "node smoke-test.mjs",
     "test:client": "node client-smoke-test.mjs",
     "test:restart": "node restart-test.mjs",
-    "test:durable": "node durability-test.mjs"
+    "test:durable": "node durability-test.mjs",
+    "test:stall": "node host-stall-test.mjs"
   },
   "dependencies": {
     "ws": "8.21.3"

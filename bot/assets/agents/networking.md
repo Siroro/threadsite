@@ -14,6 +14,7 @@ The client is `site/net/threadsite-net.js` (typed by `threadsite-net.d.ts`); ide
 * Remote transforms sample **100–150 ms in the past** using an adaptive interpolation delay and extrapolate at most **100 ms** past the newest sample by default.
 * Peers whose transforms go silent for **>2 s** vanish from `sampleAll()` / `latestAll()` / `listAlive()` / `nearest()`.
 * Reconnect backoff is roughly 0.5–8 s; half-open sockets are detected within ~30 s.
+* The relay re-elects a **stalled host**: a host that publishes no world for **15 s** (`GAMESERVER_HOST_STALL_MS`) while another peer is connected is demoted to guest and authority moves to that peer. Healthy hosts publish at 1 Hz minimum, so this never fires in normal play; a lone silent host (nobody waiting) is left alone.
 * `close()` is permanent. Other connection loss automatically reconnects and re-runs the bootstrap gate.
 
 ## Player identity
@@ -110,6 +111,7 @@ Authority can migrate after:
 * disconnect
 * `yield-host`
 * background-tab auto-yield
+* the relay's host-stall watchdog (a connected host stopped publishing while peers waited — e.g. a frozen or pre-watchdog tab whose socket still answers pings)
 
 It does not automatically return to the previous host.
 
@@ -428,6 +430,7 @@ When authority changes, the old host must stop shared simulation immediately and
 | Every timer instantly ends after durable resume | Absolute deadline was persisted                                       | Store remaining/elapsed simulation time and rebase on restore               |
 | Remote player slides across map after teleport  | `publish()` used for discontinuity                                    | Use `transforms.teleport()`                                                 |
 | Game freezes when host tab hides                | Newly authoritative peer isn't advancing simulation                   | Drive simulation from authority lifecycle, never a cached startup-host flag |
+| World frozen for everyone; an old or hidden tab is (or was) connected | That tab held host authority while its JS was frozen — the socket still answers the relay's pings, so nothing dropped it | Relay-side: the host-stall watchdog re-elects a waiting peer within ~15 s of the host going silent; keep hosts publishing so it never triggers |
 | `bad_world_sync` on startup                     | World lifecycle API mixed with raw world/authority callbacks          | Use one synchronization style; prefer the high-level lifecycle              |
 | Host sees nothing in `world.onSnapshot()`       | Own world acknowledgements are silent                                 | Expected; use local authoritative state / `net.run`                         |
 | Persisted ARENA restarts fresh                  | Snapshot schema rejected or capture never successfully persisted      | Check `schemaVersion`, `capture()` errors and relay persistence logs        |
