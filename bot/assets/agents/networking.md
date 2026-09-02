@@ -6,9 +6,11 @@ The client is `site/net/threadsite-net.js` (typed by `threadsite-net.d.ts`); ide
 
 ## Budgets and numbers (defaults)
 
-* Player transforms coalesce to **25 Hz** (`transformHz`, 1–60). Complete worlds publish at **10 Hz** (`publishHz`, 1–30).
+* Player transforms coalesce to **25 Hz** (`transformHz`, 1–60). Complete worlds publish at **10 Hz** by default (`publishHz`, 1–30) — choose that rate deliberately; see "Choosing rates and the latency budget" below.
 * One client frame must stay under **256 KB** — `publishWorld` throws `frame_too_large` beyond it. The relay accepts up to 264 KiB by default; the lower client cap provides headroom so an oversized world fails locally instead of dropping the relay connection.
 * The relay rate-limits every connection to **60 frames/s** (burst 120), shared by *all* sends. `transformHz` + `publishHz` + events must stay comfortably below it. 60 Hz transforms plus 30 Hz worlds will trip `rate_limited` and updates will start dropping.
+* The client also paces itself at **55 frames/s sustained** (burst 100): when the budget is exhausted it drops the periodic frames (transforms, worlds) with a console warning and counts them in `net.stats.budgetDroppedFrames`, so a misconfigured rate degrades gracefully instead of colliding with the relay's limiter.
+* `net.stats` exposes live link diagnostics for HUD readouts: `rtt`, `jitterMs`, `peers`, measured `worldHz`, `lastWorldBytes`, and `budgetDroppedFrames`.
 * Reliable events live **3 s** (`eventTtlMs`, 250–30000), queue at most 128 while offline, and retry once after rate limiting. Event handling should remain idempotent.
 * Ephemeral signals coalesce latest-wins per `(type, target)` at **20 Hz**.
 * Remote transforms sample **45–150 ms in the past** using an interpolation delay adaptive to measured transit jitter, and extrapolate at most **100 ms** past the newest sample by default.
@@ -16,6 +18,24 @@ The client is `site/net/threadsite-net.js` (typed by `threadsite-net.d.ts`); ide
 * Reconnect backoff is roughly 0.5–8 s; half-open sockets are detected within ~30 s.
 * The relay re-elects a **stalled host**: a host that publishes no world for **15 s** (`GAMESERVER_HOST_STALL_MS`) while another peer is connected is demoted to guest and authority moves to that peer. Healthy hosts publish at 1 Hz minimum, so this never fires in normal play; a lone silent host (nobody waiting) is left alone.
 * `close()` is permanent. Other connection loss automatically reconnects and re-runs the bootstrap gate.
+
+## Choosing rates and the latency budget
+
+Rates are a feel decision, not a default to keep. What a guest sees behind reality is the sum of four terms:
+
+```text
+transform coalescing (1000/transformHz)
++ network transit (~5–20 ms on a near relay; grows with distance/jitter)
++ snapshot staleness (up to 1000/publishHz)
++ entity render delay your presenter adds (~1.25 × 1000/publishHz for smooth interpolation)
+```
+
+* Real-time action games: `publishHz` 15–20 and `transformHz` 25–30. At `publishHz` 10 the smooth-interpolation delay alone is ~125 ms and players read the world as laggy even on a fast relay — this is the #1 cause of "multiplayer feels laggy" reports on otherwise clean builds.
+* Budget the relay's per-connection limit: `transformHz + publishHz + headroom for events/pings` should stay under ~50 of the 60 frames/s cap.
+* Size-check the complete world while hosting: log `JSON.stringify` of the capture envelope every few seconds at peak entity counts. Keep it under ~200 KB of the 256 KB `frame_too_large` cap; slim the snapshot (round harder, drop derivable or cosmetic fields, cap collections) rather than lowering the rate.
+* Hosts validate guest contact and hits from `latest()` — add a small tolerance or grace window (contact must hold ~100 ms, or a slightly smaller damage radius than visual radius) so guests don't take hits a moment after visually escaping. Authority stays host-side; leniency is a feel decision.
+* Ship a small diagnostics readout from `net.stats` in the HUD (at minimum `rtt`). When a player reports lag it immediately separates "far from the relay / bad Wi-Fi" (high RTT) from "rates or presenter delay" (low RTT), and `budgetDroppedFrames`/`lastWorldBytes` catch rate and size problems on the spot.
+* Guest entity presentation itself is covered in "Smooth guest presentation of snapshot entities" below: interpolate between the last two snapshots, never extrapolate to now.
 
 ## Player identity
 
@@ -238,28 +258,33 @@ Presence is live peer state, not durable ARENA state.
 
 ## Snapshot entity reconciliation
 
-For guest-side mirrors of authoritative collections such as enemies, pickups or props, prefer:
+For guest-side mirrors of authoritative collections such as enemies, pickups or props, use the smooth collection:
 
 ```ts
-net.entities.syncCollection(...)
+const enemiesSync = net.entities.syncCollection("enemies", {
+  getId: (snapshot) => snapshot.id,
+  create: (snapshot) => spawnEnemyView(snapshot),
+  update: (view, snapshot) => applyDiscreteFields(view, snapshot), // hp, kind, flags
+  remove: (view) => destroyEnemyView(view),
+  smooth: { keys: ["x", "z"], snapDistance: 5 },
+});
 ```
 
-Its `apply()` method creates missing IDs, updates existing IDs, and removes entities absent from the latest snapshot. The controller owns the entity map; iterate `controller.values()` for per-frame presentation. Do not create a second entity map unless necessary.
+Its `apply()` method creates missing IDs, updates existing IDs, and removes entities absent from the latest snapshot. With `smooth` set, the controller also interpolates the listed numeric keys between the last two snapshots and writes them onto each entity at render time — call `apply()` from `present()` and read positions from `controller.values()` / `get()` in the render loop; they never step at snapshot rate and never snap (only teleports past `snapDistance`, new entities, and missing history land unblended). With `smooth`, do not copy the smooth keys in `update()` — the controller owns them between snapshots; `update()` owns the discrete fields. The controller owns the entity map; do not create a second entity map unless the game truly needs one.
 
 Entity IDs must be stable strings or finite numbers. Duplicate IDs in one snapshot throw `duplicate_entity_id`.
 
 This helper manages local presentation objects only; it does not make those entities authoritative or transmit them.
 
-Prefer it over hand-written create/update/remove loops when presenting snapshot collections, as those commonly cause ghosts or duplicates after restore and host migration.
+Prefer it over hand-written create/update/remove/interpolation loops when presenting snapshot collections, as those commonly cause ghosts, duplicates, or snapshot-rate stepping after restore and host migration.
 
 ### Smooth guest presentation of snapshot entities
 
-How a guest moves entities between snapshots (arriving at `publishHz`, say 10 Hz) decides whether the game feels smooth or "laggy":
+How a guest moves entities between snapshots (arriving at `publishHz`, say 10–20 Hz) decides whether the game feels smooth or "laggy". **The default answer is the smooth `syncCollection` above — it implements everything in this section.** Hand-roll presentation only when a collection genuinely cannot flow through it, and then:
 
 * **Interpolate between the last two snapshots at a fixed render delay.** Render each entity at `now - renderDelayMs` where `renderDelayMs` is ~1 to 1.5 snapshot intervals (10 Hz → 100–150 ms), blending position between the previous and current snapshot by elapsed fraction. Both endpoints are authoritative, so motion is smooth by construction and never snaps.
 * **Never extrapolate to "now" from the newest snapshot as the default presentation.** Forward-predicting each entity by a full snapshot interval is wrong after every bounce, impulse, or turn — physics-driven and chasing entities then visibly snap at snapshot rate, which players read as severe lag even on a 10 ms connection.
 * **Do not disable interpolation for fast entities.** A speed cap is only meaningful for extrapolation beyond the newest snapshot; between two known positions any speed interpolates cleanly. Zeroing interpolation above a speed threshold makes the fastest entities — explosions, debris, knockbacks — step at discrete snapshot positions.
-* Keep a small optional extrapolation (≤ one snapshot interval) only to cover gaps while the next snapshot is late, and accept the tiny correction when it lands.
 * The same trade-off already exists for remote players: `transforms.sample()` implements it; reuse it rather than re-deriving.
 
 ## Events, intents and signals
@@ -327,6 +352,16 @@ The host must still validate:
 * current world state
 
 The intent layer validates synchronization context, not game rules.
+
+**Fast-path the acting player's feedback.** A guest's accepted action normally becomes visible to *them* only in the next complete world snapshot — up to a full publish interval (~50–100 ms) after the host already decided it, which reads as input lag on the very player who acted. When the host accepts (or clearly rejects) an intent that deserves immediate feedback — a pickup, a purchase, a hit confirmation — send a small targeted reliable event back to the sender right away and let the world snapshot reconcile the rest:
+
+```ts
+// host, inside the intent handler, after validating:
+net.events.sendReliable("pickup-approved", { entityId }, intent.from);
+// guest: play the sound/flash immediately; the snapshot brings the durable state
+```
+
+Keep the event a presentation hint, not a second source of truth: the authoritative outcome still lives in `capture()`.
 
 ### Ephemeral signals
 
@@ -434,7 +469,11 @@ When authority changes, the old host must stop shared simulation immediately and
 | Snapshot rejected immediately after game update | `schemaVersion` mismatch                                              | Expected for incompatible persisted state; initialise a fresh world         |
 | Ghost/duplicate entities after host migration   | `restore` merged instead of replacing                                 | Fully replace authoritative shared state                                    |
 | `frame_too_large`                               | Serialized client frame exceeded 256 KB                               | Slim snapshot, round values, remove transient data, cap collections         |
-| Guest entities jitter, rubber-band or "fly around" at snapshot rate | Guest presentation extrapolates to now from the newest snapshot (wrong after every bounce/turn) or disables interpolation for fast entities | Interpolate between the last two snapshots at a fixed render delay; cap extrapolation, never zero interpolation |
+| Guest entities jitter, rubber-band or "fly around" at snapshot rate | Guest presentation extrapolates to now from the newest snapshot (wrong after every bounce/turn) or disables interpolation for fast entities | Use the smooth `syncCollection` (or, hand-rolled: interpolate between the last two snapshots at a fixed render delay — never zero interpolation for fast entities) |
+| Multiplayer "feels laggy" on an otherwise clean build | `publishHz` 10 left at default: smooth interpolation alone renders shared entities ~125 ms behind | Raise `publishHz` to 15–20 (size-check the snapshot first) and scale the entity render delay to ~1.25 snapshot intervals |
+| Guest's pickup/hit reacts only in the next snapshot (~a publish interval late) | Result was visible to the actor only via the complete world | Host sends a targeted reliable event to the actor on accept; the snapshot reconciles the durable state |
+| Guest takes a hit a moment after visually escaping | Host validates contact from `latest()` with no tolerance for guest latency | Add a small grace window or margin to host-side contact checks; authority stays host-side |
+| "Lag" reported but the build follows this guide | Unknown whether network or presentation | Read `net.stats` in the HUD: high RTT is distance/Wi-Fi to the relay; low RTT points at rates or presenter delay; `budgetDroppedFrames`/`lastWorldBytes` expose rate and size problems |
 | `rate_limited`, choppy networking               | Combined transforms/world/events too close to 60 frames/s             | Reduce `transformHz`, `publishHz`, or unnecessary events                    |
 | An intent does nothing                          | No active run yet or stale `runId` caused safe rejection              | Send after world exists; tolerate actions crossing run resets               |
 | Reliable event affects a new run                | Generic reliable event survived reconnect without run scoping         | Include `runId` in run-specific reliable events and validate it             |

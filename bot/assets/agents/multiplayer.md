@@ -40,7 +40,7 @@ const net = await ThreadSiteNet.createAuthoritativeSession({
   name,
   world: {
     schemaVersion: 1,
-    publishHz: 10,
+    publishHz: 20, // feel decision: 15-20 for action games; 10 only for slow/large worlds
     capture: (): NetWorldState<SharedState> => ({
       runId,
       tick: simulationTick,
@@ -67,6 +67,10 @@ startEngineLoop(scene, net, hud);
 While `authoritative` is true, advance shared simulation using frame-rate-independent steps and `net.clock.now()` for shared time. Stop shared mutation immediately when it becomes false. The preset configures transform rate, publishes complete worlds, serves late-join requests, and publishes immediately after authority starts. Call `net.world.publishNow()` after a boss phase change or shared reset, and `net.world.yieldAuthority()` before an intentional scene transition. Do not use raw world frames or authority callbacks alongside this lifecycle.
 
 For games with genuinely no shared state, omit `world`. Default to `mode: "single"`: one game-wide shared arena with no room UI (`net.room` is intentionally `null`) — this is the preferred topology for generated games. Reach for `mode: "rooms"` only when the request explicitly calls for private invite-coded sessions; then pass `room: ThreadSiteNet.roomFromUrl()` and `createRoom: !invitedRoom`, show the room code plus `net.inviteUrl()`, and handle missing/full/expired rooms. If the initial relay connection fails, keep the same game playable solo and show a small offline indicator.
+
+### Rate budgets and guest feel
+
+Rates are feel decisions, not defaults to keep. Guests render the shared world ~1.25 snapshot intervals behind for smooth interpolation, so at `publishHz` 10 every shared entity sits ~125 ms late and players read the game as laggy even on a fast relay. Real-time action games use `publishHz` 15–20 and `transformHz` 25–30, keeping `transformHz + publishHz + event headroom` under ~50 of the relay's 60 frames/s per connection (the client also self-paces at 55/s and drops periodic frames past it — visible in `net.stats.budgetDroppedFrames`). While hosting, log the serialized capture's byte size at peak entity counts and keep it under ~200 KB of the 256 KB cap — slim the snapshot (round harder, drop derivable or cosmetic fields, cap collections) rather than lowering the rate. Present snapshot entities through the smooth `syncCollection` (never extrapolate to now); validate guest contact host-side from `latest()` with a small tolerance or grace window so guests don't take hits they visually escaped; and show a `net.stats` readout in the HUD so a lag report splits network from presentation at a glance.
 
 ### Durable arenas
 
@@ -102,21 +106,23 @@ Presence is cached for late join and automatically republished after reconnect.
 
 ### Reconcile snapshot collections centrally
 
-Do not hand-write repeated find/create/update/remove loops for snapshot entities. Register a stable-ID collection once:
+Do not hand-write repeated find/create/update/remove loops for snapshot entities. Register a stable-ID collection once, with `smooth` so the controller interpolates positions between snapshots for you:
 
 ```ts
 const enemiesSync = net.entities.syncCollection("enemies", {
   getId: (snapshot) => snapshot.id,
   create: (snapshot) => spawnEnemyView(snapshot),
-  update: (enemy, snapshot) => updateEnemyView(enemy, snapshot),
-  remove: (enemy) => destroyEnemyView(enemy),
+  update: (view, snapshot) => updateDiscreteFields(view, snapshot), // hp, kind — not the smooth keys
+  remove: (view) => destroyEnemyView(view),
+  smooth: { keys: ["x", "z"], snapDistance: 5 },
 });
 
 // Inside guest world presentation:
 enemiesSync.apply(sharedState.enemies);
+// Render loop: positions come back blended, never stepping at snapshot rate.
 ```
 
-Use one collection controller per entity kind. Duplicate or invalid IDs fail loudly; entities missing from the next complete snapshot are removed automatically. This is presentation reconciliation, not authority: the host still owns the source collection.
+Use one collection controller per entity kind. Duplicate or invalid IDs fail loudly; entities missing from the next complete snapshot are removed automatically; with `smooth`, the controller owns the listed numeric keys between snapshots (do not copy them in `update()`) so fast entities never snap or strobe. This is presentation reconciliation, not authority: the host still owns the source collection.
 
 ### Events are intents or confirmed results
 
@@ -148,4 +154,4 @@ Use `net.clock.after(ms)`, `elapsed(startTs)`, and `remaining(targetTs)` for dea
 
 Arena games (the default) show connection status and the peer list, with no room UI. Room games additionally show the room code and `net.inviteUrl()`. Reconnect is automatic, detects half-open sockets, resumes/recreates the same room after relay memory loss, and isolates stale snapshots with a room generation. A peer leaving must never break local play. Handle invalid, missing, full, and expired rooms cleanly.
 
-Before calling multiplayer complete, test two tabs and two physical devices; 2-4 moving peers; late join; network loss/reconnect; relay restart; host disconnect; explicit and background-tab authority yield; simultaneous pickup claims; every damage/down/revive path; scene/run reset; and reconnect after the event TTL. For an arena, also test everyone leaving and one player returning later — the world must resume from the persisted snapshot (correct HP, entities, and rebased timers), never reset to a fresh run. Success means one avatar per live peer, one shared outcome per intent, no stale transform replay, no HP/clock/entity snapback, no guest world writes, and continued play after authority or relay migration.
+Before calling multiplayer complete, test two tabs and two physical devices; 2-4 moving peers; late join; network loss/reconnect; relay restart; host disconnect; explicit and background-tab authority yield; simultaneous pickup claims; every damage/down/revive path; scene/run reset; and reconnect after the event TTL. For an arena, also test everyone leaving and one player returning later — the world must resume from the persisted snapshot (correct HP, entities, and rebased timers), never reset to a fresh run. Watch heavy action on a guest tab: the world must react promptly and smoothly with no snapshot-rate stepping. Success means one avatar per live peer, one shared outcome per intent, no stale transform replay, no HP/clock/entity snapback, no guest world writes, smooth guest entity motion with a logged snapshot size under its cap and a plausible `net.stats` readout, and continued play after authority or relay migration.

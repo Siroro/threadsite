@@ -81,6 +81,44 @@ export interface NetCollectionSyncOptions<TLocal, TSnapshot> {
   create: (snapshot: TSnapshot, id: string | number) => TLocal;
   update: (entity: TLocal, snapshot: TSnapshot, id: string | number) => void;
   remove: (entity: TLocal, id: string | number) => void;
+  /**
+   * Present the listed numeric fields interpolated between the last two
+   * snapshots instead of stepping at snapshot rate. The controller writes the
+   * smooth keys onto each entity at render time, so with `smooth` set the
+   * `update` callback must not copy those keys itself — it owns the discrete
+   * fields (hp, kind, flags), the controller owns position between snapshots.
+   */
+  smooth?: NetCollectionSmoothOptions<TSnapshot>;
+}
+export interface NetCollectionSmoothOptions<TSnapshot> {
+  /** Numeric snapshot keys the controller blends between snapshots. */
+  keys: (keyof TSnapshot & string)[];
+  /**
+   * Displacement across the smooth keys above which an entity lands at its
+   * newest position unblended — teleports, spawns, large corrections.
+   * Default 10.
+   */
+  snapDistance?: number;
+  /**
+   * Override the adaptive render delay. Default: 1.25 x the measured snapshot
+   * arrival interval, clamped to 50-200 ms.
+   */
+  renderDelayMs?: number;
+}
+/** Live link diagnostics from `net.stats`, sized for a HUD readout. */
+export interface NetLinkStats {
+  /** Round-trip to the relay in ms (null before the first pong). */
+  rtt: number | null;
+  /** Measured relay-time transit jitter in ms. */
+  jitterMs: number;
+  /** Connected peers excluding this client. */
+  peers: number;
+  /** Measured complete-world cadence in Hz (null before two worlds arrive). */
+  worldHz: number | null;
+  /** Size of the last sent (host) or received (guest) world frame in bytes. */
+  lastWorldBytes: number | null;
+  /** Periodic frames dropped so far by the client-side send budget. */
+  budgetDroppedFrames: number;
 }
 export type AuthoritativeSessionOptions<T = any> = Omit<ThreadSiteNetOptions,
   "world" | "mode" | "onWorld" | "onWorldRequest" | "onAuthorityAcquired" | "onAuthorityLost"> & {
@@ -133,6 +171,13 @@ type Timer = ReturnType<typeof setTimeout>;
 // 256 KB with relay headroom (relay default 264 KB): worlds with hundreds of
 // entities at 10-20 Hz fit without frame_too_large, while the cap still stops
 // runaway frames well before relay memory limits.
+// Client-side mirror of the relay's per-connection frame limiter, with
+// headroom: every frame spends a token, and once the bucket is empty the
+// periodic frames (transforms, complete worlds) are dropped with a throttled
+// warning instead of flooding into the relay's own limiter. Rare reliable
+// events still go through — reliability outranks pacing.
+const SEND_BUDGET_PER_SECOND = 55;
+const SEND_BUDGET_BURST = 100;
 const MAX_FRAME_BYTES = 256 * 1024;
 const OUTBOX_LIMIT = 128;
 const RECENT_EVENTS = 128;
@@ -264,6 +309,14 @@ export class ThreadSiteNet {
   duplicates = 0;
   rateLimited = 0;
   droppedTransient = 0;
+  /** Periodic frames dropped by the client-side send budget (see net.stats). */
+  budgetDroppedFrames = 0;
+  private worldIntervalMs = 0;
+  private lastWorldArrivalAt: number | null = null;
+  private lastWorldBytesValue: number | null = null;
+  private sendTokens = SEND_BUDGET_BURST;
+  private sendTokensUpdatedAt = Date.now();
+  private lastBudgetWarnAt = 0;
 
   private readonly transformIntervalMs: number;
   private readonly peersById = new Map<string, NetPeer>();
@@ -369,6 +422,22 @@ export class ThreadSiteNet {
   }
 
   get status(): NetStatus { return this.currentStatus; }
+  /**
+   * Live link diagnostics for HUD display: round-trip, transit jitter, peer
+   * count, measured complete-world cadence, last world-frame size, and
+   * send-budget drops. Surface it (or a subset) near the clock so lag reports
+   * can be triaged at a glance.
+   */
+  get stats(): NetLinkStats {
+    return {
+      rtt: this.rtt,
+      jitterMs: this.jitterMs,
+      peers: this.peersById.size,
+      worldHz: this.worldIntervalMs > 0 ? 1000 / this.worldIntervalMs : null,
+      lastWorldBytes: this.lastWorldBytesValue,
+      budgetDroppedFrames: this.budgetDroppedFrames,
+    };
+  }
   /**
    * True once the relay welcome has been fully processed, including its cached
    * world snapshot and initial authority. Authoritative publishing stays
@@ -613,8 +682,40 @@ export class ThreadSiteNet {
     catch (error) { throw new ThreadSiteNetError("Frame is not JSON-serializable.", "bad_frame", error); }
     const size = byteLength(payload);
     if (size > MAX_FRAME_BYTES) throw new ThreadSiteNetError(`Frame is ${size} bytes; keep frames under ${MAX_FRAME_BYTES}.`, "frame_too_large");
+    if (!this.takeSendToken() && (frame.t === "pstate" || frame.t === "world")) {
+      // The high-rate periodic frames pace down first; reliable events are
+      // rare and must not be silently lost.
+      this.budgetDroppedFrames += 1;
+      const now = Date.now();
+      if (now - this.lastBudgetWarnAt > 5000) {
+        this.lastBudgetWarnAt = now;
+        console.warn(`[threadsite-net] send budget reached (${SEND_BUDGET_PER_SECOND}/s sustained): dropping ${frame.t} frames — reduce transformHz/publishHz or event volume`);
+      }
+      return;
+    }
+    if (frame.t === "world") this.lastWorldBytesValue = size;
     try { this.socket.send(payload); }
     catch (error) { throw new ThreadSiteNetError("Send failed; the connection is closing.", "send_failed", error); }
+  }
+
+  /** @internal Token bucket pacing sends just under the relay's frame limiter. */
+  private takeSendToken(): boolean {
+    const now = Date.now();
+    this.sendTokens = Math.min(SEND_BUDGET_BURST, this.sendTokens + (now - this.sendTokensUpdatedAt) * SEND_BUDGET_PER_SECOND / 1000);
+    this.sendTokensUpdatedAt = now;
+    if (this.sendTokens < 1) return false;
+    this.sendTokens -= 1;
+    return true;
+  }
+
+  /** @internal Track measured complete-world cadence for `net.stats`. */
+  private noteWorldFrame(): void {
+    const now = Date.now();
+    if (this.lastWorldArrivalAt !== null) {
+      const gap = now - this.lastWorldArrivalAt;
+      if (gap > 0 && gap < 2000) this.worldIntervalMs = this.worldIntervalMs === 0 ? gap : this.worldIntervalMs + (gap - this.worldIntervalMs) * 0.2;
+    }
+    this.lastWorldArrivalAt = now;
   }
 
   private connectSocket(): void {
@@ -640,7 +741,13 @@ export class ThreadSiteNet {
     socket.onmessage = (event) => {
       try {
         const frame = JSON.parse(String(event.data)) as WireFrame;
-        if (frame && typeof frame.t === "string") this.handleFrame(frame, failTimer);
+        if (frame && typeof frame.t === "string") {
+          if (frame.t === "world" || frame.t === "world-ack") {
+            this.lastWorldBytesValue = String(event.data).length;
+            this.noteWorldFrame();
+          }
+          this.handleFrame(frame, failTimer);
+        }
       } catch (error) { console.error("[threadsite-net] inbound frame failed:", error); }
     };
     socket.onclose = (event) => {
@@ -1136,33 +1243,100 @@ export class NetEntities {
 
 export class NetCollectionSync<TLocal, TSnapshot> {
   private readonly entities = new Map<string, { id: string | number; entity: TLocal }>();
+  private prevSnapshot: { at: number; byId: Map<string, TSnapshot> } | null = null;
+  private curSnapshot: { at: number; byId: Map<string, TSnapshot> } | null = null;
+  private intervalMs = 0;
   readonly name: string;
   constructor(name: string, private readonly options: NetCollectionSyncOptions<TLocal, TSnapshot>) {
     this.name = cleanTypedName(name, "collection");
   }
   apply(snapshots: readonly TSnapshot[]): void {
-    const seen = new Set<string>();
+    const incoming = new Map<string, TSnapshot>();
     for (const snapshot of snapshots) {
       const id = this.options.getId(snapshot);
       if (!(typeof id === "string" || finite(id))) throw new ThreadSiteNetError(`${this.name} snapshot has an invalid id.`, "bad_entity_id");
       const key = `${typeof id}:${String(id)}`;
-      if (seen.has(key)) throw new ThreadSiteNetError(`${this.name} snapshot repeats id ${String(id)}.`, "duplicate_entity_id");
-      seen.add(key);
+      if (incoming.has(key)) throw new ThreadSiteNetError(`${this.name} snapshot repeats id ${String(id)}.`, "duplicate_entity_id");
+      incoming.set(key, snapshot);
       const existing = this.entities.get(key);
       if (existing) this.options.update(existing.entity, snapshot, id);
       else this.entities.set(key, { id, entity: this.options.create(snapshot, id) });
     }
     for (const [key, existing] of this.entities) {
-      if (seen.has(key)) continue;
+      if (incoming.has(key)) continue;
       this.options.remove(existing.entity, existing.id); this.entities.delete(key);
     }
+    if (!this.options.smooth) return;
+    const now = Date.now();
+    if (this.curSnapshot) {
+      const gap = now - this.curSnapshot.at;
+      if (gap > 0 && gap < 2000) this.intervalMs = this.intervalMs === 0 ? gap : this.intervalMs + (gap - this.intervalMs) * 0.2;
+    }
+    this.prevSnapshot = this.curSnapshot ?? { at: now, byId: incoming };
+    this.curSnapshot = { at: now, byId: incoming };
   }
-  get(id: string | number): TLocal | undefined { return this.entities.get(`${typeof id}:${String(id)}`)?.entity; }
+  get(id: string | number): TLocal | undefined {
+    this.refreshSmooth();
+    return this.entities.get(`${typeof id}:${String(id)}`)?.entity;
+  }
   /** All live local entities — the per-frame presentation iteration point. */
-  values(): TLocal[] { return [...this.entities.values()].map(({ entity }) => entity); }
+  values(): TLocal[] {
+    this.refreshSmooth();
+    return [...this.entities.values()].map(({ entity }) => entity);
+  }
   clear(): void {
     for (const { id, entity } of this.entities.values()) this.options.remove(entity, id);
     this.entities.clear();
+    this.prevSnapshot = null;
+    this.curSnapshot = null;
+    this.intervalMs = 0;
+  }
+  /**
+   * Blend the smooth keys between the last two snapshots and write them onto
+   * the live entities. Rendering at `now - delay` (delay tracking the measured
+   * snapshot cadence) keeps every read between two authoritative positions, so
+   * nothing ever snaps: new entities, missing history, and displacements past
+   * `snapDistance` land unblended, everything else interpolates regardless of
+   * speed. No extrapolation past the newest snapshot — a late snapshot holds
+   * the newest position instead of predicting one.
+   */
+  private refreshSmooth(): void {
+    const smooth = this.options.smooth;
+    const current = this.curSnapshot;
+    if (!smooth || !current) return;
+    const previous = this.prevSnapshot;
+    const delay = smooth.renderDelayMs !== undefined
+      ? clamp(smooth.renderDelayMs, 16, 300)
+      : clamp(Math.round(this.intervalMs * 1.25), 50, 200);
+    const renderTs = Date.now() - delay;
+    const snapDistance = smooth.snapDistance ?? 10;
+    for (const [key, { entity }] of this.entities) {
+      const cur = current.byId.get(key);
+      if (cur == null || typeof entity !== "object" || entity === null) continue;
+      const target = entity as Record<string, unknown>;
+      const prev = previous?.byId.get(key);
+      let alpha = 1;
+      if (prev != null && previous && current.at > previous.at) {
+        alpha = clamp((renderTs - previous.at) / (current.at - previous.at), 0, 1);
+        if (alpha < 1) {
+          let displacement = 0;
+          for (const name of smooth.keys) {
+            const from = Number(prev[name]);
+            const to = Number(cur[name]);
+            if (Number.isFinite(from) && Number.isFinite(to)) displacement += (to - from) * (to - from);
+          }
+          if (Math.sqrt(displacement) > snapDistance) alpha = 1;
+        }
+      }
+      for (const name of smooth.keys) {
+        const to = Number(cur[name]);
+        if (!Number.isFinite(to)) continue;
+        if (alpha >= 1) { target[name] = to; continue; }
+        const from = Number(prev?.[name]);
+        if (!Number.isFinite(from)) { target[name] = to; continue; }
+        target[name] = from + (to - from) * alpha;
+      }
+    }
   }
 }
 
