@@ -57,7 +57,7 @@ test("selection uses exact thread/repo/game matches, deduplicates, and rejects a
   assert.throws(() => selectProjects([a], { threads: [], repos: [], games: [] }), /Select a project/);
 });
 
-test("full removal backs up SQLite and removes only selected resources including site aliases", async () => {
+test("full removal removes only selected resources including site aliases and makes no backup by default", async () => {
   const a = record("2001", { siteAliases: ["old-game-2001"] });
   const b = record("2002");
   const f = await fixture("full", [a, b]);
@@ -70,9 +70,17 @@ test("full removal backs up SQLite and removes only selected resources including
   await assert.rejects(fs.access(path.join(config.publishRoot, a.siteSlug)), { code: "ENOENT" });
   await assert.rejects(fs.access(path.join(config.publishRoot, "old-game-2001")), { code: "ENOENT" });
   await fs.access(b.workspacePath);
-  const backupName = (await fs.readdir(root)).find((name) => name.startsWith("full.db.before-cleanup-"))!;
+  assert.deepEqual((await fs.readdir(root)).filter((name) => name.includes(".before-cleanup-")), []);
+});
+
+test("cleanup keeps a SQLite backup only when explicitly requested", async () => {
+  const project = record("2101");
+  const f = await fixture("backup", [project]);
+  await removeProjects(f.store, [project], "remove", f.services, { backup: true });
+  const backupName = (await fs.readdir(root)).find((name) => name.startsWith("backup.db.before-cleanup-"))!;
+  assert.ok(backupName);
   const snapshot = new DatabaseSync(path.join(root, backupName), { readOnly: true });
-  try { assert.equal(snapshot.prepare("SELECT count(*) AS n FROM projects").get()!.n, 2); } finally { snapshot.close(); }
+  try { assert.equal(snapshot.prepare("SELECT count(*) AS n FROM projects").get()!.n, 1); } finally { snapshot.close(); }
 });
 
 test("forget preserves files and does not invoke thread or repository deletion", async () => {
@@ -98,7 +106,7 @@ test("production removal delegates full teardown after deleting the selected Dis
 
 test("pending work, busy agents, and failures leave the record and files available for retry", async () => {
   const project = record("4001");
-  const pending = record("4002", { pendingTurn: { prompt: "Saved edit", initial: false, startedAt: "now" } });
+  const pending = record("4002", { pendingTurn: { id: "saved-turn", prompt: "Saved edit", initial: false, startedAt: "now" } });
   const f = await fixture("failures", [project, pending]);
   await assert.rejects(removeProjects(f.store, [project, pending], "remove", f.services), /pending work/);
   assert.deepEqual(f.calls, [], "preflight the complete selection before deleting anything");

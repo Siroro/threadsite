@@ -10,11 +10,14 @@ function required(name: string): string {
   return value;
 }
 
-function intEnv(name: string, fallback: number): number {
+/** Positive integers are >= 1; non-negative accepts 0 as an explicit "off". */
+function intEnv(name: string, fallback: number, minimum: 0 | 1 = 1): number {
   const raw = env(name);
   if (!raw) return fallback;
   const value = Number.parseInt(raw, 10);
-  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+  if (!Number.isFinite(value) || value < minimum) {
+    throw new Error(`${name} must be ${minimum ? "a positive" : "a non-negative"} integer${minimum ? "" : " (0 disables)"}`);
+  }
   return value;
 }
 
@@ -25,13 +28,7 @@ function boolEnv(name: string, fallback: boolean): boolean {
 }
 
 /** Milliseconds; 0 explicitly disables whatever the setting controls. */
-function msEnv(name: string, fallback: number): number {
-  const raw = env(name);
-  if (!raw) return fallback;
-  const value = Number.parseInt(raw, 10);
-  if (!Number.isFinite(value) || value < 0) throw new Error(`${name} must be a non-negative integer (0 disables)`);
-  return value;
-}
+const msEnv = (name: string, fallback: number): number => intEnv(name, fallback, 0);
 
 /** Fraction between 0 and 1; 0 explicitly disables whatever the setting controls. */
 function fractionEnv(name: string, fallback: number): number {
@@ -64,14 +61,7 @@ export const config = {
   opencodeUsername: env("OPENCODE_SERVER_USERNAME", "opencode"),
   opencodePassword: env("OPENCODE_SERVER_PASSWORD"),
   defaultModel: env("OPENCODE_DEFAULT_MODEL"),
-  opencodeMaxSteps: (() => {
-    const raw = env("OPENCODE_MAX_STEPS", "200");
-    const value = Number(raw);
-    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value <= 0) {
-      throw new Error("OPENCODE_MAX_STEPS must be a positive integer (default: 200).");
-    }
-    return value;
-  })(),
+  opencodeMaxSteps: intEnv("OPENCODE_MAX_STEPS", 200),
   opencodeReconcileTimeoutMs: intEnv("OPENCODE_RECONCILE_TIMEOUT_MS", 30 * 60 * 1000),
   opencodeReconcilePollMs: intEnv("OPENCODE_RECONCILE_POLL_MS", 1500),
   // A provider retry whose next attempt is scheduled further out than this is

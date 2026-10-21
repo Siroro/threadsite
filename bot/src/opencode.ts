@@ -8,7 +8,7 @@ import { log, logError, serializeError } from "./logger.js";
 import type { ProgressCallback, ProgressPlanItem, ProgressUpdate } from "./progress.js";
 import { steeringInstruction } from "./templates.js";
 import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
-import { cleanThreadTitle, errorText, formatShortDuration, formatTokens, formatTokensPerSecond, formatUtcClock, parseModel, truncate } from "./util.js";
+import { cleanThreadTitle, errorText, formatShortDuration, formatTokens, formatTokensPerSecond, formatUtcClock, parseModel, truncate, sleep } from "./util.js";
 
 // Sent to a session whose turn was killed by an agent-service restart. The
 // workspace keeps the turn's partial edits, so this must continue, not restart.
@@ -279,6 +279,9 @@ export function errorUsage(error: unknown): TurnUsage | undefined {
   return (error as { turnUsage?: TurnUsage } | undefined)?.turnUsage;
 }
 
+const quotaUntil = (block: { until: number }): string =>
+  `~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())})`;
+
 export class OpenCodeHarness {
   private readonly client = createOpencodeClient({
     baseUrl: config.opencodeUrl,
@@ -475,7 +478,7 @@ export class OpenCodeHarness {
   quotaStatus(): string {
     const blocks = [...this.quotaBlocked.entries()]
       .filter(([, block]) => block.until > Date.now())
-      .map(([provider, block]) => `${provider} blocked until ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())}) · ${block.title ?? block.reason}${block.link ? ` · ${block.link}` : ""}`);
+      .map(([provider, block]) => `${provider} blocked until ${quotaUntil(block)} · ${block.title ?? block.reason}${block.link ? ` · ${block.link}` : ""}`);
     return blocks.length ? blocks.join("; ") : "no active quota blocks";
   }
 
@@ -535,7 +538,7 @@ export class OpenCodeHarness {
     // subscribe pitch, and link are admin-only (log event + incident DM).
     emit(context.onProgress, {
       text: "🚫 AI provider unavailable",
-      detail: `retries resume ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())})`,
+      detail: `retries resume ${quotaUntil(block)}`,
     });
     // The provider will not answer until the reset; waiting inside this turn
     // only parks the Discord thread and the project queue for hours. Abort the
@@ -1420,10 +1423,14 @@ export class OpenCodeHarness {
   }
 
   /** Every session known to the agent service, across all projects. */
+  async workspaceSessions(): Promise<Array<{ id: string; directory: string; parentID?: string }>> {
+    return this.listAllSessions();
+  }
+
   private async listAllSessions(): Promise<Array<{ id: string; directory: string; parentID?: string }>> {
     const result = await this.client.session.list({ limit: 100_000 } as any, { signal: AbortSignal.timeout(10_000) });
     const data = unwrap<any[]>(result, "OpenCode session list");
-    if (!Array.isArray(data)) return [];
+    if (!Array.isArray(data)) throw new Error("OpenCode session inventory returned an unexpected payload.");
     return data
       .map((session) => ({
         id: String(session?.id ?? ""),
@@ -2363,7 +2370,7 @@ function quotaBlockedError(block: QuotaBlock, model?: string): Error {
     .join(" · ");
   const error = new Error(
     `Provider quota exhausted${model ? ` for ${model}` : ""}: ${block.reason} on ${block.provider}. `
-    + `Retries resume ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())}).`
+    + `Retries resume ${quotaUntil(block)}.`
     + (extras ? ` ${extras}` : ""),
   );
   error.name = "OpenCodeQuotaError";
@@ -2393,7 +2400,7 @@ function enrichProviderError(error: unknown, model?: string, usage?: TurnUsage, 
   else if (isTransportLikeError(error)) hint = "OpenCode transport failure";
 
   const quotaNote = block
-    ? ` Quota resets ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())})`
+    ? ` Quota resets ${quotaUntil(block)}`
       + (block.message ? ` — ${block.message}` : "")
       + (block.link ? ` ${block.link}` : "")
     : "";
@@ -2442,8 +2449,4 @@ function safeJson(value: unknown): string {
 async function stopStream(stream: EventStreamHandle): Promise<void> {
   stream.stop();
   await Promise.race([stream.done.catch(() => undefined), sleep(400)]);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

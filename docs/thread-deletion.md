@@ -10,7 +10,7 @@ A startup sweep runs before interrupted builds resume. Periodic sweeps default t
 
 The relay's authenticated deletion endpoint disconnects players and removes the world snapshot. An empty `<game-id>.deleted` marker prevents old open tabs from recreating the game, including after a relay restart. The bot and relay share an automatically generated cleanup credential through the private `cleanup-control` volume; it is not mounted into OpenCode or published sites. Existing server backups and general diagnostic logs are not rewritten by project cleanup.
 
-`start.sh remove` performs the same additional session, account, usage and relay cleanup after its existing preview, idle checks and SQLite backup. `start.sh forget` still removes registration only.
+`start.sh remove` performs the same additional session, account, usage and relay cleanup after its existing preview and idle checks; add `--backup` to keep a SQLite snapshot. `start.sh forget` still removes registration only. `start.sh purge` is the sweep for leftovers whose thread or registration is already gone.
 
 Deploy the bot, relay, and preview changes together:
 

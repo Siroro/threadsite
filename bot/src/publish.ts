@@ -262,8 +262,8 @@ async function validateModuleResolution(root: string): Promise<void> {
         }
       } else if (type === "module") {
         // Inline modules resolve their specifiers against this HTML file;
-        // src'd modules (bundled output is self-consistent by construction,
-        // hand-written legacy files are not) get their import chain followed.
+        // src'd modules (bundled output is self-consistent by construction)
+        // get their import chain followed.
         if (src) {
           const clean = src.trim().split("#")[0].split("?")[0];
           if (clean && clean.startsWith(".") && !/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(src.trim())) {
@@ -347,9 +347,9 @@ function tagAttr(attrs: string, name: string): string {
  * rarely guards them), TS2307 diagnostics for non-relative imports are dropped
  * because CDN/import-map dependencies like `three` have no local node_modules
  * to resolve against, TS2339 diagnostics on DOM base-type receivers are
- * dropped because un-narrowed DOM lookups are idiomatic here, legacy
- * vendor-prefixed lookups on `window` (`window.webkitAudioContext`) are
- * dropped because tsc's DOM lib does not carry them, diagnostics caused by
+ * dropped because un-narrowed DOM lookups are idiomatic here, vendor-prefixed
+ * lookups on `window` (`window.webkitAudioContext`) are dropped because tsc's
+ * DOM lib does not carry them, diagnostics caused by
  * string-literal inference (TS2367 comparisons and TS2322 assignments whose
  * target type is a string literal — frozen constant maps pin singleton types
  * onto plain status variables) are dropped because the strings are ordinary
@@ -486,12 +486,9 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
     // Harness-owned net files stay real so authored imports resolve: the
     // client's declarations give call sites the full typed API (the .js is
     // never an input; with checkJs off nothing reports from the .js itself).
-    // The legacy js/ location is mirrored too while pre-TypeSwitch projects
-    // still carry it.
     for (const name of [
       "net/threadsite-net.js", "net/threadsite-net.d.ts",
       "net/net-config.js", "net/net-config.d.ts",
-      "js/threadsite-net.js",
     ]) {
       const content = await fs.readFile(safeChild(root, ...name.split("/")), "utf8").catch(() => undefined);
       if (content === undefined) continue;
@@ -678,11 +675,11 @@ function isUnresolvedExternalImport(line: string): boolean {
 
 /**
  * Diagnostics from vendored files: the relay client (kept real in the mirror
- * for authored call-site types, but never an input — in site/net/ with its
- * declarations, or the legacy site/js/ location) and, as defense in depth,
- * anything under `assets/` — the stubs normally keep vendored implementations
- * out of the tsc program entirely. Its syntax is already covered by the
- * `node --check` pass, which includes it.
+ * for authored call-site types, but never an input — it lives in site/net/
+ * with its declarations) and, as defense in depth, anything under `assets/` —
+ * the stubs normally keep vendored implementations out of the tsc program
+ * entirely. Its syntax is already covered by the `node --check` pass, which
+ * includes it.
  */
 function isVendoredFileDiagnostic(line: string): boolean {
   return /(?:^|[\\/])(?:assets[\\/][^(]*|(?:js|net)[\\/]threadsite-net\.js)\(/.test(line);

@@ -69,11 +69,6 @@ export function skillNames(kind: ProjectKind): string[] {
   return [];
 }
 
-/** Backwards-compatible single-skill probe for callers and diagnostics. */
-export function skillName(kind: ProjectKind): string | undefined {
-  return skillNames(kind)[0];
-}
-
 /**
  * Keep the harness-curated skill set in a game workspace current. OpenCode
  * discovers project skills from `.opencode/skills/<name>/SKILL.md` at the git

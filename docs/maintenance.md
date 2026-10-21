@@ -33,9 +33,30 @@ For direct selection, names match exactly and options can be repeated. Commands 
 ./start.sh forget --repo site-deleted-game --apply
 ```
 
-Full removal deletes the selected Discord thread, Forgejo repository, workspace, published site/aliases and SQLite registration, then refreshes the site index. It saves a SQLite backup first; that backup contains metadata, not a copy of the deleted source files. Registration-only cleanup keeps the thread, repository and files. Existing agent session history and relay snapshots are retained.
+Full removal deletes the selected Discord thread, Forgejo repository, workspace, published site/aliases and SQLite registration, then refreshes the site index. No backup is written by default; pass `--backup` to save a SQLite snapshot first. That snapshot contains metadata, not a copy of the deleted source files. Registration-only cleanup keeps the thread, repository and files. Existing agent session history and relay snapshots are retained.
 
 Cleanup refuses queued/interrupted work, active agent turns, shared resources, unexpected workspace locations and paths through symlinks. Stop unfinished work with `/site stop`, clear `/site queue`, or let recovery finish first. During `--apply`, start.sh temporarily stops a running bot and restores its running state afterward, including on failure. Other services stay running. A failed removal retains the registration so the same selection can be retried; resources already deleted during that attempt are treated as absent on retry. Cleanup does not update the checkout, prune Docker volumes or remove unrelated data.
+
+### Purging orphans from deleted threads
+
+`purge` finds resources left behind when a thread disappeared without a clean teardown. It is read-only until `--apply`:
+
+```bash
+./start.sh purge
+./start.sh purge --apply
+./start.sh purge --apply --backup
+```
+
+The preview inventories, and reports counts for:
+
+- registrations whose Discord thread no longer exists (error `10003`), which are torn down completely exactly like thread deletion;
+- workspace folders under `WORKSPACE_ROOT/<guild>/<thread>` with no registered project, including their agent sessions;
+- Forgejo repositories owned by the configured owner that carry the ThreadSite README or generated-repository description;
+- published site folders (including `.staging-`/`.backup-` leftovers) with no registered project slug;
+- generated push accounts (`push-*` restricted users) not referenced by a registration;
+- relay worlds and usage records for threads with no registration.
+
+Inventory is strict: if the agent, relay, or Forgejo inventory is unavailable the command stops instead of assuming everything is orphaned. Registered projects protect their repository IDs (including old-name redirects), workspace, all site slugs and aliases, push accounts, relay world and usage. Anything partially deleted is retained for a retry, and the command exits non-zero with the failing paths. Stop the bot during `--apply`; `start.sh` does that automatically and restores its previous running state even on failure. Run it after changing `WORKSPACE_ROOT` or `PUBLISH_ROOT`: folders outside the configured roots are never touched.
 
 ### Standalone stale-registration script
 
@@ -55,7 +76,7 @@ docker compose run --rm --no-deps -T --entrypoint node bot --input-type=module -
 docker compose up -d --no-deps bot
 ```
 
-The script uses `STATE_DB_FILE` from the container, or an explicit `--db FILE`. It saves a full SQLite backup alongside the database before deleting rows, refuses projects with pending work, and rolls back if a selected record changes during cleanup. It removes only the selected registrations; workspaces, published files, Forgejo repositories, and settings remain. The backup contains private state and is created with restrictive permissions.
+The script uses `STATE_DB_FILE` from the container, or an explicit `--db FILE`. It refuses projects with pending work and rolls back if a selected record changes during cleanup. It removes only the selected registrations; workspaces, published files, Forgejo repositories, and settings remain. Add `--backup` to save a full SQLite snapshot alongside the database first; the snapshot contains private state and is created with restrictive permissions.
 
 ## Local regression checks
 

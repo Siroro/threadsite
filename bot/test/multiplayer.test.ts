@@ -99,11 +99,9 @@ test("removeMultiplayerFiles strips the harness wiring from a singleplayer works
     await fs.mkdir(path.join(dir, "site", "js"), { recursive: true });
     await fs.writeFile(path.join(dir, "site", "net", "threadsite-net.js"), "client");
     await fs.writeFile(path.join(dir, "site", "net", "net-config.js"), "config");
-    await fs.writeFile(path.join(dir, "site", "js", "threadsite-net.js"), "legacy");
     await fs.writeFile(path.join(dir, "NETWORKING.md"), "guide");
     assert.equal(await removeMultiplayerFiles(dir), true, "reports removal");
     await assert.rejects(fs.access(path.join(dir, "site", "net")));
-    await assert.rejects(fs.access(path.join(dir, "site", "js", "threadsite-net.js")));
     await assert.rejects(fs.access(path.join(dir, "NETWORKING.md")));
     assert.equal(await removeMultiplayerFiles(dir), false, "a clean workspace is a no-op");
   } finally {

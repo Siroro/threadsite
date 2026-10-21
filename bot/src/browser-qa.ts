@@ -1,5 +1,6 @@
 import { config } from "./config.js";
 import { log } from "./logger.js";
+import { errorText } from "./util.js";
 
 /**
  * Harness-driven browser QA over the preview service's Playwright MCP: load
@@ -7,10 +8,11 @@ import { log } from "./logger.js";
  * and same-origin request failures, and capture a screenshot for the thread.
  *
  * Error policy (see assets/agents/shared.md — the preview browser cannot
- * reach external origins): failures on the preview origin itself and
- * non-network console/page errors are recorded separately from availability
- * notes. All browser findings are advisory: publication is fail-open, while
- * the findings are saved for the agent's next turn.
+ * reach external origins): only concrete application defects (uncaught
+ * exceptions, same-origin asset failures) and blank-render signals are
+ * recorded as findings; environment noise is stripped before it can reach
+ * the agent or the thread. All browser findings are advisory: publication
+ * is fail-open, while the findings are saved for the agent's next turn.
  */
 export interface BrowserQaResult {
   hardErrors: string[];
@@ -23,9 +25,15 @@ export interface BrowserQaResult {
 // MCP-driven browser lives there too, so this origin is reachable from it.
 const PREVIEW_ORIGIN = "http://127.0.0.1:8080";
 
-// Console text shapes caused by the preview's offline external-origin policy.
+// Console text shapes caused by the preview's offline external-origin policy,
+// the browser/session lifecycle, or benign browser quirks. None of these say
+// anything about the application: the preview browser cannot reach external
+// origins, and games must stay playable solo when the relay is unreachable.
+// They are never recorded as findings — not even as warnings.
 const NETWORK_ERROR_RE = /failed to fetch|networkerror|net::|err_(?:failed|name_not_resolved|connection|timed_out)|load failed|\bcors\b|fetch.*(?:failed|aborted)|aborted/i;
 const TRANSIENT_BROWSER_RE = /\bTimeoutError\b|timed out|timeout \d+\s*ms.*exceeded|target.*closed|browser.*(?:closed|disconnected)|page crashed|webgl.*(?:context lost|not supported|not available)|failed to create.*(?:webgl|gpu).*context/i;
+const WEBSOCKET_CONNECT_RE = /\bwebsocket connection\b/i;
+const BENIGN_CONSOLE_RE = /\bResizeObserver loop\b|The play\(\) request was interrupted|play\(\) (?:failed|can only be initiated)|autoplay/i;
 
 /** One error-level entry from browser_console_messages (plain text, not JSON). */
 export interface ConsoleEntry { type: string; text: string }
@@ -128,7 +136,13 @@ export function parseRenderSanity(text: string): RenderSanity | undefined {
   }
 }
 
-/** Separate confirmed page defects from preview/network availability notes. */
+/**
+ * Separate confirmed page defects from environment noise. Console/network
+ * shapes that reflect the preview environment rather than the application
+ * (offline external origins, WebSocket relay fallback, browser lifecycle,
+ * benign browser quirks, preview-server availability) are dropped entirely so
+ * agent feedback and thread warnings only carry actionable findings.
+ */
 export function classifyBrowserDiagnostics(entries: ConsoleEntry[], failures: NetworkFailure[], sanity?: RenderSanity): Pick<BrowserQaResult, "hardErrors" | "softNotes"> {
   const hardErrors: string[] = [];
   const softNotes: string[] = [];
@@ -138,16 +152,17 @@ export function classifyBrowserDiagnostics(entries: ConsoleEntry[], failures: Ne
     if (!isErrorLevel({ type: entry.type })) continue;
     const text = entry.text.replace(/\s+/g, " ").trim();
     if (!text) continue;
-    const network = NETWORK_ERROR_RE.test(text) || TRANSIENT_BROWSER_RE.test(text)
-      || /failed to load resource|server responded with a status of (?:408|425|429|5\d\d)/i.test(text);
-    (network ? softNotes : hardErrors).push(text.slice(0, network ? 240 : 400));
+    if (NETWORK_ERROR_RE.test(text) || TRANSIENT_BROWSER_RE.test(text) || WEBSOCKET_CONNECT_RE.test(text) || BENIGN_CONSOLE_RE.test(text)
+      || /failed to load resource|server responded with a status of (?:408|425|429|5\d\d)/i.test(text)) continue;
+    hardErrors.push(text.slice(0, 400));
   }
   for (const failure of failures) {
     if (failure.status === 404 && /\/favicon\.ico(?:[?#]|$)/.test(failure.url)) continue;
+    // Static preview server availability is infrastructure, not an
+    // application defect; only client-error statuses on real assets remain.
+    if (failure.status === undefined || [408, 425, 429].includes(failure.status) || failure.status >= 500) continue;
     const label = failure.url.startsWith(PREVIEW_ORIGIN) ? failure.url.slice(PREVIEW_ORIGIN.length) : failure.url;
-    const message = `preview request failed: ${label || "/"} → ${failure.error ?? `HTTP ${failure.status}`}`;
-    if (failure.status === undefined || [408, 425, 429].includes(failure.status) || failure.status >= 500) softNotes.push(message);
-    else hardErrors.push(message);
+    hardErrors.push(`preview request failed: ${label || "/"} → ${failure.error ?? `HTTP ${failure.status}`}`);
   }
   return { hardErrors: [...new Set(hardErrors)].slice(0, 8), softNotes: [...new Set(softNotes)].slice(0, 5) };
 }
@@ -302,9 +317,10 @@ export async function runBrowserQa(guildId: string, threadId: string): Promise<B
       }),
     ]);
   } catch (error) {
-    const reason = `${progress.stage}: ${error instanceof Error ? error.message : String(error)}`;
+    const reason = `${progress.stage}: ${errorText(error)}`;
     report.skippedReason = reason.slice(0, 400);
-    report.softNotes.unshift(`Browser check incomplete: ${report.skippedReason}`);
+    // Incomplete QA coverage is an infrastructure outcome, not an application
+    // finding: it stays in logs and skippedReason, never in agent feedback.
     log("warn", "browserqa.skipped_unavailable", { threadId, stage: progress.stage, reason, hardErrors: report.hardErrors });
   } finally {
     if (timer) clearTimeout(timer);
@@ -323,7 +339,9 @@ async function driveQa(guildId: string, threadId: string, signal: AbortSignal, r
   const optional = async (tool: string, args: Record<string, unknown> = {}) => {
     try { return await call(tool, args); }
     catch (error) {
-      report.softNotes.push(`${tool} unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 240));
+      // A single unavailable probe is a QA-environment problem, not an
+      // application finding: log it but never feed it back to the agent.
+      log("warn", "browserqa.tool_unavailable", { threadId, tool, error: errorText(error) });
       return undefined;
     }
   };

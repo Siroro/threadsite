@@ -1,5 +1,5 @@
 // Remove explicitly named stale registrations only. Run with the bot stopped.
-// Defaults to a dry run; --apply saves a full SQLite backup before deleting.
+// Defaults to a dry run. Backups are opt-in with --backup.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -7,11 +7,13 @@ import { DatabaseSync, backup } from "node:sqlite";
 
 const repositories = new Set();
 let apply = false;
+let backupRequested = false;
 let database = process.env.STATE_DB_FILE?.trim() || "/data/state.db";
 const args = process.argv.slice(2);
 for (let index = 0; index < args.length; index += 1) {
   const arg = args[index];
   if (arg === "--apply") apply = true;
+  else if (arg === "--backup") backupRequested = true;
   else if ((arg === "--repo" || arg === "--db") && args[index + 1] && !args[index + 1].startsWith("--")) {
     const value = args[++index];
     if (arg === "--repo") repositories.add(value);
@@ -34,7 +36,7 @@ try {
     }
     console.log(JSON.stringify({ threadId: row.thread_id, repoName: project.repoName, displayName: project.displayName, status: project.status }));
   }
-  if (apply && matches.length) {
+  if (apply && backupRequested && matches.length) {
     backupFile = `${database}.before-forget-${randomUUID()}.db`;
     const file = await fs.open(backupFile, "wx", 0o600);
     await file.close();

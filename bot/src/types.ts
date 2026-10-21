@@ -110,7 +110,7 @@ export interface ProjectRecord {
    * Cleared on every terminal outcome.
    */
   pendingTurn?: {
-    id?: string;
+    id: string;
     prompt: string;
     initial: boolean;
     startedAt: string;

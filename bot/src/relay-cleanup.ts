@@ -21,3 +21,13 @@ export async function deleteRelayGame(gameId: string): Promise<void> {
   });
   if (!response.ok) throw new Error(`Relay game cleanup failed (${response.status}).`);
 }
+
+export async function listRelayGames(): Promise<string[]> {
+  const response = await fetch(`${config.gameserverInternalUrl}/admin/games`, {
+    headers: { Authorization: `Bearer ${await relayCleanupToken()}` }, signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`Relay inventory failed (${response.status}).`);
+  const games = await response.json();
+  if (!Array.isArray(games) || games.some((game) => typeof game !== "string" || !/^[a-z0-9][a-z0-9-]{2,63}$/.test(game))) throw new Error("Unexpected relay inventory payload.");
+  return games;
+}

@@ -54,6 +54,9 @@ try {
   const host = await connect("delete-game");
   host.ws.send(JSON.stringify({ t: "world", generation: host.frame.generation, epoch: host.frame.epoch, s: { secret: "deleted project state" } }));
   await waitFor(() => fs.access(path.join(state, "delete-game.json")).then(() => true, () => false));
+  const inventory = async () => (await fetch(`${origin}/admin/games`, { headers: { Authorization: `Bearer ${token}` } })).json();
+  assert.equal((await fetch(`${origin}/admin/games`)).status, 403);
+  assert.deepEqual(await inventory(), ["delete-game", "keep-game"]);
   assert.equal((await fetch(`${origin}/admin/games/delete-game`, { method: "DELETE" })).status, 403);
   assert.equal((await fetch(`${origin}/admin/games/delete-game`, { method: "DELETE", headers: { Authorization: "Bearer wrong" } })).status, 403);
   const closed = once(host.ws, "close");
@@ -62,6 +65,7 @@ try {
   assert.equal((await closed)[0], 4004);
   assert.equal((await remove()).status, 204, "deletion is idempotent");
   await assert.rejects(fs.access(path.join(state, "delete-game.json")), { code: "ENOENT" });
+  assert.deepEqual(await inventory(), ["keep-game"], "deleted worlds are not offered for purge");
   assert.equal((await connect("delete-game")).frame.code, "project_deleted");
   assert.deepEqual((await connect("keep-game")).frame.world.s, { keep: true });
   for (const ws of sockets) ws.terminate();
@@ -69,6 +73,7 @@ try {
   await start();
   assert.equal((await connect("delete-game")).frame.code, "project_deleted", "stale clients stay blocked after restart");
   assert.deepEqual((await connect("keep-game")).frame.world.s, { keep: true });
+  assert.deepEqual(await inventory(), ["keep-game"], "purge inventory ignores deleted markers after restart");
   assert.deepEqual((await fs.readdir(state)).sort(), ["delete-game.deleted", "keep-game.json"]);
   console.log("PASS: authenticated game deletion, disconnected players, no state resurrection, restart durability and unrelated-game preservation.");
 } finally {

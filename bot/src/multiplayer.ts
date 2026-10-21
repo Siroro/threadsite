@@ -5,7 +5,7 @@ import { MULTIPLAYER_PROTOCOL_VERSION, projectAgents } from "./templates.js";
 import type { MultiplayerContext, MultiplayerMode, ProjectKind } from "./types.js";
 import { safeChild } from "./util.js";
 
-export const PROTOCOL_VERSION = MULTIPLAYER_PROTOCOL_VERSION;
+const PROTOCOL_VERSION = MULTIPLAYER_PROTOCOL_VERSION;
 
 const ASSETS_DIR = path.join(process.cwd(), "assets");
 const NET_CLIENT_STEM = "threadsite-net.js";
@@ -38,10 +38,8 @@ export function multiplayerContext(kind: ProjectKind, siteSlug: string, mode: Mu
  * workspace root. Runs on project creation, before every
  * mutation, and again after each agent turn (before validation), so agent
  * deletions/drift are repaired within the same turn. Writes are
- * content-compared so an unchanged tree stays untouched; legacy copies of the
- * client/config in `site/js/` (their pre-TypeScript home, when js/ was still
- * hand-authored) are removed so nothing imports a stale, never-updated
- * client. Returns true when any file had to be written.
+ * content-compared so an unchanged tree stays untouched. Returns true when
+ * any file had to be written.
  */
 export async function ensureMultiplayerFiles(
   workspacePath: string,
@@ -82,18 +80,6 @@ export async function ensureMultiplayerFiles(
   ].join("\n");
   changed = (await writeIfChanged(safeChild(netDir, "net-config.d.ts"), netConfigTypes)) || changed;
 
-  // Pre-TypeSwitch projects kept the client/config directly in site/js/; now
-  // that js/ is purely build output, those copies would silently drift from
-  // protocol updates. Remove them — the turn's build points any stale
-  // "../js/threadsite-net.js" import at the new location to fix.
-  for (const stale of ["threadsite-net.js", "net-config.js"]) {
-    const legacy = safeChild(workspacePath, "site", "js", stale);
-    if (await fs.access(legacy).then(() => true, () => false)) {
-      await fs.rm(legacy, { force: true }).catch(() => undefined);
-      changed = true;
-    }
-  }
-
   changed = (await writeIfChanged(
     safeChild(workspacePath, "AGENTS.md"),
     await projectAgents(kind, multiplayer),
@@ -118,8 +104,8 @@ async function writeIfChanged(file: string, content: string): Promise<boolean> {
 /**
  * Remove the harness-owned multiplayer wiring from a workspace that has gone
  * singleplayer: the whole `site/net/` directory (client, config, types), the
- * NETWORKING.md guide, and legacy copies under `site/js/`. Runs on the
- * multiplayer switch and again before every turn of a singleplayer game, so
+ * NETWORKING.md guide. Runs on the multiplayer switch and again before every
+ * turn of a singleplayer game, so
  * nothing relay-shaped survives for imports or the bundler to pick up.
  * Returns true when anything had to be removed.
  */
@@ -130,11 +116,9 @@ export async function removeMultiplayerFiles(workspacePath: string): Promise<boo
     await fs.rm(netDir, { recursive: true, force: true }).catch(() => undefined);
     changed = true;
   }
-  for (const file of [safeChild(workspacePath, "NETWORKING.md"), safeChild(workspacePath, "site", "js", NET_CLIENT_STEM), safeChild(workspacePath, "site", "js", "net-config.js")]) {
-    if (await fs.lstat(file).then(() => true, () => false)) {
-      await fs.rm(file, { force: true }).catch(() => undefined);
-      changed = true;
-    }
+  if (await fs.lstat(safeChild(workspacePath, "NETWORKING.md")).then(() => true, () => false)) {
+    await fs.rm(safeChild(workspacePath, "NETWORKING.md"), { force: true }).catch(() => undefined);
+    changed = true;
   }
   return changed;
 }

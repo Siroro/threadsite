@@ -487,7 +487,7 @@ const server = http.createServer((req, res) => {
   let pathname = "/";
   try { pathname = new URL(req.url ?? "/", "http://internal").pathname; } catch { /* invalid -> 404 */ }
   const deletion = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})$/.exec(pathname);
-  if (req.method === "DELETE" && deletion) {
+  if ((req.method === "DELETE" && deletion) || (req.method === "GET" && pathname === "/admin/games")) {
     void (async () => {
       const token = (await fs.readFile(ADMIN_TOKEN_FILE, "utf8")).trim();
       const actual = Buffer.from(String(req.headers.authorization ?? ""));
@@ -495,7 +495,18 @@ const server = http.createServer((req, res) => {
       if (!token || actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
         res.writeHead(403); res.end(); return;
       }
-      await deleteGame(deletion[1]!);
+      if (req.method === "GET") {
+        const files = await fs.readdir(STATE_DIR).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
+        const gameIds = new Set([...durableWorlds.keys(), ...games.keys()]);
+        for (const file of files) {
+          const game = /^([a-z0-9][a-z0-9-]{2,63})\.json(?:\.\d+\.[a-f0-9]{8}\.tmp)?$/.exec(file)?.[1];
+          if (game) gameIds.add(game);
+        }
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify([...gameIds].filter((game) => !deletedGames.has(game)).sort()));
+        return;
+      }
+      await deleteGame(deletion![1]!);
       res.writeHead(204); res.end();
     })().catch((error) => {
       console.warn(`[threadsite-gameserver] project_cleanup failed: ${String((error as Error).message)}`);
