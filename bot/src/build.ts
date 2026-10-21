@@ -11,7 +11,7 @@ import { ensureGitignoreLines, removeGitignoreLines, safeChild } from "./util.js
  * repo shows the multiplayer wiring. Stale ignore lines from older harness
  * versions (site/net/) are scrubbed alongside — see removeGitignoreLines.
  */
-export const GENERATED_GITIGNORE = [".opencode/", "node_modules/", "site/js/", "build-manifest.json"] as const;
+export const GENERATED_GITIGNORE = [".opencode/", "node_modules/", "scratch/", "site/js/", "build-manifest.json"] as const;
 
 /** Ignore entries older harness versions wrote that the boundary no longer excludes. */
 export const RETIRED_GITIGNORE = ["site/net/"] as const;

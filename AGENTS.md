@@ -49,6 +49,7 @@ These instructions apply to this repository. This is the infrastructure that tur
 - Keep generated sites static. Preserve workspace/import boundaries, symlink checks, publication exclusions, and file/byte limits. Changes to this infrastructure may use normal development tools; generated-project tool restrictions are enforced separately in `opencode/`.
 - Keep multiplayer client, relay, protocol declarations, and generated instructions consistent. Preserve the selected arena/rooms/singleplayer architecture and existing game tenant identity. Networked games must remain playable solo when the relay is unavailable.
 - Preview compilation must match production compilation. Keep bot and preview esbuild versions/settings aligned and retain preview isolation between projects and sessions.
+- Scratch browser views live under workspace `scratch/<name>/` and preview at `/<guild>/<thread>/__scratch/<name>/`. Compile each view independently, permit imports only from that view, its project's site and installed packages, and keep scratch files out of production builds, validation, Git and publication. Keep the builder prompt and generated project rules aligned with these boundaries.
 - Keep secrets out of source, test fixtures, generated sites, and user-facing Discord messages. Use placeholders in examples; do not dump `.env`, tokens, or credential files into logs. Keep detailed private diagnostics separate from public status messages.
 
 ## Verification

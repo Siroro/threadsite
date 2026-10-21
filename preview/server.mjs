@@ -31,9 +31,10 @@ async function checkedPath(root, parts) {
   return target;
 }
 
-async function bundle(workspaceRoot, project) {
+async function bundle(workspaceRoot, project, view) {
   const workspace = await checkedPath(workspaceRoot, project.split("/"));
-  const site = await checkedPath(workspace, ["site"]);
+  const site = await checkedPath(workspace, view ? ["scratch", view] : ["site"]);
+  const projectSite = path.join(workspace, "site");
   const source = path.join(site, "src");
   let entries = [];
   try {
@@ -67,8 +68,8 @@ async function bundle(workspaceRoot, project) {
       setup(build) {
         build.onLoad({ filter: /.*/ }, async ({ path: file }) => {
           const modules = path.join(workspace, "node_modules");
-          const root = inside(site, file) ? site : inside(modules, file) ? modules : undefined;
-          if (!root) throw new Error("Preview imports must stay inside site/ or the project's node_modules/.");
+          const root = inside(site, file) ? site : view && inside(projectSite, file) ? projectSite : inside(modules, file) ? modules : undefined;
+          if (!root) throw new Error("Preview imports must stay inside the current view, site/ or the project's node_modules/.");
           await checkedPath(workspaceRoot, path.relative(workspaceRoot, file).split(path.sep));
           if ((await fs.stat(file)).size > MAX_FILE_BYTES) throw new Error("Preview input exceeds 32 MiB.");
           // Let esbuild choose its native loader; this hook only checks access.
@@ -129,23 +130,24 @@ export function createPreviewServer({ workspaceRoot }) {
     if (next) next.grant();
     else activeBuilds -= 1;
   }
-  async function rebuild(project) {
-    if (pending.has(project)) return pending.get(project);
+  async function rebuild(project, view) {
+    const key = view ? `${project}/__scratch/${view}` : project;
+    if (pending.has(key)) return pending.get(key);
     // Drop the previous snapshot first so a broken edit cannot show stale JS.
-    snapshots.delete(project);
+    snapshots.delete(key);
     const task = (async () => {
       await acquireBuildSlot();
       try {
-        return await bundle(root, project);
+        return await bundle(root, project, view);
       } finally {
         releaseBuildSlot();
       }
     })().then((snapshot) => {
-      snapshots.set(project, snapshot);
+      snapshots.set(key, snapshot);
       while (snapshots.size > SNAPSHOT_CACHE_SIZE) snapshots.delete(snapshots.keys().next().value);
       return snapshot;
-    }).finally(() => pending.delete(project));
-    pending.set(project, task);
+    }).finally(() => pending.delete(key));
+    pending.set(key, task);
     return task;
   }
 
@@ -170,14 +172,37 @@ export function createPreviewServer({ workspaceRoot }) {
       }
       const project = segments.slice(0, 2).join("/");
       const parts = segments.slice(2);
+      let view;
+      if (parts[0] === "__scratch") {
+        view = parts[1];
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(view || "")) {
+          res.writeHead(404); res.end("Scratch views use scratch/<name>/index.html and src/main.ts; name must be 1–64 letters, digits, hyphens or underscores."); return;
+        }
+        parts.splice(0, 2);
+        if (!parts.length && !pathname.endsWith("/")) {
+          res.writeHead(302, { Location: `${pathname}/` }); res.end(); return;
+        }
+      }
       if (pathname.endsWith("/")) parts.push("index.html");
+      // Shared runtime assets bypass the full scene's build. Relative paths in
+      // a shared CSS/data file continue to resolve within this same mount.
+      const sharedAsset = view && parts[0] === "__site";
+      if (sharedAsset) {
+        parts.shift();
+        if (!["assets", "css", "data"].includes(parts[0])) {
+          res.writeHead(404); res.end("Scratch shared files must be under site/assets, site/css or site/data."); return;
+        }
+      }
       if (["src", "net", "node_modules"].includes(parts[0])) {
         res.writeHead(404); res.end("Source files are not deployed."); return;
       }
       const relative = parts.join("/");
+      const key = view ? `${project}/__scratch/${view}` : project;
       // HTML navigation/reload always builds current edits, including imports.
-      const snapshot = /\.html?$/i.test(relative) || !snapshots.has(project)
-        ? await rebuild(project) : await (pending.get(project) || snapshots.get(project));
+      const snapshot = sharedAsset
+        ? { site: await checkedPath(root, [...project.split("/"), "site"]), outputs: new Map(), compiled: false }
+        : /\.html?$/i.test(relative) || !snapshots.has(key)
+          ? await rebuild(project, view) : await (pending.get(key) || snapshots.get(key));
       let body = snapshot.outputs.get(relative);
       if (!body) {
         if (snapshot.compiled && parts[0] === "js") {

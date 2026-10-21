@@ -421,7 +421,7 @@ export interface CommitStats {
 export async function untrackGeneratedArtifacts(workspace: string): Promise<void> {
   await git(workspace, [
     "rm", "-r", "-f", "--cached", "--ignore-unmatch", "--",
-    ".opencode", "site/js", "build-manifest.json",
+    ".opencode", "scratch", "site/js", "build-manifest.json",
   ]);
 }
 

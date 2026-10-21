@@ -112,12 +112,62 @@ try {
   await fs.writeFile(path.join(site, "src", "main.ts"), source("rebuilt frame").replace("first frame", "rebuilt frame") + "document.title='Rebuilt preview';");
   await call("browser_navigate", { url: "http://127.0.0.1:8080/100/200/" });
   assert.match(text(await call("browser_evaluate", { function: "() => document.title" })), /Rebuilt preview/);
+  // A scratch view uses real production components and the seeded engine,
+  // even while an unrelated entry in the game's scene graph cannot compile.
+  const workspace = path.dirname(site);
+  await fs.cp(new URL("../../bot/node_modules/three/", import.meta.url), path.join(workspace, "node_modules", "three"), { recursive: true });
+  await fs.mkdir(path.join(site, "src", "components"));
+  await fs.writeFile(path.join(site, "src", "components", "car.ts"), `import * as THREE from "three";
+    export function createCar() {
+      const car = new THREE.Group();
+      const paint = new THREE.MeshStandardMaterial({color:0xfca311,roughness:0.35});
+      const body = new THREE.Mesh(new THREE.BoxGeometry(3,0.65,1.4),paint); body.position.y=0.65; car.add(body);
+      const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.4,0.6,1.2),new THREE.MeshStandardMaterial({color:0x29435a}));
+      cabin.position.set(-0.2,1.25,0); car.add(cabin);
+      for(const x of [-1,1]) for(const z of [-0.75,0.75]) {
+        const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.35,0.35,0.2,20),new THREE.MeshStandardMaterial({color:0x151515}));
+        wheel.rotation.x=Math.PI/2; wheel.position.set(x,0.35,z); car.add(wheel);
+      } return car;
+    }`);
+  await fs.mkdir(path.join(site, "data"));
+  await fs.writeFile(path.join(site, "data", "scratch.json"), '{"label":"shared local data"}');
+  const scratch = path.join(workspace, "scratch", "car");
+  await fs.mkdir(path.join(scratch, "src"), { recursive: true });
+  await fs.writeFile(path.join(scratch, "index.html"), `<!doctype html><html><head><title>Scratch car</title></head>
+    <body style="background:#14213d;color:white;font:20px sans-serif"><h1>Isolated production car</h1>
+    <button id="rotate">Rotate car</button><div id="car"></div><p id="data">Loading</p>
+    <script type="module" src="js/main.js"></script></body></html>`);
+  await fs.writeFile(path.join(scratch, "src", "main.ts"), `import * as THREE from "three";
+    import { createCar } from "../../../site/src/components/car.js";
+    const scene=new THREE.Scene();scene.background=new THREE.Color(0x1d3045);
+    const camera=new THREE.PerspectiveCamera(40,512/320,0.1,100);camera.position.set(5,3.5,5);camera.lookAt(0,0.6,0);
+    const renderer=new THREE.WebGLRenderer({antialias:true});renderer.setSize(512,320);document.querySelector('#car')!.appendChild(renderer.domElement);
+    scene.add(new THREE.HemisphereLight(0xffffff,0x446644,2));const sun=new THREE.DirectionalLight(0xffffff,3);sun.position.set(3,5,2);scene.add(sun);
+    const car=createCar();scene.add(car);renderer.render(scene,camera);(window as any).scratchReady=car.children.length;
+    document.querySelector('#rotate')!.addEventListener('click',()=>{car.rotation.y+=0.6;renderer.render(scene,camera);(window as any).rotated=true;});
+    fetch('__site/data/scratch.json').then(r=>r.json()).then(data=>document.querySelector('#data')!.textContent=data.label);`);
+  await fs.writeFile(path.join(site, "src", "main.ts"), 'import "./missing-scene.ts";');
+  await call("browser_resize", { width: 900, height: 650 });
+  await call("browser_navigate", { url: "http://127.0.0.1:8080/100/200/__scratch/car/" });
+  assert.match(text(await call("browser_snapshot")), /Isolated production car/);
+  assert.match(text(await call("browser_evaluate", { function: "() => window.scratchReady" })), /6/);
+  assert.match(text(await call("browser_evaluate", { function: "async () => (await (await fetch('__site/data/scratch.json')).json()).label" })), /shared local data/);
+  const scratchShot = await call("browser_take_screenshot");
+  const scratchPicture = scratchShot.content.find((part) => part.type === "image");
+  assert.ok(scratchPicture, "Scratch rendering must return an inline image");
+  await fs.writeFile(path.join(artifactRoot, "scratch-car.png"), Buffer.from(scratchPicture.data, "base64"));
+  await call("browser_evaluate", { function: "() => document.querySelector('#rotate').click()" });
+  assert.match(text(await call("browser_evaluate", { function: "() => window.rotated" })), /true/);
+  await assert.rejects(fs.stat(path.join(scratch, "js")), { code: "ENOENT" });
+  await fs.writeFile(path.join(scratch, "src", "main.ts"), 'document.title="Rebuilt scratch";');
+  await call("browser_navigate", { url: "http://127.0.0.1:8080/100/200/__scratch/car/" });
+  assert.match(text(await call("browser_evaluate", { function: "() => document.title" })), /Rebuilt scratch/);
   const blocked = await call("browser_evaluate", { function: "async () => { try { await fetch('https://example.com'); return 'escaped'; } catch { return 'blocked'; } }" });
   assert.match(text(blocked), /blocked/);
   await assert.rejects(fs.stat(path.join(site, "js")), { code: "ENOENT" });
   await call("browser_close");
   await call("browser_close", {}, second);
-  console.log("PASS: inline images, WebGL, canvas interaction, keyboard, diagnostics, mobile, isolation, fresh builds and blocked external fetch.");
+  console.log("PASS: inline images, WebGL, canvas interaction, keyboard, diagnostics, mobile, isolation, fresh builds, independent scratch component rendering and blocked external fetch.");
   if (process.env.PREVIEW_TEST_OPENCODE_IMAGE) {
     const { checkOpenCodeImageDelivery } = await import("./opencode-wire.mjs");
     await checkOpenCodeImageDelivery({ docker, network, root });
