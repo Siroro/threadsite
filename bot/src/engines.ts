@@ -3,8 +3,23 @@ import path from "node:path";
 import type { ProjectKind } from "./types.js";
 import { ensureGitignoreLines, safeChild } from "./util.js";
 
-/** The bot image's own node_modules — the seed source for workspace packages. */
+/** The bot's own node_modules — the seed source for workspace packages in a
+ * dev checkout (and the source build-time staging reads; see stageEngineSeed). */
 const BOT_NODE_MODULES = path.join(process.cwd(), "node_modules");
+
+/**
+ * Staged engine payload baked into the production image by
+ * `npm run stage:engines` at build time, so the runtime carries only the
+ * bytes the seeder reads instead of full engine package trees. A dev
+ * checkout has no engine-seed/ and falls back to node_modules above.
+ */
+const ENGINE_SEED_ROOT = path.join(process.cwd(), "engine-seed");
+
+/** Where this process reads engine payload files: the staged tree when the
+ * image provides one, otherwise the dev checkout's node_modules. */
+async function engineSourceRoot(): Promise<string> {
+  return fs.access(ENGINE_SEED_ROOT).then(() => ENGINE_SEED_ROOT, () => BOT_NODE_MODULES);
+}
 
 /**
  * A browser engine the harness installs into game workspaces as a real,
@@ -224,6 +239,7 @@ export async function ensureEnginePackages(workspacePath: string, kind: ProjectK
   if (!packages.length) return false;
 
   let changed = false;
+  const sourceRoot = await engineSourceRoot();
   for (const engine of packages) {
     const packageDir = safeChild(workspacePath, "node_modules", engine.name);
     const manifestFile = path.join(packageDir, "package.json");
@@ -239,7 +255,7 @@ export async function ensureEnginePackages(workspacePath: string, kind: ProjectK
         ...engine.files.map((file) =>
           fs.access(path.join(packageDir, ...file.to.split("/"))).then(() => true, () => false)),
         ...(await Promise.all(engine.dirs.map(async (dir) => {
-          const relatives = await collectRelativeFiles(path.join(BOT_NODE_MODULES, ...dir.from.split("/")));
+          const relatives = await collectRelativeFiles(path.join(sourceRoot, ...dir.from.split("/")));
           const target = path.join(packageDir, ...dir.to.split("/"));
           return Promise.all(relatives.map((relative) =>
             fs.access(path.join(target, ...relative.split("/"))).then(() => true, () => false)),
@@ -251,13 +267,13 @@ export async function ensureEnginePackages(workspacePath: string, kind: ProjectK
     await fs.rm(packageDir, { recursive: true, force: true });
     await fs.mkdir(packageDir, { recursive: true });
     for (const file of engine.files) {
-      const source = path.join(BOT_NODE_MODULES, ...file.from.split("/"));
+      const source = path.join(sourceRoot, ...file.from.split("/"));
       const target = path.join(packageDir, ...file.to.split("/"));
       await fs.mkdir(path.dirname(target), { recursive: true });
       await fs.copyFile(source, target);
     }
     for (const dir of engine.dirs) {
-      await fs.cp(path.join(BOT_NODE_MODULES, ...dir.from.split("/")), path.join(packageDir, ...dir.to.split("/")), { recursive: true, force: true });
+      await fs.cp(path.join(sourceRoot, ...dir.from.split("/")), path.join(packageDir, ...dir.to.split("/")), { recursive: true, force: true });
     }
     await fs.writeFile(manifestFile, engine.manifest, "utf8");
     changed = true;
@@ -268,4 +284,63 @@ export async function ensureEnginePackages(workspacePath: string, kind: ProjectK
   // workspace (or the agent's tooling) put in the file.
   changed = (await ensureGitignoreLines(workspacePath, ["node_modules/"])) || changed;
   return changed;
+}
+
+/**
+ * Stage the exact engine payload the seeder reads into `targetDir`, as a
+ * node_modules-shaped subtree holding the spec entries at their `from` paths
+ * (`<targetDir>/three/build/…`,
+ * `<targetDir>/@dimforge/rapier3d-compat/dist/…`) — the layout
+ * ensureEnginePackages resolves its `from` paths against, so the staged tree
+ * is a drop-in source root. Always reads from `sourceRoot` (default: the
+ * bot's own node_modules, complete at image build time) — never the staged
+ * tree — and preflights every spec entry before writing, so a layout drift
+ * between engines.ts and the installed packages fails the build naming the
+ * missing paths, never the first game turn at runtime. Returns the staged
+ * package names, deduplicated across kinds.
+ */
+export async function stageEngineSeed(targetDir: string, sourceRoot: string = BOT_NODE_MODULES): Promise<string[]> {
+  const engines: EnginePackage[] = [];
+  for (const kind of ["game-2d", "game-3d"] as const) {
+    for (const engine of enginePackages(kind)) {
+      if (!engines.some((existing) => existing.name === engine.name)) engines.push(engine);
+    }
+  }
+
+  const missing: string[] = [];
+  for (const engine of engines) {
+    for (const file of engine.files) {
+      await fs.access(path.join(sourceRoot, ...file.from.split("/"))).catch(() => missing.push(file.from));
+    }
+    for (const dir of engine.dirs) {
+      await fs.access(path.join(sourceRoot, ...dir.from.split("/"))).catch(() => missing.push(`${dir.from}/`));
+    }
+  }
+  if (missing.length) {
+    throw new Error(`engine seed sources missing from ${sourceRoot} — the engines.ts spec no longer matches the installed packages: ${missing.join(", ")}`);
+  }
+
+  for (const engine of engines) {
+    // Clear every top-level source subtree this engine reads (package name
+    // plus any cross-package sources like @types/three) so a re-stage never
+    // leaves files behind that a retired spec entry used to stage.
+    const tops = new Set<string>();
+    for (const entry of [...engine.files.map((file) => file.from), ...engine.dirs.map((dir) => dir.from)]) {
+      const parts = entry.split("/");
+      tops.add(parts[0].startsWith("@") && parts.length > 1 ? `${parts[0]}/${parts[1]}` : parts[0]);
+    }
+    for (const top of tops) {
+      await fs.rm(safeChild(targetDir, ...top.split("/")), { recursive: true, force: true });
+    }
+    for (const file of engine.files) {
+      const source = path.join(sourceRoot, ...file.from.split("/"));
+      const target = safeChild(targetDir, ...file.from.split("/"));
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.copyFile(source, target);
+    }
+    for (const dir of engine.dirs) {
+      await fs.cp(path.join(sourceRoot, ...dir.from.split("/")), safeChild(targetDir, ...dir.from.split("/")), { recursive: true, force: true });
+    }
+  }
+  return engines.map((engine) => engine.name);
 }
