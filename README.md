@@ -131,6 +131,7 @@ DISCORD_APPLICATION_ID=...
 
 # Current default: the free Hy3 model.
 OPENCODE_DEFAULT_MODEL=opencode/hy3-free
+OPENCODE_MAX_STEPS=200
 
 # Optional Surplus Intelligence marketplace access.
 SURPLUS_API_KEY=
@@ -152,6 +153,8 @@ PUBLIC_SITES_BASE_URL=https://sites.example.com
 ```
 
 `SITES_HOST_PATH` is bind-mounted into the bot container at `/srv/sites`. Point it at the exact directory your host Apache serves at `PUBLIC_SITES_BASE_URL`.
+
+`OPENCODE_MAX_STEPS` sets the builder's step budget per turn (positive integer, default **200**). OpenCode applies it when the container starts; the title agent keeps its separate one-step limit. After changing this value in `.env`, run `docker compose up -d opencode` to recreate the service with the new environment. The startup log reports the effective limit. Invalid values stop startup with a clear error.
 
 If you do not have Apache already, leave the defaults and use the bundled static profile later.
 
