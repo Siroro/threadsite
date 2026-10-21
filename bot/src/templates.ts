@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { MultiplayerContext, ProjectKind } from "./types.js";
+import type { MultiplayerContext, MultiplayerMode, ProjectKind } from "./types.js";
 
 export const MULTIPLAYER_PROTOCOL_VERSION = 4;
 
@@ -30,13 +30,19 @@ function substitute(chunk: string, tokens: Record<string, string>): string {
   return chunk.replace(/\{\{(\w+)\}\}/g, (match, name: string) => tokens[name] ?? match);
 }
 
-export async function projectAgents(kind: ProjectKind, multiplayer?: MultiplayerContext): Promise<string> {
+export async function projectAgents(kind: ProjectKind, multiplayer?: MultiplayerContext, singleplayer = false): Promise<string> {
   const shared = await agentsChunk("shared");
   if (kind === "site") return shared;
   const game = await agentsChunk("game");
   const direction = await agentsChunk(kind === "game-2d" ? "game-2d" : "game-3d");
-  const mp = multiplayer ? `\n\n${await multiplayerAgents(multiplayer)}` : "";
-  return `${shared}\n\n${game}\n\n${direction}${mp}`;
+  const tail = multiplayer
+    ? `\n\n${await multiplayerAgents(multiplayer)}`
+    // A singleplayer game gets an explicit "no netcode" section instead: the
+    // shared game chunks mention netcode rules that would otherwise dangle.
+    : singleplayer
+      ? `\n\n${singleplayerAgents()}`
+      : "";
+  return `${shared}\n\n${game}\n\n${direction}${tail}`;
 }
 
 async function multiplayerAgents(mp: MultiplayerContext): Promise<string> {
@@ -44,7 +50,24 @@ async function multiplayerAgents(mp: MultiplayerContext): Promise<string> {
     gameId: mp.gameId,
     wsUrl: mp.wsUrl,
     protocolVersion: String(mp.protocolVersion),
+    modeGuidance: mp.mode === "rooms" ? ROOMS_GUIDANCE : ARENA_GUIDANCE,
   });
+}
+
+const ARENA_GUIDANCE =
+  "**Session mode — arena:** every player joins one game-wide arena with `mode: \"single\"` (the client's default). "
+  + "Do not add rooms, lobbies, or invite codes unless the request explicitly asks for them.";
+
+const ROOMS_GUIDANCE =
+  "**Session mode — rooms:** players join isolated invite-code rooms with `mode: \"rooms\"` plus `createRoom`/`room` "
+  + "(use `ThreadSiteNet.roomFromUrl()` for invite links). Build a minimal lobby around creating, sharing, and joining room codes; "
+  + "each room is its own world with its own host, and a late joiner lands in exactly the room they clicked.";
+
+function singleplayerAgents(): string {
+  return "## Singleplayer only\n\n"
+    + "This game is deliberately singleplayer: one player, one browser tab, no relay and no net code. "
+    + "Ignore the netcode/multiplayer references elsewhere in this brief — they apply only to networked projects. "
+    + "Keep all state local, keep the game fully playable offline, and never add WebSocket/WebRTC code or any multiplayer SDK.";
 }
 
 /** Durable project memory injected into every turn; empty when no notes exist yet. */
@@ -56,23 +79,82 @@ export function notesSection(notes: string | undefined): string {
 
 const planningInstruction = "For any request that needs multiple steps or changes across multiple files, call the todowrite tool before the first edit: create 3–6 concrete, checkable steps. Keep exactly one step in_progress, and mark a step completed as soon as it is finished while promoting the next one — the user watches this list live in Discord, so a list left behind misreports your progress. Before your final summary, mark every finished step completed and every dropped step cancelled. A prose plan does not replace the todo list. Skip todowrite only for a truly single-step change.";
 
-export function initialProjectInstruction(kind: ProjectKind, userPrompt: string, notes?: string): string {
+/** How the game connects, phrased for the initial-build instruction. */
+function multiplayerPhrase(mode: MultiplayerMode): string {
+  if (mode === "singleplayer") return "singleplayer only — no networking at all";
+  if (mode === "rooms") return "room-based multiplayer through the harness relay (invite-code rooms), solo fallback";
+  return "multiplayer-first through the harness relay, solo fallback";
+}
+
+export function initialProjectInstruction(kind: ProjectKind, userPrompt: string, notes?: string, mode: MultiplayerMode = "arena"): string {
   const common = `Read the project-root AGENTS.md first — it is the authoritative brief for engine usage and multiplayer architecture. Inspect the starter files, ${planningInstruction} Research the web when it will materially improve the result, and implement the deliverable rather than only describing it. Browser code is authored in TypeScript under site/src/; the harness compiles and bundles it after your reply. Prefer a clear multi-file structure over one giant index.html.`;
+  const sectionWord = mode === "singleplayer" ? "singleplayer" : "multiplayer";
   if (kind === "game-2d") {
-    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below, following AGENTS.md's 2D and multiplayer sections exactly (installed engine, multiplayer-first through the harness relay, solo fallback). Use asset_download for suitable reusable media.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below, following AGENTS.md's 2D and ${sectionWord} sections exactly (installed engine, ${multiplayerPhrase(mode)}). Use asset_download for suitable reusable media.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
   if (kind === "game-3d") {
-    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below, following AGENTS.md's 3D and multiplayer sections exactly (installed engine, multiplayer-first through the harness relay, solo fallback). Use asset_download for suitable media/models/textures/audio.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below, following AGENTS.md's 3D and ${sectionWord} sections exactly (installed engine, ${multiplayerPhrase(mode)}). Use asset_download for suitable media/models/textures/audio.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
   return `${common}\n\nCreate the static website described below. Make it feel intentionally designed and interactive where appropriate. Use real researched/reusable media when it improves the result, otherwise tasteful local CSS/SVG/Canvas visuals.${notesSection(notes)}\n\nSITE REQUEST:\n${userPrompt}`;
 }
 
-export function mutationInstruction(kind: ProjectKind, userPrompt: string, notes?: string): string {
+export function mutationInstruction(kind: ProjectKind, userPrompt: string, notes?: string, mode: MultiplayerMode = "arena"): string {
   const noun = kind === "site" ? "website" : kind === "game-2d" ? "2D web game" : "3D web game";
   const multiplayerClause = kind === "site"
     ? ""
-    : " Preserve working multiplayer (rooms, sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client.";
+    : mode === "singleplayer"
+      ? " This game is singleplayer-only: keep it fully playable offline, and do not add networking of any kind."
+      : mode === "rooms"
+        ? " Preserve working room-based multiplayer (invite-code rooms, room isolation, sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client."
+        : " Preserve working multiplayer (arena sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client.";
   return `Read AGENTS.md and inspect the current project before editing. ${planningInstruction} Revise the existing ${noun} according to the Discord request below. Preserve working features/mechanics unless the request changes them.${multiplayerClause} Keep browser code in TypeScript under site/src/ (never hand-edit the generated, gitignored bundles under site/js/ — if authored .js is still there, migrate it to src/ as .ts), use websearch and asset_download when they would materially improve the result, and leave a complete buildable deliverable.${notesSection(notes)}\n\nDISCORD REQUEST:\n${userPrompt}`;
+}
+
+/** Short human label for a multiplayer mode, used in prompts and replies. */
+export function multiplayerModeLabel(mode: MultiplayerMode): string {
+  if (mode === "singleplayer") return "singleplayer only";
+  if (mode === "rooms") return "invite-code rooms";
+  return "shared-arena multiplayer";
+}
+
+/** One-line summary of what the agent must build under each mode. */
+function modeTarget(mode: MultiplayerMode): string {
+  if (mode === "singleplayer") {
+    return "no networking at all: every module runs locally, the game is fully playable offline, and nothing imports site/net/";
+  }
+  if (mode === "rooms") {
+    return "invite-code rooms (`mode: \"rooms\"` with `createRoom`/`room`, `ThreadSiteNet.roomFromUrl()` for invite links), a minimal lobby for creating/sharing/joining codes, and each room an isolated world with its own host";
+  }
+  return "one game-wide shared arena (`mode: \"single\"` on the net client): every player joins the same world, with no rooms, lobbies, or invite codes";
+}
+
+/**
+ * The /site multiplayer swap prompt: investigate the current networking, work
+ * out where THIS transition is genuinely difficult for this codebase, put
+ * exactly those difficulties to the user via the question tool, then rewrite.
+ * AGENTS.md and the harness-owned net files are already swapped to the target
+ * architecture before this instruction runs.
+ */
+export function multiplayerSwapInstruction(from: MultiplayerMode, to: MultiplayerMode, userNote?: string): string {
+  const investigating = from === "singleplayer"
+    ? "Inspect the current implementation: where game state lives, which modules read it, and how input/update/render are wired — the networking will be introduced around that structure."
+    : "Inspect the current networking implementation first: how sessions are created (site/net usage), which state is shared vs. local, how the host and solo fallback work, and which modules touch the net client.";
+  const note = userNote?.trim()
+    ? `\n\nThe user added this note for the switch — treat it as part of the request and honor it over defaults where they conflict, but still ask about genuine difficulties it does not resolve:\n${userNote.trim()}`
+    : "";
+  return `The multiplayer architecture of this game is being switched from ${multiplayerModeLabel(from)} to ${multiplayerModeLabel(to)}. AGENTS.md and the harness-owned net files under site/net/ already reflect the new architecture — read the multiplayer section of AGENTS.md (and NETWORKING.md at the project root, when it exists) before editing. ${investigating}\n\n`
+    + `Then, from what you found, work out where this transition is genuinely difficult or ambiguous for THIS game: the seams the old architecture is baked into, state whose owner changes, flows that appear or disappear, and anything where a wrong guess would ship the wrong game. You MUST call the question tool and put exactly those difficulties to the user — one question per real decision point, each with 2–4 concrete options — and wait for the answers. Ask only about real difficulties; do not ask what the code, AGENTS.md, the original request, or your note below already answers, and do not guess your way past a decision the user should make.${note}\n\n`
+    + `After the answers, rewrite the networking so the game runs as ${multiplayerModeLabel(to)}: ${modeTarget(to)}. Keep gameplay, presentation, and audio modules untouched where possible; change only the session/state/networking seams. ${to === "singleplayer" ? "Remove every import of ../net/* and all host/guest/relay branches; leave no dead netcode behind." : "Keep the solo fallback working (one player must be able to play alone), preserve as much existing gameplay logic as possible, and leave no room/arena remnants of the old architecture."} Use todowrite to plan the rewrite, mark steps as you finish them, and leave a complete buildable deliverable.`;
+}
+
+/**
+ * A mid-turn user message delivered into the running agent turn (steering).
+ * The message rides alongside the turn's work — the agent reads it as an
+ * amendment to the CURRENT task, not a new request.
+ */
+export function steeringInstruction(texts: readonly string[]): string {
+  const list = texts.map((text, index) => `${index + 1}. ${text}`).join("\n");
+  return `The user sent ${texts.length === 1 ? "this message" : `${texts.length} messages`} while you were working. It is a steering update for the CURRENT task, not a new request: fold it into what you are building right now and continue — do not start over, and do not treat it as a separate piece of work.\n\nSTEERING:\n${list}`;
 }
 
 export function repairInstruction(validationError: string): string {

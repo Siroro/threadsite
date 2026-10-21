@@ -6,6 +6,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { config } from "./config.js";
 import { log, logError, serializeError } from "./logger.js";
 import type { ProgressCallback, ProgressPlanItem, ProgressUpdate } from "./progress.js";
+import { steeringInstruction } from "./templates.js";
 import { cleanThreadTitle, errorText, formatShortDuration, formatTokens, formatTokensPerSecond, formatUtcClock, parseModel, truncate } from "./util.js";
 
 // Sent to a session whose turn was killed by an agent-service restart. The
@@ -293,6 +294,11 @@ export class OpenCodeHarness {
   // is also dropped when a prompt on the session completes normally or the
   // session is swept away.
   private readonly deliberateAborts = new Set<string>();
+
+  // Sessions whose prompt request is currently in flight — the only window in
+  // which steering can land: during reconcile the original request is already
+  // gone, and after it returns there is nothing running to steer.
+  private readonly livePromptRequests = new Set<string>();
 
   // Live quota blocks by provider (free-tier exhaustion until the scheduled
   // retry/reset). Pruned lazily; a completed turn clears its provider's entry.
@@ -629,87 +635,117 @@ export class OpenCodeHarness {
     // means "this turn was deliberately stopped".
     this.deliberateAborts.delete(sessionId);
     try {
-      const summary = await this.sendPromptRaw(directory, sessionId, body);
-      // A mark added while this request was in flight must not survive into
-      // the next turn on the session.
-      this.deliberateAborts.delete(sessionId);
-      // A completed turn proves the provider is answering again; drop a stale
-      // quota block (the reset landed early or the outage was misread).
-      this.clearQuotaBlock(turn.model?.providerID ?? parsed?.providerID);
-      log("info", "opencode.prompt_completed", { sessionId, model: model || "default" });
-      return { text: summary, usage: usageOf(turn) };
-    } catch (error) {
-      // A deliberate abort (reset sweep, recovery timeout) rejects the request
-      // with the same transport-shaped text as a dropped connection, but
-      // reconciling it would be wrong: the reconcile path can re-send the
-      // prompt and resurrect the turn that was stopped on purpose. Fail it.
-      if (this.deliberateAborts.delete(sessionId)) {
-        const enriched = enrichProviderError(error, model, usageOf(turn), this.quotaContext(turn, parsed));
-        logError("opencode.prompt_aborted", enriched, {
-          sessionId,
-          model: model || "default",
-        });
-        throw enriched;
-      }
-      if (isTransportLikeError(error)) {
-        log("warn", "opencode.prompt_transport_lost", {
-          sessionId,
-          model: model || "default",
-          error: serializeError(error),
-        });
-        emit(onProgress, { text: "🔄 Lost the live agent connection — reconciling" });
-
-        if (stream) await stopStream(stream);
-        stream = await this.startEventStream(directory, sessionId, onProgress, turn).catch((reconnectError) => {
-          log("warn", "opencode.event_stream_reconnect_failed", {
-            sessionId,
-            error: serializeError(reconnectError),
-          });
-          return undefined;
-        });
-        if (stream) emit(onProgress, { text: "🟢 Reconnected — checking the running turn" });
-        // Buttons for a question asked before the transport dropped are gone from
-        // the event stream; ask the server what is still pending and re-emit it.
-        if (stream) {
-          await this.resurfacePendingQuestion(directory, sessionId, onProgress).catch((error) => {
-            log("debug", "opencode.question_resurface_failed", { sessionId, error: String(error) });
-          });
-          // The plan may have advanced while the stream was down.
-          await this.rehydratePlan(directory, sessionId, onProgress);
-        }
-
+      for (;;) {
         try {
-          const recovered = await this.reconcilePrompt(directory, sessionId, snapshot, model, onProgress, error, body);
-          log("info", "opencode.prompt_recovered", {
-            sessionId,
-            model: model || "default",
-            originalTransportError: serializeError(error),
-          });
-          emit(onProgress, { text: "✅ Recovered the completed agent turn" });
-          return { text: recovered, usage: usageOf(turn) };
-        } catch (recoveryError) {
-          const enriched = enrichProviderError(recoveryError, model, usageOf(turn), this.quotaContext(turn, parsed));
-          logError("opencode.prompt_recovery_failed", enriched, {
+          this.livePromptRequests.add(sessionId);
+          const summary = await this.sendPromptRaw(directory, sessionId, body);
+          // A mark added while this request was in flight must not survive into
+          // the next turn on the session.
+          this.deliberateAborts.delete(sessionId);
+          // A completed turn proves the provider is answering again; drop a stale
+          // quota block (the reset landed early or the outage was misread).
+          this.clearQuotaBlock(turn.model?.providerID ?? parsed?.providerID);
+          log("info", "opencode.prompt_completed", { sessionId, model: model || "default" });
+          return { text: summary, usage: usageOf(turn) };
+        } catch (error) {
+          if (this.deliberateAborts.delete(sessionId)) {
+            const enriched = enrichProviderError(error, model, usageOf(turn), this.quotaContext(turn, parsed));
+            logError("opencode.prompt_aborted", enriched, {
+              sessionId,
+              model: model || "default",
+            });
+            throw enriched;
+          }
+          if (isTransportLikeError(error)) {
+            log("warn", "opencode.prompt_transport_lost", {
+              sessionId,
+              model: model || "default",
+              error: serializeError(error),
+            });
+            emit(onProgress, { text: "🔄 Lost the live agent connection — reconciling" });
+
+            if (stream) await stopStream(stream);
+            stream = await this.startEventStream(directory, sessionId, onProgress, turn).catch((reconnectError) => {
+              log("warn", "opencode.event_stream_reconnect_failed", {
+                sessionId,
+                error: serializeError(reconnectError),
+              });
+              return undefined;
+            });
+            if (stream) emit(onProgress, { text: "🟢 Reconnected — checking the running turn" });
+            // Buttons for a question asked before the transport dropped are gone from
+            // the event stream; ask the server what is still pending and re-emit it.
+            if (stream) {
+              await this.resurfacePendingQuestion(directory, sessionId, onProgress).catch((error) => {
+                log("debug", "opencode.question_resurface_failed", { sessionId, error: String(error) });
+              });
+              // The plan may have advanced while the stream was down.
+              await this.rehydratePlan(directory, sessionId, onProgress);
+            }
+
+            try {
+              const recovered = await this.reconcilePrompt(directory, sessionId, snapshot, model, onProgress, error, body);
+              log("info", "opencode.prompt_recovered", {
+                sessionId,
+                model: model || "default",
+                originalTransportError: serializeError(error),
+              });
+              emit(onProgress, { text: "✅ Recovered the completed agent turn" });
+              return { text: recovered, usage: usageOf(turn) };
+            } catch (recoveryError) {
+              const enriched = enrichProviderError(recoveryError, model, usageOf(turn), this.quotaContext(turn, parsed));
+              logError("opencode.prompt_recovery_failed", enriched, {
+                sessionId,
+                model: model || "default",
+                provider: parsed?.providerID,
+                modelId: parsed?.modelID,
+                originalTransportError: serializeError(error),
+              });
+              throw enriched;
+            }
+          }
+
+          const enriched = enrichProviderError(error, model, usageOf(turn), this.quotaContext(turn, parsed));
+          logError("opencode.prompt_failed", enriched, {
             sessionId,
             model: model || "default",
             provider: parsed?.providerID,
             modelId: parsed?.modelID,
-            originalTransportError: serializeError(error),
           });
           throw enriched;
+        } finally {
+          this.livePromptRequests.delete(sessionId);
         }
       }
-
-      const enriched = enrichProviderError(error, model, usageOf(turn), this.quotaContext(turn, parsed));
-      logError("opencode.prompt_failed", enriched, {
-        sessionId,
-        model: model || "default",
-        provider: parsed?.providerID,
-        modelId: parsed?.modelID,
-      });
-      throw enriched;
     } finally {
       if (stream) await stopStream(stream);
+    }
+  }
+
+  /**
+   * Steer the session's running turn with a mid-flight user message: submit it
+   * to the busy session through the server's async prompt (the same path the
+   * TUI uses when you type while it works), which the agent reads as part of
+   * the running turn — or, at worst, as the immediate follow-up on the same
+   * session. Never aborts anything. False when nothing is steerable right now
+   * (no prompt request of ours in flight), so the caller can queue instead.
+   * Images cannot ride a steering send; callers queue those.
+   */
+  async steer(directory: string, sessionId: string, text: string): Promise<boolean> {
+    if (!this.livePromptRequests.has(sessionId)) return false;
+    try {
+      const result = await this.client.session.promptAsync({
+        sessionID: sessionId,
+        directory,
+        agent: "sitebuilder",
+        parts: [{ type: "text", text: steeringInstruction([text]) }],
+      } as any);
+      unwrap(result, "OpenCode steering prompt");
+      log("warn", "opencode.prompt_steered", { sessionId, chars: text.length });
+      return true;
+    } catch (error) {
+      log("warn", "opencode.steer_failed", { sessionId, error: serializeError(error) });
+      return false;
     }
   }
 

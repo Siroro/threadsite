@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { config } from "./config.js";
 import { MULTIPLAYER_PROTOCOL_VERSION, projectAgents } from "./templates.js";
-import type { MultiplayerContext, ProjectKind } from "./types.js";
+import type { MultiplayerContext, MultiplayerMode, ProjectKind } from "./types.js";
 import { safeChild } from "./util.js";
 
 export const PROTOCOL_VERSION = MULTIPLAYER_PROTOCOL_VERSION;
@@ -14,14 +14,17 @@ const NETWORKING_GUIDE = path.join(ASSETS_DIR, "agents", "networking.md");
 
 /**
  * Games are multi-tenant clients of the shared relay: the tenant key is simply
- * the published site slug, so no per-game provisioning exists anywhere.
+ * the published site slug, so no per-game provisioning exists anywhere. A
+ * singleplayer-only game gets no relay wiring at all — no net client, no
+ * tenant, no networking instructions.
  */
-export function multiplayerContext(kind: ProjectKind, siteSlug: string): MultiplayerContext | undefined {
-  if (!config.multiplayerEnabled || kind === "site") return undefined;
+export function multiplayerContext(kind: ProjectKind, siteSlug: string, mode: MultiplayerMode = "arena"): MultiplayerContext | undefined {
+  if (!config.multiplayerEnabled || kind === "site" || mode === "singleplayer") return undefined;
   return {
     gameId: siteSlug,
     wsUrl: config.gameserverPublicUrl,
     protocolVersion: PROTOCOL_VERSION,
+    mode,
   };
 }
 
@@ -110,6 +113,30 @@ async function writeIfChanged(file: string, content: string): Promise<boolean> {
   if (current === content) return false;
   await fs.writeFile(file, content, "utf8");
   return true;
+}
+
+/**
+ * Remove the harness-owned multiplayer wiring from a workspace that has gone
+ * singleplayer: the whole `site/net/` directory (client, config, types), the
+ * NETWORKING.md guide, and legacy copies under `site/js/`. Runs on the
+ * multiplayer switch and again before every turn of a singleplayer game, so
+ * nothing relay-shaped survives for imports or the bundler to pick up.
+ * Returns true when anything had to be removed.
+ */
+export async function removeMultiplayerFiles(workspacePath: string): Promise<boolean> {
+  let changed = false;
+  const netDir = safeChild(workspacePath, "site", "net");
+  if (await fs.lstat(netDir).then(() => true, () => false)) {
+    await fs.rm(netDir, { recursive: true, force: true }).catch(() => undefined);
+    changed = true;
+  }
+  for (const file of [safeChild(workspacePath, "NETWORKING.md"), safeChild(workspacePath, "site", "js", NET_CLIENT_STEM), safeChild(workspacePath, "site", "js", "net-config.js")]) {
+    if (await fs.lstat(file).then(() => true, () => false)) {
+      await fs.rm(file, { force: true }).catch(() => undefined);
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 /** One-line health summary of the shared relay for /site-admin status. */

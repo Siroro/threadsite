@@ -37,6 +37,22 @@ export const siteCommand = new SlashCommandBuilder()
     .setName("sync")
     .setDescription("Pull commits pushed to the repository from outside the bot, then rebuild and republish from them"))
   .addSubcommand((sub) => sub
+    .setName("multiplayer")
+    .setDescription("Switch this game's multiplayer architecture (the agent asks you how, then rewrites it)")
+    .addStringOption((option) => option
+      .setName("mode")
+      .setDescription("The architecture to switch to")
+      .setRequired(true)
+      .addChoices(
+        { name: "Arena", value: "arena" },
+        { name: "Rooms", value: "rooms" },
+        { name: "Singleplayer only", value: "singleplayer" },
+      ))
+    .addStringOption((option) => option
+      .setName("prompt")
+      .setDescription("Optional note: how you want the switch handled (the agent still asks about difficulties)")
+      .setMaxLength(2000)))
+  .addSubcommand((sub) => sub
     .setName("compact")
     .setDescription("Compact this thread's agent session context now"))
   .addSubcommand((sub) => sub
@@ -77,6 +93,14 @@ export const makeGameCommand = new SlashCommandBuilder()
     .setDescription("What game should be made?")
     .setRequired(true)
     .setMaxLength(6000))
+  .addStringOption((option) => option
+    .setName("multiplayer")
+    .setDescription("Multiplayer architecture (default: Arena)")
+    .addChoices(
+      { name: "Arena", value: "arena" },
+      { name: "Rooms", value: "rooms" },
+      { name: "Singleplayer only", value: "singleplayer" },
+    ))
   .addStringOption((option) => option
     .setName("name")
     .setDescription("Optional game/thread name")

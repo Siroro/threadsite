@@ -17,6 +17,7 @@ process.env.PUBLIC_SITES_BASE_URL = "https://sites.example.invalid";
 const { buildSite } = await import("../src/build.js");
 const { ensureEnginePackages } = await import("../src/engines.js");
 const { ProjectService, TurnStoppedError } = await import("../src/project.js");
+const { PROJECT_CARD_VERSION } = await import("../src/project-card.js");
 const { ForgejoClient } = await import("../src/forgejo.js");
 const { Store, pendingTurnMatches } = await import("../src/store.js");
 const { UsageLog } = await import("../src/usage.js");
@@ -339,7 +340,7 @@ test("the first successful build adopts the AI name in the returned site and rep
   const titles: string[] = [];
   const result = await service.createProject({
     threadId: "123456789012345678", guildId: "100", parentChannelId: "200", displayName: "site-a-long-original-prompt",
-    initialPrompt: "Make a garden", renameable: true,
+    initialPrompt: "Make a garden", renameable: true, infoMessageId: "card-message",
   }, undefined, async (title) => { titles.push(title); });
   assert.deepEqual(titles, ["Fresh Garden"]);
   assert.equal(result.project.displayName, "Fresh Garden");
@@ -348,6 +349,12 @@ test("the first successful build adopts the AI name in the returned site and rep
   assert.equal(result.commit, (await currentHead(workspacePath)).slice(0, 10));
   assert.match(service.siteLink(result.project), /\/fresh-garden\/$/);
   assert.match(service.repoLink(result.project), /\/site-fresh-garden$/);
+  // The pinned project card posted at thread creation is linked to the record,
+  // stamped with the design version it rendered at, alongside its prompt.
+  const saved = store.getProject("123456789012345678")!;
+  assert.equal(saved.infoMessageId, "card-message");
+  assert.equal(saved.infoCardVersion, PROJECT_CARD_VERSION);
+  assert.equal(saved.initialPrompt, "Make a garden");
 });
 
 test("renaming a game keeps its multiplayer tenant through future builds", async () => {
@@ -508,4 +515,88 @@ test("resetting a thread reports its aborted turn as a user stop, not a failure"
   assert.ok(error instanceof TurnStoppedError, `expected a user stop, got: ${error}`);
   const saved = f.store.getProject(f.project.threadId)!;
   assert.notEqual(saved.status, "error", "a reset-aborted turn is not a project failure");
+});
+
+test("switching multiplayer rewrites the wiring and runs a question-first agent turn", async () => {
+  const f = await projectFixture("mp-switch");
+  await f.store.patchProject(f.project.threadId, { projectKind: "game-2d", multiplayerMode: "arena" });
+  let instruction = "";
+  Object.assign(f.opencode, {
+    isBusy: async () => false,
+    prompt: async (_dir: string, _session: string, text: string) => {
+      instruction = text;
+      await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("rewired netcode");');
+      return { text: "Rewired", usage: {} } as PromptResult;
+    },
+  });
+  const result = await f.service.switchMultiplayer(f.project.threadId, "rooms", "status-1");
+  assert.ok(result.commit, "the rewrite landed and was committed");
+  assert.equal(f.store.getProject(f.project.threadId)!.multiplayerMode, "rooms");
+  // The turn's instruction is the swap directive: investigate, ask, rewrite.
+  assert.match(instruction, /switched from shared-arena multiplayer to invite-code rooms/);
+  assert.match(instruction, /MUST call the question tool/);
+  // Harness wiring followed the new mode before the agent ran.
+  assert.match(await fs.readFile(path.join(f.dir, "AGENTS.md"), "utf8"), /Session mode — rooms/);
+  assert.ok(await fs.access(path.join(f.dir, "site/net/net-config.js")).then(() => true, () => false), "net config is in place for rooms");
+
+  // Going singleplayer removes the wiring outright — net dir and guide gone.
+  instruction = "";
+  await f.service.switchMultiplayer(f.project.threadId, "singleplayer", "status-2");
+  assert.equal(f.store.getProject(f.project.threadId)!.multiplayerMode, "singleplayer");
+  assert.match(instruction, /no networking at all/);
+  await assert.rejects(fs.access(path.join(f.dir, "site/net")));
+  await assert.rejects(fs.access(path.join(f.dir, "NETWORKING.md")));
+  assert.match(await fs.readFile(path.join(f.dir, "AGENTS.md"), "utf8"), /## Singleplayer only/);
+
+  // Switching to the mode a game already runs is rejected without a turn.
+  await assert.rejects(f.service.switchMultiplayer(f.project.threadId, "singleplayer", "status-3"), /already runs singleplayer only/);
+});
+
+test("a message during a running turn steers the live session instead of queueing", async () => {
+  const f = await projectFixture("steer");
+  // A real harness with a stubbed transport, so the steering path exercised is
+  // the production one (promptAsync into the busy session, no abort).
+  const { OpenCodeHarness: Harness } = await import("../src/opencode.js");
+  const harness = new Harness();
+  const stub = harness as unknown as {
+    startEventStream: () => Promise<never>;
+    client: {
+      session: {
+        prompt: (options: unknown) => Promise<unknown>;
+        promptAsync: (options: unknown) => Promise<unknown>;
+        messages: () => Promise<unknown[]>;
+      };
+    };
+  };
+  stub.startEventStream = async () => { throw new Error("no stream in test"); };
+  stub.client.session.messages = async () => [];
+  let releasePrompt!: (value: unknown) => void;
+  stub.client.session.prompt = () => new Promise((resolve) => { releasePrompt = resolve; });
+  const asyncCalls: Array<{ parts: Array<{ text: string }> }> = [];
+  stub.client.session.promptAsync = async (options: unknown) => { asyncCalls.push(options as { parts: Array<{ text: string }> }); return {}; };
+  const service = new ProjectService(f.store, harness, f.forgejo, f.usage);
+
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  // Idle thread: nothing to steer.
+  assert.equal(await service.steerActiveTurn(f.project.threadId, "nope"), false);
+
+  const turning = service.mutate(f.project.threadId, "Add snow tiles", false, undefined, undefined, "status").then(
+    (result) => result,
+    (error: unknown) => error,
+  );
+  while (!releasePrompt) await settle();
+  // Mid-turn: the message goes straight into the busy session.
+  assert.equal(await service.steerActiveTurn(f.project.threadId, "make the snow ice-blue"), true);
+  assert.equal(asyncCalls.length, 1);
+  assert.match(asyncCalls[0].parts[0].text, /make the snow ice-blue/);
+  assert.match(asyncCalls[0].parts[0].text, /steering update for the CURRENT task/);
+
+  // The steered turn itself completes normally through the whole pipeline.
+  releasePrompt({ parts: [{ type: "text", text: "Snow added with the steering folded in." }] });
+  const result = await turning;
+  if (result instanceof Error) throw result;
+  assert.ok(result.commit || result.noChanges);
+
+  // Once the turn settles there is nothing running to steer.
+  assert.equal(await service.steerActiveTurn(f.project.threadId, "late"), false);
 });

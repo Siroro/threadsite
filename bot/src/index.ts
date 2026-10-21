@@ -18,6 +18,7 @@ import {
   type ChatInputCommandInteraction,
   type ButtonInteraction,
   type Message,
+  type TextBasedChannel,
   type ThreadChannel,
 } from "discord.js";
 import { AdminReporter } from "./admin-reporter.js";
@@ -27,12 +28,13 @@ import { ForgejoClient } from "./forgejo.js";
 import { getLogFile, log, logError, recentIncidents, recordIncident, serializeError } from "./logger.js";
 import { multiplayerRelayStatus } from "./multiplayer.js";
 import { OpenCodeHarness, formatTurnUsage, type PromptImage, type QuotaBlock } from "./opencode.js";
-import { DiscordProgress, formatElapsed } from "./progress.js";
+import { PROJECT_CARD_VERSION, renderProjectCard, type ProjectCardMessage, type ProjectCardState } from "./project-card.js";
+import { DiscordProgress, formatElapsed, type ProgressCallback } from "./progress.js";
 import { ProjectService, TurnStoppedError, type MutationResult, type StopTurnOutcome } from "./project.js";
 import { recoverPublishRoot } from "./publish.js";
 import { Store } from "./store.js";
-import { projectKindLabel } from "./templates.js";
-import type { CommitAuthor, ProjectKind, ProjectRecord } from "./types.js";
+import { multiplayerModeLabel, projectKindLabel } from "./templates.js";
+import type { CommitAuthor, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog, type UsageTotal } from "./usage.js";
 import { startWebhookServer } from "./webhook.js";
 import { commitAuthorIdentity, errorText, formatCost, formatShortDuration, formatTokens, formatUtcClock, MAX_DISCORD_MESSAGE_CHARS, requestDisplayText, slugify, stripSummaryPreamble, truncate, withTimeout } from "./util.js";
@@ -185,6 +187,7 @@ client.once(Events.ClientReady, (ready) => {
     errorRecipients: config.errorReportUserIds.size,
   });
   void recoverInterruptedTurns();
+  void reconcileProjectCards();
   if (pushWebhooksLive) void ensureExistingProjectWebhooks();
   else startExternalPushPoller();
 });
@@ -376,9 +379,12 @@ async function recoverInterruptedTurns(): Promise<void> {
         : thread
           ? (content) => thread.send(content).catch(() => undefined)
           : async () => undefined;
+      const recoveryCallback = progress
+        ? withQuestionPings(progress.callback, project.threadId, project.pendingTurn.requesterId)
+        : undefined;
       projects.enqueue(project.threadId, async () => {
         try {
-          const result = await projects.recoverTurn(project.threadId, progress?.callback);
+          const result = await projects.recoverTurn(project.threadId, recoveryCallback);
           await progress?.close();
           const isGame = result.project.projectKind === "game-2d" || result.project.projectKind === "game-3d";
           if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
@@ -408,6 +414,7 @@ async function recoverInterruptedTurns(): Promise<void> {
           );
         } finally {
           void recheckExternalPush(project.threadId);
+          void refreshProjectCard(project.threadId);
         }
       }).catch((error) => logError("project.queue_failed", error, { threadId: project.threadId }));
     }
@@ -449,6 +456,7 @@ async function recoverInterruptedTurns(): Promise<void> {
             requestStatusId: entry.statusMessageId,
             images: entry.images ?? [],
             author: entry.author,
+            requesterId: entry.requesterId,
             status: message && message.author.id === client.user?.id ? message : status,
             ...(index === 0 ? { progress } : {}),
           });
@@ -538,6 +546,8 @@ interface QueuedUpdate {
   prompt: string;
   images: PromptImage[];
   author?: CommitAuthor;
+  /** Discord user whose message started the batch; pinged when the agent asks a question. */
+  requesterId?: string;
   status: Message;
   /** Original persisted key, retained when recovery replaces a deleted status message. */
   requestStatusId?: string;
@@ -643,6 +653,17 @@ client.on(Events.MessageCreate, async (message) => {
     await status.edit("🚫 There was nothing to send. Describe the change you want in text instead.").catch(() => undefined);
     return;
   }
+
+  // A message during the turn's agent phase steers the running turn: it is
+  // submitted straight into the busy session, where the agent reads it as part
+  // of the current work — no waiting for the next update pass. Images cannot
+  // ride a steering send and a turn in its delivery tail cannot take one;
+  // those fall through to the queue as always.
+  if (!imageAttachments.length && await projects.steerActiveTurn(message.channel.id, prompt)) {
+    await status.edit("🧭 Sent to the running turn — the agent reads it mid-turn and folds it into the current work.").catch(() => undefined);
+    return;
+  }
+
   const author = commitAuthorIdentity({
     displayName: message.member?.displayName,
     globalName: message.author.globalName,
@@ -655,7 +676,7 @@ client.on(Events.MessageCreate, async (message) => {
   try {
     // Save every accepted message, including the first one, before exposing it to a drain.
     await store.appendQueuedRequest(message.channel.id, {
-      prompt, author, statusMessageId: status.id, images: images.length ? images : undefined,
+      prompt, author, requesterId: message.author.id, statusMessageId: status.id, images: images.length ? images : undefined,
     });
   } catch (error) {
     await status.edit("❌ Could not save this request. Please send it again.").catch(() => undefined);
@@ -667,7 +688,7 @@ client.on(Events.MessageCreate, async (message) => {
     pending = { entries: [], scheduled: false };
     pendingUpdates.set(message.channel.id, pending);
   }
-  pending.entries.push({ prompt, images, author, status });
+  pending.entries.push({ prompt, images, author, requesterId: message.author.id, status });
   const running = store.getProject(message.channel.id);
   if (running?.pendingTurn?.statusMessageId) {
     liveProgress.get(running.pendingTurn.statusMessageId)?.callback({
@@ -766,6 +787,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
   }
   const progress = first.progress ?? new DiscordProgress(first.status, `${isGame ? "🎮 Updating" : "🛠️ Updating"} ${project.displayName}`);
   if (!first.progress) registerQuestionButtons(first.status, progress);
+  const callback = withQuestionPings(progress.callback, threadId, first.requesterId);
   const merged = mergeUpdateBatch(batch);
   const consumed = batch.slice(0, batch.length - merged.overflow.length);
   for (const entry of consumed.slice(1)) {
@@ -779,7 +801,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
   }
   progress.enableStopButton();
   try {
-    const result = await projects.mutate(threadId, merged.prompt, false, progress.callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id), merged.display);
+    const result = await projects.mutate(threadId, merged.prompt, false, callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id), merged.display, first.requesterId);
     await progress.close();
     if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
       await setStatusMessage(first.status, finishedWithErrorsMessageText(result));
@@ -816,6 +838,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
     );
   } finally {
     void recheckExternalPush(threadId);
+    void refreshProjectCard(threadId);
   }
 }
 
@@ -880,10 +903,16 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     const { thread, created } = await resolveOrCreateThread(interaction, requestedName || prompt);
     if (store.getProject(thread.id)) throw new Error("That thread already has a site. Just reply in the thread to mutate it.");
     const status = await thread.send("🛠️ Preparing this thread's persistent site…");
+    // The pinned project card goes up immediately, before any build work, so
+    // the thread's front page exists from the first second.
+    const card = await postProjectCard(thread, previewProjectRecord(
+      thread.id, interaction.guildId!, thread.parentId || interaction.channelId, requestedName || thread.name, prompt, "site",
+    ));
     const progress = new DiscordProgress(status, `🛠️ Building ${requestedName || thread.name}`);
     registerQuestionButtons(status, progress);
     progress.enableStopButton();
     progress.update("📋 Request accepted");
+    const callback = withQuestionPings(progress.callback, thread.id, interaction.user.id);
 
     await interaction.editReply(`Created/attached <#${thread.id}>. The public thread will show live build stages; detailed failures stay private.`);
     creatingThreads.add(thread.id);
@@ -899,8 +928,10 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
           initialPrompt: prompt,
           renameable: created && !requestedName,
           initiator: interactionInitiator(interaction),
+          initiatorUserId: interaction.user.id,
           statusMessageId: status.id,
-        }, progress.callback, (title) => applyAiThreadTitle(thread, title));
+          infoMessageId: card?.id,
+        }, callback, (title) => applyAiThreadTitle(thread, title));
         await progress.close();
         if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
           await setStatusMessage(
@@ -929,6 +960,9 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
           return;
         }
         const project = store.getProject(thread.id);
+        // Setup died before the record existed: the pinned card has no project
+        // to describe, so take it down instead of pinning a ghost.
+        if (!project) await card?.delete().catch(() => undefined);
         const incident = await reportFailure(error, {
           operation: "initial-site-build",
           guildId: interaction.guildId,
@@ -956,6 +990,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         creatingThreads.delete(thread.id);
         abandonedThreads.delete(thread.id);
         void recheckExternalPush(thread.id);
+        if (store.getProject(thread.id)) void refreshProjectCard(thread.id);
       }
     }).catch((error) => logError("project.queue_failed", error, { threadId: thread.id }));
     return;
@@ -965,7 +1000,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     await interaction.reply({
       content:
         "**ThreadSite** — every normal message in a project thread edits its site or game.\n" +
-        "Send several in a row and they merge into one update. Image attachments reach the model when it can see them. " +
+        "Reply while a turn runs to **steer it live** — the agent reads your message mid-turn. Send several between turns and they merge into one update. Image attachments reach the model when it can see them (images queue for the next pass rather than steering). " +
         "The live status message carries a **Stop** button while a turn runs; `/site stop` works even if that message is gone. " +
         "A turn with no progress for a few minutes is flagged on the card. Failures offer rollback or keep.\n\n" +
         "**/site start** — create a site (works in any channel)\n" +
@@ -975,6 +1010,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         "**/site sync** — adopt commits pushed to the repo from outside the bot\n" +
         "**/site republish** — rebuild and republish without the model\n" +
         "**/site compact** — summarize the session context now\n" +
+        "**/site multiplayer** — switch a game between arena, rooms, and singleplayer (the agent asks how, then rewrites the netcode; you get pinged when it asks)\n" +
         "**/site stop** — interrupt the running turn without dropping its session\n" +
         "**/site queue** — show queued messages and cancel individual entries\n" +
         "**/site revert** — undo the last accepted turn\n" +
@@ -997,7 +1033,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       content:
         `**${project.displayName}** — ${project.status}\n` +
         `[open site](${projects.siteLink(project)}) · [source](${projects.repoLink(project)})\n` +
-        `Type: ${projectKindLabel(project.projectKind)}\n` +
+        `Type: ${projectKindLabel(project.projectKind)}${project.multiplayerMode && project.projectKind !== "site" ? ` (${project.multiplayerMode === "arena" ? "arena multiplayer" : project.multiplayerMode === "rooms" ? "invite-code rooms" : "singleplayer"})` : ""}\n` +
         `Model: \`${store.getModel() || "the model default"}\` · Effort: \`${store.getEffort() || "auto"}\`\n` +
         threadUsageText(usage, isAdmin(interaction)) +
         (project.lastError && config.errorReportUserIds.has(interaction.user.id) ? `\nLast private error summary: ${truncate(project.lastError, 900)}` : ""),
@@ -1016,6 +1052,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       log("warn", "project.thread_rename_failed", { threadId: project.threadId, error: serializeError(error) });
     });
     await interaction.editReply(`Renamed to **${renamed.displayName}**.\n[open site](${projects.siteLink(renamed)}) · [source](${projects.repoLink(renamed)})\nOld site links redirect to the new address.${titleUpdated ? "" : "\nThe thread title could not be updated yet; it will be retried."}`);
+    void refreshProjectCard(project.threadId);
     return;
   }
 
@@ -1050,6 +1087,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       }
     } finally {
       await progress?.close();
+      void refreshProjectCard(project.threadId);
     }
     return;
   }
@@ -1061,6 +1099,67 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       `🧠 Compaction started with \`${result.model}\`. Older session context is being summarized; ` +
       "this thread keeps working normally afterwards. The site itself is unchanged.",
     );
+    return;
+  }
+
+  if (sub === "multiplayer") {
+    const raw = interaction.options.getString("mode", true);
+    const mode: MultiplayerMode = raw === "rooms" || raw === "singleplayer" ? raw : "arena";
+    const userNote = interaction.options.getString("prompt")?.trim() || undefined;
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (!project.projectKind || project.projectKind === "site") {
+      throw new Error("Multiplayer architectures apply to games. Create one with /makegam.");
+    }
+    if ((project.multiplayerMode ?? "arena") === mode) {
+      await interaction.editReply(`This game already runs ${multiplayerModeLabel(mode)}.`);
+      return;
+    }
+    const status = await interaction.channel?.send(`🕹️ Switching the multiplayer architecture to **${multiplayerModeLabel(mode)}** — the agent will inspect the netcode, then ask about anything it finds tricky…`).catch(() => undefined);
+    if (!status) throw new Error("Could not post a status message in this thread.");
+    const progress = new DiscordProgress(status, `🕹️ Rewiring ${project.displayName}`);
+    registerQuestionButtons(status, progress);
+    progress.enableStopButton();
+    const callback = withQuestionPings(progress.callback, project.threadId, interaction.user.id);
+    try {
+      const result = await projects.enqueue(project.threadId, () =>
+        projects.switchMultiplayer(project.threadId, mode, status.id, callback, interaction.user.id, userNote));
+      await progress.close();
+      if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
+        await setStatusMessage(status, finishedWithErrorsMessageText(result));
+        await sendOutcomeFollowUp(interaction.channel, result, {
+          operation: "multiplayer-switch",
+          guildId: interaction.guildId,
+          requesterId: interaction.user.id,
+        });
+        await interaction.editReply(`The switch to ${multiplayerModeLabel(mode)} did not land cleanly — see the status message. The architecture setting is already switched; reply here to have the agent finish the rewrite.`);
+      } else {
+        await setStatusMessage(status, successMessageText(result, true, `The game now runs **${multiplayerModeLabel(mode)}**.`));
+        await postQaScreenshot(status.channel, result, "📸 How the game looks now:");
+        await interaction.editReply(`Switched to ${multiplayerModeLabel(mode)}.`);
+      }
+    } catch (error) {
+      await progress.close();
+      if (error instanceof TurnStoppedError) {
+        await setStatusMessage(status, "🛑 **Stopped at your request** — the half-finished network rewrite is preserved in the workspace. Reply here to continue it.");
+        await interaction.editReply("Stopped. The architecture setting is switched; reply in the thread to finish the rewrite.");
+        return;
+      }
+      const incident = await reportFailure(error, {
+        operation: "multiplayer-switch",
+        guildId: interaction.guildId,
+        threadId: project.threadId,
+        project,
+        requesterId: interaction.user.id,
+        model: store.getModel() || "the model default",
+      });
+      await setStatusMessage(
+        status,
+        `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Multiplayer switch failed · reference \`${incident.id}\`. The architecture setting is switched; reply here to have the agent finish or revert the rewrite.`,
+      );
+      await interaction.editReply(`The switch failed — reference \`${incident.id}\`.`);
+    } finally {
+      void refreshProjectCard(project.threadId);
+    }
     return;
   }
 
@@ -1106,6 +1205,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       "Anything waiting in this thread's queue was released, and the next message starts a fresh conversation — " +
       "the site, git history, and project notes are all kept.",
     );
+    void refreshProjectCard(project.threadId);
     return;
   }
 
@@ -1120,6 +1220,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       `${body}${result.conversationReverted ? "" : "\n⚠️ The agent conversation revert failed (see the bot log); files and git were still reverted."}\n` +
       `[open site](${projects.siteLink(updated)}) · [source](${projects.repoLink(updated)})`,
     );
+    void refreshProjectCard(project.threadId);
     return;
   }
 
@@ -1148,6 +1249,8 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
 
   const dimension = interaction.options.getString("dimension", true);
   const projectKind: ProjectKind = dimension === "3d" ? "game-3d" : "game-2d";
+  const rawMode = interaction.options.getString("multiplayer");
+  const multiplayerMode: MultiplayerMode = rawMode === "rooms" || rawMode === "singleplayer" ? rawMode : "arena";
   const prompt = interaction.options.getString("prompt", true).trim();
   const requestedName = interaction.options.getString("name")?.trim();
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -1155,11 +1258,17 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
 
   const { thread, created } = await resolveOrCreateThread(interaction, requestedName || prompt, "game");
   if (store.getProject(thread.id)) throw new Error("That thread already has a project. Use a fresh thread for /makegam, then reply normally to mutate the game.");
-  const status = await thread.send(`🎮 Preparing a persistent **${dimension.toUpperCase()} static web game**…`);
+  const modeLabel = multiplayerMode === "singleplayer" ? "singleplayer" : multiplayerMode === "rooms" ? "invite-code rooms" : "shared-arena multiplayer";
+  const status = await thread.send(`🎮 Preparing a persistent **${dimension.toUpperCase()} static web game** (${modeLabel})…`);
+  // The pinned project card goes up immediately, before any build work.
+  const card = await postProjectCard(thread, previewProjectRecord(
+    thread.id, interaction.guildId!, thread.parentId || interaction.channelId, requestedName || thread.name, prompt, projectKind, multiplayerMode,
+  ));
   const progress = new DiscordProgress(status, `🎮 Building ${requestedName || thread.name}`);
   registerQuestionButtons(status, progress);
   progress.enableStopButton();
   progress.update(`🕹️ ${dimension.toUpperCase()} game profile selected`);
+  const callback = withQuestionPings(progress.callback, thread.id, interaction.user.id);
 
   await interaction.editReply(`Created/attached <#${thread.id}>. The thread will show live research/edit/publish stages; detailed failures stay private.`);
   creatingThreads.add(thread.id);
@@ -1174,10 +1283,13 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
         displayName: requestedName || thread.name,
         initialPrompt: prompt,
         projectKind,
+        multiplayerMode,
         renameable: created && !requestedName,
         initiator: interactionInitiator(interaction),
+        initiatorUserId: interaction.user.id,
         statusMessageId: status.id,
-      }, progress.callback, (title) => applyAiThreadTitle(thread, title));
+        infoMessageId: card?.id,
+      }, callback, (title) => applyAiThreadTitle(thread, title));
       await progress.close();
         if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
           await setStatusMessage(status, finishedWithErrorsMessageText(result));
@@ -1200,6 +1312,9 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
         return;
       }
       const project = store.getProject(thread.id);
+      // Setup died before the record existed: the pinned card has no project
+      // to describe, so take it down instead of pinning a ghost.
+      if (!project) await card?.delete().catch(() => undefined);
       const incident = await reportFailure(error, {
         operation: `initial-${dimension}-game-build`,
         guildId: interaction.guildId,
@@ -1227,6 +1342,7 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
         creatingThreads.delete(thread.id);
         abandonedThreads.delete(thread.id);
         void recheckExternalPush(thread.id);
+        if (store.getProject(thread.id)) void refreshProjectCard(thread.id);
       }
     }).catch((error) => logError("project.queue_failed", error, { threadId: thread.id }));
 }
@@ -1271,6 +1387,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     await store.setModel(model);
     log("info", "admin.model_changed", { userId: interaction.user.id, model: model || "default" });
     await interaction.editReply(`Future turns will use \`${model || "the model default"}\`. Existing thread sessions switch on their next message too.`);
+    for (const project of store.listProjects()) void refreshProjectCard(project.threadId);
     return;
   }
 
@@ -1283,6 +1400,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
         ? "Future turns will use the model's default reasoning effort."
         : `Future turns will request \`${level}\` reasoning effort. Models without that variant just fall back to their default.`,
     );
+    for (const project of store.listProjects()) void refreshProjectCard(project.threadId);
     return;
   }
 
@@ -1496,6 +1614,121 @@ function threadUsageText(total: UsageTotal, includeCost: boolean): string {
   const more = total.models.size - models.length;
   return `Usage: ${total.turns} model turns${failed} · in ${formatTokens(total.inputTokens)}${cached} · out ${formatTokens(total.outputTokens)} tok${cost}\n`
     + `Models: ${models.join(" · ")}${more > 0 ? ` · +${more} more` : ""}`;
+}
+
+// --- The pinned project card -------------------------------------------------
+// Posted when a project thread is created, pinned to it, and edited in place
+// after every outcome: the durable front page (original request, model,
+// settings, lifetime usage, links), unlike the per-turn tracking card.
+
+async function projectCardState(project: ProjectRecord): Promise<ProjectCardState> {
+  return {
+    project,
+    model: store.getModel(),
+    effort: store.getEffort(),
+    usage: await usageLog.threadTotal(project.threadId),
+    siteUrl: project.status !== "creating" ? projects.siteLink(project) : undefined,
+    repoUrl: project.repoName ? projects.repoLink(project) : undefined,
+  };
+}
+
+/** Any channel a project card can be posted into (project threads, in practice). */
+interface CardChannel {
+  send(options: ProjectCardMessage): Promise<Message>;
+}
+
+/** Send the card, pin it, and link it to the project record when one exists. */
+async function postProjectCard(thread: CardChannel, project: ProjectRecord): Promise<Message | undefined> {
+  const message = await thread.send({ ...renderProjectCard(await projectCardState(project)) }).catch((error: unknown) => {
+    log("warn", "discord.project_card_post_failed", { threadId: project.threadId, error: serializeError(error) });
+    return undefined;
+  });
+  if (!message) return undefined;
+  // Pinning needs Manage Messages; an unpinned card still works, it just does
+  // not sit at the top of the thread.
+  await message.pin().catch((error) => log("warn", "discord.project_card_pin_failed", { threadId: project.threadId, error: serializeError(error) }));
+  if (store.getProject(project.threadId)) {
+    await store.patchProject(project.threadId, { infoMessageId: message.id, infoCardVersion: PROJECT_CARD_VERSION }).catch(() => undefined);
+  }
+  log("info", "discord.project_card_posted", { threadId: project.threadId, messageId: message.id, version: PROJECT_CARD_VERSION });
+  return message;
+}
+
+/** Edit the pinned card in place; (re)post and pin when missing or deleted. */
+async function refreshProjectCard(threadId: string): Promise<void> {
+  try {
+    const project = store.getProject(threadId);
+    if (!project) return;
+    const channel = await client.channels.fetch(threadId).catch(() => undefined);
+    const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
+    if (!thread) return;
+    if (project.infoMessageId) {
+      const card = await thread.messages.fetch(project.infoMessageId).catch(() => undefined);
+      if (card && card.author.id === client.user?.id) {
+        await card.edit(renderProjectCard(await projectCardState(project)));
+        // A refresh always renders the current design; sync a stale stored
+        // version so boot reconciliation can skip this card next time.
+        if (project.infoCardVersion !== PROJECT_CARD_VERSION) {
+          await store.patchProject(threadId, { infoCardVersion: PROJECT_CARD_VERSION }).catch(() => undefined);
+        }
+        return;
+      }
+    }
+    await postProjectCard(thread, project);
+  } catch (error) {
+    log("warn", "discord.project_card_refresh_failed", { threadId, error: serializeError(error) });
+  }
+}
+
+/** A stand-in record so the card can render before createProject persists the real one. */
+function previewProjectRecord(
+  threadId: string, guildId: string, parentChannelId: string, displayName: string, prompt: string,
+  projectKind: ProjectKind, multiplayerMode?: MultiplayerMode,
+): ProjectRecord {
+  const now = new Date().toISOString();
+  return {
+    threadId, guildId, parentChannelId, displayName, workspacePath: "", siteSlug: "", repoName: "", sessionId: "",
+    projectKind, status: "creating", createdAt: now, updatedAt: now, initialPrompt: truncate(prompt, 2_000),
+    ...(projectKind !== "site" ? { multiplayerMode: multiplayerMode ?? "arena" as const } : {}),
+  };
+}
+
+/**
+ * Boot-time card reconciliation: projects from before the card feature get
+ * one, and cards still on an older design version are upgraded — bump
+ * PROJECT_CARD_VERSION and every pinned card re-renders on the next start.
+ */
+async function reconcileProjectCards(): Promise<void> {
+  for (const project of store.listProjects()) {
+    if (project.infoMessageId && project.infoCardVersion === PROJECT_CARD_VERSION) continue;
+    await refreshProjectCard(project.threadId);
+  }
+}
+
+/**
+ * Wrap a turn's progress callback so the first appearance of each agent
+ * question pings the requester in the thread: the buttons live on the status
+ * card and are easy to miss, while a parked question holds the whole turn
+ * (and the thread's queue) open.
+ */
+function withQuestionPings(callback: ProgressCallback, threadId: string, requesterId?: string): ProgressCallback {
+  if (!requesterId) return callback;
+  const pinged = new Set<string>();
+  return (update) => {
+    if (update.kind === "question" && update.question && !update.question.resolved
+      && update.question.requestID && !pinged.has(update.question.requestID)) {
+      pinged.add(update.question.requestID);
+      void client.channels.fetch(threadId).then(async (channel) => {
+        if (channel?.isTextBased() && "send" in channel) {
+          await channel.send({
+            content: `<@${requesterId}> ❓ The agent needs your answer to continue — use the buttons on this turn's status message.`,
+            allowedMentions: { users: [requesterId] },
+          }).catch(() => undefined);
+        }
+      }).catch(() => undefined);
+    }
+    return callback(update);
+  };
 }
 
 function isAdmin(interaction: ChatInputCommandInteraction | AutocompleteInteraction): boolean {

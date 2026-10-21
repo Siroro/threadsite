@@ -4,16 +4,17 @@ import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
 import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, turnRevertTarget, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
-import { ensureMultiplayerFiles, multiplayerContext } from "./multiplayer.js";
+import { ensureMultiplayerFiles, multiplayerContext, removeMultiplayerFiles } from "./multiplayer.js";
 import { OpenCodeHarness, addUsage, errorUsage, type PromptImage, type PromptResult, type TurnUsage } from "./opencode.js";
+import { PROJECT_CARD_VERSION } from "./project-card.js";
 import { publishIndex, publishSite, publishSiteRedirects, siteUrl, validateSite } from "./publish.js";
 import { buildSite, GENERATED_GITIGNORE } from "./build.js";
 import { enginePackages, ensureEnginePackages } from "./engines.js";
 import { ensureSkillFiles, skillNames } from "./skills.js";
 import { Store, pendingTurnMatches } from "./store.js";
-import { initialProjectInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, repairInstruction } from "./templates.js";
+import { initialProjectInstruction, multiplayerModeLabel, multiplayerSwapInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, repairInstruction } from "./templates.js";
 import { starterHtml, starterSource } from "./starter.js";
-import type { CommitAuthor, MultiplayerContext, ProjectKind, ProjectRecord } from "./types.js";
+import type { CommitAuthor, MultiplayerContext, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog } from "./usage.js";
 import type { ProgressCallback, ProgressPhase } from "./progress.js";
 import type { WorkingTreeStats } from "./git.js";
@@ -124,7 +125,7 @@ export class ProjectService {
   /** Recreate ignored harness build inputs after a checkout/clean or on a fresh host. */
   private async ensureHarnessBuildInputs(project: ProjectRecord): Promise<void> {
     await ensureEnginePackages(project.workspacePath, project.projectKind ?? "site");
-    const multiplayer = multiplayerContext(project.projectKind ?? "site", project.multiplayerGameId ?? project.siteSlug);
+    const multiplayer = multiplayerContext(project.projectKind ?? "site", project.multiplayerGameId ?? project.siteSlug, project.multiplayerMode);
     if (multiplayer) await ensureMultiplayerFiles(project.workspacePath, multiplayer, project.projectKind ?? "site");
   }
 
@@ -194,6 +195,12 @@ export class ProjectService {
     initiator?: CommitAuthor;
     /** Live status message for the initial build, resumed by restart recovery. */
     statusMessageId?: string;
+    /** The pinned project card posted at thread creation; linked into the record. */
+    infoMessageId?: string;
+    /** Multiplayer architecture for games; omitted means arena (the default). */
+    multiplayerMode?: MultiplayerMode;
+    /** Discord user who requested the project, pinged when the agent asks a question. */
+    initiatorUserId?: string;
   }, onProgress?: ProgressCallback, onTitle?: (title: string) => Promise<void>): Promise<MutationResult> {
     if (this.store.getProject(input.threadId)) throw new Error("This Discord thread already has a site.");
     // Bot-created threads carry a "site-"/"game-" prefix in their name; keep it
@@ -217,12 +224,16 @@ export class ProjectService {
     // record. Harness build inputs and generated bundles are recreated locally
     // and never enter Forgejo.
     await fs.writeFile(path.join(workspacePath, ".gitignore"), `${GENERATED_GITIGNORE.join("\n")}\n`, "utf8");
-    const multiplayer = multiplayerContext(projectKind, siteSlug);
+    const multiplayerMode = input.multiplayerMode ?? "arena";
+    const multiplayer = multiplayerContext(projectKind, siteSlug, multiplayerMode);
     if (multiplayer) {
       // Games are multi-tenant clients of the shared relay: vendored protocol
       // client + this game's net config + the multiplayer AGENTS.md section.
-      emit(onProgress, "🕹️ Provisioning multiplayer client and AGENTS.md");
+      emit(onProgress, multiplayerMode === "rooms" ? "🕹️ Provisioning the multiplayer client (invite-code rooms)" : "🕹️ Provisioning the multiplayer client (shared arena)");
       await ensureMultiplayerFiles(workspacePath, multiplayer, projectKind);
+    } else if (projectKind !== "site") {
+      emit(onProgress, "🕹️ Singleplayer game — no multiplayer client");
+      await fs.writeFile(path.join(workspacePath, "AGENTS.md"), await projectAgents(projectKind, undefined, true), "utf8");
     } else {
       emit(onProgress, "🧭 Writing project-specific AGENTS.md");
       await fs.writeFile(path.join(workspacePath, "AGENTS.md"), await projectAgents(projectKind), "utf8");
@@ -273,6 +284,13 @@ export class ProjectService {
       status: "creating",
       createdAt: now,
       updatedAt: now,
+      // The card's front page: the original request outlives pendingTurn. The
+      // card id arrives from the already-posted message, so it is stamped with
+      // the design version it was rendered at.
+      initialPrompt: truncate(input.initialPrompt, 2_000),
+      ...(projectKind !== "site" ? { multiplayerMode } : {}),
+      infoMessageId: input.infoMessageId,
+      infoCardVersion: input.infoMessageId ? PROJECT_CARD_VERSION : undefined,
     };
     await this.store.putProject(project);
     log("info", "project.created", { threadId: input.threadId, projectKind, repoName, siteSlug });
@@ -287,7 +305,7 @@ export class ProjectService {
           })
       : undefined;
 
-    let result = await this.mutate(input.threadId, input.initialPrompt, true, onProgress, input.initiator, input.statusMessageId);
+    let result = await this.mutate(input.threadId, input.initialPrompt, true, onProgress, input.initiator, input.statusMessageId, undefined, [], undefined, input.initiatorUserId);
 
     if (titlePromise && onTitle) {
       const generated = await withTimeout(titlePromise, 90_000);
@@ -360,7 +378,9 @@ export class ProjectService {
         const target = await this.forgejo.repositoryInfo(repoName);
         if (target && target.id !== source.id) continue;
         await this.store.patchProject(threadId, {
-          multiplayerGameId: project.multiplayerGameId ?? project.siteSlug,
+          multiplayerGameId: project.multiplayerMode === "singleplayer"
+            ? project.multiplayerGameId
+            : project.multiplayerGameId ?? project.siteSlug,
           pendingRename: { displayName, siteSlug, repoName, fromSiteSlug: project.siteSlug, fromRepoName: project.repoName, repoId: source.id },
         });
         return;
@@ -415,7 +435,7 @@ export class ProjectService {
     return project;
   }
 
-  async mutate(threadId: string, prompt: string, initial = false, onProgress?: ProgressCallback, author?: CommitAuthor, statusMessageId?: string, images?: readonly PromptImage[], queuedStatusIds: readonly string[] = [], displayRequest?: string): Promise<MutationResult> {
+  async mutate(threadId: string, prompt: string, initial = false, onProgress?: ProgressCallback, author?: CommitAuthor, statusMessageId?: string, images?: readonly PromptImage[], queuedStatusIds: readonly string[] = [], displayRequest?: string, requesterId?: string, instructionOverride?: string): Promise<MutationResult> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site. Use /site start first.");
     if (project.pendingRename) project = await this.resumeRename(threadId, onProgress);
@@ -452,7 +472,8 @@ export class ProjectService {
       const workspacePath = project.workspacePath;
       // Repair harness-owned multiplayer files (vendored client, net config,
       // multiplayer AGENTS.md section) in case a previous turn removed them.
-      const multiplayer = multiplayerContext(projectKind, project.multiplayerGameId ?? project.siteSlug);
+      const multiplayerMode = project.multiplayerMode ?? "arena";
+      const multiplayer = multiplayerContext(projectKind, project.multiplayerGameId ?? project.siteSlug, multiplayerMode);
       if (multiplayer) {
         emit(onProgress, "🕹️ Ensuring multiplayer client files");
         await ensureMultiplayerFiles(workspacePath, multiplayer, projectKind);
@@ -460,10 +481,13 @@ export class ProjectService {
         // Non-multiplayer projects get the same per-turn guarantee: AGENTS.md
         // rule updates reach existing threads, not just newly created ones.
         const agentsFile = path.join(workspacePath, "AGENTS.md");
-        const agents = await projectAgents(projectKind);
+        const agents = await projectAgents(projectKind, undefined, multiplayerMode === "singleplayer");
         if ((await fs.readFile(agentsFile, "utf8").catch(() => undefined)) !== agents) {
           await fs.writeFile(agentsFile, agents, "utf8");
         }
+        // A singleplayer game must also stay free of leftover relay wiring:
+        // stale net files would keep imports and the bundler resolving.
+        if (multiplayerMode === "singleplayer") await removeMultiplayerFiles(workspacePath);
       }
       // The engine package gets the same per-turn guarantee: if node_modules
       // ever goes missing or drifts, it is reseeded before the agent runs, so
@@ -496,9 +520,11 @@ export class ProjectService {
       // Durable project memory: read fresh each turn so notes land in the very
       // turn after they are written. Missing file is fine (nothing noted yet).
       const notes = await readProjectNotes(project.workspacePath);
-      let instruction = initial
-        ? initialProjectInstruction(projectKind, prompt, notes)
-        : mutationInstruction(projectKind, prompt, notes);
+      // A harness-driven turn (e.g. the multiplayer switch) brings its own
+      // instruction; the prompt then stays the user-facing display text.
+      let instruction = instructionOverride ?? (initial
+        ? initialProjectInstruction(projectKind, prompt, notes, multiplayerMode)
+        : mutationInstruction(projectKind, prompt, notes, multiplayerMode));
       if (turnImages?.length) {
         instruction += `\n\nThe user's Discord message included ${turnImages.length} attached image${turnImages.length === 1 ? "" : "s"}, delivered with this prompt.`;
       }
@@ -535,7 +561,7 @@ export class ProjectService {
       emit(onProgress, initial ? "✨ Building the first version" : "🧠 Applying your requested revision", undefined, "working");
       // Persist the in-flight request first: if the bot dies mid-turn, boot
       // recovery uses it to continue, commit, and publish this work.
-      pendingMarker = { id: randomUUID(), prompt, initial, startedAt: new Date().toISOString(), author, statusMessageId,
+      pendingMarker = { id: randomUUID(), prompt, initial, startedAt: new Date().toISOString(), author, requesterId, statusMessageId,
         beforeCommit: await currentHead(workspacePath), images: turnImages ? [...turnImages] : undefined };
       project = await this.store.startQueuedTurn(threadId, pendingMarker, queuedStatusIds);
       queueClaimed = true;
@@ -962,8 +988,8 @@ export class ProjectService {
           const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
           project = await this.store.patchProject(threadId, { sessionId });
           const instruction = pending.initial
-            ? initialProjectInstruction(projectKind, pending.prompt, notes)
-            : mutationInstruction(projectKind, pending.prompt, notes);
+            ? initialProjectInstruction(projectKind, pending.prompt, notes, project.multiplayerMode)
+            : mutationInstruction(projectKind, pending.prompt, notes, project.multiplayerMode);
           const result = await this.recoveryPrompt(project.workspacePath, sessionId, instruction, onProgress, threadId, pending.images);
           agentSummary = result.text;
           usage = result.usage;
@@ -977,7 +1003,7 @@ export class ProjectService {
         prompt: pending.prompt,
         initial: pending.initial,
         projectKind,
-        multiplayer: multiplayerContext(projectKind, project.multiplayerGameId ?? project.siteSlug),
+        multiplayer: multiplayerContext(projectKind, project.multiplayerGameId ?? project.siteSlug, project.multiplayerMode),
         agentSummary,
         author: pending.author,
         onProgress,
@@ -1256,6 +1282,72 @@ export class ProjectService {
       log("warn", "project.session_auto_compact_failed", { threadId, error: serializeError(error) });
       return undefined;
     }
+  }
+
+  /**
+   * Steer the thread's running agent turn with a mid-flight user message: the
+   * harness submits it to the busy session, where the agent reads it as part
+   * of the running turn — no abort, no waiting for the next pass. False when
+   * nothing is steerable right now (idle, delivering, or recovering), so the
+   * caller can queue the message instead.
+   */
+  async steerActiveTurn(threadId: string, text: string): Promise<boolean> {
+    if (!this.activeTurnThreads.has(threadId) || this.delivering.has(threadId)) return false;
+    const project = this.store.getProject(threadId);
+    if (!project) return false;
+    const steered = await this.opencode.steer(project.workspacePath, project.sessionId, text);
+    if (steered) log("info", "project.turn_steered", { threadId, sessionId: project.sessionId });
+    return steered;
+  }
+
+  /**
+   * Swap a game's multiplayer architecture (/site multiplayer): persist the new
+   * mode, swap the harness-owned wiring (net files + AGENTS.md guidance, or
+   * their removal for singleplayer), then run a normal agent turn whose
+   * instruction orders investigate → question the user → rewrite. The turn
+   * rides the thread's queue like any update, so it cannot race a running one.
+   */
+  async switchMultiplayer(
+    threadId: string,
+    mode: MultiplayerMode,
+    statusMessageId: string,
+    onProgress?: ProgressCallback,
+    requesterId?: string,
+    userNote?: string,
+  ): Promise<MutationResult> {
+    const project = this.store.getProject(threadId);
+    if (!project) throw new Error("This thread is not attached to a site.");
+    const kind = project.projectKind ?? "site";
+    if (kind === "site") throw new Error("This project is a website — multiplayer architectures apply to games only.");
+    const from = project.multiplayerMode ?? "arena";
+    if (from === mode) throw new Error(`This game already runs ${multiplayerModeLabel(mode)}.`);
+
+    // Mode first: the turn's own per-turn repair and the agent's AGENTS.md
+    // must both describe the target architecture from here on.
+    await this.store.patchProject(threadId, { multiplayerMode: mode });
+    const multiplayer = multiplayerContext(kind, project.multiplayerGameId ?? project.siteSlug, mode);
+    if (multiplayer) {
+      emit(onProgress, `🕹️ Rewiring the harness client for ${multiplayerModeLabel(mode)}`);
+      await ensureMultiplayerFiles(project.workspacePath, multiplayer, kind);
+    } else {
+      emit(onProgress, "🕹️ Removing the multiplayer client — this game is going singleplayer");
+      await removeMultiplayerFiles(project.workspacePath);
+    }
+    log("info", "project.multiplayer_switch", { threadId, from, to: mode });
+
+    return this.mutate(
+      threadId,
+      `Switch the multiplayer architecture to ${multiplayerModeLabel(mode)}`,
+      false,
+      onProgress,
+      undefined,
+      statusMessageId,
+      undefined,
+      [],
+      undefined,
+      requesterId,
+      multiplayerSwapInstruction(from, mode, userNote),
+    );
   }
 
   /**
