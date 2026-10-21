@@ -19,6 +19,14 @@ ORIGIN="${THREADSITE_ORIGIN:-https://github.com/Siroro/threadsite.git}"
 command -v git >/dev/null || { echo "git is required" >&2; exit 1; }
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }
 
+# git refuses repositories owned by another user (common when the tree was
+# created by root). Self-heal: mark exactly this checkout as safe for the
+# current user instead of failing the deploy.
+if ! git rev-parse --git-dir >/dev/null 2>&1 && git rev-parse --git-dir 2>&1 | grep -q "dubious ownership"; then
+  git config --global --add safe.directory "$(pwd)"
+  echo "Marked $(pwd) as a safe git directory for $(whoami)."
+fi
+
 if ! git remote get-url origin >/dev/null 2>&1; then
   git remote add origin "$ORIGIN"
   echo "Added origin $ORIGIN"
