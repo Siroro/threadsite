@@ -1,6 +1,6 @@
 ---
 name: threejs-game-studio
-description: "Plan, build, teach, upgrade, debug, optimize, test, and release professional Three.js browser games. Use for Three.js game work involving project setup, scene graphs, cameras, input, gameplay, collision or physics, local and procedural assets, PBR rendering, WebGLRenderer, experimental WebGPURenderer/TSL, post-processing, VFX, UI, audio, WebXR, performance, accessibility, playtesting, or release QA. Coordinates a local-first Vite and TypeScript workflow, loads renderer- and task-specific references, and verifies version-sensitive APIs against the installed Three.js runtime and current official documentation."
+description: "Plan, build, teach, upgrade, debug, optimize, test, and release professional Three.js browser games. Use for Three.js game work involving project setup, scene graphs, cameras, input, gameplay, collision or physics, local and procedural assets, PBR rendering, WebGLRenderer, experimental WebGPURenderer/TSL, post-processing, VFX, UI, audio, WebXR, performance, accessibility, playtesting, or release QA. Coordinates a local-first TypeScript workflow in the harness workspace, loads renderer- and task-specific references, and verifies version-sensitive APIs against the installed Three.js runtime and current official documentation."
 license: MIT
 ---
 

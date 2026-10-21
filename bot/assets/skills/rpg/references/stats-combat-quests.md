@@ -109,4 +109,4 @@ quest = {
 ```
 
 Keep quest *definitions* as data and quest *progress* in the save. Gate dialogue lines and
-NPC behavior on quest state via `dialogue-systems` conditions/variables.
+NPC behavior on quest state via a branching-dialogue reference conditions/variables.

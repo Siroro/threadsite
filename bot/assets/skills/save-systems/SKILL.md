@@ -23,7 +23,7 @@ patch. Get those three right and the rest is plumbing.
  migration).
 
 **When *not* to use:** for Roblox cloud persistence specifics, use
-`roblox-datastores`. For the data model the save serializes (resources/SOs), use
+the platform's cloud-persistence docs. For the data model the save serializes (resources/SOs), use
 the engine's equivalent API. For Godot's `FileAccess`/
 `ResourceSaver` and `user://` paths, defer to the Godot engine skill while
 applying the patterns here.
@@ -144,7 +144,7 @@ func autosave_if_due(dt: float) -> void:
  inconsistent state. Use a dedicated autosave slot and save on safe boundaries.
 - **Storing secrets or trusting client saves in multiplayer.** A local save is
  player-controlled; never treat it as authoritative for online state. For cloud,
- handle the device's data limits and conflicts (`roblox-datastores`).
+ handle the device's data limits and conflicts.
 
 ## References
 
@@ -154,7 +154,7 @@ func autosave_if_due(dt: float) -> void:
 
 ## Related skills
 
-- `roblox-datastores` — cloud persistence, request limits, session locking.
+- the platform's cloud-persistence docs — cloud persistence, request limits, session locking.
 - the engine's equivalent API — the data model you serialize.
 - `procedural-gen` — store the seed to regenerate worlds instead of saving them.
 - `rpg`, `survival-crafting`, `visual-novel` — genres that compose this skill.

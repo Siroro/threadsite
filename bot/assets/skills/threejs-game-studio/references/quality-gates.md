@@ -72,8 +72,8 @@ premium, showcase, or release-ready.
 - Every meaningful runtime asset is procedural, project-local, or user-supplied.
 - Broad work has a reviewed content-provenance inventory; static path checks are
  not treated as proof of how a local file was obtained.
-- `npm run audit:local` passes with no unapproved runtime package or network
- source.
+- No unapproved runtime package or network source: every import resolves
+ inside the workspace and the outbound-request list is empty.
 - No remote fonts, models, textures, audio, scripts, APIs, MCP tools, analytics,
  or cloud runtimes are required.
 - Production-preview browser QA blocks and reports non-loopback requests; the

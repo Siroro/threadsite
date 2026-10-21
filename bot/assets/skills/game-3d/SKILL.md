@@ -1,13 +1,13 @@
 ---
 name: game-3d
-description: three.js playbook for this repository's 3D games — renderer and scene bootstrap, frame-loop discipline, physically-based lighting, materials and geometry budgets, GLB/GLTF asset loading, addon vendoring, disposal, picking, Rapier physics, BVH spatial queries, and performance patterns for the pinned three 0.185 engine package. Load before building or substantially revising 3D rendering, scenes, cameras, models, physics, or effects.
+description: three.js playbook for this repository's 3D games — renderer and scene bootstrap, frame-loop discipline, physically-based lighting, materials and geometry budgets, GLB/GLTF asset loading, addon vendoring, disposal, picking, Rapier physics, BVH spatial queries, and performance patterns for the pinned three 0.186 engine package. Load before building or substantially revising 3D rendering, scenes, cameras, models, physics, or effects.
 ---
 
 # three.js playbook (game-3d)
 
 The rules that bound this project (edit scope, build step, multiplayer protocol,
 validation) live in the project-root `AGENTS.md` — this skill is the engine
-how-to layer beneath them. The engine is **three.js r185**, installed as a real
+how-to layer beneath them. The engine is **three.js r186**, installed as a real
 package in the harness-managed `node_modules/`: `import * as THREE from "three"`
 gives you the full API with real TypeScript types, tree-shaken into your bundle
 at build time. Two more real packages are seeded alongside it:

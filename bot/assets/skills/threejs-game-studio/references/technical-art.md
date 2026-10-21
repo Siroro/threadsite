@@ -49,10 +49,8 @@ only the affected budget, baseline, and tradeoff.
 ## Render Budget Starting Points
 
 These are starting contracts, not universal limits — measure on the target game,
-and document every deliberate overrun as a tradeoff. The canvas inspector
-(`npm run inspect:canvas`) compares live diagnostics against the same numbers
-and reports over-budget rows. In a non-scaffold project, capture equivalent
-`renderer.info` and viewport/DPR evidence directly when that command is absent.
+and document every deliberate overrun as a tradeoff. Capture live `renderer.info` and viewport/DPR evidence and compare it
+against the same numbers; report over-budget rows as documented tradeoffs.
 
 | Metric (worst active-play view) | Desktop tier | Mobile tier |
 | --- | --- | --- |

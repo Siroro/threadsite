@@ -170,9 +170,8 @@ Any of these prevents a polished/premium/showcase claim:
 
 ## Measured Evidence
 
-Run the canvas inspector (`npm run inspect:canvas` or
-`scripts/inspect-threejs-canvas.ts`) on relevant viewports and cite its
-`metrics` and `renderBudget` blocks. Pixel metrics are smoke signals only. They
+Capture canvas evidence (`renderer.info`, viewport/DPR, or the page's
+diagnostics overlay) on relevant viewports and cite the numbers. Pixel metrics are smoke signals only. They
 can reward visual noise and penalize an intentionally sparse, high-quality art
 direction, so never convert a threshold directly into a score or automatic
 failure. Calibrate them against the packaged anchors and the game's own prior

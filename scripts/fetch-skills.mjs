@@ -80,7 +80,10 @@ const DEAD_SKILL_REWRITES = [
   [/`pygame-[\w-]+`/g, "the engine's equivalent API"],
   [/`bevy-[\w-]+`/g, "the engine's equivalent API"],
   [/`love2d-[\w-]+`/g, "the engine's equivalent API"],
+  [/`roblox-[\w-]+`/g, "the platform's cloud-persistence docs"],
   [/`shader-programming`/g, "a GPU shader reference"],
+  [/`dialogue-systems`/g, "a branching-dialogue reference"],
+  [/`prototype-fast`/g, "a rapid prototype"],
 ];
 
 /**
@@ -161,9 +164,101 @@ const HARNESS_CONFLICT_REPLACEMENTS = [
  */
 const REFERENCE_REPLACEMENTS = [
   {
+    // Upstream made physics.md engine-neutral ("explicitly approved and
+    // locally pinned physics engine"); ThreadSite preinstalls Rapier and
+    // three-mesh-bvh for 3D projects and forbids vendoring a second engine,
+    // so restore the harness-specific decision guidance (the physics.md
+    // banner below carries the same message even if these anchors drift).
+    file: "references/physics.md",
+    find: "Adding a\nphysics engine is an architecture and dependency decision: obtain explicit\napproval, pin and host it according to the project's local-first policy, and\ndefine its world, stepping, synchronization, teardown, and asset ownership.\nPreserve an engine already owned by an existing project unless migration is in\nscope; do not expand it merely to avoid a small, well-bounded collision query.",
+    replace: "When a\ndesign genuinely needs a general physics engine, the decision is already made\nfor this workspace: use the **preinstalled `@dimforge/rapier3d-compat`**\n(`await RAPIER.init()` once at boot). Do not vendor Ammo, Cannon, Jolt, or any\nsecond engine, and define the world's stepping, synchronization, teardown, and\nasset ownership up front. Preserve an engine already owned by an existing\nproject unless migration is in scope; do not expand it merely to avoid a\nsmall, well-bounded collision query.",
+  },
+  {
+    file: "references/physics.md",
+    find: "| stacks, joints, ragdolls, arbitrary convex dynamics, robust vehicles | explicitly approved and locally pinned physics engine |",
+    replace: "| stacks, joints, ragdolls, arbitrary convex dynamics, robust vehicles | preinstalled Rapier (`@dimforge/rapier3d-compat`) |\n| fast queries against complex static meshes (hitscan, LOS, ground, picking) | preinstalled `three-mesh-bvh` on the static geometry |",
+  },
+  {
+    file: "references/physics.md",
+    find: "a project that promises local-only runtime assets.",
+    replace: "a project that promises local-only runtime assets — Rapier itself is already\npreinstalled here, so there is no gap for them to fill.",
+  },
+  {
+    // Rapier-specific lifecycle and failure modes upstream generalized away;
+    // they are exactly the traps a preinstalled-Rapier workspace hits.
+    file: "references/physics.md",
+    find: "- Results are stable under a seeded input replay when determinism matters.",
+    replace: "- Soak-test long enough to cross every lifecycle cap and expiry at least once (spawn max+1 of each pooled, capped, or retired entity kind) with a clean console — eviction-path bugs surface minutes into play, not on the first frame.\n- Results are stable under a seeded input replay when determinism matters.",
+  },
+  {
+    file: "references/physics.md",
+    find: "- A custom arcade solver is described as general rigid-body physics.",
+    replace: "- A cap-eviction destroys a physics body but leaves it in the tracking list, so the next eviction destroys it twice and panics inside WASM.\n- A swallowed Rapier exception hides a poisoned world: the game plays on until the next physics call, then fails with `recursive use of an object…` on every frame.\n- A custom arcade solver is described as general rigid-body physics.",
+  },
+  {
     file: "references/local-assets.md",
     find: "For imported models and textures, also run this package's asset checklist:\n\n```bash\nnpm --prefix <this-skill-dir> run audit:assets -- <project>\n```",
     replace: "For imported models and textures, walk every file in `site/assets/` and confirm each entry in `ASSET_SOURCES.json` names its source and license before release.",
+  },
+  {
+    file: "references/local-assets.md",
+    find: "Run:\n\n```bash\nnpm run audit:local\n```\n\n",
+    replace: "Audit local-only status by confirming every runtime import resolves\ninside the workspace and the outbound-request list is empty.\n\n",
+  },
+  {
+    file: "references/upgrade-existing.md",
+    find: "Run:\n\n```bash\nnpm --prefix <skill-dir> run audit:project-apis -- <project>\nnpm --prefix <skill-dir> run probe:three -- <project>\nnpm ls three @types/three\n```",
+    replace: "Audit manually: walk the stale-API list above through the project source\nand confirm every flagged pattern against the installed engine package's real\nTypeScript declarations (the type-check gate fails misspelled or removed\nAPIs), and record `THREE.REVISION` from the installed package.",
+  },
+  {
+    file: "references/upgrade-existing.md",
+    find: "- `audit:project-apis` — curated stale-API and renderer-family patterns,\n  including legacy color-space properties and pointer-lock accessors\n- `audit:assets` — local glTF/texture checklist\n- `ship-check` — revision probe → APIs → local-only → build → canvas → report",
+    replace: "- Manual API audit — curated stale-API and renderer-family patterns from\n `official-docs.md`, checked against the installed revision's real types\n- Asset walk — every imported model/texture in `site/assets/` has source and\n license recorded in `ASSET_SOURCES.json`\n- Browser ship check — full loop, clean console, and canvas evidence on the\n harness preview URL",
+  },
+  {
+    file: "references/load-budgets.md",
+    find: "| `ship-check` outputs; mobile/a11y refs when claimed |",
+    replace: "| Browser ship evidence on the preview URL; mobile/a11y refs when claimed |",
+  },
+  {
+    file: "references/load-budgets.md",
+    find: "| Imported model path, provenance, axes, scale, bounds, or ownership | Relevant section of `local-assets.md`; run `audit:assets` |",
+    replace: "| Imported model path, provenance, axes, scale, bounds, or ownership | Relevant section of `local-assets.md`; walk `site/assets/` + `ASSET_SOURCES.json` |",
+  },
+  {
+    file: "references/load-budgets.md",
+    find: "| Revision-only pre-r185 / CDN / global THREE migration | `upgrade-existing.md`; run `audit:project-apis` |",
+    replace: "| Revision-only pre-r185 / CDN / global THREE migration | `upgrade-existing.md`; audit APIs against the installed types |",
+  },
+  {
+    file: "references/quality-gates.md",
+    find: "- `npm run audit:local` passes with no unapproved runtime package or network\n  source.",
+    replace: "- No unapproved runtime package or network source: every import resolves\n inside the workspace and the outbound-request list is empty.",
+  },
+  {
+    file: "references/qa-release.md",
+    find: "- `npm run setup:browsers` completed on fresh machines before Playwright or\n  canvas-inspector checks.",
+    replace: "- Browser QA runs through the harness preview (Chromium); no local browser\n setup is needed.",
+  },
+  {
+    file: "references/gameplay-architecture.md",
+    find: "- `npm run build` or equivalent.",
+    replace: "- The harness build and type-check gate pass.",
+  },
+  {
+    file: "references/quality-scorecard.md",
+    find: "Run the canvas inspector (`npm run inspect:canvas` or\n`scripts/inspect-threejs-canvas.ts`) on relevant viewports and cite its\n`metrics` and `renderBudget` blocks.",
+    replace: "Capture canvas evidence (`renderer.info`, viewport/DPR, or the page's\ndiagnostics overlay) on relevant viewports and cite the numbers.",
+  },
+  {
+    file: "references/technical-art.md",
+    find: "The canvas inspector\n(`npm run inspect:canvas`) compares live diagnostics against the same numbers\nand reports over-budget rows. In a non-scaffold project, capture equivalent\n`renderer.info` and viewport/DPR evidence directly when that command is absent.",
+    replace: "Capture live `renderer.info` and viewport/DPR evidence and compare it\nagainst the same numbers; report over-budget rows as documented tradeoffs.",
+  },
+  {
+    file: "references/webgpu.md",
+    find: "Run `npm run audit:structure` when changing this skill: it scans executable\nMarkdown examples and scaffold TypeScript for the deprecated API set verified\nagainst r185 and for renderer-family mixing. Re-audit the scanner rules on each\nThree.js upgrade.",
+    replace: "When changing this skill, re-scan its executable examples for the deprecated\nAPI set verified against the baseline revision and for renderer-family mixing,\nand re-check the scanner rules on each Three.js upgrade.",
   },
   {
     file: "references/webgpu.md",
@@ -187,6 +282,39 @@ const BANNERS = {
     + "node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. "
     + "The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md.",
 };
+
+/**
+ * Per-file banner overrides keyed `<skill>/<path>`: reference manuals whose
+ * harness context differs from the repo-wide banner. physics.md gets the
+ * preinstalled Rapier/three-mesh-bvh context because upstream keeps it
+ * engine-neutral while 3D workspaces here cannot vendor a second engine.
+ */
+const FILE_BANNERS = {
+  "threejs-game-studio/references/physics.md":
+    "Vendored from chrislaupama/threejs-game-studio (MIT) by scripts/fetch-skills.mjs. "
+    + "ThreadSite context: three.js, @dimforge/rapier3d-compat (physics, WASM inlined), and three-mesh-bvh "
+    + "(BVH queries on static geometry) are preinstalled in this workspace's harness-managed node_modules — "
+    + "import them by bare name with full TypeScript types. This workspace has NO npm, NO Vite, NO dev server, "
+    + "and NO project scaffold: author TypeScript under site/src, keep assets under site/assets, and the harness "
+    + "runs the only build (site/src TypeScript -> site/js ESM via esbuild). Map every project-setup/scaffold/build "
+    + "step of this skill onto the existing ThreadSite workspace layout; skip its npm/Vite instructions entirely. "
+    + "The hand-rolled collision techniques below are the right tool for simple arcade games; when a design needs "
+    + "real rigid-body dynamics, use the preinstalled Rapier rather than vendoring any other engine. "
+    + "Verification happens in a real browser via the preview URL; see AGENTS.md.",
+};
+
+/**
+ * Targeted frontmatter-description rewrites: a vendored description that
+ * advertises workflows the workspace forbids (Vite/npm scaffolding) fights
+ * the banner in the very text OpenCode shows and triggers on.
+ */
+const FRONTMATTER_REPLACEMENTS = [
+  {
+    skill: "threejs-game-studio",
+    find: "Coordinates a local-first Vite and TypeScript workflow, loads renderer- and task-specific references, and verifies version-sensitive APIs against the installed Three.js runtime and current official documentation.",
+    replace: "Coordinates a local-first TypeScript workflow in the harness workspace, loads renderer- and task-specific references, and verifies version-sensitive APIs against the installed Three.js runtime and current official documentation.",
+  },
+];
 
 const SOURCES = [
   {
@@ -296,19 +424,25 @@ function scrubMarkdown(text, skillName, isSkillEntry = false, relativeFile = "")
     new RegExp(`\\\`${ENGINE_SKILL_NAME.source}\\\`(?:\\s*(?:/|,|,? ?or|,? ?and)\\s*\\\`${ENGINE_SKILL_NAME.source}\\\`)+`, "g"),
     GENERIC_ENGINE_SKILL,
   );
-  text = text.replace(/`shader-programming`/g, "a GPU shader reference");
   text = text.replace(new RegExp(`\\\`${ENGINE_SKILL_NAME.source}\\\``, "g"), GENERIC_ENGINE_SKILL);
   text = text.replace(new RegExp(`(?<![\\\`\\w])${ENGINE_SKILL_NAME.source}`, "g"), GENERIC_ENGINE_SKILL);
+  // Standalone dead names run after the engine-family passes above (their
+  // engine patterns then match nothing; they stay in the list as the record).
+  for (const [pattern, phrase] of DEAD_SKILL_REWRITES) {
+    text = text.replace(pattern, phrase);
+  }
   text = text.replace(/ {2,}/g, " ");
   // A parenthetical that ended up containing only a scrub phrase adds
   // nothing ("the engine animation skill (the engine's equivalent API)").
-  text = text.replace(/\s*\((?:the engine's equivalent API|a GPU shader reference)\)(?=[\s.,;:)]|$)/g, "");
+  text = text.replace(/\s*\((?:the engine's equivalent API|a GPU shader reference|a branching-dialogue reference|a rapid prototype|the platform's cloud-persistence docs)\)(?=[\s.,;:)]|$)/g, "");
   return text;
 }
 
 /** Final gate: no pointer to an unshipped skill may survive vendoring. */
 function assertNoDeadReferences(text, skillName) {
-  const survivor = text.match(new RegExp(`\\\`?shader-programming\\\`|\\\`?${ENGINE_SKILL_NAME.source}\\\``));
+  const survivor = text.match(
+    new RegExp(`\\\`?(?:shader-programming|dialogue-systems|prototype-fast|roblox-datastores)\\\`?|\\\`?${ENGINE_SKILL_NAME.source}\\\``),
+  );
   if (survivor) fail(skillName, `unscrubbed engine-skill reference "${survivor[0].trim()}"`);
 }
 
@@ -411,7 +545,10 @@ async function main() {
         const { frontmatter, body } = parseFrontmatter(skill.name, original);
         const name = /^name:\s*(.+)$/m.exec(frontmatter)?.[1]?.trim();
         if (name !== skill.name) fail(skill.name, `frontmatter name "${name}" does not match directory`);
-        const bounded = boundedFrontmatter(skill.name, frontmatter, source.license);
+        let bounded = boundedFrontmatter(skill.name, frontmatter, source.license);
+        for (const fm of FRONTMATTER_REPLACEMENTS) {
+          if (fm.skill === skill.name && bounded.includes(fm.find)) bounded = bounded.replace(fm.find, fm.replace);
+        }
         const length = descriptionText(skill.name, bounded).length;
         if (length < 1 || length > 1024) fail(skill.name, `description unfolds to ${length} chars (OpenCode allows 1-1024)`);
 
@@ -438,13 +575,14 @@ async function main() {
         // Scrub harness-conflicting instructions and dead skill references
         // in every markdown file of the vendored skill, then re-write the
         // normalized SKILL.md (its body was scrubbed too).
-        const banner = `<!-- ${BANNERS[source.repo]} -->`;
         for (const file of await listMarkdown(to)) {
           const isEntry = file === path.join(to, "SKILL.md");
+          const relative = path.relative(to, file).replace(/\\/g, "/");
           const text = isEntry ? normalized : await readFile(file, "utf8");
-          const scrubbed = scrubMarkdown(text, skill.name, isEntry, path.relative(to, file));
+          const scrubbed = scrubMarkdown(text, skill.name, isEntry, relative);
           assertNoDeadReferences(scrubbed, skill.name);
-          await writeFile(file, isEntry ? scrubbed : `${banner}\n\n${scrubbed}`, "utf8");
+          const banner = FILE_BANNERS[`${skill.name}/${relative}`] ?? BANNERS[source.repo];
+          await writeFile(file, isEntry ? scrubbed : `<!-- ${banner} -->\n\n${scrubbed}`, "utf8");
         }
         report.push({ skill: skill.name, source: source.repo, license: source.license, ...await dirStats(to) });
       }

@@ -29,13 +29,10 @@ Look for:
 - `PCFSoftShadowMap` without a renderer-and-revision qualification
 - manual `requestAnimationFrame()` without an XR/WebGPU initialization contract
 
-Run:
-
-```bash
-npm --prefix <skill-dir> run audit:project-apis -- <project>
-npm --prefix <skill-dir> run probe:three -- <project>
-npm ls three @types/three
-```
+Audit manually: walk the stale-API list above through the project source
+and confirm every flagged pattern against the installed engine package's real
+TypeScript declarations (the type-check gate fails misspelled or removed
+APIs), and record `THREE.REVISION` from the installed package.
 
 The recipes here are verified against r185 / npm `three@0.185.1`. If the user
 requested an upgrade, check current stable, choose an explicit target, and read
@@ -158,10 +155,12 @@ and the stable-versus-next-release watchlist.
 
 ## Mechanical Scanners
 
-- `audit:project-apis` — curated stale-API and renderer-family patterns,
- including legacy color-space properties and pointer-lock accessors
-- `audit:assets` — local glTF/texture checklist
-- `ship-check` — revision probe → APIs → local-only → build → canvas → report
+- Manual API audit — curated stale-API and renderer-family patterns from
+ `official-docs.md`, checked against the installed revision's real types
+- Asset walk — every imported model/texture in `site/assets/` has source and
+ license recorded in `ASSET_SOURCES.json`
+- Browser ship check — full loop, clean console, and canvas evidence on the
+ harness preview URL
 
 Scanners find candidates; they cannot prove semantic transform, color, shader,
 or gameplay equivalence.

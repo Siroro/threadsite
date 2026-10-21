@@ -856,10 +856,9 @@ For WebGPU code verified against r185:
 - never combine this renderer with GLSL `ShaderMaterial`, `RawShaderMaterial`,
  `onBeforeCompile()`, or `EffectComposer`
 
-Run `npm run audit:structure` when changing this skill: it scans executable
-Markdown examples and scaffold TypeScript for the deprecated API set verified
-against r185 and for renderer-family mixing. Re-audit the scanner rules on each
-Three.js upgrade.
+When changing this skill, re-scan its executable examples for the deprecated
+API set verified against the baseline revision and for renderer-family mixing,
+and re-check the scanner rules on each Three.js upgrade.
 
 ## WebGPU Release Gate
 
