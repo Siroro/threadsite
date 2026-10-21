@@ -276,6 +276,10 @@ export class DiscordProgress {
   private snapshot(): ProgressSnapshot {
     const tools = [...this.tools.values()];
     const idleMs = Date.now() - this.lastActivityAt;
+    // A failed tool and a provider retry both turn the card amber, so name the
+    // cause: an alarm without a label tells the reader nothing.
+    const latestToolFailed = this.latest.key ? this.tools.get(this.latest.key)?.status === "error" : false;
+    const serviceWaiting = /retry|backoff|unavailable|reconnect|waiting for.*(?:agent|service)|hit an error/i.test(this.latest.text);
     return {
       title: this.title, phase: this.phase, startedAt: this.started, now: Date.now(), latest: this.latest,
       history: this.history, context: this.context, thought: this.thought, stats: this.stats, changes: this.changes,
@@ -283,8 +287,10 @@ export class DiscordProgress {
       plan: this.plan, queuedRequests: this.queuedRequests,
       actions: tools.length, activeTools: tools.filter((tool) => tool.status === "running").length,
       toolErrors: tools.filter((tool) => tool.status === "error").length, questionPin: this.questionPin,
-      waiting: (this.latest.key ? this.tools.get(this.latest.key)?.status === "error" : false)
-        || /retry|backoff|unavailable|reconnect|waiting for.*(?:agent|service)|hit an error/i.test(this.latest.text),
+      waiting: latestToolFailed || serviceWaiting,
+      waitingReason: latestToolFailed
+        ? "A tool reported an error — the agent is retrying"
+        : serviceWaiting ? "Waiting on the agent service — it will retry automatically" : undefined,
       questions: this.question?.questions,
       stalledForMs: config.turnStallWarnMs > 0 && idleMs >= config.turnStallWarnMs ? idleMs : undefined,
     };

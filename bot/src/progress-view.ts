@@ -40,6 +40,8 @@ export interface ProgressSnapshot {
   activeTools: number;
   toolErrors: number;
   waiting?: boolean;
+  /** Why the card is amber while not waiting for an answer; shown with the warning. */
+  waitingReason?: string;
   questionPin?: { question: string; resolution?: string };
   questions?: Array<{ question: string; options: Array<{ label: string; description?: string }> }>;
   /** Time since the agent last emitted any event, once past the configured stall threshold. */
@@ -58,10 +60,16 @@ export function renderProgressCard(state: ProgressSnapshot): MessageEditOptions 
   const attention = Boolean(state.questions?.length || state.waiting || stalledForMs);
   const age = Math.max(0, state.now - state.latest.at);
   const current = PHASES.indexOf(state.phase);
-  const rail = PHASES.map((phase, index) => index < current ? `✓ ${LABELS[phase]}` : index === current ? `**● ${LABELS[phase]}**` : `○ ${LABELS[phase]}`).join("  ›  ");
+  // "queued" is outside the rail, so it gets its own leading marker: without
+  // one every step would render as pending and read as "nothing is happening".
+  const rail = [...(state.phase === "queued" ? ["**● Queued**"] : []), ...PHASES.map((phase, index) =>
+    index < current ? `✓ ${LABELS[phase]}` : index === current ? `**● ${LABELS[phase]}**` : `○ ${LABELS[phase]}`)].join("  ›  ");
   const description = [rail, "", `**${state.questions?.length ? "Waiting for your answer" : state.phase === "queued" ? "In the project queue" : "Right now"}**`, activity(state.latest, 300)];
   if (stalledForMs) {
     description.push(`⚠️ **No progress for ${elapsed(stalledForMs)}** — the agent may be waiting on a provider or a stuck tool. Run \`/site stop\` to interrupt this turn.`);
+  } else if (state.waiting && !state.questions?.length) {
+    // The amber colour is driven by `waiting` too, so it needs its own label.
+    description.push(`⚠️ **${plain(state.waitingReason ?? "Waiting on the agent — it will retry automatically", 160)}**`);
   } else if (age >= 15_000 && state.phase !== "queued" && !state.questions?.length) {
     description.push(`${state.metrics?.liveTokensPerSecond ? "Generating" : state.activeTools ? "Running this activity" : "Waiting for the next activity"} · ${elapsed(age)}`);
   }

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { setImmediate as nextTick } from "node:timers/promises";
 import { EmbedBuilder, type Message, type MessageEditOptions } from "discord.js";
 import { renderProgressCard, renderProgressText } from "../src/progress-view.js";
+import { requestDisplayText } from "../src/util.js";
 import { buildingSnapshot } from "./fixtures/progress.js";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
@@ -98,6 +99,67 @@ test("queued turns and pending questions are idle by design, not stalled", () =>
   waiting.stalledForMs = 20 * 60_000;
   waiting.questions = [{ question: "Pick a theme", options: [{ label: "Dark" }] }];
   assert.doesNotMatch(embed(renderProgressCard(waiting)).description!, /No progress/);
+});
+
+test("a queued turn leads the rail instead of leaving every stage pending", () => {
+  const state = buildingSnapshot();
+  state.phase = "queued";
+  const description = embed(renderProgressCard(state)).description!;
+  assert.match(description, /^\*\*● Queued\*\*  ›  ○ Prepare/);
+  assert.doesNotMatch(description, /● Build|✓ /);
+  // The stage list still renders, so the reader knows what happens next.
+  assert.match(description, /○ Publish/);
+});
+
+test("a non-question amber card explains what it is waiting on", () => {
+  const state = buildingSnapshot();
+  state.waiting = true;
+  state.waitingReason = "A tool reported an error — the agent is retrying";
+  let card = embed(renderProgressCard(state));
+  assert.equal(card.color, 0xf59e0b);
+  assert.match(card.description!, /A tool reported an error/);
+  assert.match(card.description!, /Right now/);
+
+  // Without a reason the card still says something rather than showing a bare amber frame.
+  state.waitingReason = undefined;
+  card = embed(renderProgressCard(state));
+  assert.match(card.description!, /Waiting on the agent/);
+
+  // A question owns the amber state and its own heading, so no duplicate warning.
+  state.questions = [{ question: "Pick a theme", options: [{ label: "Dark" }] }];
+  card = embed(renderProgressCard(state));
+  assert.match(card.description!, /Waiting for your answer/);
+  assert.doesNotMatch(card.description!, /Waiting on the agent|A tool reported/);
+});
+
+test("a failed tool or provider retry reaches the card with a stated reason", async () => {
+  const progress = new DiscordProgress({ id: "amber", edit: async () => {} } as unknown as Message, "Updating");
+  const snapshot = () => (progress as unknown as { snapshot: () => ReturnType<typeof buildingSnapshot> }).snapshot();
+  try {
+    progress.callback({ text: "🔧 Fixing the build", tool: { id: "t1", name: "bash", status: "error" } });
+    assert.equal(snapshot().waiting, true);
+    assert.match(snapshot().waitingReason!, /tool reported an error/);
+
+    progress.callback({ text: "🔌 Waiting for the agent service to be reachable" });
+    assert.equal(snapshot().waiting, true);
+    assert.match(snapshot().waitingReason!, /agent service/);
+
+    progress.callback({ text: "✏️ Editing code" });
+    assert.equal(snapshot().waiting, false);
+    assert.equal(snapshot().waitingReason, undefined);
+  } finally { await progress.close(); }
+});
+
+test("a merged prompt shows the user's own words, not the model-facing preamble", () => {
+  const merged = "Add a leaderboard\n\nWhile updates were queued, the user sent 2 more messages — apply all of them in this same pass:\n2. Make the arena louder\n3. Fix the reset button";
+  const display = requestDisplayText(["Add a leaderboard", "Make the arena louder", "Fix the reset button"]);
+  assert.doesNotMatch(display, /While updates were queued|apply all of them/);
+  assert.equal(display, "Add a leaderboard · Make the arena louder · Fix the reset button");
+  assert.match(merged, /While updates were queued/, "the prompt keeps its instructions for the model");
+
+  // Blank and whitespace-only entries never produce stray separators.
+  assert.equal(requestDisplayText(["  only  ", "   ", ""]), "only");
+  assert.equal(requestDisplayText([]), "");
 });
 
 test("the watchdog derives stall time from agent events, not queued-user notifications", async () => {
