@@ -49,8 +49,14 @@ export interface ProjectRecord {
   /** Design version the pinned card last rendered; the next boot upgrades older designs. */
   infoCardVersion?: number;
   lastError?: string;
-  /** Advisory browser observations carried into the agent's next turn. */
-  browserQaFindings?: { checkedAt: string; errors: string[]; notes: string[] };
+  /**
+   * Confirmed browser-QA findings carried into the agent's next turn. `errors`
+   * is the legacy field name from records written before findings replaced the
+   * old error/warning split; it is read once and never written again.
+   */
+  browserQaFindings?: { checkedAt: string; findings?: string[]; errors?: string[] };
+  /** Model-written preview of the project, shown on the play card. */
+  preview?: { pitch: string; added?: string; play?: string };
   /** Short hash of the commit belonging to the last accepted turn; used by /site revert. */
   lastCommit?: string;
   /** Pre-turn commit; metadata-only rename commits belong to the same undo boundary. */

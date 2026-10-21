@@ -1,18 +1,15 @@
 import assert from "node:assert/strict";
-import { after, test } from "node:test";
+import { test } from "node:test";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { createHmac } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { testRootSetup, trackStore } from "./fixtures/root.js";
+import type { ForgejoClient } from "../src/forgejo.js";
+import type { ProjectRecord } from "../src/types.js";
 
-const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-hardening-"));
-process.env.DISCORD_BOT_TOKEN = "test";
-process.env.DISCORD_APPLICATION_ID = "test";
-process.env.WORKSPACE_ROOT = path.join(root, "workspaces");
-process.env.PUBLISH_ROOT = path.join(root, "published");
-process.env.LOG_FILE = path.join(root, "test.log");
+const root = testRootSetup("hardening");
 process.env.BROWSER_QA_ENABLED = "false";
 process.env.PUBLIC_SITES_BASE_URL = "https://sites.example.invalid";
 
@@ -21,33 +18,12 @@ const { publishSite, publishSiteRedirects, recoverPublishRoot } = await import("
 const { syncToRemote } = await import("../src/git.js");
 const { startWebhookServer } = await import("../src/webhook.js");
 const { config } = await import("../src/config.js");
-import type { ForgejoClient } from "../src/forgejo.js";
-import type { ProjectRecord } from "../src/types.js";
 
 const exec = promisify(execFile);
-const stores: Array<InstanceType<typeof Store>> = [];
 
 async function openStore(file: string) {
-  const store = await Store.open(file);
-  stores.push(store);
-  return store;
+  return trackStore(await Store.open(file));
 }
-
-after(async () => {
-  for (const store of stores) store.close();
-  // Windows can hold a directory handle briefly (the logger's file, WAL
-  // cleanup); retry instead of failing the whole file on ENOTEMPTY.
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    try {
-      await fs.rm(root, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY") throw error;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-  await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
-});
 
 function record(threadId: string, dir: string, extra: Partial<ProjectRecord> = {}): ProjectRecord {
   const now = new Date().toISOString();

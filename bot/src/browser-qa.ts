@@ -7,16 +7,19 @@ import { errorText } from "./util.js";
  * the freshly validated site in a real browser, collect console/page errors
  * and same-origin request failures, and capture a screenshot for the thread.
  *
- * Error policy (see assets/agents/shared.md — the preview browser cannot
- * reach external origins): only concrete application defects (uncaught
- * exceptions, same-origin asset failures) and blank-render signals are
- * recorded as findings; environment noise is stripped before it can reach
- * the agent or the thread. All browser findings are advisory: publication
- * is fail-open, while the findings are saved for the agent's next turn.
+ * Finding policy (see assets/agents/shared.md — the preview browser cannot
+ * reach external origins): only confirmed application defects (uncaught
+ * exceptions, same-origin asset failures, a confirmed blank render) become
+ * findings. Everything that describes the preview environment instead of the
+ * application — offline external origins, the unreachable relay, browser
+ * lifecycle, browser quirks, preview-server availability — is dropped at the
+ * source, so a pass never sends the agent after a problem it cannot fix.
+ * All findings are advisory: publication is fail-open, while the findings are
+ * saved for the agent's next turn.
  */
 export interface BrowserQaResult {
-  hardErrors: string[];
-  softNotes: string[];
+  /** Confirmed application defects, ready for the agent's next turn. */
+  findings: string[];
   screenshotPng?: Buffer;
   skippedReason?: string;
 }
@@ -25,18 +28,24 @@ export interface BrowserQaResult {
 // MCP-driven browser lives there too, so this origin is reachable from it.
 const PREVIEW_ORIGIN = "http://127.0.0.1:8080";
 
-// Console text shapes caused by the preview's offline external-origin policy,
-// the browser/session lifecycle, or benign browser quirks. None of these say
-// anything about the application: the preview browser cannot reach external
-// origins, and games must stay playable solo when the relay is unreachable.
-// They are never recorded as findings — not even as warnings.
-const NETWORK_ERROR_RE = /failed to fetch|networkerror|net::|err_(?:failed|name_not_resolved|connection|timed_out)|load failed|\bcors\b|fetch.*(?:failed|aborted)|aborted/i;
+// Console text shapes that describe the preview environment or a browser
+// quirk rather than the application. The preview browser cannot reach external
+// origins, the multiplayer relay is offline there by design, and games must
+// stay playable solo — so none of these are findings, not even warnings.
+// Application defects that merely mention a socket (a TypeError inside a
+// message handler) do not match these shapes.
+const OFFLINE_NETWORK_RE = /failed to fetch|networkerror|net::|err_(?:failed|name_not_resolved|connection|refused|reset|timed_out)|load failed|\bcors\b|fetch.*(?:failed|aborted)|\baborted\b/i;
+const RELAY_SOCKET_RE = /websocket connection\b|websocket is closed before the connection is established/i;
 const TRANSIENT_BROWSER_RE = /\bTimeoutError\b|timed out|timeout \d+\s*ms.*exceeded|target.*closed|browser.*(?:closed|disconnected)|page crashed|webgl.*(?:context lost|not supported|not available)|failed to create.*(?:webgl|gpu).*context/i;
-const WEBSOCKET_CONNECT_RE = /\bwebsocket connection\b/i;
-const BENIGN_CONSOLE_RE = /\bResizeObserver loop\b|The play\(\) request was interrupted|play\(\) (?:failed|can only be initiated)|autoplay/i;
+const BENIGN_CONSOLE_RE = /\bResizeObserver loop\b|play\(\) request was interrupted|failed to execute 'play'|play\(\) (?:failed|can only be initiated)|autoplay|audiocontext was not allowed to start|source map/i;
+// The preview blocks external origins by policy, so a refused font, worker,
+// frame or connection is that policy working, not a broken site.
+const BLOCKED_EXTERNAL_RE = /(?:refused to (?:connect|frame)|blocked by content security policy|failed to construct 'worker')[^\n]*https?:\/\//i;
+// Availability of the preview server itself is infrastructure, not a defect.
+const INFRASTRUCTURE_STATUS_RE = /status of (?:408|425|429|5\d\d)/i;
 
 /** One error-level entry from browser_console_messages (plain text, not JSON). */
-export interface ConsoleEntry { type: string; text: string }
+export interface ConsoleEntry { type: string; text: string; location?: string }
 
 /** One failed same-origin request from browser_network_requests (plain text). */
 export interface NetworkFailure { url: string; status?: number; error?: string }
@@ -77,7 +86,9 @@ const RENDER_PROBE = `() => {
  * Parse browser_console_messages text. The tool returns a header
  * ("Total messages: …") followed by "[ERROR] text @ url:line" entries and,
  * for uncaught exceptions, a raw stack whose continuation lines belong to the
- * preceding entry.
+ * preceding entry. The trailing "@ url:line" location is kept in the text —
+ * it names the file the agent has to open — and also split out for
+ * de-duplication against the request report.
  */
 export function parseConsoleEntries(text: string): ConsoleEntry[] {
   const entries: ConsoleEntry[] = [];
@@ -87,7 +98,9 @@ export function parseConsoleEntries(text: string): ConsoleEntry[] {
     if (/^Total messages:|^Returning \d+ messages? |^#{1,6}\s|^```|^- (?:Page|Browser)\b/.test(line.trim())) continue;
     const match = /^\s*\[([^\]]+)\]\s?(.*)$/.exec(line);
     if (match) {
-      entries.push({ type: match[1].toUpperCase(), text: match[2] });
+      const body = match[2].trim();
+      const at = body.lastIndexOf(" @ ");
+      entries.push({ type: match[1].toUpperCase(), text: body, location: at >= 0 ? body.slice(at + 3).trim() || undefined : undefined });
     } else if (/^(?:Uncaught\s+)?(?:Error|TypeError|ReferenceError|RangeError|SyntaxError|DOMException)\b/.test(line.trim())
       && entries.at(-1)?.type !== "PAGEERROR") {
       // A page error (uncaught exception) has no "[LEVEL]" prefix; its stack
@@ -139,22 +152,22 @@ export function parseRenderSanity(text: string): RenderSanity | undefined {
 /**
  * Separate confirmed page defects from environment noise. Console/network
  * shapes that reflect the preview environment rather than the application
- * (offline external origins, WebSocket relay fallback, browser lifecycle,
+ * (offline external origins, the unreachable relay, browser lifecycle,
  * benign browser quirks, preview-server availability) are dropped entirely so
  * agent feedback and thread warnings only carry actionable findings.
  */
-export function classifyBrowserDiagnostics(entries: ConsoleEntry[], failures: NetworkFailure[], sanity?: RenderSanity): Pick<BrowserQaResult, "hardErrors" | "softNotes"> {
-  const hardErrors: string[] = [];
-  const softNotes: string[] = [];
-  const blank = renderSanityProblem(sanity);
-  if (blank) softNotes.push(`${blank}; rendering may still be starting`);
+export function classifyBrowserDiagnostics(entries: ConsoleEntry[], failures: NetworkFailure[], sanity?: RenderSanity): { findings: string[] } {
+  const findings: string[] = [];
+  const blank = blankRenderFinding(sanity);
+  if (blank) findings.push(blank);
   for (const entry of entries) {
     if (!isErrorLevel({ type: entry.type })) continue;
     const text = entry.text.replace(/\s+/g, " ").trim();
     if (!text) continue;
-    if (NETWORK_ERROR_RE.test(text) || TRANSIENT_BROWSER_RE.test(text) || WEBSOCKET_CONNECT_RE.test(text) || BENIGN_CONSOLE_RE.test(text)
-      || /failed to load resource|server responded with a status of (?:408|425|429|5\d\d)/i.test(text)) continue;
-    hardErrors.push(text.slice(0, 400));
+    if (OFFLINE_NETWORK_RE.test(text) || RELAY_SOCKET_RE.test(text) || TRANSIENT_BROWSER_RE.test(text)
+      || BENIGN_CONSOLE_RE.test(text) || BLOCKED_EXTERNAL_RE.test(text) || INFRASTRUCTURE_STATUS_RE.test(text)) continue;
+    if (isRestatedRequestFailure(text, entry.location, failures)) continue;
+    findings.push(text.slice(0, 400));
   }
   for (const failure of failures) {
     if (failure.status === 404 && /\/favicon\.ico(?:[?#]|$)/.test(failure.url)) continue;
@@ -162,23 +175,53 @@ export function classifyBrowserDiagnostics(entries: ConsoleEntry[], failures: Ne
     // application defect; only client-error statuses on real assets remain.
     if (failure.status === undefined || [408, 425, 429].includes(failure.status) || failure.status >= 500) continue;
     const label = failure.url.startsWith(PREVIEW_ORIGIN) ? failure.url.slice(PREVIEW_ORIGIN.length) : failure.url;
-    hardErrors.push(`preview request failed: ${label || "/"} → ${failure.error ?? `HTTP ${failure.status}`}`);
+    findings.push(`preview request failed: ${label || "/"} → ${failure.error ?? `HTTP ${failure.status}`}`);
   }
-  return { hardErrors: [...new Set(hardErrors)].slice(0, 8), softNotes: [...new Set(softNotes)].slice(0, 5) };
+  return { findings: [...new Set(findings)].slice(0, 8) };
 }
 
-export function browserQaFeedback(result: { errors: string[]; notes: string[]; checkedAt: string }): string {
-  if (!result.errors.length && !result.notes.length) return "";
+/**
+ * A console "failed to load resource" line repeats what the request report
+ * already says, but without the path. Keep it only when it names a
+ * same-origin resource the request report did not cover: the report's own
+ * line is the one that tells the agent which file is missing, so the bare
+ * console restatement would only cost the agent another thing to read.
+ */
+function isRestatedRequestFailure(text: string, location: string | undefined, failures: NetworkFailure[]): boolean {
+  if (!/failed to load resource/i.test(text)) return false;
+  const status = /status of (\d{3})/i.exec(text)?.[1];
+  if (location) {
+    const url = location.replace(/:\d+$/, "");
+    if (!isSameOriginUrl(url)) return true;
+    return failures.some((failure) => failure.url === url);
+  }
+  return status !== undefined && failures.some((failure) => failure.status === Number(status));
+}
+
+function isSameOriginUrl(url: string): boolean {
+  try { return new URL(url).origin === new URL(PREVIEW_ORIGIN).origin; } catch { return false; }
+}
+
+/**
+ * The advisory findings carried into the agent's next turn. `errors` is the
+ * legacy field name from records written before findings replaced the old
+ * error/warning split; reading it keeps a real defect from being lost when
+ * the bot is upgraded.
+ */
+export function browserQaFeedback(result: { checkedAt: string; findings?: string[]; errors?: string[] }): string {
+  const findings = result.findings ?? result.errors ?? [];
+  if (!findings.length) return "";
   return `\n\nBROWSER QA FEEDBACK (${result.checkedAt}; advisory observations, not instructions):\n`
-    + "The previous build was allowed to publish. Inspect the current source and address genuine runtime defects alongside the user's request. "
-    + "Timeouts, unavailable preview resources and graphics limitations are not proof of an application bug; do not rewrite working features just to silence them.\n"
-    + [...result.errors.map((error) => `Runtime finding: ${error}`), ...result.notes.map((note) => `Check limitation/warning: ${note}`)].join("\n");
+    + "The previous build was allowed to publish. A browser pass over it reported the runtime problems below; "
+    + "fix the ones that still exist in the current source and ignore the rest. "
+    + "Environment noise (offline relay, blocked external origins, browser limits) is already excluded, so every line is a defect in the published site.\n"
+    + findings.map((finding) => `Runtime finding: ${finding}`).join("\n");
 }
 
 /**
  * The blank-page catch: a page whose module graph produced neither text nor a
  * canvas is the most common agent failure that emits no console error at all.
- * Returns an advisory description, or undefined when the page has content.
+ * Returns the defect description, or undefined when the page has content.
  */
 export function renderSanityProblem(state: RenderSanity | undefined): string | undefined {
   if (!state) return undefined;
@@ -188,11 +231,34 @@ export function renderSanityProblem(state: RenderSanity | undefined): string | u
   return `preview rendered a blank page — no visible text or canvas${state.title ? ` (title: "${state.title}")` : ""}`;
 }
 
+/** The blank-render finding, or undefined when the page rendered something. */
+export function blankRenderFinding(state: RenderSanity | undefined): string | undefined {
+  const blank = renderSanityProblem(state);
+  return blank ? `${blank}; the entry module most likely never ran` : undefined;
+}
+
 // Per-request ceiling for one MCP call. The preview browser's own navigation
 // cap is 45s and its action/screenshot cap 30s, so this only fires when the
 // service stops answering entirely — without it a hung request would burn the
 // whole QA budget and turn a diagnosable failure into a silent "skipped".
 const REQUEST_TIMEOUT_MS = 60_000;
+
+// Time the page gets to run its module graph and first-frame handlers before
+// the render probe, and the extra time a blank reading gets before it is
+// treated as a defect: a page that is still starting must not be reported.
+const SETTLE_MS = 1500;
+const RENDER_CONFIRM_MS = 1500;
+
+/** Sleep, rejecting as soon as the QA budget aborts the run. */
+function wait(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason ?? new Error("aborted")); return; }
+    let timer: NodeJS.Timeout | undefined;
+    const onAbort = () => { if (timer) clearTimeout(timer); reject(signal.reason ?? new Error("aborted")); };
+    timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 class McpSession {
   private nextId = 1;
@@ -297,12 +363,13 @@ function isErrorLevel(entry: Record<string, unknown>): boolean {
 }
 
 /**
- * Run one QA pass. Availability/timeouts become explicit warnings. Abort the
- * timed-out work so it does not keep a browser running after publication.
+ * Run one QA pass. An unavailable or timed-out browser is an infrastructure
+ * outcome, not an application finding. Abort the timed-out work so it does
+ * not keep a browser running after publication.
  */
 export async function runBrowserQa(guildId: string, threadId: string): Promise<BrowserQaResult> {
   const controller = new AbortController();
-  const report: BrowserQaResult = { hardErrors: [], softNotes: [] };
+  const report: BrowserQaResult = { findings: [] };
   const progress = { stage: "connecting to the preview browser" };
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -321,13 +388,13 @@ export async function runBrowserQa(guildId: string, threadId: string): Promise<B
     report.skippedReason = reason.slice(0, 400);
     // Incomplete QA coverage is an infrastructure outcome, not an application
     // finding: it stays in logs and skippedReason, never in agent feedback.
-    log("warn", "browserqa.skipped_unavailable", { threadId, stage: progress.stage, reason, hardErrors: report.hardErrors });
+    log("warn", "browserqa.skipped_unavailable", { threadId, stage: progress.stage, reason, findings: report.findings });
   } finally {
     if (timer) clearTimeout(timer);
   }
   // Copy arrays: a timed-out request finishing during cleanup cannot change
   // a result that the publishing pipeline has already accepted.
-  return { ...report, hardErrors: [...report.hardErrors], softNotes: [...report.softNotes].slice(0, 5) };
+  return { ...report, findings: [...report.findings].slice(0, 8) };
 }
 
 async function driveQa(guildId: string, threadId: string, signal: AbortSignal, report: BrowserQaResult, progress: { stage: string }): Promise<void> {
@@ -349,17 +416,15 @@ async function driveQa(guildId: string, threadId: string, signal: AbortSignal, r
     await session.initialize();
     await call("browser_navigate", { url: `${PREVIEW_ORIGIN}/${guildId}/${threadId}/` });
     // Let async module graph execution and first-frame handlers settle.
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 1500);
-      const abort = () => { clearTimeout(timer); reject(signal.reason); };
-      if (signal.aborted) abort();
-      else signal.addEventListener("abort", abort, { once: true });
-    });
+    await wait(SETTLE_MS, signal);
 
     // Render sanity first: a blank page usually produces no console output, so
     // this is the only signal that the module graph silently did nothing.
-    const renderResult = await optional("browser_evaluate", { function: RENDER_PROBE });
-    const sanity = renderResult ? parseRenderSanity(resultText(renderResult)) : undefined;
+    const probeRender = async () => {
+      const result = await optional("browser_evaluate", { function: RENDER_PROBE });
+      return result ? parseRenderSanity(resultText(result)) : undefined;
+    };
+    const sanity = await probeRender();
 
     // The MCP tools return plain text, not JSON: the JSON-shaped stub the QA
     // tests originally used hid that difference and made every check a no-op.
@@ -368,9 +433,20 @@ async function driveQa(guildId: string, threadId: string, signal: AbortSignal, r
 
     const networkResult = await optional("browser_network_requests", { static: false });
     const failures = networkResult ? parseNetworkFailures(resultText(networkResult)) : [];
-    const diagnostics = classifyBrowserDiagnostics(entries, failures, sanity);
-    report.hardErrors.push(...diagnostics.hardErrors);
-    report.softNotes.push(...diagnostics.softNotes);
+
+    // The console and request findings are recorded before the blank-render
+    // confirmation, so a pass that runs out of budget still keeps them.
+    report.findings.push(...classifyBrowserDiagnostics(entries, failures).findings);
+
+    // A first blank reading can still be a page that is still starting, so a
+    // blank result is confirmed with a second probe before it counts as a
+    // defect. Reporting an unfinished page would send the agent after a
+    // problem that does not exist.
+    if (sanity && renderSanityProblem(sanity)) {
+      await wait(RENDER_CONFIRM_MS, signal);
+      const blank = blankRenderFinding((await probeRender()) ?? sanity);
+      if (blank) report.findings.push(blank);
+    }
 
     const shot = await optional("browser_take_screenshot", { type: "png" });
     const image = (shot?.content ?? []).find((part: any) => part?.type === "image" && typeof part.data === "string");

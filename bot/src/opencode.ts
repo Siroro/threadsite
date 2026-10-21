@@ -248,6 +248,91 @@ export interface PromptResult {
   usage: TurnUsage;
 }
 
+/** Everything the preview model needs to describe the project as it stands. */
+export interface PreviewInput {
+  /** Display name of the project. */
+  name: string;
+  /** Human kind: "website", "2D game" or "3D game". */
+  kind: string;
+  /** The user's original request for the project. */
+  request?: string;
+  /** What the agent just did in this turn. */
+  summary?: string;
+  /** The preview from the previous turn, so the pitch stays stable. */
+  previous?: string;
+}
+
+/** The parsed preview: a pitch for the project, what changed, and how to play. */
+export interface Preview {
+  pitch?: string;
+  added?: string;
+  play?: string;
+}
+
+/**
+ * The preview request. The model sees the original brief, the previous
+ * preview and what the turn just did, and answers with three labelled lines:
+ * the project as it is, what changed, and how to play it. The source material
+ * is a technical report, so the instructions insist on the visitor's view.
+ */
+export function previewInstruction(input: PreviewInput): string {
+  return [
+    `Write the preview shown next to a finished ${input.kind} called "${input.name}".`,
+    "",
+    "PITCH: one sentence, at most 140 characters, saying what the project is and what a visitor gets to do.",
+    "NEW: one sentence, at most 160 characters, saying what the latest change added in the terms a visitor would notice; write NONE if it added nothing visible.",
+    "PLAY: one or two sentences, at most 220 characters, telling a visitor how to play it or what to try first; write NONE if there is nothing to say.",
+    "",
+    "Write for a visitor, not for an engineer: no file names, no code, no APIs, no engine or system internals, no jargon. Say what someone sees and can do.",
+    "Reply with exactly those three lines and nothing else.",
+    "",
+    "ORIGINAL REQUEST:",
+    truncate(input.request ?? "", 1200),
+    "",
+    "PREVIOUS PREVIEW:",
+    truncate(input.previous ?? "", 400),
+    "",
+    "LATEST CHANGE (technical notes — describe the visitor-visible effect, not the implementation):",
+    truncate(input.summary ?? "", 1600),
+  ].join("\n");
+}
+
+/** Parse the labelled lines; an unlabelled answer is treated as the pitch. */
+export function parsePreview(text: string): Preview {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let pitch: string | undefined;
+  let added: string | undefined;
+  let play: string | undefined;
+  for (const line of lines) {
+    const pitchMatch = /^pitch\s*:\s*(.+)$/i.exec(line);
+    if (pitchMatch) { pitch = cleanPreviewLine(pitchMatch[1]); continue; }
+    const addedMatch = /^new\s*:\s*(.+)$/i.exec(line);
+    if (addedMatch) {
+      const value = cleanPreviewLine(addedMatch[1]);
+      added = value && !/^none\b/i.test(value) ? value : undefined;
+      continue;
+    }
+    const playMatch = /^play\s*:\s*(.+)$/i.exec(line);
+    if (playMatch) {
+      const value = cleanPreviewLine(playMatch[1]);
+      play = value && !/^none\b/i.test(value) ? value : undefined;
+    }
+  }
+  if (!pitch) {
+    // A model that ignored the format still said something useful: keep the
+    // first line as the pitch rather than showing no preview at all.
+    const fallback = cleanPreviewLine(lines[0] ?? "");
+    pitch = fallback && !/^pitch\s*:/i.test(fallback) ? fallback : undefined;
+  }
+  return { pitch, added, play };
+}
+
+function cleanPreviewLine(value: string): string | undefined {
+  const text = value.replace(/^[*_`\s]+/, "").replace(/[*_`\s]+$/, "").replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  return text.length > 200 ? `${text.slice(0, 199)}…` : text;
+}
+
 /**
  * A provider quota exhausted until a known reset time — typically OpenCode's
  * free-tier daily limit, whose retry action schedules the next attempt at the
@@ -342,17 +427,22 @@ export class OpenCodeHarness {
   }
 
   /** "providerID/modelID" -> advertised context limit, derived from the cached provider list. */
-  private async providerContextLimits(): Promise<Map<string, number>> {
-    const map = new Map<string, number>();
+  /** Walk every (providerID, modelID, model) entry in the cached catalog. */
+  private async forEachCatalogModel(visit: (providerID: string, modelID: string, model: any) => void): Promise<void> {
     for (const provider of await this.providerList()) {
       const providerID = typeof provider?.id === "string" ? provider.id : undefined;
       const models = provider?.models;
       if (!providerID || !models || typeof models !== "object") continue;
-      for (const [modelID, model] of Object.entries(models as Record<string, unknown>)) {
-        const context = Number((model as any)?.limit?.context ?? 0);
-        if (context > 0) map.set(`${providerID}/${modelID}`, context);
-      }
+      for (const [modelID, model] of Object.entries(models as Record<string, unknown>)) visit(providerID, modelID, model);
     }
+  }
+
+  private async providerContextLimits(): Promise<Map<string, number>> {
+    const map = new Map<string, number>();
+    await this.forEachCatalogModel((providerID, modelID, model) => {
+      const context = Number(model?.limit?.context ?? 0);
+      if (context > 0) map.set(`${providerID}/${modelID}`, context);
+    });
     return map;
   }
 
@@ -365,20 +455,15 @@ export class OpenCodeHarness {
    */
   async listSelectableModels(): Promise<string[]> {
     const ids: string[] = [];
-    for (const provider of await this.providerList()) {
-      const providerID = typeof provider?.id === "string" ? provider.id : undefined;
-      if (providerID !== "opencode" && providerID !== "surplus") continue;
-      const models = provider?.models;
-      if (!models || typeof models !== "object") continue;
-      for (const [modelID, model] of Object.entries(models as Record<string, unknown>)) {
-        const cost = (model as any)?.cost;
-        const free = (cost && typeof cost === "object"
-          && Number(cost.input ?? 0) === 0 && Number(cost.output ?? 0) === 0)
-          || /-free$/.test(modelID);
-        if (providerID === "opencode" && !free) continue;
-        ids.push(`${providerID}/${modelID}`);
-      }
-    }
+    await this.forEachCatalogModel((providerID, modelID, model) => {
+      if (providerID !== "opencode" && providerID !== "surplus") return;
+      const cost = model?.cost;
+      const free = (cost && typeof cost === "object"
+        && Number(cost.input ?? 0) === 0 && Number(cost.output ?? 0) === 0)
+        || /-free$/.test(modelID);
+      if (providerID === "opencode" && !free) return;
+      ids.push(`${providerID}/${modelID}`);
+    });
     return ids.sort((a, b) => a.localeCompare(b));
   }
 
@@ -389,17 +474,15 @@ export class OpenCodeHarness {
    * not forward images" rather than guessing.
    */
   async modelAcceptsAttachments(providerID: string, modelID: string): Promise<boolean | undefined> {
-    for (const provider of await this.providerList()) {
-      if (typeof provider?.id !== "string" || provider.id !== providerID) continue;
-      const models = provider?.models;
-      if (!models || typeof models !== "object") continue;
-      const model = (models as Record<string, any>)[modelID];
-      if (!model) return undefined;
-      if (typeof model.capabilities?.input?.image === "boolean") return model.capabilities.input.image;
-      if (Array.isArray(model.modalities?.input)) return model.modalities.input.includes("image");
-      return model.attachment === true;
-    }
-    return undefined;
+    let found: boolean | undefined;
+    await this.forEachCatalogModel((pid, mid, model) => {
+      if (pid !== providerID || mid !== modelID || found !== undefined) return;
+      if (!model) return;
+      if (typeof model.capabilities?.input?.image === "boolean") found = model.capabilities.input.image;
+      else if (Array.isArray(model.modalities?.input)) found = model.modalities.input.includes("image");
+      else found = model.attachment === true;
+    });
+    return found;
   }
 
   private async applyContextLimit(turn: TurnState, onProgress: ProgressCallback | undefined): Promise<void> {
@@ -1065,6 +1148,45 @@ export class OpenCodeHarness {
     }
   }
 
+  /**
+   * One short, tools-free description of the project as it now stands: a
+   * pitch for the play card and a line about what this turn added. Bounded
+   * like the title call — a preview must never hold up a finished turn, and
+   * a failed preview is simply not shown.
+   */
+  async generatePreview(directory: string, input: PreviewInput, model?: string): Promise<{ pitch?: string; added?: string; play?: string; usage: TurnUsage }> {
+    const deadline = AbortSignal.timeout(20_000);
+    const sessionId = await this.createSession(directory, "ThreadSite project preview", deadline);
+    let usage: TurnUsage | undefined;
+    let completed = false;
+    try {
+      // A preview is a bounded, tools-free request. Do not enter the builder's
+      // long transport reconciliation or quota retry loop for a blurb.
+      const raw = unwrap<SessionMessage>(await this.client.session.prompt({
+        sessionID: sessionId, directory, agent: "presenter", model: parseModel(model), tools: { "*": false },
+        parts: [{ type: "text", text: previewInstruction(input) }],
+      } as any, { signal: deadline }), "OpenCode project preview");
+      usage = usageFromMessages([raw]);
+      if (raw.info?.error) throw new Error(`Preview model failed: ${safeJson(raw.info.error)}`);
+      completed = true;
+      return { ...parsePreview(extractText(raw.parts)), usage: usage ?? usageOf(createTurnState(Date.now(), 0)) };
+    } catch (error) {
+      if (!usage) {
+        try {
+          const saved = unwrap<SessionMessage[]>(await this.client.session.messages({ sessionID: sessionId, directory, limit: 20 } as any,
+            { signal: AbortSignal.timeout(5_000) }), "OpenCode preview usage");
+          usage = usageFromMessages(saved);
+        } catch { /* A failed provider may still have saved billable steps; unavailable history must not block fallback. */ }
+      }
+      throw enrichProviderError(error, model, usage);
+    } finally {
+      const cleanup = { signal: AbortSignal.timeout(5_000) };
+      if (!completed) await this.client.session.abort({ sessionID: sessionId, directory } as any, cleanup).catch(() => undefined);
+      await this.client.session.delete({ sessionID: sessionId, directory } as any, { signal: AbortSignal.timeout(5_000) })
+        .catch((error: unknown) => log("debug", "opencode.preview_session_delete_failed", { sessionId, error: String(error) }));
+    }
+  }
+
   async setProviderToken(providerID: string, token: string): Promise<void> {
     const result = await this.client.auth.set({
       providerID,
@@ -1107,15 +1229,7 @@ export class OpenCodeHarness {
     return data.map((request) => ({
       id: String(request?.id ?? ""),
       sessionID: String(request?.sessionID ?? ""),
-      questions: (Array.isArray(request?.questions) ? request.questions : []).map((q: any) => ({
-        header: String(q?.header ?? "Question").slice(0, 80),
-        question: String(q?.question ?? "").slice(0, 500),
-        multiple: Boolean(q?.multiple),
-        options: (Array.isArray(q?.options) ? q.options : []).slice(0, 4).map((o: any) => ({
-          label: String(o?.label ?? "Option").slice(0, 80),
-          description: typeof o?.description === "string" ? o.description.slice(0, 120) : undefined,
-        })),
-      })),
+      questions: (Array.isArray(request?.questions) ? request.questions : []).map(normalizeQuestion),
     })).filter((request) => request.id && request.questions.length);
   }
 
@@ -1678,22 +1792,16 @@ export class OpenCodeHarness {
   private handleEvent(event: any, directory: string, sessionId: string, onProgress: ProgressCallback | undefined, turn: TurnState): void {
     const properties = event?.properties ?? {};
     const eventSessionId = properties.sessionID ?? properties.part?.sessionID ?? properties.info?.sessionID;
-    if (eventSessionId && eventSessionId !== sessionId) {
-      // Subagents run in child sessions of the root session. Their activity is
-      // surfaced as prefixed progress lines and their tokens/cost fold into the
-      // turn stats; everything else from unknown sessions stays filtered out.
-      const isChild = eventSessionId && turn.childSessions.has(eventSessionId);
-      if (!isChild) return;
-      this.handleChildEvent(event, properties, eventSessionId, directory, sessionId, onProgress, turn);
-      return;
-    }
+    // Subagents run in child sessions of the root session. Their activity is
+    // surfaced as prefixed progress lines and their tokens/cost fold into the
+    // turn stats; everything else from unknown sessions stays filtered out.
+    const isChild = Boolean(eventSessionId && eventSessionId !== sessionId && turn.childSessions.has(eventSessionId));
+    if (eventSessionId && eventSessionId !== sessionId && !isChild) return;
+    const childSessionId = isChild ? eventSessionId : undefined;
+    const label = isChild ? "🤖 Subagent" : undefined;
 
-    if (event?.type === "session.created" && properties.info?.parentID === sessionId) {
-      turn.childSessions.add(String(properties.info.id));
-      return;
-    }
-    if (event?.type === "session.updated" && properties.info?.parentID === sessionId) {
-      turn.childSessions.add(String(properties.info.id));
+    if (event?.type === "session.created" || event?.type === "session.updated") {
+      if (!isChild && properties.info?.parentID === sessionId) turn.childSessions.add(String(properties.info.id));
       return;
     }
 
@@ -1706,18 +1814,17 @@ export class OpenCodeHarness {
       // Track assistant message IDs so streaming text parts can be attributed to the
       // model's output rather than the echoed user prompt. The first sighting of
       // a message also opens its generation window for the tok/s rate.
-      if (properties.info?.role === "assistant" && properties.info.id) {
-        const id = String(properties.info.id);
+      const info = properties.info;
+      if (info?.role === "assistant" && info.id) {
+        const id = String(info.id);
         if (!turn.assistantMessageIds.has(id)) {
           turn.assistantMessageIds.add(id);
           turn.stepStartAtByMessage.set(id, Date.now());
         }
-        const providerID = properties.info.providerID;
-        const modelID = properties.info.modelID;
-        if (providerID && modelID) {
-          turn.messageModels.set(String(properties.info.id), `${providerID}/${modelID}`);
-        }
-        if (providerID && modelID && (turn.model?.providerID !== providerID || turn.model?.modelID !== modelID)) {
+        const providerID = info.providerID;
+        const modelID = info.modelID;
+        if (providerID && modelID) turn.messageModels.set(id, `${providerID}/${modelID}`);
+        if (!isChild && providerID && modelID && (turn.model?.providerID !== providerID || turn.model?.modelID !== modelID)) {
           turn.model = { providerID, modelID };
           void this.applyContextLimit(turn, onProgress);
         }
@@ -1727,20 +1834,23 @@ export class OpenCodeHarness {
 
     if (event?.type === "session.status") {
       const status = properties.status;
-      if (status?.type === "busy") emit(onProgress, { text: "🧠 Model is thinking" });
-      if (status?.type === "retry") this.handleRetryStatus(status, { sessionId, directory, onProgress, turn });
+      if (status?.type === "busy") emit(onProgress, { text: isChild ? `${label} is working` : "🧠 Model is thinking" });
+      if (status?.type === "retry") {
+        this.handleRetryStatus(status, { sessionId: childSessionId ?? sessionId, directory, onProgress, turn, ...(isChild ? { actor: "Subagent" } : {}) });
+      }
       return;
     }
 
-    if (event?.type === "session.error") {
+    if (!isChild && event?.type === "session.error") {
       log("error", "opencode.session_error", { sessionId, providerError: properties.error });
       emit(onProgress, { text: "⚠️ Provider/session error detected" });
       return;
     }
 
     // The question tool blocks the turn until the user answers, so it must be
-    // surfaced immediately as buttons on the Discord status message.
-    if (event?.type === "question.asked" || event?.type === "question.v2.asked") {
+    // surfaced immediately as buttons on the Discord status message. Child
+    // sessions never ask: only root-session questions surface as buttons.
+    if (!isChild && (event?.type === "question.asked" || event?.type === "question.v2.asked")) {
       const requestID = typeof properties.id === "string" ? properties.id : "";
       const questions = Array.isArray(properties.questions) ? properties.questions : [];
       if (!requestID || !questions.length) return;
@@ -1753,25 +1863,14 @@ export class OpenCodeHarness {
       emit(onProgress, {
         kind: "question",
         text: "❓ The agent has a question",
-        question: {
-          requestID,
-          questions: questions.map((q: any) => ({
-            header: String(q?.header ?? "Question").slice(0, 80),
-            question: String(q?.question ?? "").slice(0, 500),
-            multiple: Boolean(q?.multiple),
-            options: (Array.isArray(q?.options) ? q.options : []).slice(0, 4).map((o: any) => ({
-              label: String(o?.label ?? "Option").slice(0, 80),
-              description: typeof o?.description === "string" ? o.description.slice(0, 120) : undefined,
-            })),
-          })),
-        },
+        question: { requestID, questions: questions.map(normalizeQuestion) },
       });
       return;
     }
-    if (
+    if (!isChild && (
       event?.type === "question.replied" || event?.type === "question.v2.replied"
       || event?.type === "question.rejected" || event?.type === "question.v2.rejected"
-    ) {
+    )) {
       const requestID = String(properties.requestID ?? "");
       const rejected = event.type.includes("rejected");
       const labels = (Array.isArray(properties.answers) ? properties.answers : [])
@@ -1790,7 +1889,7 @@ export class OpenCodeHarness {
       return;
     }
 
-    if (event?.type === "session.compacted") {
+    if (!isChild && event?.type === "session.compacted") {
       turn.compactions += 1;
       log("info", "opencode.session_compacted", { sessionId, total: turn.compactions });
       emit(onProgress, { text: "🧠 Context compacted — continuing automatically" });
@@ -1798,13 +1897,13 @@ export class OpenCodeHarness {
       return;
     }
 
-    if (event?.type === "session.diff") {
+    if (!isChild && event?.type === "session.diff") {
       const count = Array.isArray(properties.diff) ? properties.diff.length : undefined;
       emit(onProgress, { text: "🧩 Updating project files", detail: count ? `${count} changed` : undefined });
       return;
     }
 
-    if (event?.type === "todo.updated") {
+    if (!isChild && event?.type === "todo.updated") {
       const todos = Array.isArray(properties.todos) ? properties.todos : [];
       emit(onProgress, { kind: "plan", text: "Updated plan", plan: planFromTodos(todos) });
       const done = todos.filter((todo: any) => todo?.status === "completed" || todo?.status === "cancelled").length;
@@ -1822,25 +1921,31 @@ export class OpenCodeHarness {
     if (event?.type !== "message.part.updated") return;
     const part = properties.part;
     if (!part) return;
+    const tool = String(part.tool || "tool");
 
     if (part.type === "step-finish") {
       if (part.id && turn.finishedParts.has(part.id)) return;
       if (part.id) turn.finishedParts.add(part.id);
       const step = stepFigures(part);
       accumulateStep(turn, step, part.messageID);
-      if (part.messageID) this.stepBudgets.get(sessionId)?.observe(String(part.messageID));
+      if (!isChild && part.messageID) this.stepBudgets.get(sessionId)?.observe(String(part.messageID));
       turn.liveTokenSamples.length = 0;
       // Every step re-processes the full context, so billed input accumulates
       // per step while the context display only wants the newest window size.
-      turn.contextTokens = step.inputTokens;
+      if (!isChild) turn.contextTokens = step.inputTokens;
       emitPublicMetrics(turn, onProgress);
       return;
     }
 
     if (part.type === "text" && !part.synthetic && turn.assistantMessageIds.has(part.messageID)) {
       samplePartGrowth(turn, part, onProgress);
-      const text = String(part.text ?? "").trim();
-      if (text) emit(onProgress, { kind: "thought", text });
+      if (isChild) {
+        const text = singleLineText(String(part.text ?? ""));
+        if (text) emit(onProgress, { text: `${label}: ${truncate(text, 100)}` });
+      } else {
+        const text = String(part.text ?? "").trim();
+        if (text) emit(onProgress, { kind: "thought", text });
+      }
       return;
     }
 
@@ -1853,7 +1958,6 @@ export class OpenCodeHarness {
 
     if (part.type !== "tool") return;
     const state = part.state ?? {};
-    const tool = String(part.tool || "tool");
 
     // Generation is paused while tools run; drop live samples and settle the
     // stats line back to completed-step figures so the ⚡ rate cannot go stale.
@@ -1863,132 +1967,66 @@ export class OpenCodeHarness {
     }
 
     if (state.status === "error") {
-      log("warn", "opencode.tool_error", {
-        sessionId,
+      log("warn", isChild ? "opencode.subagent_tool_error" : "opencode.tool_error", {
+        sessionId: childSessionId ?? sessionId,
+        ...(isChild ? { childSessionId } : {}),
         tool,
         error: state.error,
-        title: state.title,
+        ...(isChild ? {} : { title: state.title }),
       });
-      emit(onProgress, { text: `⚠️ ${toolLabel(tool)} hit an error`, tool: { id: `${sessionId}:${part.callID ?? part.id}`, name: tool, status: "error" } });
+      emit(onProgress, {
+        text: isChild ? `⚠️ ${label} tool error` : `⚠️ ${toolLabel(tool)} hit an error`,
+        tool: { id: `${childSessionId ?? sessionId}:${part.callID ?? part.id}`, name: tool, status: "error" },
+      });
       return;
     }
 
     if (state.status !== "running" && state.status !== "completed") return;
-    const progress = describeTool(tool, state.input, state.status, state.title, directory);
-    if (progress) emit(onProgress, { ...progress, tool: { id: `${sessionId}:${part.callID ?? part.id}`, name: tool, status: state.status } });
+    const described = describeTool(tool, state.input, state.status, state.title, directory);
+    if (described) {
+      emit(onProgress, isChild
+        ? { text: `${label} — ${described.text}`, detail: described.detail, tool: { id: `${childSessionId}:${part.callID ?? part.id}`, name: tool, status: state.status } }
+        : { ...described, tool: { id: `${sessionId}:${part.callID ?? part.id}`, name: tool, status: state.status } });
+    }
   }
+}
 
-  // Events from a subagent's child session: attributed, prefixed activity lines
-  // plus token/cost accounting merged into the parent turn's shared stats.
-  private handleChildEvent(
-    event: any,
-    properties: any,
-    childSessionId: string,
-    directory: string,
-    rootSessionId: string,
-    onProgress: ProgressCallback | undefined,
-    turn: TurnState,
-  ): void {
-    const label = "🤖 Subagent";
-
-    if (event?.type === "message.part.delta") {
-      sampleStreamDelta(properties, turn, onProgress);
-      return;
-    }
-
-    if (event?.type === "message.updated") {
-      const info = properties.info;
-      if (info?.role === "assistant" && info.id) {
-        const id = String(info.id);
-        // First sighting opens the child step's generation window (tok/s rate).
-        if (!turn.assistantMessageIds.has(id)) {
-          turn.assistantMessageIds.add(id);
-          turn.stepStartAtByMessage.set(id, Date.now());
-        }
-        if (info.providerID && info.modelID) {
-          turn.messageModels.set(id, `${info.providerID}/${info.modelID}`);
-        }
-      }
-      return;
-    }
-
-    if (event?.type === "session.status") {
-      const type = properties.status?.type;
-      if (type === "busy") emit(onProgress, { text: `${label} is working` });
-      else if (type === "retry") this.handleRetryStatus(properties.status, { sessionId: childSessionId, directory, onProgress, turn, actor: "Subagent" });
-      return;
-    }
-
-    if (event?.type !== "message.part.updated") return;
-    const part = properties.part;
-    if (!part) return;
-
-    if (part.type === "step-finish") {
-      if (part.id && turn.finishedParts.has(part.id)) return;
-      if (part.id) turn.finishedParts.add(part.id);
-      accumulateStep(turn, stepFigures(part), part.messageID);
-      turn.liveTokenSamples.length = 0;
-      emitPublicMetrics(turn, onProgress);
-      return;
-    }
-
-    if (part.type === "text" && !part.synthetic) {
-      samplePartGrowth(turn, part, onProgress);
-      const text = singleLineText(String(part.text ?? ""));
-      if (text) emit(onProgress, { text: `${label}: ${truncate(text, 100)}` });
-      return;
-    }
-
-    if (part.type === "reasoning" && !part.synthetic) {
-      samplePartGrowth(turn, part, onProgress);
-      return;
-    }
-
-    if (part.type !== "tool") return;
-    const state = part.state ?? {};
-
-    // Subagent tool runs pause generation just like root ones; settle the ⚡ line.
-    if (turn.liveTokenSamples.length && ["running", "completed", "error"].includes(String(state.status))) {
-      turn.liveTokenSamples.length = 0;
-      emitPublicMetrics(turn, onProgress);
-    }
-
-    if (state.status === "error") {
-      log("warn", "opencode.subagent_tool_error", {
-        sessionId: rootSessionId,
-        childSessionId,
-        tool: String(part.tool || "tool"),
-        error: state.error,
-      });
-      emit(onProgress, { text: `⚠️ ${label} tool error`, tool: { id: `${childSessionId}:${part.callID ?? part.id}`, name: String(part.tool || "tool"), status: "error" } });
-      return;
-    }
-    if (state.status !== "running" && state.status !== "completed") return;
-    const described = describeTool(String(part.tool || "tool"), state.input, state.status, state.title, directory);
-    if (described) emit(onProgress, { text: `${label} — ${described.text}`, detail: described.detail,
-      tool: { id: `${childSessionId}:${part.callID ?? part.id}`, name: String(part.tool || "tool"), status: state.status } });
-  }
+/** Shared option/label clamping for question events and /questions polling. */
+function normalizeQuestion(q: any): { header: string; question: string; multiple: boolean; options: Array<{ label: string; description?: string }> } {
+  return {
+    header: String(q?.header ?? "Question").slice(0, 80),
+    question: String(q?.question ?? "").slice(0, 500),
+    multiple: Boolean(q?.multiple),
+    options: (Array.isArray(q?.options) ? q.options : []).slice(0, 4).map((o: any) => ({
+      label: String(o?.label ?? "Option").slice(0, 80),
+      description: typeof o?.description === "string" ? o.description.slice(0, 120) : undefined,
+    })),
+  };
 }
 
 function singleLineText(value: string): string {
   return value.replace(/\r?\n+/g, " ").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Terminal sitebuilder assistant message: finished (or errored) after the
+ * given instant. An aborted finish is not a completion — the turn was killed
+ * partway (service crash, abort), so callers must continue the work rather
+ * than accept the partial output as the turn's result.
+ */
+export function isTerminalAssistant(info: SessionMessage["info"], options: { since: number; agent: string }): boolean {
+  if (!info?.id || info.role !== "assistant") return false;
+  if ((info.time?.created ?? 0) < options.since - 2_000) return false;
+  if (info.agent && info.agent !== options.agent) return false;
+  if (info.error) return true;
+  if (!info.finish || info.finish === "tool-calls" || info.finish === "aborted") return false;
+  return Boolean(info.time?.completed || info.finish);
+}
+
 function findTerminalAssistant(messages: SessionMessage[], snapshot: PromptSnapshot): SessionMessage | undefined {
   return messages
-    .filter((message) => {
-      const info = message.info;
-      if (!info?.id || info.role !== "assistant") return false;
-      if (snapshot.ids.has(info.id)) return false;
-      if ((info.time?.created ?? 0) < snapshot.startedAt - 2_000) return false;
-      if (info.agent && info.agent !== snapshot.agent) return false;
-      if (info.error) return true;
-      // An aborted finish is not a completion: the turn was killed partway
-      // (service crash, abort), so the caller must continue the work rather
-      // than accept the partial output as the turn's result.
-      if (!info.finish || info.finish === "tool-calls" || info.finish === "aborted") return false;
-      return Boolean(info.time?.completed || info.finish);
-    })
+    .filter((message) => isTerminalAssistant(message.info, { since: snapshot.startedAt, agent: snapshot.agent })
+      && !snapshot.ids.has(message.info!.id!))
     .sort((a, b) => (b.info?.time?.created ?? 0) - (a.info?.time?.created ?? 0))[0];
 }
 

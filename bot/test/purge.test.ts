@@ -1,26 +1,15 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { after, test } from "node:test";
+import { test } from "node:test";
 import type { ProjectRecord } from "../src/types.js";
 import type { PurgeServices } from "../src/purge.js";
+import { testRootSetup, trackStore } from "./fixtures/root.js";
 
-const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-purge-"));
-process.env.DISCORD_BOT_TOKEN = "test";
-process.env.DISCORD_APPLICATION_ID = "test";
-process.env.WORKSPACE_ROOT = path.join(root, "workspaces");
-process.env.PUBLISH_ROOT = path.join(root, "published");
-process.env.LOG_FILE = path.join(root, "test.log");
+const root = testRootSetup("purge");
 const { config } = await import("../src/config.js");
 const { Store } = await import("../src/store.js");
 const { planPurge, applyPurge } = await import("../src/purge.js");
-
-const stores: InstanceType<typeof Store>[] = [];
-after(async () => {
-  for (const store of stores) store.close();
-  await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-});
 
 function record(threadId: string, patch: Partial<ProjectRecord> = {}): ProjectRecord {
   return { threadId, guildId: "100", parentChannelId: "200", displayName: `Site ${threadId}`, repoName: `site-${threadId}`,
@@ -29,8 +18,7 @@ function record(threadId: string, patch: Partial<ProjectRecord> = {}): ProjectRe
 }
 
 async function storeWith(name: string, projects: ProjectRecord[]): Promise<InstanceType<typeof Store>> {
-  const store = await Store.open(path.join(root, `${name}.db`));
-  stores.push(store);
+  const store = trackStore(await Store.open(path.join(root, `${name}.db`)));
   for (const project of projects) await store.putProject(project);
   return store;
 }

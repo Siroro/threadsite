@@ -56,6 +56,20 @@ test("turn revisions survive reopening the ledger, concurrent appends and a torn
   assert.equal(total.inputTokens, 810);
 });
 
+test("side prompts spend tokens without counting as turns", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-side-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "usage.jsonl");
+  const log = new UsageLog(file);
+  const usage = usageFromMessages([message("done", Date.now())])!;
+  await log.record({ label: "turn", threadId: "thread", project: "Game", kind: "game-2d", usage });
+  await log.record({ label: "preview", threadId: "thread", project: "Game", kind: "game-2d", usage });
+  await log.record({ label: "title", threadId: "thread", project: "Game", kind: "game-2d", usage });
+  const total = await new UsageLog(file).threadTotal("thread");
+  assert.equal(total.turns, 1, "only real agent turns count as turns");
+  assert.equal(total.inputTokens, 405, "side prompts still spent their tokens");
+});
+
 test("legacy zero-token entries backfill within their windows, retaining failures and turn counts", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-backfill-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

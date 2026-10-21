@@ -92,7 +92,8 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   embed.addFields({ name: "Original request", value: `> ${quoted(project.initialPrompt, PROMPT_CHARS)}`, inline: false });
 
   if (project.browserQaFindings) {
-    const findings = project.browserQaFindings.errors.length + project.browserQaFindings.notes.length;
+    // Legacy records stored their findings under `errors`; count both shapes.
+    const findings = project.browserQaFindings.findings?.length ?? project.browserQaFindings.errors?.length ?? 0;
     const checked = relative(project.browserQaFindings.checkedAt);
     embed.addFields({ name: "Browser QA", value: `Advisory · ${findings ? `${findings} finding${findings === 1 ? "" : "s"}` : "no findings"}${checked ? ` · checked ${checked}` : ""}`, inline: false });
   }

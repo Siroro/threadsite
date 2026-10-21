@@ -112,3 +112,33 @@ test("title generation is a bounded tools-free request and cleans up failed atte
   assert.equal(aborted, 1);
   assert.equal(deleted, 2);
 });
+
+test("preview generation is a bounded tools-free request and cleans up failed attempts", async () => {
+  const { harness, stub } = fixture();
+  stub.createSession = async () => "preview-session";
+  let aborted = 0;
+  let deleted = 0;
+  let requests = 0;
+  stub.prompt = () => assert.fail("previews must not enter the builder reconciliation loop");
+  stub.client.session.abort = async () => { aborted++; return {}; };
+  stub.client.session.delete = async () => { deleted++; return {}; };
+  stub.client.session.prompt = async (body: any, options: any) => {
+    requests++;
+    assert.deepEqual(body.tools, { "*": false });
+    assert.equal(body.agent, "presenter");
+    assert.ok(options.signal instanceof AbortSignal);
+    if (requests === 1) throw new Error("model timeout");
+    return { info: { id: "preview-message", role: "assistant", time: { created: Date.now() }, tokens: { input: 120, output: 30 } },
+      parts: [{ type: "text", text: "PITCH: A calm pond where you feed koi.\nNEW: Added the lily pads.\nPLAY: Click the water to drop food." }] };
+  };
+  const input = { name: "Koi Pond", kind: "2D web game", request: "a pond game" };
+  await assert.rejects(harness.generatePreview("/w", input, "test/backup"), /model timeout/);
+  const result = await harness.generatePreview("/w", input, "test/backup");
+  assert.equal(result.pitch, "A calm pond where you feed koi.");
+  assert.equal(result.added, "Added the lily pads.");
+  assert.equal(result.play, "Click the water to drop food.");
+  assert.equal(result.usage.inputTokens, 120);
+  assert.equal(requests, 2);
+  assert.equal(aborted, 1);
+  assert.equal(deleted, 2);
+});

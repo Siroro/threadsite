@@ -1,26 +1,15 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ProjectRecord } from "../src/types.js";
+import { test } from "node:test";
+import { testRootSetup, trackStore } from "./fixtures/root.js";
 
-const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-deletion-"));
-process.env.DISCORD_BOT_TOKEN = "test";
-process.env.DISCORD_APPLICATION_ID = "test";
-process.env.WORKSPACE_ROOT = path.join(root, "workspaces");
-process.env.PUBLISH_ROOT = path.join(root, "published");
-process.env.LOG_FILE = path.join(root, "test.log");
-const { after } = await import("node:test");
+const root = testRootSetup("deletion");
 const { Store } = await import("../src/store.js");
 const { UsageLog } = await import("../src/usage.js");
 const { ProjectService } = await import("../src/project.js");
 const { reconcileProjectThreads } = await import("../src/thread-cleanup.js");
-const stores: InstanceType<typeof Store>[] = [];
-after(async () => {
-  for (const store of stores) { try { store.close(); } catch {} }
-  await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-});
 
 async function fixture(id: string) {
   const project: ProjectRecord = { threadId: id, guildId: "100", parentChannelId: "300", displayName: `Game ${id}`,
@@ -32,7 +21,7 @@ async function fixture(id: string) {
   await fs.writeFile(path.join(project.workspacePath, "PROJECT_NOTES.md"), "private project notes");
   for (const slug of [project.siteSlug, ...project.siteAliases!]) await fs.mkdir(path.join(root, "published", slug), { recursive: true });
   await fs.mkdir(path.join(root, "published", `.backup-${project.siteSlug}-0123456789`));
-  const store = await Store.open(path.join(root, `${id}.db`)); stores.push(store);
+  const store = trackStore(await Store.open(path.join(root, `${id}.db`)));
   await store.putProject(project);
   const usage = new UsageLog(path.join(root, `${id}-usage.jsonl`));
   await usage.record({ threadId: id, project: project.displayName, kind: "game-3d" });
@@ -73,7 +62,7 @@ test("partial failure retains durable deletion intent; restart retries without r
   await assert.rejects(f.store.patchProject(f.project.threadId, { sessionId: "resurrected" }), /deletion is pending/);
   await assert.rejects(f.service.enqueue(f.project.threadId, async () => {}), /deletion is pending/);
   f.store.close();
-  const reopened = await Store.open(f.store.file); stores.push(reopened);
+  const reopened = trackStore(await Store.open(f.store.file));
   f.forgejo.deleteRepository = original;
   const service = new ProjectService(reopened, f.agent as never, f.forgejo as never, f.usage);
   Object.assign(service, { deleteRelayGame: async () => {} });
