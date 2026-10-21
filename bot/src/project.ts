@@ -18,7 +18,7 @@ import { UsageLog } from "./usage.js";
 import type { ProgressCallback, ProgressPhase } from "./progress.js";
 import type { WorkingTreeStats } from "./git.js";
 import { log, logError, serializeError } from "./logger.js";
-import { errorText, formatTokens, parseModel, safeChild, slugify, truncate, withTimeout } from "./util.js";
+import { errorText, formatShortDuration, formatTokens, parseModel, safeChild, slugify, truncate, withTimeout } from "./util.js";
 import { runBrowserQa as driveBrowserQa, type BrowserQaResult } from "./browser-qa.js";
 
 export interface MutationResult {
@@ -105,6 +105,13 @@ export class ProjectService {
   private readonly delivering = new Set<string>();
   /** Turns currently between mutate()/recoverTurn() entry and settlement. */
   private activeTurns = 0;
+  /**
+   * Threads with a turn between entry and settlement — including the whole
+   * pre-prompt phase, where OpenCode reports nothing busy yet. stopTurn()
+   * reads it to honor a stop for a turn that has not reached the agent (or is
+   * prompting an unreachable service): the turn bails at its next checkpoint.
+   */
+  private readonly activeTurnThreads = new Set<string>();
   private identityTail: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -430,9 +437,13 @@ export class ProjectService {
     let queueClaimed = false;
     const turnStartedAt = Date.now();
     this.activeTurns += 1;
+    this.activeTurnThreads.add(threadId);
     try {
       await onProgress?.({ text: "📁 Preparing your update", phase: "preparing", context: {
-        request: displayRequest ?? prompt, repoUrl: this.repoLink(project),
+        // Only a merged batch passes displayRequest. The single-message and
+        // initial prompts are already visible in the thread, so repeating them
+        // on the card only crowded out the plan.
+        request: displayRequest, repoUrl: this.repoLink(project),
         siteUrl: project.status !== "creating" ? this.siteLink(project) : undefined,
       } });
       let agentSummary: string;
@@ -529,6 +540,14 @@ export class ProjectService {
       project = await this.store.startQueuedTurn(threadId, pendingMarker, queuedStatusIds);
       queueClaimed = true;
       await onProgress?.({ kind: "queue", text: "Saved requests", queuedRequests: project.pendingQueue?.length ?? 0 });
+      // A stop that arrived during preparation (before any server-side turn
+      // existed to abort) lands here: fail as a user stop instead of starting
+      // the agent work the user just asked to interrupt. The catch consumes
+      // the mark and rethrows TurnStoppedError.
+      if (this.stopRequested.has(threadId)) {
+        stopChangesTimer(); // the changes interval is otherwise cleared inside the prompt guard below
+        throw new Error("Stopped before the agent turn started.");
+      }
       try {
         try {
           const result = await this.promptWithFailover(project.workspacePath, project.sessionId, instruction, onProgress, turnImages, requestedModel);
@@ -650,6 +669,7 @@ export class ProjectService {
         : error;
     } finally {
       this.activeTurns -= 1;
+      this.activeTurnThreads.delete(threadId);
       this.delivering.delete(threadId);
       // A stop that raced an already-completing turn must not poison the next one.
       this.stopRequested.delete(threadId);
@@ -903,12 +923,24 @@ export class ProjectService {
     let usage: TurnUsage | undefined;
     log("info", "project.recovery_started", { threadId, initial: pending.initial, startedAt: pending.startedAt });
     this.activeTurns += 1;
+    this.activeTurnThreads.add(threadId);
 
     try {
       emit(onProgress, "🔌 Waiting for the agent service to be reachable");
       await this.waitForAgentService();
       emit(onProgress, "⏳ Waiting for the interrupted agent turn to finish");
-      await this.waitForIdleTurn(project.workspacePath, project.sessionId);
+      const stopWatching = await this.opencode.watchExistingTurn(project.workspacePath, project.sessionId, onProgress);
+      try {
+        await this.waitForIdleTurn(project.workspacePath, project.sessionId, onProgress);
+      } finally {
+        await stopWatching();
+      }
+      // A stop pressed while recovery waited lands on the server-side turn via
+      // an abort; nothing in this process was prompting, so without this
+      // checkpoint recovery would sail past the wait and send a fresh prompt
+      // (or commit the partials) for exactly the work the user stopped. The
+      // catch consumes the mark and rethrows TurnStoppedError.
+      if (this.stopRequested.has(threadId)) throw new Error("Stopped while waiting for the interrupted agent turn.");
 
       let agentSummary: string;
       if (await this.turnCompletedSince(project.workspacePath, project.sessionId, pending.startedAt)) {
@@ -1001,6 +1033,7 @@ export class ProjectService {
         : error;
     } finally {
       this.activeTurns -= 1;
+      this.activeTurnThreads.delete(threadId);
       this.delivering.delete(threadId);
       this.stopRequested.delete(threadId);
     }
@@ -1085,16 +1118,49 @@ export class ProjectService {
   }
 
   /** Block while the session still reports a running turn (bot restart only). */
-  private async waitForIdleTurn(workspacePath: string, sessionId: string, timeoutMs = config.opencodeReconcileTimeoutMs): Promise<void> {
+  private async waitForIdleTurn(workspacePath: string, sessionId: string, onProgress?: ProgressCallback, timeoutMs = config.opencodeReconcileTimeoutMs): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     let sawBusy = false;
+    let lastHeartbeatAt = 0;
+    let lastPollError: unknown;
     while (Date.now() < deadline) {
-      const busy = await this.opencode.isBusy(workspacePath, sessionId).catch(() => false);
-      if (!busy) return;
+      let busy: boolean;
+      try {
+        busy = await this.opencode.isBusy(workspacePath, sessionId);
+        lastPollError = undefined;
+      } catch (error) {
+        // A slow status endpoint is not evidence that the agent turn is idle.
+        // Keep waiting while the event stream remains attached.
+        lastPollError = error;
+        if (Date.now() - lastHeartbeatAt >= 30_000) {
+          onProgress?.({ kind: "heartbeat", text: "🔌 OpenCode status is taking longer than usual", detail: `Still attached to the saved session · ${formatShortDuration(Date.now() - (deadline - timeoutMs))} elapsed`, phase: "working" });
+          lastHeartbeatAt = Date.now();
+        }
+        await sleep(config.opencodeReconcilePollMs);
+        continue;
+      }
+      if (!busy) {
+        onProgress?.({ kind: "heartbeat", text: "✅ The interrupted agent turn has finished", active: false, phase: "working" });
+        return;
+      }
       sawBusy = true;
+      if (Date.now() - lastHeartbeatAt >= 30_000) {
+        onProgress?.({ kind: "heartbeat", text: "⏳ OpenCode still reports the interrupted turn running", detail: `Reattached to live session · ${formatShortDuration(Date.now() - (deadline - timeoutMs))} elapsed`, active: true, phase: "working" });
+        lastHeartbeatAt = Date.now();
+      }
       await sleep(config.opencodeReconcilePollMs);
     }
-    if (sawBusy) throw new Error("The interrupted agent turn kept running past the recovery window; recovery gave up waiting for it.");
+    if (sawBusy) {
+      // Mirror recoveryPrompt's timeout: leaving the turn running would keep
+      // burning provider tokens unsupervised and wedge the next prompt on a
+      // session that is still busy server-side.
+      emit(onProgress, "🛑 Recovery window exhausted — stopping the orphaned agent turn");
+      await this.opencode.abortTurn(workspacePath, sessionId).catch((error) => {
+        log("warn", "project.recovery_wait_abort_failed", { sessionId, error: serializeError(error) });
+      });
+      throw new Error("The interrupted agent turn kept running past the recovery window; recovery stopped it and gave up.");
+    }
+    if (lastPollError) throw new Error(`OpenCode status stayed unavailable throughout the recovery window: ${errorText(lastPollError)}`);
   }
 
   /**
@@ -1119,6 +1185,9 @@ export class ProjectService {
           (!info.agent || info.agent === "sitebuilder") &&
           info.finish &&
           info.finish !== "tool-calls" &&
+          // An aborted finish is a killed turn, not a completed one: recovery
+          // must continue the work instead of committing the partials.
+          info.finish !== "aborted" &&
           (info.time?.completed ?? 0) > since - 2_000,
       );
     } catch {
@@ -1253,6 +1322,11 @@ export class ProjectService {
       lastTurnUsage: undefined,
       lastTurnAt: undefined,
     });
+    // Classify the swept turn's failure as a user stop, like forceDeleteProject
+    // does: a reset is intentional, so its aborted turns must not raise
+    // spurious failure incidents. Only when a turn is actually in flight — an
+    // unconsumed mark would mislabel the next turn's unrelated failure.
+    if (this.activeTurnThreads.has(threadId)) this.stopRequested.add(threadId);
     const sweep = await this.opencode
       .stopSessionsInDirectory(project.workspacePath, project.sessionId, new Set([sessionId]))
       .catch((error) => {
@@ -1322,6 +1396,11 @@ export class ProjectService {
         return false;
       }
     }));
+    // The sweep below aborts every still-running turn on purpose; classify
+    // those failures as user stops (no spurious incidents), mirroring
+    // resetSession. Guarded on an active turn so an idle thread keeps no mark.
+    const stoppedThreads = projects.filter((project) => this.activeTurnThreads.has(project.threadId));
+    for (const project of stoppedThreads) this.stopRequested.add(project.threadId);
     // With the replacements alive, sweep everything else on the service;
     // the fresh sessions are the only thing left running afterwards.
     const sweep = await this.opencode.stopAllSessions(fresh).catch((error) => {
@@ -1432,26 +1511,39 @@ export class ProjectService {
    *
    * Three outcomes are reported separately because the caller's message must
    * not claim "no turn is running" while the thread is visibly stuck:
-   * `stopped` (abort landed), `delivering` (the turn is past the agent and
-   * will finish on its own), and `queueFreed` (the agent service could not be
-   * reached, so the wedged queue was released instead of aborting).
+   * `stopped` (an abort landed, or a still-preparing turn was marked to stop
+   * at its pre-prompt checkpoint), `delivering` (the turn is past the agent
+   * and will finish on its own), and `queueFreed` (the agent service could
+   * not be reached, so the wedged queue was released instead of aborting).
    */
   async stopTurn(threadId: string): Promise<StopTurnOutcome> {
     const project = this.store.getProject(threadId);
     if (!project) return { stopped: false, delivering: false, queueFreed: false };
     const busy = await this.opencode.isBusy(project.workspacePath, project.sessionId).catch(() => undefined);
     if (busy === false) {
-      // No agent turn: either the thread is idle, or the turn already moved on
-      // to build/commit/publish. Only the latter is worth reporting, and it
-      // must not have its queue severed — it releases the queue itself.
-      return { stopped: false, delivering: this.delivering.has(threadId), queueFreed: false };
+      // No server-side turn: the thread is idle, the turn already moved on to
+      // build/commit/publish (which releases the queue itself), or it is still
+      // preparing — claimed but not prompting yet, so there was nothing busy
+      // to abort. Mark a preparing turn so it bails at its pre-prompt
+      // checkpoint instead of starting agent work the user just asked to stop.
+      if (this.delivering.has(threadId)) return { stopped: false, delivering: true, queueFreed: false };
+      if (this.activeTurnThreads.has(threadId)) {
+        this.stopRequested.add(threadId);
+        log("warn", "project.turn_stop_before_agent", { threadId, sessionId: project.sessionId });
+        return { stopped: true, delivering: false, queueFreed: false };
+      }
+      return { stopped: false, delivering: false, queueFreed: false };
     }
     if (busy === undefined) {
       // The status call failed. A turn in its delivery tail is finishing on its
       // own, so leave its queue alone; otherwise a prompt against an
       // unreachable service may never settle, which is the one case where
-      // leaving the chain intact wedges the thread for good.
+      // leaving the chain intact wedges the thread for good. An active turn
+      // that cannot be aborted is still marked, so it reports a user stop when
+      // it finally settles — and restart recovery bails at its checkpoint
+      // instead of prompting when the service returns.
       if (this.delivering.has(threadId)) return { stopped: false, delivering: true, queueFreed: false };
+      if (this.activeTurnThreads.has(threadId)) this.stopRequested.add(threadId);
       this.severQueue(threadId);
       log("warn", "project.turn_stop_unreachable", { threadId, sessionId: project.sessionId });
       return { stopped: false, delivering: false, queueFreed: true };

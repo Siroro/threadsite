@@ -5,7 +5,7 @@ import { Agent } from "undici";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { config } from "./config.js";
 import { log, logError, serializeError } from "./logger.js";
-import type { ProgressCallback, ProgressUpdate } from "./progress.js";
+import type { ProgressCallback, ProgressPlanItem, ProgressUpdate } from "./progress.js";
 import { cleanThreadTitle, errorText, formatShortDuration, formatTokens, formatTokensPerSecond, formatUtcClock, parseModel, truncate } from "./util.js";
 
 // Sent to a session whose turn was killed by an agent-service restart. The
@@ -88,6 +88,7 @@ interface EventStreamHandle {
 interface SessionMessage {
   info?: {
     id?: string;
+    sessionID?: string;
     role?: string;
     agent?: string;
     parentID?: string;
@@ -97,7 +98,7 @@ interface SessionMessage {
     error?: unknown;
     time?: { created?: number; completed?: number };
   };
-  parts?: Array<{ type?: string; text?: string }>;
+  parts?: Array<Record<string, any>>;
 }
 
 interface PromptSnapshot {
@@ -156,6 +157,32 @@ interface TurnState {
   lastLiveStatsAt: number;
   /** Quota-exhaustion action observed mid-turn (free_tier_limit etc.), so the failure names the reset. */
   quotaBlock?: QuotaBlock;
+}
+
+function createTurnState(startedAt: number, compactions: number): TurnState {
+  return {
+    assistantMessageIds: new Set<string>(),
+    outputTokens: 0,
+    inputTokens: 0,
+    cacheTokens: 0,
+    contextTokens: 0,
+    cost: 0,
+    steps: 0,
+    compactions,
+    baselineCompactions: compactions,
+    childSessions: new Set<string>(),
+    messageModels: new Map(),
+    modelUsage: new Map(),
+    startedAt,
+    generationMs: 0,
+    timedOutputTokens: 0,
+    stepStartAtByMessage: new Map(),
+    lastStepFinishAt: startedAt,
+    liveTokenSamples: [],
+    livePartBytes: new Map(),
+    deltaFedParts: new Set(),
+    lastLiveStatsAt: 0,
+  };
 }
 
 /** Token/context/cost accounting attributed to one model within a turn. */
@@ -259,9 +286,11 @@ export class OpenCodeHarness {
   // Sessions this harness deliberately aborted (reset sweeps, recovery
   // timeouts). An abort rejects the in-flight prompt with transport-shaped
   // error text; prompt() consumes the mark so that rejection is failed
-  // outright instead of reconciling — the reconcile path can re-send the
-  // prompt (continueAfterRestart), resurrecting exactly the turn the abort
-  // stopped. Cleared when a prompt on the session completes normally or the
+  // outright instead of reconciling, and reconcilePrompt treats a mark that
+  // appears mid-reconcile the same way — both paths can re-send the prompt
+  // (continueAfterRestart), resurrecting exactly the turn the abort stopped.
+  // prompt() clears a stale mark from an earlier turn before sending; a mark
+  // is also dropped when a prompt on the session completes normally or the
   // session is swept away.
   private readonly deliberateAborts = new Set<string>();
 
@@ -571,35 +600,17 @@ export class OpenCodeHarness {
     const snapshot = await this.capturePromptSnapshot(directory, sessionId, agent);
     // One TurnState per prompt, shared by the initial event stream and any reconnect
     // so token/context totals survive a transport recovery.
-    const turn: TurnState = {
-      assistantMessageIds: new Set<string>(),
-      outputTokens: 0,
-      inputTokens: 0,
-      cacheTokens: 0,
-      contextTokens: 0,
-      cost: 0,
-      steps: 0,
-      compactions: snapshot.compactions,
-      baselineCompactions: snapshot.compactions,
-      model: parsed ? { providerID: parsed.providerID, modelID: parsed.modelID } : undefined,
-      childSessions: new Set<string>(),
-      messageModels: new Map(),
-      modelUsage: new Map(),
-      startedAt: snapshot.startedAt,
-      generationMs: 0,
-      timedOutputTokens: 0,
-      stepStartAtByMessage: new Map(),
-      lastStepFinishAt: snapshot.startedAt,
-      liveTokenSamples: [],
-      livePartBytes: new Map(),
-      deltaFedParts: new Set(),
-      lastLiveStatsAt: 0,
-    };
+    const turn = createTurnState(snapshot.startedAt, snapshot.compactions);
+    turn.model = parsed ? { providerID: parsed.providerID, modelID: parsed.modelID } : undefined;
     if (turn.model) void this.applyContextLimit(turn, onProgress);
     let stream = await this.startEventStream(directory, sessionId, onProgress, turn).catch((error) => {
       log("warn", "opencode.event_stream_unavailable", { sessionId, error: serializeError(error) });
       return undefined;
     });
+    // Seed the card from the session's stored todos before the first event: a
+    // model that plans once and only edits afterwards would otherwise leave the
+    // plan invisible until (and unless) it re-sends the list.
+    await this.rehydratePlan(directory, sessionId, onProgress, { onlyUnfinished: true });
 
     emit(onProgress, { text: "🧠 Model is working", phase: "working" });
     log("info", "opencode.prompt_started", {
@@ -611,10 +622,16 @@ export class OpenCodeHarness {
       baselineMessages: snapshot.ids.size,
     });
 
+    // A mark left by an abort that targeted an earlier turn on this session
+    // (a reconcile- or recovery-timeout abort has no in-flight request left to
+    // consume it) is stale — no request of ours is in flight yet. Clearing it
+    // here means a mark appearing during the reconcile below unambiguously
+    // means "this turn was deliberately stopped".
+    this.deliberateAborts.delete(sessionId);
     try {
       const summary = await this.sendPromptRaw(directory, sessionId, body);
-      // A stale abort mark must not poison a later genuine-transport recovery
-      // on a session that carried on normally.
+      // A mark added while this request was in flight must not survive into
+      // the next turn on the session.
       this.deliberateAborts.delete(sessionId);
       // A completed turn proves the provider is answering again; drop a stale
       // quota block (the reset landed early or the outage was misread).
@@ -651,13 +668,15 @@ export class OpenCodeHarness {
           return undefined;
         });
         if (stream) emit(onProgress, { text: "🟢 Reconnected — checking the running turn" });
-    // Buttons for a question asked before the transport dropped are gone from
-    // the event stream; ask the server what is still pending and re-emit it.
-    if (stream) {
-      await this.resurfacePendingQuestion(directory, sessionId, onProgress).catch((error) => {
-        log("debug", "opencode.question_resurface_failed", { sessionId, error: String(error) });
-      });
-    }
+        // Buttons for a question asked before the transport dropped are gone from
+        // the event stream; ask the server what is still pending and re-emit it.
+        if (stream) {
+          await this.resurfacePendingQuestion(directory, sessionId, onProgress).catch((error) => {
+            log("debug", "opencode.question_resurface_failed", { sessionId, error: String(error) });
+          });
+          // The plan may have advanced while the stream was down.
+          await this.rehydratePlan(directory, sessionId, onProgress);
+        }
 
         try {
           const recovered = await this.reconcilePrompt(directory, sessionId, snapshot, model, onProgress, error, body);
@@ -722,6 +741,116 @@ export class OpenCodeHarness {
     const statuses = await this.sessionStatus(directory);
     const type = (statuses[sessionId] as any)?.type;
     return type === "busy" || type === "retry";
+  }
+
+  /** Reattach to an existing session's event feed after the bot process restarted. */
+  async watchExistingTurn(directory: string, sessionId: string, onProgress?: ProgressCallback): Promise<() => Promise<void>> {
+    let stopped = false;
+    let stream: EventStreamHandle | undefined;
+    // One TurnState for the whole watch, so child sessions learned before a
+    // drop stay known after reconnecting (each event only announces itself
+    // once, over the stream that was live at the time).
+    const turn = createTurnState(Date.now(), 0);
+    const watcher = (async () => {
+      while (!stopped) {
+        try {
+          stream = await this.startEventStream(directory, sessionId, onProgress, turn);
+          if (!stream) throw new Error("OpenCode returned no recovery event stream");
+          if (stopped) stream.stop();
+          else {
+            // Children created while no stream was attached never announced
+            // themselves; adopt them so their events attribute to this turn.
+            await this.adoptChildSessions(sessionId, turn);
+            // A question asked before the watcher attached (while the bot was
+            // down) never re-fires as an event; re-emit it so its answer
+            // buttons render and the parked turn can actually be answered.
+            await this.resurfacePendingQuestion(directory, sessionId, onProgress).catch(() => undefined);
+            // Every reconnect replays the persisted plan and running tools:
+            // whatever started during the gap produced no live events.
+            await this.rehydratePlan(directory, sessionId, onProgress);
+            await this.rehydrateRunningTools(directory, sessionId, onProgress);
+          }
+          await stream.done;
+        } catch (error) {
+          if (!stopped) log("warn", "opencode.recovery_event_stream_unavailable", { sessionId, error: serializeError(error) });
+          // A throw between connect and `await stream.done` must not leak the
+          // still-live stream while the loop opens a replacement.
+          stream?.stop();
+        }
+        stream = undefined;
+        if (!stopped) await sleep(2_000);
+      }
+    })();
+    return async () => {
+      stopped = true;
+      stream?.stop();
+      await watcher;
+    };
+  }
+
+  /** Learn subagent child sessions that already exist, so their live events are not filtered out. */
+  private async adoptChildSessions(sessionId: string, turn: TurnState): Promise<void> {
+    try {
+      for (const session of await this.listAllSessions()) {
+        if (session.parentID === sessionId) turn.childSessions.add(session.id);
+      }
+    } catch (error) {
+      log("debug", "opencode.child_sessions_adopt_failed", { sessionId, error: serializeError(error) });
+    }
+  }
+
+  /** The session's persisted todo list, mapped for the progress card. */
+  private async fetchPlan(directory: string, sessionId: string): Promise<ProgressPlanItem[]> {
+    const result = await this.client.session.todo({ sessionID: sessionId, directory } as any);
+    const data = unwrap<unknown>(result, "OpenCode session todo");
+    return Array.isArray(data) ? planFromTodos(data) : [];
+  }
+
+  /**
+   * Seed the card with the plan the session already holds. Todos live on the
+   * server, so without this the card stays empty for a turn that resumed after
+   * a bot restart, and for any model that writes its list once and never
+   * re-sends it. Best-effort: a missing or empty list is not an error.
+   */
+  private async rehydratePlan(
+    directory: string,
+    sessionId: string,
+    onProgress: ProgressCallback | undefined,
+    options: { onlyUnfinished?: boolean } = {},
+  ): Promise<void> {
+    if (!onProgress) return;
+    try {
+      const plan = await this.fetchPlan(directory, sessionId);
+      if (!plan.length) return;
+      // A turn starting fresh inherits the previous turn's list; replaying it
+      // only matters while it still has work left, otherwise the card would
+      // claim the new request is already done.
+      if (options.onlyUnfinished && !plan.some(isUnfinished)) return;
+      emit(onProgress, { kind: "plan", text: "Restored the existing plan", plan });
+      log("info", "opencode.plan_restored", { sessionId, items: plan.length });
+    } catch (error) {
+      log("debug", "opencode.plan_restore_failed", { sessionId, error: serializeError(error) });
+    }
+  }
+
+  /** Restore the currently running tool from persisted message parts after the event gap. */
+  private async rehydrateRunningTools(directory: string, sessionId: string, onProgress?: ProgressCallback): Promise<void> {
+    try {
+      const messages = await this.listSessionMessages(directory, sessionId, 100);
+      const turn = createTurnState(Date.now(), 0);
+      for (const message of messages) {
+        const info = message.info;
+        if (info?.role !== "assistant" || (info.agent && info.agent !== "sitebuilder")) continue;
+        const running = (message.parts ?? []).filter((part) => part.type === "tool" && part.state?.status === "running");
+        if (!running.length) continue;
+        this.handleEvent({ type: "message.updated", properties: { info: { ...info, sessionID: sessionId } } }, directory, sessionId, onProgress, turn);
+        for (const part of running) {
+          this.handleEvent({ type: "message.part.updated", properties: { part: { ...part, sessionID: sessionId } } }, directory, sessionId, onProgress, turn);
+        }
+      }
+    } catch (error) {
+      log("warn", "opencode.recovery_activity_restore_failed", { sessionId, error: serializeError(error) });
+    }
   }
 
   async revertSession(directory: string, sessionId: string, messageID: string): Promise<void> {
@@ -869,11 +998,33 @@ export class OpenCodeHarness {
     let lastProgressAt = 0;
 
     while (Date.now() < deadline) {
+      // An abort that landed since this prompt began (user stop, reset sweep)
+      // deliberately stopped the session. The idle branch below would re-send
+      // the prompt via continueAfterRestart — resurrecting exactly the turn
+      // the abort killed, the multi-stop symptom this guards against — so a
+      // mark present here fails the turn instead.
+      if (this.deliberateAborts.has(sessionId)) {
+        throw new OpenCodeReconciliationError(
+          "The session was deliberately stopped while reconciling a dropped connection.",
+          { phase: "aborted-while-reconciling", model },
+          { cause: originalError },
+        );
+      }
       let messages: SessionMessage[] | undefined;
       try {
         messages = await this.listSessionMessages(directory, sessionId, 100);
         consecutivePollFailures = 0;
       } catch (error) {
+        // A vanished session is permanent, not transient — fail at once (the
+        // 404-shaped text routes the caller into its recreate-and-reprompt
+        // path) instead of polling a dead session for the whole window.
+        if (/404|not found|unknown session/i.test(errorText(error))) {
+          throw new OpenCodeReconciliationError(
+            `The saved OpenCode session is gone (unknown session): ${errorText(error)}`,
+            { phase: "session-vanished", model },
+            { cause: originalError },
+          );
+        }
         consecutivePollFailures += 1;
         if (consecutivePollFailures === 1 || consecutivePollFailures % 10 === 0) {
           log("warn", "opencode.reconcile_messages_failed", {
@@ -1091,12 +1242,16 @@ export class OpenCodeHarness {
   }
 
   /** Every session known to the agent service, across all projects. */
-  private async listAllSessions(): Promise<Array<{ id: string; directory: string }>> {
+  private async listAllSessions(): Promise<Array<{ id: string; directory: string; parentID?: string }>> {
     const result = await this.client.session.list({} as any);
     const data = unwrap<any[]>(result, "OpenCode session list");
     if (!Array.isArray(data)) return [];
     return data
-      .map((session) => ({ id: String(session?.id ?? ""), directory: String(session?.directory ?? "") }))
+      .map((session) => ({
+        id: String(session?.id ?? ""),
+        directory: String(session?.directory ?? ""),
+        parentID: session?.parentID ? String(session.parentID) : undefined,
+      }))
       .filter((session) => session.id);
   }
 
@@ -1420,10 +1575,7 @@ export class OpenCodeHarness {
 
     if (event?.type === "todo.updated") {
       const todos = Array.isArray(properties.todos) ? properties.todos : [];
-      emit(onProgress, { kind: "plan", text: "Updated plan", plan: todos.map((todo: any) => ({
-        content: String(todo?.content ?? ""),
-        status: ["completed", "cancelled", "in_progress"].includes(todo?.status) ? todo.status : "pending",
-      })) });
+      emit(onProgress, { kind: "plan", text: "Updated plan", plan: planFromTodos(todos) });
       const done = todos.filter((todo: any) => todo?.status === "completed" || todo?.status === "cancelled").length;
       const active = todos.find((todo: any) => todo?.status === "in_progress");
       if (active?.content) {
@@ -1595,7 +1747,10 @@ function findTerminalAssistant(messages: SessionMessage[], snapshot: PromptSnaps
       if ((info.time?.created ?? 0) < snapshot.startedAt - 2_000) return false;
       if (info.agent && info.agent !== snapshot.agent) return false;
       if (info.error) return true;
-      if (!info.finish || info.finish === "tool-calls") return false;
+      // An aborted finish is not a completion: the turn was killed partway
+      // (service crash, abort), so the caller must continue the work rather
+      // than accept the partial output as the turn's result.
+      if (!info.finish || info.finish === "tool-calls" || info.finish === "aborted") return false;
       return Boolean(info.time?.completed || info.finish);
     })
     .sort((a, b) => (b.info?.time?.created ?? 0) - (a.info?.time?.created ?? 0))[0];
@@ -1847,6 +2002,20 @@ export function mergeModelUsage(entries: ModelUsage[]): ModelUsage[] {
 function emit(callback: ProgressCallback | undefined, update: ProgressUpdate): void {
   if (!callback) return;
   Promise.resolve(callback(update)).catch((error) => log("debug", "progress.callback_failed", { error: String(error) }));
+}
+
+const PLAN_STATUSES = new Set<ProgressPlanItem["status"]>(["completed", "cancelled", "in_progress"]);
+
+/** Map OpenCode's todo entries onto the card's plan items, defaulting unknown statuses to pending. */
+function planFromTodos(todos: readonly unknown[]): ProgressPlanItem[] {
+  return todos.map((todo: any) => ({
+    content: String(todo?.content ?? ""),
+    status: PLAN_STATUSES.has(todo?.status) ? todo.status : "pending",
+  }));
+}
+
+function isUnfinished(item: ProgressPlanItem): boolean {
+  return item.status === "pending" || item.status === "in_progress";
 }
 
 function describeTool(tool: string, input: any, status: string, title?: string, directory?: string): { text: string; detail?: string } | undefined {

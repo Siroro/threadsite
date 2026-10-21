@@ -48,7 +48,7 @@ V2.1 also recursively serializes `Error.cause` into the private JSONL log and ad
 
 ## Why static-only
 
-This harness intentionally does **not** let the model run `npm install`, shell commands, git, or server code. Games are also static web deliverables: HTML/CSS/static browser JavaScript/assets only, with no Node or game server at runtime. The agent platform is configured so the `sitebuilder` agent can edit `site/**` and inspect the workspace, while shell, external directories, arbitrary web fetching, subagents, LSP, skills, and questions are denied. `websearch` is explicitly allowed, and media downloads go through a guarded `asset_download` tool.
+This harness intentionally does **not** let the model run `npm install`, unrestricted shell commands, git writes, or server code. Games are also static web deliverables: HTML/CSS/static browser JavaScript/assets only, with no Node or game server at runtime. The `sitebuilder` agent can edit `site/**` and inspect the workspace; external directories stay denied and shell commands use an explicit allowlist. `webfetch` and `websearch` are allowed for broad web research, while media downloads go through the guarded `asset_download` tool. Configured subagents, LSP, curated skills, questions, and OpenCode's repeated-tool-call recovery guard are enabled.
 
 ### TypeScript sources, harness-owned build
 
