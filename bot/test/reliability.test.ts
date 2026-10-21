@@ -357,6 +357,38 @@ test("the first successful build adopts the AI name in the returned site and rep
   assert.equal(saved.initialPrompt, "Make a garden");
 });
 
+test("webhook outages do not block project creation or leave renames pending", async () => {
+  const store = await openStore(path.join(root, "webhook-outage.db"));
+  await store.ensureWebhookSecret();
+  const forgejo = new LocalForgejo();
+  let hookAttempts = 0;
+  forgejo.ensurePushWebhook = async () => {
+    hookAttempts += 1;
+    throw new Error("Forgejo webhook creation failed (404)");
+  };
+  let projectWorkspace = "";
+  const opencode = {
+    createSession: async (dir: string) => { projectWorkspace = dir; return "session"; },
+    isBusy: async () => false,
+    prompt: async () => {
+      await fs.writeFile(path.join(projectWorkspace, "site/src/main.ts"), 'console.log("published despite missing hook");');
+      return { text: "Finished", usage: {} };
+    },
+  } as unknown as OpenCodeHarness;
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "webhook-outage-usage.jsonl")));
+  const result = await service.createProject({
+    threadId: "123456789012345679", guildId: "100", parentChannelId: "200", displayName: "Hook Outage Project",
+    initialPrompt: "Make a small site",
+  });
+  assert.equal(result.project.status, "ready");
+  assert.ok(result.commit);
+  const renamed = await service.renameProject(result.project.threadId, "Renamed During Hook Outage");
+  assert.equal(renamed.pendingRename, undefined);
+  assert.equal(renamed.repoName, "site-renamed-during-hook-outage");
+  assert.ok(hookAttempts >= 2);
+  await fs.access(path.join(config.publishRoot, renamed.siteSlug, "index.html"));
+});
+
 test("renaming a game keeps its multiplayer tenant through future builds", async () => {
   const f = await projectFixture("game");
   await f.store.patchProject(f.project.threadId, { projectKind: "game-2d" });
