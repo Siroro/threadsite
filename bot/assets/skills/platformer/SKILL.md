@@ -130,7 +130,7 @@ for a few frames when the player holds Down + Jump. Do not re-implement collisio
 - **Feel/physics:** `physics-tuning` for timestep, CCD, and stability.
 - **Input:** `input-systems` for buffering, rebinding, and gamepad support.
 - **Polish:** `audio-design` for SFX/music; the engine animation skill for squash/stretch.
-- **Process:** `prototype-fast` to greybox the controller before building content.
+- **Process:** a rapid prototype to greybox the controller before building content.
 
 ## References
 

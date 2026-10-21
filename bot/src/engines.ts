@@ -31,27 +31,28 @@ interface EnginePackage {
 
 const THREE_PACKAGE: EnginePackage = {
   name: "three",
-  version: "0.185.1",
+  version: "0.186.1",
   manifest: JSON.stringify({
     name: "three",
-    version: "0.185.1",
+    version: "0.186.1",
     description: "three.js browser ESM build (harness-seeded, curated manifest)",
     type: "module",
     license: "MIT",
-    main: "./build/three.module.min.js",
+    main: "./build/three.module.js",
     types: "./index.d.ts",
     exports: {
       ".": {
         types: "./index.d.ts",
-        import: "./build/three.module.min.js",
+        import: "./build/three.module.js",
       },
     },
   }, null, 2) + "\n",
-  // Runtime: the minified module + its internal core dependency. Types: the
+  // Runtime: the module build plus its internal core dependency (0.186+ ships
+  // no minified builds; the harness bundle minifies). Types: the
   // DefinitelyTyped tree, which is a src/**/*.d.ts graph reached from index.d.ts.
   files: [
-    { from: "three/build/three.module.min.js", to: "build/three.module.min.js" },
-    { from: "three/build/three.core.min.js", to: "build/three.core.min.js" },
+    { from: "three/build/three.module.js", to: "build/three.module.js" },
+    { from: "three/build/three.core.js", to: "build/three.core.js" },
     { from: "three/LICENSE", to: "LICENSE" },
     { from: "@types/three/index.d.ts", to: "index.d.ts" },
   ],
@@ -61,46 +62,47 @@ const THREE_PACKAGE: EnginePackage = {
 
 /**
  * Rapier physics, compat build: the WASM is base64-inlined into the single
- * ESM file, so the workspace bundle needs no .wasm asset handling — the
- * plain esbuild step just works. Declarations are the package's own .d.ts
- * graph (rapier.d.ts → exports → math/dynamics/geometry/pipeline/control →
- * the raw wasm-binding types).
+ * ESM file (its `init()` decodes the embedded blob), so the workspace bundle
+ * needs no .wasm asset handling — the plain esbuild step just works. 0.21
+ * moved the payload under dist/ (entry `rapier.mjs`). Declarations are the
+ * package's own .d.ts graph (rapier.d.ts → exports → math/dynamics/geometry/
+ * pipeline/control → the raw wasm-binding types).
  */
 const RAPIER_PACKAGE: EnginePackage = {
   name: "@dimforge/rapier3d-compat",
-  version: "0.12.0",
+  version: "0.21.0",
   manifest: JSON.stringify({
     name: "@dimforge/rapier3d-compat",
-    version: "0.12.0",
+    version: "0.21.0",
     description: "Rapier 3D physics, compat build with WASM inlined as base64 (harness-seeded, curated manifest)",
     type: "module",
     license: "Apache-2.0",
-    main: "./rapier.es.js",
+    main: "./rapier.mjs",
     types: "./rapier.d.ts",
     exports: {
       ".": {
         types: "./rapier.d.ts",
-        import: "./rapier.es.js",
+        import: "./rapier.mjs",
       },
     },
   }, null, 2) + "\n",
   files: [
-    { from: "@dimforge/rapier3d-compat/rapier.es.js", to: "rapier.es.js" },
+    { from: "@dimforge/rapier3d-compat/dist/rapier.mjs", to: "rapier.mjs" },
     { from: "@dimforge/rapier3d-compat/LICENSE", to: "LICENSE" },
-    { from: "@dimforge/rapier3d-compat/rapier.d.ts", to: "rapier.d.ts" },
-    { from: "@dimforge/rapier3d-compat/exports.d.ts", to: "exports.d.ts" },
-    { from: "@dimforge/rapier3d-compat/math.d.ts", to: "math.d.ts" },
-    { from: "@dimforge/rapier3d-compat/init.d.ts", to: "init.d.ts" },
-    { from: "@dimforge/rapier3d-compat/coarena.d.ts", to: "coarena.d.ts" },
-    { from: "@dimforge/rapier3d-compat/raw.d.ts", to: "raw.d.ts" },
-    { from: "@dimforge/rapier3d-compat/rapier_wasm3d.d.ts", to: "rapier_wasm3d.d.ts" },
-    { from: "@dimforge/rapier3d-compat/rapier_wasm3d_bg.wasm.d.ts", to: "rapier_wasm3d_bg.wasm.d.ts" },
+    { from: "@dimforge/rapier3d-compat/dist/rapier.d.ts", to: "rapier.d.ts" },
+    { from: "@dimforge/rapier3d-compat/dist/exports.d.ts", to: "exports.d.ts" },
+    { from: "@dimforge/rapier3d-compat/dist/math.d.ts", to: "math.d.ts" },
+    { from: "@dimforge/rapier3d-compat/dist/init.d.ts", to: "init.d.ts" },
+    { from: "@dimforge/rapier3d-compat/dist/coarena.d.ts", to: "coarena.d.ts" },
+    { from: "@dimforge/rapier3d-compat/dist/raw.d.ts", to: "raw.d.ts" },
+    { from: "@dimforge/rapier3d-compat/dist/rapier_wasm3d.d.ts", to: "rapier_wasm3d.d.ts" },
+    { from: "@dimforge/rapier3d-compat/dist/rapier_wasm3d_bg.wasm.d.ts", to: "rapier_wasm3d_bg.wasm.d.ts" },
   ],
   dirs: [
-    { from: "@dimforge/rapier3d-compat/control", to: "control" },
-    { from: "@dimforge/rapier3d-compat/dynamics", to: "dynamics" },
-    { from: "@dimforge/rapier3d-compat/geometry", to: "geometry" },
-    { from: "@dimforge/rapier3d-compat/pipeline", to: "pipeline" },
+    { from: "@dimforge/rapier3d-compat/dist/control", to: "control" },
+    { from: "@dimforge/rapier3d-compat/dist/dynamics", to: "dynamics" },
+    { from: "@dimforge/rapier3d-compat/dist/geometry", to: "geometry" },
+    { from: "@dimforge/rapier3d-compat/dist/pipeline", to: "pipeline" },
   ],
   typesEntry: "@dimforge/rapier3d-compat/rapier.d.ts",
 };
@@ -114,10 +116,10 @@ const RAPIER_PACKAGE: EnginePackage = {
  */
 const THREE_MESH_BVH_PACKAGE: EnginePackage = {
   name: "three-mesh-bvh",
-  version: "0.9.14",
+  version: "0.9.16",
   manifest: JSON.stringify({
     name: "three-mesh-bvh",
-    version: "0.9.14",
+    version: "0.9.16",
     description: "three-mesh-bvh BVH acceleration for three.js raycasts and spatial queries (harness-seeded, curated manifest)",
     type: "module",
     license: "MIT",

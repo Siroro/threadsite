@@ -111,7 +111,7 @@ ttk_seconds = (shots_to_kill - 1) / fire_rate_per_second # first shot at t=0
 - **Enemies:** `game-ai` with the engine's equivalent API / Godot navigation.
 - **Camera & feel:** `camera-systems` for FOV/recoil kick and look smoothing; `game-feel` for hit-stop, screen shake, and impact juice.
 - **Polish:** `audio-design` for weapon/impact sound; a GPU shader reference for muzzle/impact VFX.
-- **Process:** `prototype-fast` to validate aim feel before building content.
+- **Process:** a rapid prototype to validate aim feel before building content.
 
 ## References
 

@@ -24,7 +24,7 @@ before their entry conditions are met.
 | First playable / greenfield | `official-docs.md` version/renderer sections, `quickref.md`, Phase 2–3 foundation sections below, matching `genre-playbooks.md` section | `physics.md` / `audio.md` / `ui.md` when adding those systems | Scorecard, `webgpu.md`, `shaders.md`, `webxr.md` |
 | Broad production / complete game | `workflow.md`, `official-docs.md`, `game-design.md`, matching `genre-playbooks.md` section | Phase router below; `fundamentals.md` and `gameplay-architecture.md` only when foundation work is needed | Premium scorecard, full WebGPU/custom shader/post, XR, and release manuals until their trigger or gate |
 | Premium quality overlay | Prior playable set + `visual-architecture.md`, `quality-scorecard.md`, `rendering.md`, `vfx.md`, and the budget/scaling sections of `technical-art.md` | `webgpu.md` / `shaders.md` if renderer/post changes; `overlays.md` for world labels | A playable loop has browser smoke evidence |
-| Release evidence gate | `qa-release.md`, `visual-regression.md` or bot decision, `quality-gates.md` | `ship-check` outputs; mobile/a11y refs when claimed | Promised product/quality scope is implemented and features are frozen |
+| Release evidence gate | `qa-release.md`, `visual-regression.md` or bot decision, `quality-gates.md` | Browser ship evidence on the preview URL; mobile/a11y refs when claimed | Promised product/quality scope is implemented and features are frozen |
 | Revision-only legacy upgrade | `upgrade-existing.md`, `official-docs.md`, `quickref.md` | Owning tech refs per migration step | Premium/release gates until build + smoke pass; a renderer-family, shader-language, or post-architecture port uses broad production instead |
 | Network ask | `networking-boundary.md` first | Nothing else for net until architecture approved | Inventing sockets inside the render loop |
 
@@ -79,7 +79,7 @@ not design a custom shader stack. Defer the full `shaders.md` manual until Phase
 | Procedural hero, threat, reward, or prop family | Relevant recipe in `procedural-modeling.md` |
 | Geometry count, merge, instance, batch, or LOD decision | Relevant section of `geometry.md`; add `technical-art.md` only for measured budgets |
 | File-backed PBR texture, UV, atlas, transparency, or environment issue | Relevant section of `materials-textures.md` |
-| Imported model path, provenance, axes, scale, bounds, or ownership | Relevant section of `local-assets.md`; run `audit:assets` |
+| Imported model path, provenance, axes, scale, bounds, or ownership | Relevant section of `local-assets.md`; walk `site/assets/` + `ASSET_SOURCES.json` |
 | glTF compression, loading UI, clips, mixers, cloning, or animation state | Relevant section of `loaders-animation.md`; pair with `local-assets.md` only for intake/ownership |
 | Light or shadow issue | Relevant section of `lighting-shadows.md` |
 | Custom GLSL, TSL, or renderer-specific post | `shaders.md`, but only after playable smoke evidence or for a focused shader repair |
@@ -92,5 +92,5 @@ not design a custom shader stack. Defer the full `shaders.md` manual until Phase
 | Physics-heavy | `physics.md` |
 | Save migration, chunk residency, custom workers, or local diagnostics | `production-runtime.md`; add `networking-boundary.md` and stop for approval if storage, workers, or telemetry become remote |
 | Multiplayer / cloud saves / remote telemetry | `networking-boundary.md` — stop and get approval |
-| Revision-only pre-r185 / CDN / global THREE migration | `upgrade-existing.md`; run `audit:project-apis` |
+| Revision-only pre-r185 / CDN / global THREE migration | `upgrade-existing.md`; audit APIs against the installed types |
 | WebGL↔WebGPU, GLSL↔TSL, or post-architecture port | Broad-production workflow plus the relevant `rendering.md`, `webgpu.md`, and `shaders.md` compatibility sections; prove a minimal spike before full port |

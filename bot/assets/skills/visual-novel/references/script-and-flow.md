@@ -4,7 +4,7 @@
 
 Detail behind `SKILL.md`. Engine-neutral pseudocode. Covers the branching data model, route
 structures, and the save/backlog/skip data a VN needs. For the branching-script runtime
-(Ink/Yarn) defer to `dialogue-systems`; this file is the VN-specific glue.
+(Ink/Yarn) defer to a branching-dialogue reference; this file is the VN-specific glue.
 
 ## 1. The script data model
 

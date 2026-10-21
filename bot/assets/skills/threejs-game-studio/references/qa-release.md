@@ -33,8 +33,8 @@ tier is not a matrix result.
 Minimum meaningful QA for every applicable row:
 
 - Dependencies installed or known.
-- `npm run setup:browsers` completed on fresh machines before Playwright or
- canvas-inspector checks.
+- Browser QA runs through the harness preview (Chromium); no local browser
+ setup is needed.
 - Installed `three` package version, `THREE.REVISION`, renderer class, and actual
  backend captured; live-doc examples are not assumed compatible without the
  version gate in `official-docs.md`.

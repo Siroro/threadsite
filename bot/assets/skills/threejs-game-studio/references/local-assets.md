@@ -373,11 +373,8 @@ when local source files are absent.
 
 ## Local-Only Verification
 
-Run:
-
-```bash
-npm run audit:local
-```
+Audit local-only status by confirming every runtime import resolves
+inside the workspace and the outbound-request list is empty.
 
 For imported models and textures, walk every file in `site/assets/` and confirm each entry in `ASSET_SOURCES.json` names its source and license before release.
 

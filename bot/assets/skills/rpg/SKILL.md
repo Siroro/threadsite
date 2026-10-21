@@ -23,7 +23,7 @@ that make growth and choice feel meaningful, and points to the skills that imple
 
 **When *not* to use:** permadeath dungeon runs with no persistent character → `roguelike`.
 Pure conversation/branching story → `visual-novel`. Open-world needs/crafting/base-building →
-`survival-crafting`. For the dialogue engine itself, use `dialogue-systems`.
+`survival-crafting`. For the dialogue engine itself, use a branching-dialogue reference.
 
 ## Core loop
 
@@ -118,7 +118,7 @@ def on_event(kind, data):
 
 ## Composition (build it from these skills)
 
-- **Dialogue:** `dialogue-systems` (Yarn Spinner / Ink) — branching lines, conditions, variables.
+- **Dialogue:** a branching-dialogue reference (Yarn Spinner / Ink) — branching lines, conditions, variables.
 - **Persistence:** `save-systems` — character, inventory, quest flags, world state, versioning.
 - **Content data:** the engine's equivalent API — items, enemies, quests, skills as assets.
 - **Combat AI:** `game-ai` for enemy behavior; for turn order reuse the scheduler idea in `roguelike`.

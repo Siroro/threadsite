@@ -11,7 +11,8 @@ import os from "node:os";
 import { buildSite } from "./src/build.js";
 import { validateSite, publishSite } from "./src/publish.js";
 import { ensureEnginePackages } from "./src/engines.js";
-import { ensureMultiplayerFiles, PROTOCOL_VERSION } from "./src/multiplayer.js";
+import { ensureMultiplayerFiles } from "./src/multiplayer.js";
+import { MULTIPLAYER_PROTOCOL_VERSION as PROTOCOL_VERSION } from "./src/templates.js";
 import { ensureSkillFiles, skillNames } from "./src/skills.js";
 import { starterSource } from "./src/starter.js";
 import { untrackGeneratedArtifacts } from "./src/git.js";
@@ -138,8 +139,8 @@ async function main(): Promise<void> {
     execFileSync("git", ["-c", "user.email=e2e@local", "-c", "user.name=e2e", "commit", "--quiet", "-m", "old boundary"], { cwd: workspace });
     await untrackGeneratedArtifacts(workspace);
     const tracked = execFileSync("git", ["ls-files"], { cwd: workspace, encoding: "utf8" }) as string;
-    check("migration untracks generated bundles/net/manifest but keeps source",
-      tracked.includes("site/src/main.ts") && !tracked.includes("site/js/") && !tracked.includes("site/net/") && !tracked.includes("build-manifest.json"),
+    check("migration untracks generated bundles/manifest; net client and source stay tracked",
+      tracked.includes("site/src/main.ts") && tracked.includes("site/net/threadsite-net.js") && !tracked.includes("site/js/") && !tracked.includes("build-manifest.json"),
       tracked.replaceAll("\n", ", "));
     check("untracking preserves runtime workspace files",
       await fs.stat(path.join(workspace, "site", "js", "main.js")).then(() => true, () => false)
@@ -184,7 +185,7 @@ async function main(): Promise<void> {
 
   console.log("\n== 1d. 3D physics stack: Rapier compat + three-mesh-bvh ==");
   const rapierDir = path.join(ws3d, "node_modules", "@dimforge", "rapier3d-compat");
-  check("Rapier compat ESM seeded", await fs.stat(path.join(rapierDir, "rapier.es.js")).then(() => true, () => false));
+  check("Rapier compat ESM seeded", await fs.stat(path.join(rapierDir, "rapier.mjs")).then(() => true, () => false));
   check("Rapier real declarations seeded", await fs.stat(path.join(rapierDir, "rapier.d.ts")).then(() => true, () => false));
   const bvhDir = path.join(ws3d, "node_modules", "three-mesh-bvh");
   check("three-mesh-bvh ESM seeded", await fs.stat(path.join(bvhDir, "src", "index.js")).then(() => true, () => false));
@@ -247,8 +248,10 @@ async function main(): Promise<void> {
   check("gitignore ensure idempotent", (await ensureEnginePackages(ws2d, "game-2d")) === false);
   await fs.mkdir(path.join(ws2d, "node_modules", "pixi.js"), { recursive: true });
   await fs.writeFile(path.join(ws2d, "node_modules", "pixi.js", "package.json"), "{}\n");
-  check("legacy Pixi package removed on freshness pass", (await ensureEnginePackages(ws2d, "game-2d")) === true
-    && !(await fs.stat(path.join(ws2d, "node_modules", "pixi.js")).then(() => true, () => false)));
+  // The v2 Phaser migration is complete: the freshness pass no longer scrubs
+  // legacy packages; stray node_modules entries are inert (gitignored).
+  check("legacy Pixi package is inert, not scrubbed", (await ensureEnginePackages(ws2d, "game-2d")) === false
+    && (await fs.stat(path.join(ws2d, "node_modules", "pixi.js")).then(() => true, () => false)));
   await fs.writeFile(path.join(site2d, "src", "main.ts"), [
     `import * as Phaser from "phaser";`,
     `import { NET_CONFIG } from "../net/net-config.js";`,
@@ -291,8 +294,9 @@ async function main(): Promise<void> {
   const built2d = await buildSite(ws2d);
   check("game-2d builds", built2d.skipped === false && built2d.emitted === 1, JSON.stringify(built2d));
   const ignored = (await fs.readFile(path.join(ws2d, ".gitignore"), "utf8")).split(/\r?\n/);
-  check("generated build and net paths are gitignored",
-    ["node_modules/", "site/js/", "site/net/", "build-manifest.json"].every((line) => ignored.includes(line)),
+  check("generated build paths are gitignored; tracked net client is not",
+    [".opencode/", "node_modules/", "scratch/", "site/js/", "build-manifest.json"].every((line) => ignored.includes(line))
+      && !ignored.includes("site/net/"),
     ignored.join(", "));
   const bundle2d = await fs.readFile(path.join(site2d, "js", "main.js"), "utf8");
   check("phaser bundled", bundle2d.includes("Phaser") || bundle2d.includes("Scene"), `${(bundle2d.length / 1024).toFixed(0)}KB`);
@@ -392,11 +396,11 @@ async function main(): Promise<void> {
   await buildSite(wsMap);
   // An agent that vendors the complete three.js pair by hand under site/assets/.
   await fs.mkdir(path.join(siteMap, "assets/vendor"), { recursive: true });
-  await fs.copyFile("node_modules/three/build/three.module.min.js", path.join(siteMap, "assets/vendor/three.module.min.js"));
-  await fs.copyFile("node_modules/three/build/three.core.min.js", path.join(siteMap, "assets/vendor/three.core.min.js"));
+  await fs.copyFile("node_modules/three/build/three.module.js", path.join(siteMap, "assets/vendor/three.module.js"));
+  await fs.copyFile("node_modules/three/build/three.core.js", path.join(siteMap, "assets/vendor/three.core.js"));
   await fs.writeFile(path.join(siteMap, "index.html"),
     `<!doctype html><html><body><main id="app"></main>` +
-    `<script type="importmap">{"imports":{"three":"./assets/vendor/three.module.min.js"}}</script>` +
+    `<script type="importmap">{"imports":{"three":"./assets/vendor/three.module.js"}}</script>` +
     `<script type="module">import * as THREE from "three"; console.log(THREE.REVISION);</script>` +
     `<script type="module" src="js/main.js"></script></body></html>\n`);
   await validateSite(siteMap);
@@ -409,14 +413,14 @@ async function main(): Promise<void> {
   const siteSplit = path.join(wsSplit, "site");
   await buildSite(wsSplit);
   await fs.mkdir(path.join(siteSplit, "assets/vendor/three"), { recursive: true });
-  await fs.copyFile("node_modules/three/build/three.module.min.js", path.join(siteSplit, "assets/vendor/three/three.module.js"));
+  await fs.copyFile("node_modules/three/build/three.module.js", path.join(siteSplit, "assets/vendor/three/three.module.js"));
   await fs.writeFile(path.join(siteSplit, "index.html"),
     `<!doctype html><html><body><main id="app"></main>` +
     `<script type="importmap">{"imports":{"three":"./assets/vendor/three/three.module.js"}}</script>` +
     `<script type="module" src="js/main.js"></script></body></html>\n`);
   const splitMessage = await expectThrow("split-library import map fails validation",
-    () => validateSite(siteSplit), /Broken local reference[\s\S]*three\.core\.min\.js/);
-  check("error names the missing sibling and the wrapper", /via site\/assets\/vendor\/three\/three\.module\.js/.test(splitMessage) && /three\.core\.min\.js/.test(splitMessage), splitMessage.slice(0, 300));
+    () => validateSite(siteSplit), /Broken local reference[\s\S]*three\.core\.js/);
+  check("error names the missing sibling and the wrapper", /via site\/assets\/vendor\/three\/three\.module\.js/.test(splitMessage) && /three\.core\.js/.test(splitMessage), splitMessage.slice(0, 300));
 
   // The workspace node_modules is a build-time dependency, never published:
   // import maps or imports that reach outside site/ are broken references.
@@ -425,7 +429,7 @@ async function main(): Promise<void> {
   await buildSite(wsOutside);
   await fs.writeFile(path.join(siteOutside, "index.html"),
     `<!doctype html><html><body><main id="app"></main>` +
-    `<script type="importmap">{"imports":{"three":"../node_modules/three/build/three.module.min.js"}}</script>` +
+    `<script type="importmap">{"imports":{"three":"../node_modules/three/build/three.module.js"}}</script>` +
     `<script type="module" src="js/main.js"></script></body></html>\n`);
   await expectThrow("import map reaching into node_modules is rejected", () => validateSite(siteOutside), /outside the site directory[\s\S]*node_modules/);
 
@@ -531,8 +535,10 @@ async function main(): Promise<void> {
   await fs.writeFile(path.join(siteNet, "js", "threadsite-net.js"), "// stale legacy copy\n");
   await fs.writeFile(path.join(siteNet, "js", "net-config.js"), "// stale legacy copy\n");
   await ensureMultiplayerFiles(wsNet, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: PROTOCOL_VERSION }, "game-3d");
-  check("stale js/threadsite-net.js removed", await fs.access(path.join(siteNet, "js", "threadsite-net.js")).then(() => false, () => true));
-  check("stale js/net-config.js removed", await fs.access(path.join(siteNet, "js", "net-config.js")).then(() => false, () => true));
+  // Current contract: the harness never silently deletes project files —
+  // stale js/ copies persist and the build/import gates reject using them.
+  check("stale js/threadsite-net.js left for the gates (no silent deletion)", await fs.access(path.join(siteNet, "js", "threadsite-net.js")).then(() => true, () => false));
+  check("stale js/net-config.js left for the gates (no silent deletion)", await fs.access(path.join(siteNet, "js", "net-config.js")).then(() => true, () => false));
   check("net client seeded in site/net", await fs.access(path.join(siteNet, "net", "threadsite-net.js")).then(() => true, () => false));
   check("net declarations seeded in site/net", await fs.access(path.join(siteNet, "net", "threadsite-net.d.ts")).then(() => true, () => false));
   check("net-config declarations seeded", await fs.access(path.join(siteNet, "net", "net-config.d.ts")).then(() => true, () => false));
@@ -586,7 +592,7 @@ async function main(): Promise<void> {
   // seeds site/net/), then the deploy-tail build+validate — exactly what
   // completeTurn does before the agent is even prompted.
   await ensureMultiplayerFiles(wsLive, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: PROTOCOL_VERSION }, "game-2d");
-  check("legacy game's js/net client removed by restore", await fs.access(path.join(siteLive, "js", "threadsite-net.js")).then(() => false, () => true));
+  check("legacy game's js/net copy preserved by restore", await fs.access(path.join(siteLive, "js", "threadsite-net.js")).then(() => true, () => false));
   const liveBuilt = await buildSite(wsLive);
   check("legacy project builds skipped (no src/)", liveBuilt.skipped === true, JSON.stringify(liveBuilt));
   const liveValidateError = await validateSite(siteLive).then(() => undefined, (error: unknown) => String((error as Error).message));

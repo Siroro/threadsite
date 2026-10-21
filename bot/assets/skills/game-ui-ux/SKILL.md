@@ -24,7 +24,7 @@ concrete widget API to the engine UI skill.
 
 **When *not* to use:** for the engine's concrete UI nodes/components and styling, use
 the engine's equivalent API or Unity UI (UGUI/UI Toolkit). For *visual* punch (button pop, damage
-numbers, shake) use `game-feel`. For branching conversation UI use `dialogue-systems`. For
+numbers, shake) use `game-feel`. For branching conversation UI use a branching-dialogue reference. For
 translating UI strings, that is localization (see `references/` and `input-systems` for
 rebinding screens). For card/board layout specifics, the `card-game` genre composes this skill.
 
@@ -144,6 +144,6 @@ func _on_health_changed(current: int, max: int) -> void:
 
 - the engine's equivalent API, Unity UI (UGUI/UI Toolkit) — the concrete widgets, themes, and styling.
 - `game-feel` — button pops, transitions, and HUD juice that ride on top of this layout.
-- `dialogue-systems` — conversation/choice UI that lives inside this UI shell.
+- a branching-dialogue reference — conversation/choice UI that lives inside this UI shell.
 - `input-systems` — device switching, rebinding screens, and accessible controls.
 - `rpg`, `card-game`, `tower-defense`, `visual-novel` — UI-heavy genres that compose this skill.

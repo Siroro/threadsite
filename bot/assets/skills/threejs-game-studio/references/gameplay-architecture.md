@@ -473,7 +473,7 @@ Diagnostics should be easy to disable or gate for release.
 
 Minimum evidence after meaningful gameplay work:
 
-- `npm run build` or equivalent.
+- The harness build and type-check gate pass.
 - Local browser run.
 - Console/page error check.
 - Nonblank canvas pixel check.
