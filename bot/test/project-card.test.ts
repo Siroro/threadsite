@@ -40,7 +40,9 @@ test("the creating preview shows the request and settings before any build work"
     project: record({ status: "creating", lastCommit: undefined, workspacePath: "", siteSlug: "", repoName: "", sessionId: "" }),
   }));
   assert.match(card.description!, /Building the first version/);
-  assert.match(card.description!, /Build a koi pond arcade game/);
+  assert.match(card.fields!.find((field) => field.name === "Original request")!.value, /Build a koi pond arcade game/);
+  assert.deepEqual(card.fields!.slice(0, 3).map((field) => field.name), ["Type", "Engine", "Multiplayer"]);
+  assert.equal(card.fields![1].value, "Phaser");
   assert.equal(card.color, 0xf59e0b);
   // The design version is bookkeeping in the stored record, not card chrome.
   assert.equal(card.footer, undefined);
@@ -51,7 +53,7 @@ test("the creating preview shows the request and settings before any build work"
   assert.equal(card.fields!.find((field) => field.name === "Lifetime usage"), undefined);
 });
 
-test("a live project shows version, links, context, lifetime usage and the models used", () => {
+test("a live project puts settings before the request and shows version, links and lifetime usage", () => {
   const card = embed(renderProjectCard({
     project: record({
       multiplayerGameId: "koi-pond-arcade",
@@ -65,10 +67,9 @@ test("a live project shows version, links, context, lifetime usage and the model
   }));
   assert.equal(card.color, 0x22c55e);
   assert.match(card.description!, /Live · version `abc1234` · updated <t:\d+:R>/);
-  const projectField = card.fields!.find((field) => field.name === "Project")!.value;
-  assert.match(projectField, /2D static web game/);
-  assert.match(projectField, /multiplayer via the shared relay/);
-  assert.match(projectField, /created <t:\d+:R>/);
+  assert.match(card.fields!.find((field) => field.name === "Type")!.value, /2D static web game/);
+  assert.equal(card.fields!.find((field) => field.name === "Multiplayer")!.value, "Shared arena multiplayer");
+  assert.match(card.description!, /Created <t:\d+:R>/);
   const lifetime = card.fields!.find((field) => field.name === "Lifetime usage")!.value;
   assert.match(lifetime, /4 turns · 1 failed/);
   assert.match(lifetime, /in 82\.3k \(65\.8k cached\) · out 6\.2k/);
@@ -94,18 +95,30 @@ test("an errored project says so and keeps the card useful", () => {
 
 test("a missing prompt degrades gracefully instead of rendering empty", () => {
   const card = embed(renderProjectCard({ project: record({ initialPrompt: undefined }) }));
-  assert.match(card.description!, /\*\(not recorded\)\*/);
+  assert.match(card.fields!.find((field) => field.name === "Original request")!.value, /\*\(not recorded\)\*/);
 });
 
-test("the project line names the chosen multiplayer architecture", () => {
-  const bits = (overrides: Partial<ProjectRecord>) =>
-    embed(renderProjectCard({ project: record(overrides) })).fields!.find((field) => field.name === "Project")!.value;
+test("game settings name the dimension, engine and chosen multiplayer architecture", () => {
+  const fields = (overrides: Partial<ProjectRecord>) => embed(renderProjectCard({ project: record(overrides) })).fields!;
+  const multiplayer = (overrides: Partial<ProjectRecord>) => fields(overrides).find((field) => field.name === "Multiplayer")?.value;
 
   // A game with no stored mode (legacy) but a relay tenant reads as arena.
-  assert.match(bits({ multiplayerGameId: "koi-pond-arcade" }), /arena multiplayer via the shared relay/);
-  assert.match(bits({ multiplayerMode: "rooms" }), /invite-code rooms via the shared relay/);
-  assert.match(bits({ multiplayerMode: "singleplayer", multiplayerGameId: undefined }), /singleplayer only/);
-  assert.match(bits({ multiplayerMode: "arena" }), /arena multiplayer via the shared relay/);
-  // Sites never carry a multiplayer bit.
-  assert.doesNotMatch(bits({ projectKind: "site", multiplayerMode: "arena" }), /relay|singleplayer/);
+  assert.equal(multiplayer({ multiplayerGameId: "koi-pond-arcade" }), "Shared arena multiplayer");
+  assert.equal(multiplayer({ multiplayerMode: undefined, multiplayerGameId: undefined }), "Shared arena multiplayer");
+  assert.equal(multiplayer({ multiplayerMode: "rooms" }), "Invite-code rooms");
+  assert.equal(multiplayer({ multiplayerMode: "singleplayer", multiplayerGameId: undefined }), "Singleplayer only");
+  assert.equal(multiplayer({ multiplayerMode: "arena" }), "Shared arena multiplayer");
+  const three = fields({ projectKind: "game-3d" });
+  assert.match(three.find((field) => field.name === "Type")!.value, /3D/);
+  assert.equal(three.find((field) => field.name === "Engine")!.value, "Three.js");
+  assert.equal(multiplayer({ projectKind: "site", multiplayerMode: "arena" }), undefined);
+  assert.equal(fields({ projectKind: undefined }).find((field) => field.name === "Engine"), undefined);
+});
+
+test("the pinned card shows advisory QA status and keeps long requests within field limits", () => {
+  const card = embed(renderProjectCard({ project: record({ initialPrompt: "request ".repeat(1000), browserQaFindings: {
+    checkedAt: new Date().toISOString(), errors: ["runtime finding"], notes: ["preview unavailable"],
+  } }) }));
+  assert.match(card.fields!.find((field) => field.name === "Browser QA")!.value, /Advisory · 2 findings · checked <t:\d+:R>/);
+  assert.ok(card.fields!.every((field) => field.value.length <= 1024));
 });

@@ -27,7 +27,7 @@ const KIND_COLORS: Record<string, number> = { site: 0x5865f2, "game-2d": 0x22c55
  * version is stored next to the pinned message id, and the next boot upgrades
  * every card still on an older design (see reconcileProjectCards in index.ts).
  */
-export const PROJECT_CARD_VERSION = 1;
+export const PROJECT_CARD_VERSION = 2;
 
 const PROMPT_CHARS = 900;
 
@@ -51,14 +51,13 @@ export interface ProjectCardMessage {
   allowedMentions: { parse: [] };
 }
 
-/** The game's connectivity in one phrase; sites have none. Legacy games (no stored mode) default to arena. */
+/** The configured architecture. Legacy games default to arena, like the build harness. */
 function multiplayerLine(project: ProjectRecord): string | undefined {
   if (!project.projectKind || project.projectKind === "site") return undefined;
-  const mode = project.multiplayerMode ?? (project.multiplayerGameId ? "arena" : undefined);
-  if (mode === "singleplayer") return "singleplayer only";
-  if (mode === "rooms") return "invite-code rooms via the shared relay";
-  if (mode === "arena") return "arena multiplayer via the shared relay";
-  return undefined;
+  const mode = project.multiplayerMode ?? "arena";
+  if (mode === "singleplayer") return "Singleplayer only";
+  if (mode === "rooms") return "Invite-code rooms";
+  return "Shared arena multiplayer";
 }
 
 /** The pinned, self-updating front page of a project thread. */
@@ -80,14 +79,23 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   const embed = new EmbedBuilder()
     .setTitle(project.displayName)
     .setColor(color)
-    .setDescription([statusLine, "", "**Original request**", `> ${quoted(project.initialPrompt, PROMPT_CHARS)}`].join("\n"));
+    .setDescription([statusLine, relative(project.createdAt) ? `Created ${relative(project.createdAt)}` : undefined].filter(Boolean).join("\n"));
 
-  const projectBits = [
-    projectKindLabel(project.projectKind),
-    multiplayerLine(project),
-    project.createdAt ? `created ${relative(project.createdAt)}` : undefined,
-  ].filter(Boolean);
-  embed.addFields({ name: "Project", value: projectBits.join(" · "), inline: false });
+  // Settings come before the long request so they are visible immediately.
+  embed.addFields({ name: "Type", value: projectKindLabel(project.projectKind), inline: true });
+  if (kind !== "site") {
+    embed.addFields(
+      { name: "Engine", value: kind === "game-3d" ? "Three.js" : "Phaser", inline: true },
+      { name: "Multiplayer", value: multiplayerLine(project)!, inline: true },
+    );
+  }
+  embed.addFields({ name: "Original request", value: `> ${quoted(project.initialPrompt, PROMPT_CHARS)}`, inline: false });
+
+  if (project.browserQaFindings) {
+    const findings = project.browserQaFindings.errors.length + project.browserQaFindings.notes.length;
+    const checked = relative(project.browserQaFindings.checkedAt);
+    embed.addFields({ name: "Browser QA", value: `Advisory · ${findings ? `${findings} finding${findings === 1 ? "" : "s"}` : "no findings"}${checked ? ` · checked ${checked}` : ""}`, inline: false });
+  }
 
   // Model, effort, and which models served the thread are deliberately absent:
   // model routing is operational detail, kept in the admin-only
