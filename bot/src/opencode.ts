@@ -7,6 +7,7 @@ import { config } from "./config.js";
 import { log, logError, serializeError } from "./logger.js";
 import type { ProgressCallback, ProgressPlanItem, ProgressUpdate } from "./progress.js";
 import { steeringInstruction } from "./templates.js";
+import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
 import { cleanThreadTitle, errorText, formatShortDuration, formatTokens, formatTokensPerSecond, formatUtcClock, parseModel, truncate } from "./util.js";
 
 // Sent to a session whose turn was killed by an agent-service restart. The
@@ -96,6 +97,8 @@ export interface SessionMessage {
     finish?: string;
     providerID?: string;
     modelID?: string;
+    model?: { providerID: string; modelID: string; variant?: string };
+    variant?: string;
     error?: unknown;
     tokens?: Record<string, any>;
     cost?: number;
@@ -304,6 +307,7 @@ export class OpenCodeHarness {
   // gone, and after it returns there is nothing running to steer.
   private readonly livePromptRequests = new Set<string>();
   private readonly promptControllers = new Map<string, AbortController>();
+  private readonly stepBudgets = new Map<string, TurnStepBudget>();
 
   // Live quota blocks by provider (free-tier exhaustion until the scheduled
   // retry/reset). Pruned lazily; a completed turn clears its provider's entry.
@@ -327,7 +331,7 @@ export class OpenCodeHarness {
   }
 
   private async fetchProviderList(): Promise<any[]> {
-    const result = await this.client.provider.list({} as any);
+    const result = await this.client.provider.list({} as any, { signal: AbortSignal.timeout(10_000) });
     const payload = unwrap<any>(result, "OpenCode provider list");
     const providers = payload?.all;
     if (!Array.isArray(providers)) throw new Error("OpenCode provider list returned an unexpected payload");
@@ -386,8 +390,10 @@ export class OpenCodeHarness {
       if (typeof provider?.id !== "string" || provider.id !== providerID) continue;
       const models = provider?.models;
       if (!models || typeof models !== "object") continue;
-      const model = (models as Record<string, unknown>)[modelID] as { attachment?: boolean } | undefined;
+      const model = (models as Record<string, any>)[modelID];
       if (!model) return undefined;
+      if (typeof model.capabilities?.input?.image === "boolean") return model.capabilities.input.image;
+      if (Array.isArray(model.modalities?.input)) return model.modalities.input.includes("image");
       return model.attachment === true;
     }
     return undefined;
@@ -591,6 +597,7 @@ export class OpenCodeHarness {
     // with the request, so nothing depends on the (expiring) Discord CDN URL.
     const body: any = {
       agent,
+      tools: agent === "titler" ? { "*": false } : await this.browserTools(parsed),
       parts: [
         { type: "text", text },
         ...(images?.length
@@ -649,6 +656,9 @@ export class OpenCodeHarness {
     // here means a mark appearing during the reconcile below unambiguously
     // means "this turn was deliberately stopped".
     this.deliberateAborts.delete(sessionId);
+    const budget = agent === "sitebuilder"
+      ? this.watchStepBudget(directory, sessionId, snapshot.startedAt, onProgress, snapshot.ids, () => this.livePromptRequests.has(sessionId))
+      : undefined;
     try {
       for (;;) {
         try {
@@ -733,6 +743,8 @@ export class OpenCodeHarness {
         }
       }
     } finally {
+      await budget?.stop();
+      if (this.stepBudgets.get(sessionId) === budget) this.stepBudgets.delete(sessionId);
       if (stream) await stopStream(stream);
     }
   }
@@ -762,6 +774,50 @@ export class OpenCodeHarness {
       log("warn", "opencode.steer_failed", { sessionId, error: serializeError(error) });
       return false;
     }
+  }
+
+  /** Unknown capabilities are treated as text-only. Permission rules hide all MCP tools, not just screenshots. */
+  private async browserTools(model?: { providerID: string; modelID: string }): Promise<Record<string, boolean>> {
+    return { "playwright_*": Boolean(model && await this.modelAcceptsAttachments(model.providerID, model.modelID)) };
+  }
+
+  private watchStepBudget(
+    directory: string, sessionId: string, since: number, onProgress?: ProgressCallback,
+    baseline?: ReadonlySet<string>, isActive: () => boolean = () => true,
+  ): TurnStepBudget {
+    const budget = new TurnStepBudget({
+      limit: config.opencodeMaxSteps, since, baseline,
+      read: () => this.listSessionMessages(directory, sessionId, Math.max(200, config.opencodeMaxSteps + 50)),
+      onError: (error) => log("warn", "opencode.step_budget_watch_failed", { sessionId, error: serializeError(error) }),
+      send: async (steps, signal) => {
+        const deadline = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
+        if (!isActive() || signal.aborted || this.deliberateAborts.has(sessionId) || !await this.isBusy(directory, sessionId, deadline)) return false;
+        // Keep the actual running model (including failover) and its reasoning setting.
+        const messages = await this.listSessionMessages(directory, sessionId, 20, deadline);
+        const user = [...messages].reverse().find((message) => message.info?.role === "user")?.info;
+        const latest = [...messages].reverse().find((message) => message.info?.role === "assistant");
+        const assistant = latest?.info;
+        if (assistant?.finish && !["tool-calls", "unknown"].includes(assistant.finish)
+          && !latest?.parts?.some((part) => part.type === "tool")) return false;
+        const model = assistant?.providerID && assistant.modelID
+          ? { providerID: assistant.providerID, modelID: assistant.modelID } : user?.model;
+        const tools = await this.browserTools(model);
+        if (signal.aborted || !isActive() || this.deliberateAborts.has(sessionId)) return false;
+        if (!await this.isBusy(directory, sessionId, deadline) || signal.aborted) return false;
+        const result = await this.client.session.promptAsync({
+          sessionID: sessionId, directory, agent: "sitebuilder", model,
+          variant: assistant?.variant ?? user?.model?.variant ?? user?.variant,
+          tools,
+          parts: [{ type: "text", text: finishUpInstruction(steps, config.opencodeMaxSteps) }],
+        } as any, { signal: deadline });
+        unwrap(result, "OpenCode force finish steering");
+        log("warn", "opencode.step_budget_steered", { sessionId, steps, limit: config.opencodeMaxSteps });
+        emit(onProgress, { text: `🏁 Near the step limit (${steps}/${config.opencodeMaxSteps}) — told the agent to finish up` });
+        return true;
+      },
+    });
+    this.stepBudgets.set(sessionId, budget);
+    return budget;
   }
 
   async listMessages(directory: string, sessionId: string, limit = 100): Promise<SessionMessage[]> {
@@ -827,15 +883,17 @@ export class OpenCodeHarness {
     return undefined;
   }
 
-  async isBusy(directory: string, sessionId: string): Promise<boolean> {
-    const statuses = await this.sessionStatus(directory);
+  async isBusy(directory: string, sessionId: string, signal?: AbortSignal): Promise<boolean> {
+    const statuses = await this.sessionStatus(directory, signal);
     const type = (statuses[sessionId] as any)?.type;
     return type === "busy" || type === "retry";
   }
 
   /** Reattach to an existing session's event feed after the bot process restarted. */
-  async watchExistingTurn(directory: string, sessionId: string, onProgress?: ProgressCallback): Promise<() => Promise<void>> {
+  async watchExistingTurn(directory: string, sessionId: string, onProgress?: ProgressCallback, startedAt = Date.now()): Promise<() => Promise<void>> {
     let stopped = false;
+    const budget = this.watchStepBudget(directory, sessionId, startedAt, onProgress, undefined, () => !stopped);
+    void budget.refresh();
     let stream: EventStreamHandle | undefined;
     // One TurnState for the whole watch, so child sessions learned before a
     // drop stay known after reconnecting (each event only announces itself
@@ -873,6 +931,8 @@ export class OpenCodeHarness {
     })();
     return async () => {
       stopped = true;
+      await budget.stop();
+      if (this.stepBudgets.get(sessionId) === budget) this.stepBudgets.delete(sessionId);
       stream?.stop();
       await watcher;
     };
@@ -1224,6 +1284,7 @@ export class OpenCodeHarness {
       directory,
       agent: body.agent as string | undefined,
       model: body.model as { providerID: string; modelID: string } | undefined,
+      tools: body.tools as Record<string, boolean> | undefined,
       variant: body.variant as string | undefined,
       parts: body.parts as Array<{ type: "text"; text: string } | { type: "file"; mime: string; url: string; filename?: string }>,
     } as any, { signal: controller.signal }); }
@@ -1295,19 +1356,19 @@ export class OpenCodeHarness {
     });
   }
 
-  private async listSessionMessages(directory: string, sessionId: string, limit: number): Promise<SessionMessage[]> {
+  private async listSessionMessages(directory: string, sessionId: string, limit: number, signal?: AbortSignal): Promise<SessionMessage[]> {
     const result = await this.client.session.messages({
       sessionID: sessionId,
       directory,
       limit,
-    } as any);
+    } as any, { signal: signal ?? AbortSignal.timeout(10_000) });
     const data = unwrap<SessionMessage[]>(result, "OpenCode message history");
     if (!Array.isArray(data)) throw new Error("OpenCode message history returned an unexpected payload");
     return data;
   }
 
-  private async sessionStatus(directory: string): Promise<Record<string, unknown>> {
-    const result = await this.client.session.status({ directory } as any);
+  private async sessionStatus(directory: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const result = await this.client.session.status({ directory } as any, { signal: signal ?? AbortSignal.timeout(10_000) });
     const data = unwrap<Record<string, unknown>>(result, "OpenCode session status");
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("OpenCode session status returned an unexpected payload");
     return data;
@@ -1320,6 +1381,7 @@ export class OpenCodeHarness {
     // await resumes. Marking afterwards let that rejection race past and the
     // reconcile path then resurrected the very turn being stopped.
     this.deliberateAborts.add(sessionId);
+    await this.stepBudgets.get(sessionId)?.stop();
     try {
       const result = await this.client.session.abort({
         sessionID: sessionId,
@@ -1445,6 +1507,7 @@ export class OpenCodeHarness {
   async deleteSessionsInDirectory(directory: string, knownSessionId: string): Promise<void> {
     if (knownSessionId) {
       this.deliberateAborts.add(knownSessionId);
+      await this.stepBudgets.get(knownSessionId)?.stop();
       this.promptControllers.get(knownSessionId)?.abort(new Error("Project deleted"));
     }
     const all = await this.listAllSessions();
@@ -1469,6 +1532,7 @@ export class OpenCodeHarness {
     }
     for (const session of targets.values()) {
       this.deliberateAborts.add(session.id);
+      await this.stepBudgets.get(session.id)?.stop();
       this.promptControllers.get(session.id)?.abort(new Error("Project deleted"));
       // Session abort also releases pending tools/questions. Delete cascades
       // persisted messages and child sessions on the agent service.
@@ -1735,6 +1799,7 @@ export class OpenCodeHarness {
       if (part.id) turn.finishedParts.add(part.id);
       const step = stepFigures(part);
       accumulateStep(turn, step, part.messageID);
+      if (part.messageID) this.stepBudgets.get(sessionId)?.observe(String(part.messageID));
       turn.liveTokenSamples.length = 0;
       // Every step re-processes the full context, so billed input accumulates
       // per step while the context display only wants the newest window size.

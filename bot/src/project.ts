@@ -1008,7 +1008,7 @@ export class ProjectService {
       emit(onProgress, "🔌 Waiting for the agent service to be reachable");
       await this.waitForAgentService();
       emit(onProgress, "⏳ Waiting for the interrupted agent turn to finish");
-      const stopWatching = await this.opencode.watchExistingTurn(project.workspacePath, project.sessionId, onProgress);
+      const stopWatching = await this.opencode.watchExistingTurn(project.workspacePath, project.sessionId, onProgress, Date.parse(pending.startedAt));
       try {
         await this.waitForIdleTurn(project.workspacePath, project.sessionId, onProgress);
       } finally {

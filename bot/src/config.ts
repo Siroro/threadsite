@@ -64,6 +64,14 @@ export const config = {
   opencodeUsername: env("OPENCODE_SERVER_USERNAME", "opencode"),
   opencodePassword: env("OPENCODE_SERVER_PASSWORD"),
   defaultModel: env("OPENCODE_DEFAULT_MODEL"),
+  opencodeMaxSteps: (() => {
+    const raw = env("OPENCODE_MAX_STEPS", "200");
+    const value = Number(raw);
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value <= 0) {
+      throw new Error("OPENCODE_MAX_STEPS must be a positive integer (default: 200).");
+    }
+    return value;
+  })(),
   opencodeReconcileTimeoutMs: intEnv("OPENCODE_RECONCILE_TIMEOUT_MS", 30 * 60 * 1000),
   opencodeReconcilePollMs: intEnv("OPENCODE_RECONCILE_POLL_MS", 1500),
   // A provider retry whose next attempt is scheduled further out than this is
