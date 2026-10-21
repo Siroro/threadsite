@@ -593,14 +593,19 @@ Run `npm --prefix bot test` for production import containment, restart-safe queu
 
 ## Updating pinned versions
 
-To deploy updates on the server, one command pulls from GitHub, safely resets tracked files (`.env`, `secrets/`, and `data/` are untracked and untouched — never run `git clean` in this repo), and rebuilds/recreates only the containers whose code changed:
+The one server command is the root-level `start.sh`: it pulls the latest code from GitHub, safely resets tracked files (`.env`, `secrets/`, and `data/` are untracked and untouched — never run `git clean` in this repo), rebuilds and recreates only the containers whose code changed, brings the stack up, and waits for services to report healthy. It also covers day-2 operations:
 
 ```bash
-scripts/deploy.sh              # track origin/main
-scripts/deploy.sh release/v2.5 # or a specific branch
+./start.sh                 # update to latest main, rebuild, up, wait healthy
+./start.sh release/v2.5    # same, tracking a branch
+./start.sh --no-update     # start the current code without touching git
+./start.sh status          # service health overview
+./start.sh logs [service]  # follow logs (default: bot)
+./start.sh restart [svc]   # restart one service or the whole stack
+./start.sh stop            # stop the stack (containers, data and .env kept)
 ```
 
-The project intentionally pins the agent platform/SDK versions together in `opencode/Dockerfile` and `bot/package.json`. When updating one, update the other and rebuild:
+The finer-grained `scripts/deploy.sh [branch]` does just the update+rebuild part. The project intentionally pins the agent platform/SDK versions together in `opencode/Dockerfile` and `bot/package.json`. When updating one, update the other and rebuild:
 
 ```bash
 docker compose build --pull opencode bot
