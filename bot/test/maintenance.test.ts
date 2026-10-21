@@ -1,26 +1,16 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { after, test } from "node:test";
+import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import type { REST } from "discord.js";
 import type { ProjectRecord } from "../src/types.js";
+import { testRootSetup, trackStore } from "./fixtures/root.js";
 
-const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-maintenance-"));
-process.env.DISCORD_BOT_TOKEN = "test";
-process.env.DISCORD_APPLICATION_ID = "test";
-process.env.WORKSPACE_ROOT = path.join(root, "workspaces");
-process.env.PUBLISH_ROOT = path.join(root, "published");
-process.env.LOG_FILE = path.join(root, "test.log");
+const root = testRootSetup("maintenance");
 const { config } = await import("../src/config.js");
 const { Store } = await import("../src/store.js");
 const { selectProjects, checkedRemovalPath, removeDiscordThread, removeProjects } = await import("../src/maintenance.js");
-const stores: InstanceType<typeof Store>[] = [];
-after(async () => {
-  for (const store of stores) store.close();
-  await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-});
 
 function record(threadId: string, patch: Partial<ProjectRecord> = {}): ProjectRecord {
   return { threadId, guildId: "100", parentChannelId: "200", displayName: `Game ${threadId}`, repoName: `site-game-${threadId}`,
@@ -29,8 +19,7 @@ function record(threadId: string, patch: Partial<ProjectRecord> = {}): ProjectRe
 }
 
 async function fixture(name: string, projects: ProjectRecord[]) {
-  const store = await Store.open(path.join(root, `${name}.db`));
-  stores.push(store);
+  const store = trackStore(await Store.open(path.join(root, `${name}.db`)));
   await store.setModel("saved-model");
   for (const project of projects) {
     await store.putProject(project);

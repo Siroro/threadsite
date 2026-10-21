@@ -5,7 +5,7 @@ import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
 import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, turnRevertTarget, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
 import { ensureMultiplayerFiles, multiplayerContext, removeMultiplayerFiles } from "./multiplayer.js";
-import { OpenCodeHarness, addUsage, errorUsage, reconcileUsage, usageFromMessages, type PromptImage, type PromptResult, type TurnUsage } from "./opencode.js";
+import { OpenCodeHarness, addUsage, errorUsage, isTerminalAssistant, reconcileUsage, usageFromMessages, type PromptImage, type PromptResult, type TurnUsage } from "./opencode.js";
 import { PROJECT_CARD_VERSION } from "./project-card.js";
 import { publishIndex, publishSite, publishSiteRedirects, siteUrl, validateSite } from "./publish.js";
 import { buildSite, GENERATED_GITIGNORE } from "./build.js";
@@ -25,6 +25,20 @@ import { assertExclusiveResources, projectAccounts, projectRepos, removalPaths }
 import { deleteRelayGame } from "./relay-cleanup.js";
 import { pushRenameMetadata } from "./git.js";
 import { fallbackProjectName, needsProjectNaming, projectName } from "./naming.js";
+
+/**
+ * The model-written preview of a project: one line on what it is, one line on
+ * what the last change added, one line on how to play it. Shown on the play
+ * card beside the screenshot.
+ */
+export interface ProjectPreview {
+  /** What the project is and what a visitor gets to do. */
+  pitch: string;
+  /** What the latest turn added, when it added something a visitor can see. */
+  added?: string;
+  /** How to play it, or what to try first. */
+  play?: string;
+}
 
 export interface MutationResult {
   project: ProjectRecord;
@@ -46,8 +60,10 @@ export interface MutationResult {
   usage?: TurnUsage;
   /** PNG screenshot of the finished result from browser QA, when captured. */
   screenshot?: Uint8Array;
-  /** Advisory findings; browser QA never blocks an otherwise valid build. */
-  browserQaWarnings?: string[];
+  /** Model-written preview of the project as it stands, for the play card. */
+  preview?: ProjectPreview;
+  /** Confirmed browser-QA findings; browser QA never blocks an otherwise valid build. */
+  browserQaFindings?: string[];
   /** Validation errors that kept the turn unpublished; the work is committed. */
   validationError?: string;
   /** Commit/publish pipeline failure after the agent finished; see commit for how far it got. */
@@ -687,17 +703,15 @@ export class ProjectService {
           agentSummary = result.text;
           usage = result.usage;
         } catch (error) {
-          if (!/404|not found|unknown session/i.test(errorText(error))) throw error;
           // The session was replaced out from under this turn (e.g. /site-admin
           // reset deleted it) — recreating here would resurrect a turn the
           // reset just stopped.
-          if (this.store.getProject(threadId)?.pendingDeletion || this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;
           emit(onProgress, "♻️ Recreating a missing agent session");
-          const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
-          project = await this.store.patchProject(threadId, { sessionId });
-          const result = await this.promptWithFailover(project.workspacePath, sessionId, instruction, onProgress, turnImages, requestedModel);
-          agentSummary = result.text;
-          usage = result.usage;
+          const retry = await this.repromptOnVanishedSession(threadId, project!, error, instruction,
+            (sessionId) => this.promptWithFailover(project!.workspacePath, sessionId, instruction, onProgress, turnImages, requestedModel));
+          project = retry.project;
+          agentSummary = retry.text;
+          usage = retry.usage;
         }
         stopChangesTimer();
         // Capture the last edits even when the turn finished between 3s polls.
@@ -735,48 +749,7 @@ export class ProjectService {
       });
       return result;
     } catch (error) {
-      // A failed run still spent its tokens: ledger whatever was observed —
-      // the hoisted total plus anything the failing prompt attached to the
-      // error itself — before marking the project errored.
-      await this.recordTurnUsage(project, pendingMarker, addUsage(usage, errorUsage(error)), true, Date.now() - turnStartedAt);
-      const stoppedByUser = this.stopRequested.delete(threadId);
-      // The turn failed before it could claim the persisted batch: release it
-      // now, or the acknowledged messages stay in pendingQueue and replay (or
-      // are reported by boot recovery) after a restart that may be hours away.
-      if (!queueClaimed && queuedStatusIds.length) {
-        await this.store.dropQueuedRequests(threadId, queuedStatusIds).catch((dropError) => {
-          log("warn", "project.queue_release_failed", { threadId, error: errorText(dropError) });
-        });
-      }
-      // Touch the project record only while this turn still owns the
-      // in-flight marker. A hard reset (or a successor released by one) can
-      // swap the session and pendingTurn while this failure is still landing:
-      // clearing the replacement's marker would silently lose its crash
-      // recovery, and stamping error/lastTurnAt would overwrite its state.
-      const owning = this.store.getProject(threadId);
-      if (owning && !owning.pendingDeletion && pendingTurnMatches(owning.pendingTurn, pendingMarker)) {
-        await this.store.patchProject(threadId, stoppedByUser
-          ? {
-            // A user stop is not a project failure: keep the prior status and
-            // error — except a half-built initial project, which never shipped.
-            ...(owning.status === "creating" ? { status: "error" as const, lastError: "Initial build stopped at the user's request" } : {}),
-            pendingTurn: undefined,
-            lastTurnAt: new Date().toISOString(),
-          }
-          : {
-            status: "error" as const,
-            lastError: truncate(errorText(error), 1000),
-            pendingTurn: undefined,
-            lastTurnAt: new Date().toISOString(),
-          });
-      } else if (queueClaimed) {
-        // The turn did claim the marker, so a mismatch means a reset or a
-        // successor replaced it while this turn was failing.
-        log("warn", "project.mutation_superseded", { threadId, initial });
-      } else {
-        // Failed before the turn claimed anything; there is no record to update.
-        log("warn", "project.mutation_failed_before_start", { threadId, initial });
-      }
+      const stoppedByUser = await this.settleFailedTurn(threadId, project, pendingMarker, usage, error, turnStartedAt, queueClaimed, queuedStatusIds, "project.mutation_superseded");
       logError("project.mutation_failed", error, { threadId, initial, model: this.store.getModel() || "default", stoppedByUser });
       throw stoppedByUser
         ? new TurnStoppedError("The update was stopped at the user's request.", { cause: error })
@@ -838,7 +811,7 @@ export class ProjectService {
     // result so the thread sees what shipped (also after a repair round-trip).
     let qaScreenshot: Uint8Array | undefined;
     let qaFindings: ProjectRecord["browserQaFindings"];
-    let qaWarnings: string[] = [];
+    let qaFindingsList: string[] = [];
     // The static build step of deployment: bundle site/src/ TypeScript into
     // site/js/ (with code-framed bundler errors an agent can act on), then
     // validate the resulting tree, then collect advisory browser diagnostics.
@@ -853,11 +826,11 @@ export class ProjectService {
       const validated = await validateSite(siteDir);
       const qa = await this.runBrowserQa(project, input.onProgress);
       qaScreenshot = qa?.screenshotPng;
-      qaWarnings = qa ? [...qa.hardErrors, ...qa.softNotes] : [];
-      if (qa) qaFindings = { checkedAt: new Date().toISOString(), errors: qa.hardErrors, notes: qa.softNotes };
-      if (qaWarnings.length) {
+      qaFindingsList = qa ? [...qa.findings] : [];
+      if (qa) qaFindings = { checkedAt: new Date().toISOString(), findings: qaFindingsList };
+      if (qaFindingsList.length) {
         log("warn", "browserqa.advisory_findings", { threadId, ...qaFindings });
-        emit(input.onProgress, `⚠️ Browser QA warning: ${truncate(qaWarnings[0], 240)} — continuing publication; details saved for the next update`);
+        emit(input.onProgress, `⚠️ Browser QA: ${truncate(qaFindingsList[0], 240)} — continuing publication; details saved for the next update`);
       }
       return validated;
     };
@@ -948,6 +921,14 @@ export class ProjectService {
     // workspace. That is a normal outcome, not a delivery failure — leave the
     // project's status and lastError exactly as they were.
     const noChanges = !commitStats && !deliveryError;
+    // The play card shows what the project is now: a short, model-written
+    // preview of the project and what this turn added. It is advisory — a
+    // preview that cannot be written costs the card its blurb, nothing else.
+    let preview: ProjectPreview | undefined;
+    if (published) {
+      emit(input.onProgress, "📝 Writing the preview for the finished project");
+      preview = await this.describeProject(project, agentSummary, input.projectKind);
+    }
     // Flush billing before clearing the durable recovery marker. A crash in
     // the delivery tail can revise this same turn, never add a second one.
     usage = await this.recordTurnUsage(project, input.pendingTurn, usage,
@@ -972,6 +953,7 @@ export class ProjectService {
         // origin/main's tip is exactly this turn's commit.
         ...(commitStats ? { lastSeenCommit: await currentHead(workspacePath) } : {}),
         ...(qaFindings ? { browserQaFindings: qaFindings } : {}),
+        ...(preview ? { preview } : {}),
         pendingTurn: undefined,
         // Record when the session was last used and how full its context window
         // ended; the next turn's lifecycle check reads both.
@@ -1025,7 +1007,9 @@ export class ProjectService {
       usage,
       durationMs: Date.now() - input.startedAt,
       ...(qaScreenshot ? { screenshot: qaScreenshot } : {}),
-      ...(qaWarnings.length ? { browserQaWarnings: qaWarnings } : {}),
+      ...(qaFindingsList.length ? { browserQaFindings: qaFindingsList } : {}),
+      // A turn that changed nothing keeps the preview the last change wrote.
+      ...(preview ?? project.preview ? { preview: preview ?? project.preview } : {}),
       ...(commitStats
         ? { commit: commitStats.commit, commitFiles: commitStats.files, additions: commitStats.additions, deletions: commitStats.deletions }
         : { commitFiles: 0, additions: 0, deletions: 0 }),
@@ -1090,17 +1074,16 @@ export class ProjectService {
           agentSummary = result.text;
           usage = result.usage;
         } catch (error) {
-          if (!/404|not found|unknown session/i.test(errorText(error))) throw error;
-          if (this.store.getProject(threadId)?.pendingDeletion || this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;
           log("warn", "project.recovery_session_lost", { threadId, sessionId: project.sessionId });
-          const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
-          project = await this.store.patchProject(threadId, { sessionId });
+          emit(onProgress, "♻️ Recreating a missing agent session");
           const instruction = pending.initial
             ? initialProjectInstruction(projectKind, pending.prompt, notes, project.multiplayerMode)
             : mutationInstruction(projectKind, pending.prompt, notes, project.multiplayerMode);
-          const result = await this.recoveryPrompt(project.workspacePath, sessionId, instruction, onProgress, threadId, pending.images);
-          agentSummary = result.text;
-          usage = result.usage;
+          const retry = await this.repromptOnVanishedSession(threadId, project!, error, instruction,
+            (sessionId) => this.recoveryPrompt(project!.workspacePath, sessionId, instruction, onProgress, threadId, pending.images));
+          project = retry.project;
+          agentSummary = retry.text;
+          usage = retry.usage;
         }
       }
       // Agent phase over: recovery's delivery tail holds the queue the same
@@ -1122,28 +1105,7 @@ export class ProjectService {
       log("info", "project.recovery_completed", { threadId, commit: result.commit, published: !result.validationError && !result.deliveryError });
       return result;
     } catch (error) {
-      await this.recordTurnUsage(project, pending, addUsage(usage, errorUsage(error)), true, Date.now() - turnStartedAt);
-      const stoppedByUser = this.stopRequested.delete(threadId);
-      // Same ownership guard as mutate(): a hard reset may have swapped the
-      // session and marker while this recovery was in flight, and the
-      // replacement's crash-recovery marker must survive this failure.
-      const owning = this.store.getProject(threadId);
-      if (owning && !owning.pendingDeletion && pendingTurnMatches(owning.pendingTurn, pending)) {
-        await this.store.patchProject(threadId, stoppedByUser
-          ? {
-            ...(owning.status === "creating" ? { status: "error" as const, lastError: "Initial build stopped at the user's request" } : {}),
-            pendingTurn: undefined,
-            lastTurnAt: new Date().toISOString(),
-          }
-          : {
-            status: "error" as const,
-            lastError: truncate(errorText(error), 1000),
-            pendingTurn: undefined,
-            lastTurnAt: new Date().toISOString(),
-          });
-      } else {
-        log("warn", "project.recovery_superseded", { threadId });
-      }
+      const stoppedByUser = await this.settleFailedTurn(threadId, project, pending, usage, error, turnStartedAt, true, [], "project.recovery_superseded");
       logError("project.recovery_failed", error, { threadId, stoppedByUser });
       throw stoppedByUser
         ? new TurnStoppedError("The recovered update was stopped at the user's request.", { cause: error })
@@ -1320,19 +1282,11 @@ export class ProjectService {
     try {
       const messages = await this.opencode.listMessages(workspacePath, sessionId, 100);
       const newest = [...messages].sort((a, b) => (b.info?.time?.created ?? 0) - (a.info?.time?.created ?? 0))[0];
-      const info = newest?.info;
-      return Boolean(
-        info?.id &&
-          info.role === "assistant" &&
-          !info.error &&
-          (!info.agent || info.agent === "sitebuilder") &&
-          info.finish &&
-          info.finish !== "tool-calls" &&
-          // An aborted finish is a killed turn, not a completed one: recovery
-          // must continue the work instead of committing the partials.
-          info.finish !== "aborted" &&
-          (info.time?.completed ?? 0) > since - 2_000,
-      );
+      return isTerminalAssistant(newest?.info, { since, agent: "sitebuilder" })
+        // An errored message is terminal for reconcile, but not evidence of a
+        // completed turn for recovery: continue the work instead.
+        && !newest?.info?.error
+        && (newest!.info!.time?.completed ?? 0) > since - 2_000;
     } catch {
       return false;
     }
@@ -1711,20 +1665,48 @@ export class ProjectService {
   }
 
   /**
-   * Load the just-validated site in the preview browser. Page exceptions
-   * and request failures are advisory and saved for the agent's
-   * next turn; the screenshot rides the result for the thread. Browser QA
-   * never triggers a repair turn or blocks publication.
+   * Ask the model for a short preview of the project as it stands: the pitch
+   * for the play card and what this turn added. Bounded and fail-open — a
+   * preview that cannot be written costs the card its blurb, never the turn.
+   */
+  private async describeProject(project: ProjectRecord, summary: string, kind: ProjectKind): Promise<ProjectPreview | undefined> {
+    const model = this.store.getModel();
+    try {
+      const generated = await this.opencode.generatePreview(project.workspacePath, {
+        name: project.displayName,
+        kind: projectKindLabel(kind),
+        request: project.initialPrompt,
+        summary,
+        previous: project.preview?.pitch,
+      }, model);
+      await this.usageLog.record({ label: "preview", threadId: project.threadId, project: project.displayName,
+        kind, usage: generated.usage, fallbackModel: model, failed: !generated.pitch });
+      if (!generated.pitch) return undefined;
+      return { pitch: generated.pitch, added: generated.added, play: generated.play };
+    } catch (error) {
+      const usage = errorUsage(error);
+      if (usage) await this.usageLog.record({ label: "preview", threadId: project.threadId, project: project.displayName,
+        kind, usage, fallbackModel: model, failed: true });
+      log("warn", "project.preview_generation_failed", { threadId: project.threadId, model, error: serializeError(error) });
+      return undefined;
+    }
+  }
+
+  /**
+   * Load the just-validated site in the preview browser. Confirmed page
+   * defects are advisory and saved for the agent's next turn; the screenshot
+   * rides the result for the thread. Browser QA never triggers a repair turn
+   * or blocks publication.
    */
   private async runBrowserQa(project: ProjectRecord, onProgress?: ProgressCallback): Promise<BrowserQaResult | undefined> {
     if (!config.browserQaEnabled) return undefined;
-    emit(onProgress, "📷 Browser QA — loading the site in a real browser");
+    emit(onProgress, "📷 Browser QA");
     try {
       return await driveBrowserQa(project.guildId, project.threadId);
     } catch (error) {
       log("warn", "browserqa.failed", { threadId: project.threadId, error: serializeError(error) });
       const reason = `Browser check unavailable: ${truncate(errorText(error), 350)}`;
-      return { hardErrors: [], softNotes: [reason], skippedReason: reason };
+      return { findings: [], skippedReason: reason };
     }
   }
 
@@ -1877,10 +1859,113 @@ export class ProjectService {
    * workspace back to the previously published commit and reports; the pushed
    * commit stays in the repo, the live site keeps the older version.
    */
+  /**
+   * The agent session vanished mid-prompt (404/not-found). Unless a deletion
+   * is pending or the record's session was swapped meanwhile, create a fresh
+   * session against the same files and retry the prompt through `reprompt`.
+   */
+  private async repromptOnVanishedSession(
+    threadId: string, project: ProjectRecord, error: unknown,
+    instruction: string, reprompt: (sessionId: string) => Promise<{ text: string; usage: TurnUsage }>,
+  ): Promise<{ text: string; usage: TurnUsage; project: ProjectRecord }> {
+    if (!/404|not found|unknown session/i.test(errorText(error))) throw error;
+    if (this.store.getProject(threadId)?.pendingDeletion || this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;
+    const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
+    project = await this.store.patchProject(threadId, { sessionId });
+    const result = await reprompt(sessionId);
+    return { ...result, project };
+  }
+
   /** Refuse while an agent turn is live; the message names the blocked action. */
   private async assertIdle(project: ProjectRecord, action: string): Promise<void> {
     if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
       throw new Error(`A model turn is currently running in this thread. Wait for it to finish before ${action}.`);
+    }
+  }
+
+  /**
+   * Shared failure tail for mutate() and recoverTurn(): ledger the tokens the
+   * failed turn spent, then clear the in-flight marker only while this turn
+   * still owns it — a hard reset or a successor can swap the session and
+   * marker while this failure is landing. A user stop keeps the prior
+   * status/error, except a half-built initial project, which never shipped.
+   * Returns true when the failure was a user stop.
+   */
+  private async settleFailedTurn(
+    threadId: string, project: ProjectRecord, pending: ProjectRecord["pendingTurn"],
+    usage: TurnUsage | undefined, error: unknown, turnStartedAt: number,
+    queueClaimed: boolean, queuedStatusIds: readonly string[], supersededTag: string,
+  ): Promise<boolean> {
+    await this.recordTurnUsage(project, pending, addUsage(usage, errorUsage(error)), true, Date.now() - turnStartedAt);
+    const stoppedByUser = this.stopRequested.delete(threadId);
+    if (!queueClaimed && queuedStatusIds.length) {
+      // The turn failed before it could claim the persisted batch: release it
+      // now, or the acknowledged messages stay in pendingQueue and replay (or
+      // are reported by boot recovery) after a restart that may be hours away.
+      await this.store.dropQueuedRequests(threadId, queuedStatusIds).catch((dropError) => {
+        log("warn", "project.queue_release_failed", { threadId, error: errorText(dropError) });
+      });
+    }
+    const owning = this.store.getProject(threadId);
+    if (owning && !owning.pendingDeletion && pendingTurnMatches(owning.pendingTurn, pending)) {
+      await this.store.patchProject(threadId, stoppedByUser
+        ? {
+          ...(owning.status === "creating" ? { status: "error" as const, lastError: "Initial build stopped at the user's request" } : {}),
+          pendingTurn: undefined,
+          lastTurnAt: new Date().toISOString(),
+        }
+        : {
+          status: "error" as const,
+          lastError: truncate(errorText(error), 1000),
+          pendingTurn: undefined,
+          lastTurnAt: new Date().toISOString(),
+        });
+    } else if (queueClaimed) {
+      log("warn", supersededTag, { threadId });
+    }
+    return stoppedByUser;
+  }
+
+  /**
+   * Shared build/validate/publish tail: rebuild the harness bundle, validate,
+   * publish, and stamp the ready state. On validation failure the workspace
+   * rolls back to previousHead and the previously published site stays live.
+   */
+  private async publishValidatedBuild(
+    threadId: string, project: ProjectRecord, commit: string,
+    options: { failedLabel: string; previousHead?: string; logTag: string; logExtra?: Record<string, unknown>; onProgress?: ProgressCallback },
+  ): Promise<{ project: ProjectRecord; validationError?: string }> {
+    const siteDir = safeChild(project.workspacePath, "site");
+    try {
+      emit(options.onProgress, "⚙️ Rebuilding the TypeScript bundle");
+      await this.ensureHarnessBuildInputs(project);
+      await buildSite(project.workspacePath);
+      emit(options.onProgress, "🧪 Validating rebuilt runtime files");
+      await validateSite(siteDir);
+      emit(options.onProgress, "🚀 Republishing to Apache");
+      await publishSite(siteDir, project.siteSlug);
+      const updated = await this.store.patchProject(threadId, {
+        status: "ready",
+        lastError: undefined,
+        lastCommit: commit.slice(0, 10),
+        lastTurnBaseCommit: undefined,
+        lastSeenCommit: commit,
+        lastTurnAt: new Date().toISOString(),
+      });
+      await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
+      return { project: updated };
+    } catch (error) {
+      if (options.previousHead) {
+        await resetToCommit(project.workspacePath, options.previousHead).catch(() => undefined);
+      }
+      const validationError = errorText(error);
+      await this.store.patchProject(threadId, {
+        status: "error",
+        lastError: truncate(`${options.failedLabel} failed validation: ${validationError}`, 1000),
+        lastSeenCommit: commit,
+      });
+      log("warn", options.logTag, { threadId, commit: commit.slice(0, 10), ...options.logExtra, error: truncate(validationError, 400) });
+      return { project, validationError };
     }
   }
 
@@ -1892,39 +1977,16 @@ export class ProjectService {
     const previousHead = await currentHead(project.workspacePath).catch(() => undefined);
     const { commit } = await syncToRemote(project.workspacePath, this.forgejo);
     const short = commit.slice(0, 10);
-    const siteDir = safeChild(project.workspacePath, "site");
-    try {
-      await this.ensureHarnessBuildInputs(project);
-      await buildSite(project.workspacePath);
-      await validateSite(siteDir);
-      await publishSite(siteDir, project.siteSlug);
-      project = await this.store.patchProject(threadId, {
-        status: "ready",
-        lastError: undefined,
-        lastCommit: short,
-        lastTurnBaseCommit: undefined,
-        lastSeenCommit: commit,
-        lastTurnAt: new Date().toISOString(),
-      });
-      await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
-      log("info", "project.external_push_published", { threadId, commit: short });
-      return { project, commit: short };
-    } catch (error) {
-      // The pushed code does not validate: roll the workspace back to the last
-      // good commit so the next agent turn starts from the published state.
-      // The pushed commit stays in the repo; the live site keeps the older version.
-      if (previousHead) {
-        await resetToCommit(project.workspacePath, previousHead).catch(() => undefined);
-      }
-      const validationError = errorText(error);
-      await this.store.patchProject(threadId, {
-        status: "error",
-        lastError: truncate(`External push ${short} failed validation: ${validationError}`, 1000),
-        lastSeenCommit: commit,
-      });
-      log("warn", "project.external_push_validation_failed", { threadId, commit: short, error: truncate(validationError, 400) });
-      return { project, commit: short, validationError };
-    }
+    // The pushed code does not validate: roll the workspace back to the last
+    // good commit so the next agent turn starts from the published state.
+    // The pushed commit stays in the repo; the live site keeps the older version.
+    const { project: updated, validationError } = await this.publishValidatedBuild(threadId, project, commit, {
+      failedLabel: `External push ${short}`,
+      previousHead,
+      logTag: "project.external_push_validation_failed",
+    });
+    if (!validationError) log("info", "project.external_push_published", { threadId, commit: short });
+    return { project: updated, commit: short, validationError };
   }
 
   /**
@@ -1970,65 +2032,36 @@ export class ProjectService {
     const { commit, ahead, behind } = await syncWithRemote(project.workspacePath, this.forgejo);
     const short = commit.slice(0, 10);
     if (behind === 0 && ahead === 0) {
-      emit(onProgress, "✅ Already up to date — republishing the checked-in tree");
+      emit(onProgress, "✅ Already up to date");
     } else if (ahead > 0 && behind > 0) {
       emit(onProgress, `🔀 Rebased ${ahead} local commit${ahead === 1 ? "" : "s"} onto ${behind} pulled commit${behind === 1 ? "" : "s"}`);
     } else if (behind > 0) {
       emit(onProgress, `📥 Adopted ${behind} commit${behind === 1 ? "" : "s"} from the repository`);
     }
 
-    const siteDir = safeChild(project.workspacePath, "site");
+    // The synced tree does not validate: keep the live site on the last good
+    // commit and roll the workspace back to it, like publishExternalPush.
     const previousHead = await commitHistory(project.workspacePath).then((h) => h.current).catch(() => undefined);
-    try {
-      emit(onProgress, "⚙️ Rebuilding the TypeScript bundle");
-      await this.ensureHarnessBuildInputs(project);
-      await buildSite(project.workspacePath);
-      emit(onProgress, "🧪 Validating rebuilt runtime files");
-      await validateSite(siteDir);
-      emit(onProgress, "🚀 Republishing to Apache");
-      await publishSite(siteDir, project.siteSlug);
-      project = await this.store.patchProject(threadId, {
-        status: "ready",
-        lastError: undefined,
-        lastCommit: short,
-        lastTurnBaseCommit: undefined,
-        lastSeenCommit: commit,
-        lastTurnAt: new Date().toISOString(),
-      });
-      await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
-      log("info", "project.synced", { threadId, commit: short, ahead, behind });
-      return { project, commit: short, ahead, behind };
-    } catch (error) {
-      // The synced tree does not validate: keep the live site on the last good
-      // commit and roll the workspace back to it, like publishExternalPush.
-      if (previousHead) {
-        await resetToCommit(project.workspacePath, previousHead).catch(() => undefined);
-      }
-      const validationError = errorText(error);
-      await this.store.patchProject(threadId, {
-        status: "error",
-        lastError: truncate(`Sync to ${short} failed validation: ${validationError}`, 1000),
-        lastSeenCommit: commit,
-      });
-      log("warn", "project.sync_validation_failed", { threadId, commit: short, error: truncate(validationError, 400) });
-      return { project, commit: short, ahead, behind, validationError };
-    }
+    const { project: updated, validationError } = await this.publishValidatedBuild(threadId, project, commit, {
+      failedLabel: `Sync to ${short}`,
+      previousHead,
+      logTag: "project.sync_validation_failed",
+      onProgress,
+    });
+    if (!validationError) log("info", "project.synced", { threadId, commit: short, ahead, behind });
+    return { project: updated, commit: short, ahead, behind, validationError };
   }
 
-  async republish(threadId: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {
+  async republish(threadId: string): Promise<ProjectRecord> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
-    const siteDir = safeChild(project.workspacePath, "site");
-    emit(onProgress, "⚙️ Rebuilding the TypeScript bundle");
-    await this.ensureHarnessBuildInputs(project);
-    await buildSite(project.workspacePath);
-    emit(onProgress, "🧪 Validating rebuilt runtime files");
-    await validateSite(siteDir);
-    emit(onProgress, "🚀 Republishing to Apache");
-    await publishSite(siteDir, project.siteSlug);
-    project = await this.store.patchProject(threadId, { status: "ready", lastError: undefined });
-    await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
-    return project;
+    const commit = (await currentHead(project.workspacePath).catch(() => undefined)) ?? project.lastCommit ?? "";
+    // republish never rolls back: the tree is the last accepted (or pushed)
+    // state and the previous publication stays live on any failure.
+    return (await this.publishValidatedBuild(threadId, project, commit, {
+      failedLabel: "Republish",
+      logTag: "project.republish_failed",
+    })).project;
   }
 
   async compact(threadId: string): Promise<{ model: string }> {

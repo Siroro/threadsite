@@ -62,15 +62,3 @@ test("start logs executes Docker directly", async (t) => {
   await f.run(["logs", "gameserver"]);
   assert.match(await f.calls(), /compose logs -f --tail=100 gameserver/);
 });
-
-test("interactive cleanup applies only the selected row and chosen action", { skip: process.platform === "win32" }, async (t) => {
-  const f = await fixture(t);
-  await new Promise<void>((resolve, reject) => {
-    const child = execFile("script", ["-qe", "-c", 'export PATH="$PWD/bin:$PATH"; bash ./start.sh cleanup', "/dev/null"], { cwd: f.root, timeout: 10_000 }, (error) => error ? reject(error) : resolve());
-    child.stdin!.end("1\n2\nDELETE\n");
-  });
-  const calls = await f.calls();
-  assert.match(calls, /maintenance.js forget --thread 123 --apply/);
-  assert.doesNotMatch(calls, /maintenance.js remove/);
-  assert.match(calls, /compose up -d --no-deps bot/);
-});

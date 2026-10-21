@@ -124,8 +124,14 @@ test("game settings name the dimension, engine and chosen multiplayer architectu
 
 test("the pinned card shows advisory QA status and keeps long requests within field limits", () => {
   const card = embed(renderProjectCard({ project: record({ initialPrompt: "request ".repeat(1000), browserQaFindings: {
-    checkedAt: new Date().toISOString(), errors: ["runtime finding"], notes: ["preview unavailable"],
+    checkedAt: new Date().toISOString(), findings: ["runtime finding", "missing asset"],
   } }) }));
   assert.match(card.fields!.find((field) => field.name === "Browser QA")!.value, /Advisory · 2 findings · checked <t:\d+:R>/);
   assert.ok(card.fields!.every((field) => field.value.length <= 1024));
+  // Legacy records stored an error list next to warnings; only the errors
+  // were findings, so the card counts one finding for them.
+  const legacy = embed(renderProjectCard({ project: record({ browserQaFindings: {
+    checkedAt: new Date().toISOString(), errors: ["runtime finding"], notes: ["preview unavailable"],
+  } }) }));
+  assert.match(legacy.fields!.find((field) => field.name === "Browser QA")!.value, /Advisory · 1 finding ·/);
 });

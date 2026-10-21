@@ -565,13 +565,10 @@ test("a mid-turn message steers the running session without aborting it", async 
   const prompting = harness.prompt("/w", "session", "build the arena");
   await new Promise((resolve) => setImmediate(resolve));
   // Mid-turn: the steer is submitted to the busy session and accepted.
+  // Payload construction (session/agent/preamble/user text) is covered
+  // end-to-end by reliability.test.ts's steerActiveTurn test.
   assert.equal(await harness.steer("/w", "session", "make the ice slipperier"), true);
   assert.equal(asyncCalls.length, 1);
-  const sent = asyncCalls[0] as { sessionID: string; agent: string; parts: Array<{ type: string; text: string }> };
-  assert.equal(sent.sessionID, "session");
-  assert.equal(sent.agent, "sitebuilder");
-  assert.match(sent.parts[0].text, /steering update for the CURRENT task/);
-  assert.match(sent.parts[0].text, /make the ice slipperier/);
   // The original turn request was never disturbed: it completes normally.
   releasePrompt({ parts: [{ type: "text", text: "arena built" }] });
   const result = await prompting;

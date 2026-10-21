@@ -23,7 +23,8 @@ export interface UsageEntry {
   pending?: boolean;
   /** ISO completion timestamp. */
   ts: string;
-  label: "turn" | "title";
+  /** "turn" is a real agent turn; "title" and "preview" are bounded side prompts. */
+  label: "turn" | "title" | "preview";
   threadId: string;
   project: string;
   kind: string;
@@ -74,11 +75,16 @@ function addToTotal(
     failedTurns?: number;
     /** Single-entry failure marker (a raw ledger line). */
     failed?: boolean;
+    /** Ledger label of a raw entry; side prompts are not turns. */
+    label?: UsageEntry["label"];
     models?: Array<ModelUsage & { turns?: number }>;
   },
 ): void {
-  total.turns += entry.turns ?? 1;
-  total.failedTurns += entry.failedTurns ?? (entry.failed ? 1 : 0);
+  // Only real agent turns count as turns: the title and preview prompts spend
+  // tokens but are not turns, and counting them inflated the turn total.
+  const isTurn = !entry.label || entry.label === "turn";
+  total.turns += entry.turns ?? (isTurn ? 1 : 0);
+  total.failedTurns += entry.failedTurns ?? (entry.failed && isTurn ? 1 : 0);
   total.inputTokens += entry.inputTokens;
   total.outputTokens += entry.outputTokens;
   total.cacheTokens += entry.cacheTokens;
@@ -92,13 +98,14 @@ function addToTotal(
     bucket.cost += model.cost;
     // Pre-aggregated contributions (a whole day folded into one blob) carry
     // their own turn count; raw entries count as one.
-    bucket.turns += model.turns ?? 1;
+    bucket.turns += model.turns ?? (isTurn ? 1 : 0);
     total.models.set(model.model, bucket);
   }
 }
 
 /** `in 1.2M (980k cached) · out 45.1k · $3.42` */
 function figuresLine(total: UsageTotal): string {
+
   const cached = total.cacheTokens > 0 ? ` (${formatTokens(total.cacheTokens)} cached)` : "";
   return `in ${formatTokens(total.inputTokens)}${cached} · out ${formatTokens(total.outputTokens)} · ${formatCost(total.cost)}`;
 }
@@ -120,7 +127,7 @@ export class UsageLog {
     sessionId?: string;
     startedAt?: string;
     pending?: boolean;
-    label?: "turn" | "title";
+    label?: "turn" | "title" | "preview";
     threadId: string;
     project: string;
     kind: string;

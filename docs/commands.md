@@ -76,7 +76,16 @@ A reply sent while a turn is running is not queued — it **steers the live turn
 
 When the agent asks a question mid-turn, the person who requested the turn gets a Discord ping pointing at the answer buttons on the status card, so a parked question (which holds the turn and the thread's queue open) cannot sit unseen.
 
-Edits respect `PROGRESS_UPDATE_MS`, coalesce rapid events and serialize Discord requests. Quiet turns retain a heartbeat, and stale live throughput estimates disappear. Closing a feed waits for its last edit before posting the final result so a late update cannot overwrite it. Servers without **Embed Links** permission automatically get a compact text version with the same controls. Final messages clear the live card and retain the agent's outcome summary; successful browser-QA screenshots are still posted normally.
+Edits respect `PROGRESS_UPDATE_MS`, coalesce rapid events and serialize Discord requests. Quiet turns retain a heartbeat, and stale live throughput estimates disappear. Closing a feed waits for its last edit before posting the final result so a late update cannot overwrite it. Servers without **Embed Links** permission automatically get a compact text version with the same controls.
+
+## The final post of a turn
+
+When a turn finishes, it is presented in two messages:
+
+- the turn's **own message** becomes the technical card — the agent's full report of what it did, kept as the model wrote it, plus the commit, the files and lines changed, how long it took, and the token usage of the turn;
+- a **new message** under it carries the playable card — the browser-QA screenshot when one was captured, a plain-language preview of what the project is, what this turn added and how to play it, and the play link next to the source link.
+
+The preview is written by a bounded, tools-free `presenter` prompt (the same shape as the thread-title prompt): it sees the original request, the previous preview and the turn's report, and answers with a pitch line, a line about the change and a line on how to play. The report is technical, so the prompt insists on the visitor's view of it — no file names, no code, no engine internals, only what someone sees and can do. It runs after publication, is capped at 20 seconds, and is stored with the project so the next turn can keep the pitch stable. A preview that cannot be written costs the card its blurb and nothing else — the turn still finishes, still publishes, and both messages still render. Servers without **Embed Links** permission get the same information as text.
 
 ### AI-generated thread titles
 

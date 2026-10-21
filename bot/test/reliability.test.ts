@@ -1,17 +1,15 @@
 import assert from "node:assert/strict";
-import { after, test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { test } from "node:test";
+import { testRootSetup, trackStore } from "./fixtures/root.js";
+import type { OpenCodeHarness, PromptResult } from "../src/opencode.js";
+import type { ProjectRecord } from "../src/types.js";
 
-const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-reliability-"));
-process.env.DISCORD_BOT_TOKEN = "test";
-process.env.DISCORD_APPLICATION_ID = "test";
-process.env.WORKSPACE_ROOT = path.join(root, "workspaces");
-process.env.PUBLISH_ROOT = path.join(root, "published");
-process.env.LOG_FILE = path.join(root, "test.log");
+const root = testRootSetup("reliability");
 process.env.BROWSER_QA_ENABLED = "false";
 process.env.PUBLIC_SITES_BASE_URL = "https://sites.example.invalid";
 const { buildSite, GENERATED_GITIGNORE } = await import("../src/build.js");
@@ -24,22 +22,11 @@ const { UsageLog } = await import("../src/usage.js");
 const { config } = await import("../src/config.js");
 const { publishSite, validateSite } = await import("../src/publish.js");
 const { currentHead, ensureGitRepository, ensureLocalBaseline, commitAndPush, turnRevertTarget } = await import("../src/git.js");
-import type { OpenCodeHarness, PromptResult } from "../src/opencode.js";
-import type { ProjectRecord } from "../src/types.js";
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", args, { cwd })).stdout.trim();
-const stores: InstanceType<typeof Store>[] = [];
 async function openStore(file: string) {
-  const store = await Store.open(file);
-  stores.push(store);
-  return store;
+  return trackStore(await Store.open(file));
 }
-after(async () => {
-  for (const store of stores) store.close();
-  // Windows transiently reports ENOTEMPTY/EBUSY while git/index handles close;
-  // without retries the cleanup itself fails the suite.
-  await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-});
 
 async function workspace(name: string): Promise<string> {
   const dir = path.join(root, name);
@@ -104,23 +91,60 @@ test("browser findings publish without a repair turn and reach the next agent pr
       return { text: "Updated", usage: {} };
     },
   });
-  let report = { hardErrors: ["ReferenceError: player is not defined at main.js:42"], softNotes: ["Browser navigation timed out"] };
+  let report = { findings: ["ReferenceError: player is not defined at main.js:42"] };
   Object.assign(f.service, { runBrowserQa: async () => report });
   const result = await f.service.mutate(f.project.threadId, "Add a scoreboard");
   assert.equal(result.validationError, undefined);
   assert.equal(result.deliveryError, undefined);
   assert.equal(result.project.status, "ready");
   assert.equal(instructions.length, 1, "advisory browser errors must not trigger an extra repair prompt");
-  assert.match(result.browserQaWarnings!.join("\n"), /ReferenceError.*main.js:42/);
+  assert.match(result.browserQaFindings!.join("\n"), /ReferenceError.*main.js:42/);
   assert.match(await fs.readFile(path.join(config.publishRoot, result.project.siteSlug, "js/main.js"), "utf8"), /qa update 1/);
-  assert.match(f.store.getProject(f.project.threadId)!.browserQaFindings!.errors[0], /player is not defined/);
-  report = { hardErrors: [], softNotes: [] };
+  assert.match(f.store.getProject(f.project.threadId)!.browserQaFindings!.findings![0], /player is not defined/);
+  report = { findings: [] };
   const next = await f.service.mutate(f.project.threadId, "Improve the scoreboard");
   assert.match(instructions[1], /BROWSER QA FEEDBACK/);
   assert.match(instructions[1], /Runtime finding: ReferenceError.*main.js:42/);
-  assert.match(instructions[1], /not proof of an application bug/);
-  assert.deepEqual(next.project.browserQaFindings!.errors, []);
-  assert.equal(next.browserQaWarnings, undefined);
+  assert.match(instructions[1], /already excluded/);
+  assert.deepEqual(next.project.browserQaFindings!.findings, []);
+  assert.equal(next.browserQaFindings, undefined);
+});
+
+test("a finished turn stores the model-written preview for the play card", async () => {
+  const f = await projectFixture("705234567890123456");
+  const previews: unknown[] = [];
+  Object.assign(f.opencode, {
+    prompt: async () => {
+      await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("preview turn");');
+      return { text: "Updated", usage: {} };
+    },
+    generatePreview: async (_dir: string, input: { name: string; summary?: string; previous?: string }) => {
+      previews.push(input);
+      return { pitch: "A calm pond where you feed koi.", added: "Added the lily pads.", usage: {} };
+    },
+  });
+  const result = await f.service.mutate(f.project.threadId, "Add lily pads");
+  assert.equal(result.preview?.pitch, "A calm pond where you feed koi.");
+  assert.equal(result.preview?.added, "Added the lily pads.");
+  assert.equal(f.store.getProject(f.project.threadId)!.preview?.pitch, "A calm pond where you feed koi.");
+  const asked = previews[0] as { name: string; summary?: string };
+  assert.equal(asked.name, f.project.displayName);
+  assert.match(asked.summary ?? "", /Updated/);
+});
+
+test("a preview that cannot be written costs the card its blurb, not the turn", async () => {
+  const f = await projectFixture("715234567890123456");
+  Object.assign(f.opencode, {
+    prompt: async () => {
+      await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("preview turn");');
+      return { text: "Updated", usage: {} };
+    },
+    generatePreview: async () => { throw new Error("provider unavailable"); },
+  });
+  const result = await f.service.mutate(f.project.threadId, "Add lily pads");
+  assert.equal(result.validationError, undefined);
+  assert.equal(result.preview, undefined);
+  assert.equal(result.project.status, "ready");
 });
 
 test("fail-open browser QA does not bypass compiler failures or replace the previous live site", async () => {
@@ -132,7 +156,7 @@ test("fail-open browser QA does not bypass compiler failures or replace the prev
     return { text: "Finished", usage: {} };
   } });
   let browserCalls = 0;
-  Object.assign(f.service, { runBrowserQa: async () => { browserCalls += 1; return { hardErrors: [], softNotes: [] }; } });
+  Object.assign(f.service, { runBrowserQa: async () => { browserCalls += 1; return { findings: [] }; } });
   const result = await f.service.mutate(f.project.threadId, "Make an update");
   assert.match(result.validationError ?? "", /TypeScript compile error/);
   assert.equal(browserCalls, 0);
