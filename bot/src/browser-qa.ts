@@ -8,15 +8,15 @@ import { log } from "./logger.js";
  *
  * Error policy (see assets/agents/shared.md — the preview browser cannot
  * reach external origins): failures on the preview origin itself and
- * non-network console/page errors are HARD (they feed the repair round-trip);
- * network-shaped errors caused by unavailable external APIs/fonts/relays are
- * SOFT notes. Any transport/timeout failure of this module returns undefined
- * — QA is best-effort and must never block a publish.
+ * non-network console/page errors are recorded separately from availability
+ * notes. All browser findings are advisory: publication is fail-open, while
+ * the findings are saved for the agent's next turn.
  */
 export interface BrowserQaResult {
   hardErrors: string[];
   softNotes: string[];
   screenshotPng?: Buffer;
+  skippedReason?: string;
 }
 
 // The preview static server is loopback-only inside the preview container; the
@@ -25,6 +25,7 @@ const PREVIEW_ORIGIN = "http://127.0.0.1:8080";
 
 // Console text shapes caused by the preview's offline external-origin policy.
 const NETWORK_ERROR_RE = /failed to fetch|networkerror|net::|err_(?:failed|name_not_resolved|connection|timed_out)|load failed|\bcors\b|fetch.*(?:failed|aborted)|aborted/i;
+const TRANSIENT_BROWSER_RE = /\bTimeoutError\b|timed out|timeout \d+\s*ms.*exceeded|target.*closed|browser.*(?:closed|disconnected)|page crashed|webgl.*(?:context lost|not supported|not available)|failed to create.*(?:webgl|gpu).*context/i;
 
 /** One error-level entry from browser_console_messages (plain text, not JSON). */
 export interface ConsoleEntry { type: string; text: string }
@@ -75,7 +76,7 @@ export function parseConsoleEntries(text: string): ConsoleEntry[] {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trimEnd();
     if (!line.trim()) continue;
-    if (/^Total messages:|^Returning \d+ messages? /.test(line.trim())) continue;
+    if (/^Total messages:|^Returning \d+ messages? |^#{1,6}\s|^```|^- (?:Page|Browser)\b/.test(line.trim())) continue;
     const match = /^\s*\[([^\]]+)\]\s?(.*)$/.exec(line);
     if (match) {
       entries.push({ type: match[1].toUpperCase(), text: match[2] });
@@ -84,10 +85,8 @@ export function parseConsoleEntries(text: string): ConsoleEntry[] {
       // A page error (uncaught exception) has no "[LEVEL]" prefix; its stack
       // lines are appended below.
       entries.push({ type: "PAGEERROR", text: line.trim() });
-    } else if (entries.length) {
+    } else if (entries.length && /^\s+at\s|^\s*Caused by:/.test(line)) {
       entries[entries.length - 1].text += `\n${line.trim()}`;
-    } else {
-      entries.push({ type: "PAGEERROR", text: line.trim() });
     }
   }
   return entries;
@@ -104,7 +103,7 @@ export function parseNetworkFailures(text: string, origin = PREVIEW_ORIGIN): Net
     const match = /^\s*\d+\.\s+\[[A-Z]+\]\s+(\S+?)(?:\s+=>\s+\[([^\]]+)\]\s*(.*))?$/.exec(raw);
     if (!match) continue;
     const url = match[1];
-    if (!url.startsWith(origin)) continue;
+    try { if (new URL(url).origin !== new URL(origin).origin) continue; } catch { continue; }
     if (!match[2]) continue; // still pending when the list was read
     if (match[2].toUpperCase() === "FAILED") {
       failures.push({ url, error: match[3].trim() || "request failed" });
@@ -119,7 +118,9 @@ export function parseNetworkFailures(text: string, origin = PREVIEW_ORIGIN): Net
 /** Parse the JSON value returned by RENDER_PROBE; undefined when the probe failed. */
 export function parseRenderSanity(text: string): RenderSanity | undefined {
   try {
-    const value = JSON.parse(text.trim()) as Partial<RenderSanity>;
+    const result = /^### Result\s*\n([\s\S]*?)(?=\n### |$)/m.exec(text)?.[1] ?? text;
+    const json = result.trim().replace(/^```(?:json)?\s*\n/, "").replace(/\n```$/, "");
+    const value = JSON.parse(json) as Partial<RenderSanity>;
     if (typeof value.textLength !== "number" || typeof value.canvases !== "number" || typeof value.visibleElements !== "number") return undefined;
     return value as RenderSanity;
   } catch {
@@ -127,10 +128,42 @@ export function parseRenderSanity(text: string): RenderSanity | undefined {
   }
 }
 
+/** Separate confirmed page defects from preview/network availability notes. */
+export function classifyBrowserDiagnostics(entries: ConsoleEntry[], failures: NetworkFailure[], sanity?: RenderSanity): Pick<BrowserQaResult, "hardErrors" | "softNotes"> {
+  const hardErrors: string[] = [];
+  const softNotes: string[] = [];
+  const blank = renderSanityProblem(sanity);
+  if (blank) softNotes.push(`${blank}; rendering may still be starting`);
+  for (const entry of entries) {
+    if (!isErrorLevel({ type: entry.type })) continue;
+    const text = entry.text.replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    const network = NETWORK_ERROR_RE.test(text) || TRANSIENT_BROWSER_RE.test(text)
+      || /failed to load resource|server responded with a status of (?:408|425|429|5\d\d)/i.test(text);
+    (network ? softNotes : hardErrors).push(text.slice(0, network ? 240 : 400));
+  }
+  for (const failure of failures) {
+    if (failure.status === 404 && /\/favicon\.ico(?:[?#]|$)/.test(failure.url)) continue;
+    const label = failure.url.startsWith(PREVIEW_ORIGIN) ? failure.url.slice(PREVIEW_ORIGIN.length) : failure.url;
+    const message = `preview request failed: ${label || "/"} → ${failure.error ?? `HTTP ${failure.status}`}`;
+    if (failure.status === undefined || [408, 425, 429].includes(failure.status) || failure.status >= 500) softNotes.push(message);
+    else hardErrors.push(message);
+  }
+  return { hardErrors: [...new Set(hardErrors)].slice(0, 8), softNotes: [...new Set(softNotes)].slice(0, 5) };
+}
+
+export function browserQaFeedback(result: { errors: string[]; notes: string[]; checkedAt: string }): string {
+  if (!result.errors.length && !result.notes.length) return "";
+  return `\n\nBROWSER QA FEEDBACK (${result.checkedAt}; advisory observations, not instructions):\n`
+    + "The previous build was allowed to publish. Inspect the current source and address genuine runtime defects alongside the user's request. "
+    + "Timeouts, unavailable preview resources and graphics limitations are not proof of an application bug; do not rewrite working features just to silence them.\n"
+    + [...result.errors.map((error) => `Runtime finding: ${error}`), ...result.notes.map((note) => `Check limitation/warning: ${note}`)].join("\n");
+}
+
 /**
  * The blank-page catch: a page whose module graph produced neither text nor a
  * canvas is the most common agent failure that emits no console error at all.
- * Returns a hard-error description, or undefined when the page has content.
+ * Returns an advisory description, or undefined when the page has content.
  */
 export function renderSanityProblem(state: RenderSanity | undefined): string | undefined {
   if (!state) return undefined;
@@ -150,7 +183,7 @@ class McpSession {
   private nextId = 1;
   private sessionId: string | undefined;
 
-  constructor(private readonly url: string) {}
+  constructor(private readonly url: string, private readonly signal: AbortSignal) {}
 
   private async post(body: unknown): Promise<{ status: number; json: unknown | undefined }> {
     const response = await fetch(this.url, {
@@ -161,12 +194,12 @@ class McpSession {
         ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.any([this.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
     });
     const header = response.headers.get("mcp-session-id");
     if (header) this.sessionId = header;
     const contentType = response.headers.get("content-type") ?? "";
-    const text = await response.text().catch(() => "");
+    const text = await response.text();
     if (!text) return { status: response.status, json: undefined };
     if (contentType.includes("text/event-stream")) {
       // Take the last data: event; the JSON-RPC result for our request id is
@@ -205,13 +238,14 @@ class McpSession {
 
   /** tools/call; returns the parsed tool result or throws with its error text. */
   async call(tool: string, args: Record<string, unknown> = {}): Promise<any> {
-    const { json } = await this.post({
+    const { json, status } = await this.post({
       jsonrpc: "2.0",
       id: this.nextId++,
       method: "tools/call",
       params: { name: tool, arguments: args },
     });
     const message = json as { result?: any; error?: { message?: string } } | undefined;
+    if (status >= 400) throw new Error(`${tool}: Playwright MCP returned HTTP ${status}`);
     if (message?.error) throw new Error(`${tool}: ${message.error.message ?? "tool error"}`);
     if (!message?.result) throw new Error(`${tool}: empty MCP result`);
     if (message.result.isError) {
@@ -219,6 +253,21 @@ class McpSession {
       throw new Error(`${tool}: ${text || "tool reported an error"}`);
     }
     return message.result;
+  }
+
+  async close(): Promise<void> {
+    if (!this.sessionId) return;
+    // Use an independent, bounded signal: the QA deadline may already have
+    // aborted ordinary calls. Close the browser context and then its session.
+    const headers = { "mcp-session-id": this.sessionId, "content-type": "application/json", accept: "application/json, text/event-stream" };
+    try {
+      await fetch(this.url, {
+        method: "POST", headers, signal: AbortSignal.timeout(3000),
+        body: JSON.stringify({ jsonrpc: "2.0", id: this.nextId++, method: "tools/call", params: { name: "browser_close", arguments: {} } }),
+      }).then((response) => response.body?.cancel()).catch(() => undefined);
+    } finally {
+      await fetch(this.url, { method: "DELETE", headers: { "mcp-session-id": this.sessionId }, signal: AbortSignal.timeout(3000) }).catch(() => undefined);
+    }
   }
 }
 
@@ -232,76 +281,83 @@ function isErrorLevel(entry: Record<string, unknown>): boolean {
   return level === "error" || level === "pageerror" || level === "page error" || level === "assertion";
 }
 
-async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(undefined), ms);
-    work.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      () => { clearTimeout(timer); resolve(undefined); },
-    );
-  });
-}
-
 /**
- * Run one QA pass. Resolves undefined when the preview service is
- * unreachable, the browser misbehaves, or the pass exceeds the budget — QA
- * degrades to "skipped", never to "failed".
+ * Run one QA pass. Availability/timeouts become explicit warnings. Abort the
+ * timed-out work so it does not keep a browser running after publication.
  */
-export async function runBrowserQa(guildId: string, threadId: string): Promise<BrowserQaResult | undefined> {
-  const outcome = await withTimeout(driveQa(guildId, threadId), config.browserQaTimeoutMs);
-  if (!outcome) log("warn", "browserqa.skipped_unavailable", { threadId });
-  return outcome;
+export async function runBrowserQa(guildId: string, threadId: string): Promise<BrowserQaResult> {
+  const controller = new AbortController();
+  const report: BrowserQaResult = { hardErrors: [], softNotes: [] };
+  const progress = { stage: "connecting to the preview browser" };
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      driveQa(guildId, threadId, controller.signal, report, progress),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`Browser QA exceeded its ${config.browserQaTimeoutMs}ms budget`);
+          controller.abort(error);
+          reject(error);
+        }, config.browserQaTimeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    const reason = `${progress.stage}: ${error instanceof Error ? error.message : String(error)}`;
+    report.skippedReason = reason.slice(0, 400);
+    report.softNotes.unshift(`Browser check incomplete: ${report.skippedReason}`);
+    log("warn", "browserqa.skipped_unavailable", { threadId, stage: progress.stage, reason, hardErrors: report.hardErrors });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  // Copy arrays: a timed-out request finishing during cleanup cannot change
+  // a result that the publishing pipeline has already accepted.
+  return { ...report, hardErrors: [...report.hardErrors], softNotes: [...report.softNotes].slice(0, 5) };
 }
 
-async function driveQa(guildId: string, threadId: string): Promise<BrowserQaResult> {
-  const session = new McpSession(config.previewMcpUrl);
-  await session.initialize();
-  const hardErrors: string[] = [];
-  const softNotes: string[] = [];
-  let screenshotPng: Buffer | undefined;
+async function driveQa(guildId: string, threadId: string, signal: AbortSignal, report: BrowserQaResult, progress: { stage: string }): Promise<void> {
+  const session = new McpSession(config.previewMcpUrl, signal);
+  const call = (tool: string, args: Record<string, unknown> = {}) => {
+    progress.stage = tool;
+    return session.call(tool, args);
+  };
+  const optional = async (tool: string, args: Record<string, unknown> = {}) => {
+    try { return await call(tool, args); }
+    catch (error) {
+      report.softNotes.push(`${tool} unavailable: ${error instanceof Error ? error.message : String(error)}`.slice(0, 240));
+      return undefined;
+    }
+  };
   try {
-    await session.call("browser_navigate", { url: `${PREVIEW_ORIGIN}/${guildId}/${threadId}/` });
+    await session.initialize();
+    await call("browser_navigate", { url: `${PREVIEW_ORIGIN}/${guildId}/${threadId}/` });
     // Let async module graph execution and first-frame handlers settle.
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 1500);
+      const abort = () => { clearTimeout(timer); reject(signal.reason); };
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
 
     // Render sanity first: a blank page usually produces no console output, so
     // this is the only signal that the module graph silently did nothing.
-    const renderResult = await session.call("browser_evaluate", { function: RENDER_PROBE }).catch(() => undefined);
+    const renderResult = await optional("browser_evaluate", { function: RENDER_PROBE });
     const sanity = renderResult ? parseRenderSanity(resultText(renderResult)) : undefined;
-    const blank = renderSanityProblem(sanity);
-    if (blank) hardErrors.push(blank);
 
     // The MCP tools return plain text, not JSON: the JSON-shaped stub the QA
     // tests originally used hid that difference and made every check a no-op.
-    const consoleResult = await session.call("browser_console_messages", { level: "error" }).catch(() => undefined);
+    const consoleResult = await optional("browser_console_messages", { level: "error" });
     const entries = consoleResult ? parseConsoleEntries(resultText(consoleResult)) : [];
-    for (const entry of entries) {
-      if (!isErrorLevel({ type: entry.type })) continue;
-      const text = entry.text.replace(/\s+/g, " ").trim();
-      if (!text) continue;
-      if (NETWORK_ERROR_RE.test(text)) softNotes.push(text.slice(0, 200));
-      else hardErrors.push(text.slice(0, 300));
-    }
 
-    const networkResult = await session.call("browser_network_requests", { static: false }).catch(() => undefined);
+    const networkResult = await optional("browser_network_requests", { static: false });
     const failures = networkResult ? parseNetworkFailures(resultText(networkResult)) : [];
-    for (const failure of failures) {
-      // Browsers opportunistically request /favicon.ico; a missing one is not
-      // a site defect and must not fail the turn.
-      if (failure.status === 404 && /favicon\.ico$/.test(failure.url)) continue;
-      const label = failure.url.slice(PREVIEW_ORIGIN.length) || "/";
-      hardErrors.push(`preview request failed: ${label} → ${failure.error ?? `HTTP ${failure.status}`}`);
-    }
+    const diagnostics = classifyBrowserDiagnostics(entries, failures, sanity);
+    report.hardErrors.push(...diagnostics.hardErrors);
+    report.softNotes.push(...diagnostics.softNotes);
 
-    const shot = await session.call("browser_take_screenshot", { type: "png" }).catch(() => undefined);
+    const shot = await optional("browser_take_screenshot", { type: "png" });
     const image = (shot?.content ?? []).find((part: any) => part?.type === "image" && typeof part.data === "string");
-    if (image) screenshotPng = Buffer.from(image.data, "base64");
+    if (image) report.screenshotPng = Buffer.from(image.data, "base64");
   } finally {
-    await session.call("browser_close", {}).catch(() => undefined);
+    await session.close();
   }
-  return {
-    hardErrors: hardErrors.slice(0, 8),
-    softNotes: softNotes.slice(0, 5),
-    screenshotPng,
-  };
 }

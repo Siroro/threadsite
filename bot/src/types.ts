@@ -47,6 +47,8 @@ export interface ProjectRecord {
   /** Design version the pinned card last rendered; the next boot upgrades older designs. */
   infoCardVersion?: number;
   lastError?: string;
+  /** Advisory browser observations carried into the agent's next turn. */
+  browserQaFindings?: { checkedAt: string; errors: string[]; notes: string[] };
   /** Short hash of the commit belonging to the last accepted turn; used by /site revert. */
   lastCommit?: string;
   /** Pre-turn commit; metadata-only rename commits belong to the same undo boundary. */

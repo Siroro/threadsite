@@ -75,6 +75,51 @@ test("production accepts local modules and the real seeded engine package graph"
   assert.ok((await buildSite(dir)).emitted > 0);
 });
 
+test("browser findings publish without a repair turn and reach the next agent prompt", async () => {
+  const f = await projectFixture("701234567890123456");
+  const instructions: string[] = [];
+  Object.assign(f.opencode, {
+    prompt: async (_dir: string, _session: string, instruction: string) => {
+      instructions.push(instruction);
+      await fs.writeFile(path.join(f.dir, "site/src/main.ts"), `console.log("qa update ${instructions.length}");`);
+      return { text: "Updated", usage: {} };
+    },
+  });
+  let report = { hardErrors: ["ReferenceError: player is not defined at main.js:42"], softNotes: ["Browser navigation timed out"] };
+  Object.assign(f.service, { runBrowserQa: async () => report });
+  const result = await f.service.mutate(f.project.threadId, "Add a scoreboard");
+  assert.equal(result.validationError, undefined);
+  assert.equal(result.deliveryError, undefined);
+  assert.equal(result.project.status, "ready");
+  assert.equal(instructions.length, 1, "advisory browser errors must not trigger an extra repair prompt");
+  assert.match(result.browserQaWarnings!.join("\n"), /ReferenceError.*main.js:42/);
+  assert.match(await fs.readFile(path.join(config.publishRoot, result.project.siteSlug, "js/main.js"), "utf8"), /qa update 1/);
+  assert.match(f.store.getProject(f.project.threadId)!.browserQaFindings!.errors[0], /player is not defined/);
+  report = { hardErrors: [], softNotes: [] };
+  const next = await f.service.mutate(f.project.threadId, "Improve the scoreboard");
+  assert.match(instructions[1], /BROWSER QA FEEDBACK/);
+  assert.match(instructions[1], /Runtime finding: ReferenceError.*main.js:42/);
+  assert.match(instructions[1], /not proof of an application bug/);
+  assert.deepEqual(next.project.browserQaFindings!.errors, []);
+  assert.equal(next.browserQaWarnings, undefined);
+});
+
+test("fail-open browser QA does not bypass compiler failures or replace the previous live site", async () => {
+  const f = await projectFixture("711234567890123456");
+  const liveFile = path.join(config.publishRoot, f.project.siteSlug, "js/main.js");
+  const previousLive = await fs.readFile(liveFile, "utf8");
+  Object.assign(f.opencode, { prompt: async () => {
+    await fs.writeFile(path.join(f.dir, "site/src/main.ts"), "export const broken = ;");
+    return { text: "Finished", usage: {} };
+  } });
+  let browserCalls = 0;
+  Object.assign(f.service, { runBrowserQa: async () => { browserCalls += 1; return { hardErrors: [], softNotes: [] }; } });
+  const result = await f.service.mutate(f.project.threadId, "Make an update");
+  assert.match(result.validationError ?? "", /TypeScript compile error/);
+  assert.equal(browserCalls, 0);
+  assert.equal(await fs.readFile(liveFile, "utf8"), previousLive);
+});
+
 test("production rejects symlinked imports and output directories", async () => {
   const outside = path.join(root, "linked-files");
   await fs.mkdir(outside);

@@ -134,7 +134,8 @@ export const config = {
 
   // Browser QA: after static validation, load the site in the preview
   // service's Playwright browser, collect console/request errors, and capture a
-  // screenshot for the thread. Unreachable preview = QA skipped, never blocks.
+  // screenshot for the thread. Every browser finding is advisory: warnings
+  // are saved for the next agent turn and never trigger repair or block publication.
   // The budget must stay above the preview browser's own navigation (45s) and
   // action (30s) timeouts plus a screenshot, or a slow WebGL/software-rendered
   // page loses the pass to this outer timeout instead of reporting a result.

@@ -20,7 +20,7 @@ import type { ProgressCallback, ProgressPhase } from "./progress.js";
 import type { WorkingTreeStats } from "./git.js";
 import { log, logError, serializeError } from "./logger.js";
 import { errorText, formatShortDuration, formatTokens, parseModel, safeChild, slugify, truncate, withTimeout } from "./util.js";
-import { runBrowserQa as driveBrowserQa, type BrowserQaResult } from "./browser-qa.js";
+import { browserQaFeedback, runBrowserQa as driveBrowserQa, type BrowserQaResult } from "./browser-qa.js";
 
 export interface MutationResult {
   project: ProjectRecord;
@@ -42,6 +42,8 @@ export interface MutationResult {
   usage?: TurnUsage;
   /** PNG screenshot of the finished result from browser QA, when captured. */
   screenshot?: Uint8Array;
+  /** Advisory findings; browser QA never blocks an otherwise valid build. */
+  browserQaWarnings?: string[];
   /** Validation errors that kept the turn unpublished; the work is committed. */
   validationError?: string;
   /** Commit/publish pipeline failure after the agent finished; see commit for how far it got. */
@@ -528,6 +530,7 @@ export class ProjectService {
       let instruction = instructionOverride ?? (initial
         ? initialProjectInstruction(projectKind, prompt, notes, multiplayerMode)
         : mutationInstruction(projectKind, prompt, notes, multiplayerMode));
+      if (project.browserQaFindings) instruction += browserQaFeedback(project.browserQaFindings);
       if (turnImages?.length) {
         instruction += `\n\nThe user's Discord message included ${turnImages.length} attached image${turnImages.length === 1 ? "" : "s"}, delivered with this prompt.`;
       }
@@ -752,11 +755,12 @@ export class ProjectService {
     // The QA screenshot from the last successful browser pass rides the
     // result so the thread sees what shipped (also after a repair round-trip).
     let qaScreenshot: Uint8Array | undefined;
+    let qaFindings: ProjectRecord["browserQaFindings"];
+    let qaWarnings: string[] = [];
     // The static build step of deployment: bundle site/src/ TypeScript into
     // site/js/ (with code-framed bundler errors an agent can act on), then
-    // validate the resulting tree, then load it in a real browser. Kept as one
-    // unit so a bundle, validation, or browser-QA failure feeds the same
-    // repair round-trip.
+    // validate the resulting tree, then collect advisory browser diagnostics.
+    // Only build/static validation failures trigger a repair round-trip.
     const buildAndValidate = async (): Promise<{ files: number; bytes: number }> => {
       emit(input.onProgress, "⚙️ Compiling the current source", undefined, "checking");
       const built = await buildSite(workspacePath);
@@ -766,12 +770,12 @@ export class ProjectService {
       emit(input.onProgress, "🧪 Validating static output", undefined, "checking");
       const validated = await validateSite(siteDir);
       const qa = await this.runBrowserQa(project, input.onProgress);
-      if (qa?.screenshotPng) qaScreenshot = qa.screenshotPng;
-      if (qa?.softNotes.length) {
-        emit(input.onProgress, `ℹ️ Browser QA: ${qa.softNotes.length} warning${qa.softNotes.length === 1 ? "" : "s"} from unavailable external resources (ignored)`);
-      }
-      if (qa?.hardErrors.length) {
-        throw new Error(`Browser QA error: the page failed in a real browser.\n${qa.hardErrors.join("\n")}`);
+      qaScreenshot = qa?.screenshotPng;
+      qaWarnings = qa ? [...qa.hardErrors, ...qa.softNotes] : [];
+      if (qa) qaFindings = { checkedAt: new Date().toISOString(), errors: qa.hardErrors, notes: qa.softNotes };
+      if (qaWarnings.length) {
+        log("warn", "browserqa.advisory_findings", { threadId, ...qaFindings });
+        emit(input.onProgress, `⚠️ Browser QA warning: ${truncate(qaWarnings[0], 240)} — continuing publication; details saved for the next update`);
       }
       return validated;
     };
@@ -779,7 +783,7 @@ export class ProjectService {
       stats = await buildAndValidate();
     } catch (error) {
       const firstError = errorText(error);
-      if (!/JavaScript (?:syntax|type-check) error|TypeScript compile error|Broken local reference|Browser QA error/i.test(firstError)) {
+      if (!/JavaScript (?:syntax|type-check) error|TypeScript compile error|Broken local reference/i.test(firstError)) {
         // Structural problems (missing index.html, dotfiles, blocked file
         // types, size caps) get no repair round-trip; they commit unpublished,
         // exactly like a failed repair.
@@ -881,6 +885,7 @@ export class ProjectService {
         // Keep the external-push poller in sync: after the bot's own push,
         // origin/main's tip is exactly this turn's commit.
         ...(commitStats ? { lastSeenCommit: await currentHead(workspacePath) } : {}),
+        ...(qaFindings ? { browserQaFindings: qaFindings } : {}),
         pendingTurn: undefined,
         // Record when the session was last used and how full its context window
         // ended; the next turn's lifecycle check reads both.
@@ -923,6 +928,7 @@ export class ProjectService {
       usage,
       durationMs: Date.now() - input.startedAt,
       ...(qaScreenshot ? { screenshot: qaScreenshot } : {}),
+      ...(qaWarnings.length ? { browserQaWarnings: qaWarnings } : {}),
       ...(commitStats
         ? { commit: commitStats.commit, commitFiles: commitStats.files, additions: commitStats.additions, deletions: commitStats.deletions }
         : { commitFiles: 0, additions: 0, deletions: 0 }),
@@ -979,7 +985,8 @@ export class ProjectService {
         emit(onProgress, "✅ The interrupted turn had already finished on the agent side");
         agentSummary = "This turn had already finished on the agent side before the restart; it was committed and published by recovery.";
       } else {
-        const notes = await readProjectNotes(project.workspacePath);
+        const savedNotes = await readProjectNotes(project.workspacePath);
+        const notes = [savedNotes, project.browserQaFindings ? browserQaFeedback(project.browserQaFindings) : ""].filter(Boolean).join("\n\n") || undefined;
         try {
           const result = await this.recoveryPrompt(project.workspacePath, project.sessionId, recoveryInstruction(pending.prompt, notes), onProgress, threadId, pending.images);
           agentSummary = result.text;
@@ -1607,12 +1614,10 @@ export class ProjectService {
   }
 
   /**
-   * Load the just-validated site in the preview browser. Hard errors (page
-   * crashes, same-origin request failures, non-network console errors) come
-   * back as BrowserQaResult.hardErrors and the caller throws them into the
-   * repair round-trip; the screenshot rides the turn result for the thread.
-   * An unreachable or misbehaving preview resolves undefined — QA is
-   * best-effort and never blocks a publish.
+   * Load the just-validated site in the preview browser. Page exceptions
+   * and request failures are advisory and saved for the agent's
+   * next turn; the screenshot rides the result for the thread. Browser QA
+   * never triggers a repair turn or blocks publication.
    */
   private async runBrowserQa(project: ProjectRecord, onProgress?: ProgressCallback): Promise<BrowserQaResult | undefined> {
     if (!config.browserQaEnabled) return undefined;
@@ -1621,7 +1626,8 @@ export class ProjectService {
       return await driveBrowserQa(project.guildId, project.threadId);
     } catch (error) {
       log("warn", "browserqa.failed", { threadId: project.threadId, error: serializeError(error) });
-      return undefined;
+      const reason = `Browser check unavailable: ${truncate(errorText(error), 350)}`;
+      return { hardErrors: [], softNotes: [reason], skippedReason: reason };
     }
   }
 
