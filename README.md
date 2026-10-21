@@ -591,6 +591,26 @@ This is suitable for a private/friends Discord or a carefully permissioned serve
 - A failed validation or git push leaves the previous published website in place.
 - Site limits are controlled with `MAX_SITE_BYTES`, `MAX_SITE_FILES`, and `MAX_PROMPT_CHARS`.
 
+## Removing stale project registrations
+
+Deleting a repository directly in Forgejo does not remove its Discord project registration from SQLite. A webhook warning for that repository can therefore persist across bot restarts. A 404 can also mean lost access, so confirm the repository was intentionally deleted before removing its registration.
+
+The maintenance script previews exact repository-name matches by default. It runs inside the existing bot image and needs no host Node installation:
+
+```bash
+docker compose run --rm --no-deps -T --entrypoint node bot --input-type=module - --repo DELETED_REPO < scripts/forget-projects.mjs
+```
+
+Repeat `--repo NAME` to select several repositories. After reviewing the preview, stop the bot and apply the removal:
+
+```bash
+docker compose stop bot
+docker compose run --rm --no-deps -T --entrypoint node bot --input-type=module - --repo DELETED_REPO --apply < scripts/forget-projects.mjs
+docker compose up -d --no-deps bot
+```
+
+The script uses `STATE_DB_FILE`/`STATE_FILE` from the container, or an explicit `--db FILE`. It saves a full SQLite backup alongside the database before deleting rows, refuses projects with pending work, and rolls back if a selected record changes during cleanup. It removes only the selected registrations; workspaces, published files, Forgejo repositories, and settings remain. The backup contains private state and is created with restrictive permissions.
+
 ## Local regression checks
 
 Run `npm --prefix bot test` for production import containment, restart-safe queue handoff, clean naming, collisions, interrupted renames and revert coverage. Run `npm --prefix bot run build` for the bot compiler check and `npm --prefix preview test` for preview regression checks. Tests use temporary files, local git repositories and a fake agent/Forgejo service; no Discord login or paid inference is needed.
