@@ -18,6 +18,12 @@ services:
       FORGEJO__service__DISABLE_REGISTRATION: "true"
       FORGEJO__security__INSTALL_LOCK: "true"
       FORGEJO__repository__DEFAULT_PRIVATE: public
+      # Forgejo refuses to POST webhooks to private/loopback addresses unless
+      # the target host is allowlisted, so without this every push event to
+      # http://bot:8901 is rejected ("webhook can only call allowed HTTP
+      # servers"). The bot treats its listener as live regardless, so it also
+      # never starts the polling fallback — pushes are missed silently.
+      FORGEJO__webhook__ALLOWED_HOST_LIST: ${FORGEJO_WEBHOOK_ALLOWED_HOSTS:-bot}
     volumes:
       - forgejo-data:/var/lib/gitea
     ports:
