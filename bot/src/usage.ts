@@ -1,18 +1,25 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { log } from "./logger.js";
-import type { ModelUsage, TurnUsage } from "./opencode.js";
+import { usageFromMessages, type SessionMessage, type ModelUsage, type TurnUsage } from "./opencode.js";
 import { formatCost, formatTokens, truncate } from "./util.js";
 
 /**
  * Append-only token/cost ledger behind `/site-admin usage`: one JSONL line per
  * agent turn — completed or failed, initial, mutation, repair, restart-recovery
- * — and per AI thread-title prompt. A separate file from state.json so
+ * — and per AI thread-title prompt. Turn IDs allow durable revisions without
+ * counting recovery twice. A separate file from project state so
  * day-by-day history survives without growing the store, and so a corrupt line
  * costs one entry, not the whole bot state.
  */
 export interface UsageEntry {
   v: 1;
+  /** Revisions with the same identity replace earlier snapshots when read. */
+  id?: string;
+  sessionId?: string;
+  startedAt?: string;
+  pending?: boolean;
   /** ISO completion timestamp. */
   ts: string;
   label: "turn" | "title";
@@ -96,16 +103,21 @@ function figuresLine(total: UsageTotal): string {
 }
 
 export class UsageLog {
+  private writes: Promise<void> = Promise.resolve();
   constructor(private readonly file: string) {}
 
   /**
    * Persist one usage record, completed or failed. Best-effort: a ledger
    * failure is logged and never fails the turn it describes. Turns whose usage
    * could not be observed (e.g. recovered after finishing while the bot was
-   * down, or dropped before the first model step) still record a zero-token
-   * entry so day turn counts stay truthful.
+   * down, or dropped before the first model step) retain their turn count;
+   * persisted OpenCode history can later fill missing token figures.
    */
   async record(input: {
+    id?: string;
+    sessionId?: string;
+    startedAt?: string;
+    pending?: boolean;
     label?: "turn" | "title";
     threadId: string;
     project: string;
@@ -118,16 +130,20 @@ export class UsageLog {
     fallbackModel?: string;
   }): Promise<void> {
     const usage = input.usage;
-    const inputTokens = usage?.inputTokens ?? 0;
-    const outputTokens = usage?.outputTokens ?? 0;
-    const cacheTokens = usage?.cacheTokens ?? 0;
-    const cost = usage?.cost ?? 0;
+    const inputTokens = usage?.inputTokens ?? usage?.models?.reduce((sum, model) => sum + model.inputTokens, 0) ?? 0;
+    const outputTokens = usage?.outputTokens ?? usage?.models?.reduce((sum, model) => sum + model.outputTokens, 0) ?? 0;
+    const cacheTokens = usage?.cacheTokens ?? usage?.models?.reduce((sum, model) => sum + model.cacheTokens, 0) ?? 0;
+    const cost = usage?.cost ?? usage?.models?.reduce((sum, model) => sum + model.cost, 0) ?? 0;
     let models = (usage?.models ?? []).filter((entry) => entry.inputTokens || entry.outputTokens || entry.cost);
     if (!models.length && (inputTokens || outputTokens || cost)) {
       models = [{ model: input.fallbackModel || "unknown", inputTokens, outputTokens, cacheTokens, cost }];
     }
     const entry: UsageEntry = {
       v: 1,
+      ...(input.id ? { id: input.id } : {}),
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.startedAt ? { startedAt: input.startedAt } : {}),
+      ...(input.pending ? { pending: true } : {}),
       ts: new Date().toISOString(),
       label: input.label ?? "turn",
       threadId: input.threadId,
@@ -141,12 +157,55 @@ export class UsageLog {
       cost,
       models,
     };
-    try {
+    await this.append(entry);
+  }
+
+  private async append(entry: UsageEntry): Promise<void> {
+    const write = this.writes.then(async () => {
+      if (entry.id) {
+        const previous = (await this.readEntries(false)).find((value) => value.id === entry.id);
+        // A later recovery may temporarily lose access to history. Never
+        // replace already durable billing with that smaller/empty snapshot.
+        if (previous && previous.inputTokens + previous.outputTokens > entry.inputTokens + entry.outputTokens) {
+          entry = { ...entry, inputTokens: previous.inputTokens, outputTokens: previous.outputTokens,
+            cacheTokens: previous.cacheTokens, cost: previous.cost, models: previous.models };
+        }
+      }
       await fs.mkdir(path.dirname(this.file), { recursive: true });
-      await fs.appendFile(this.file, `${JSON.stringify(entry)}\n`, "utf8");
-    } catch (error) {
+      const handle = await fs.open(this.file, "a");
+      try {
+        // The leading newline isolates a torn last line from a previous crash.
+        await handle.writeFile(`\n${JSON.stringify(entry)}\n`, "utf8");
+        await handle.sync();
+      } finally { await handle.close(); }
+    });
+    this.writes = write.catch((error) => {
       log("warn", "usage.record_failed", { file: this.file, error: String(error) });
+    });
+    await this.writes;
+  }
+
+  /** Fill old missed-event records from persisted history without adding turns. */
+  async reconcileThread(threadId: string, sessionId: string, messages: SessionMessage[]): Promise<boolean> {
+    let previousEnd = 0;
+    let changed = false;
+    for (const entry of await this.readEntries()) {
+      if (entry.threadId !== threadId || entry.label !== "turn") continue;
+      const until = Date.parse(entry.ts);
+      const since = entry.startedAt ? Date.parse(entry.startedAt) : previousEnd + 1;
+      previousEnd = Math.max(previousEnd, until);
+      if (entry.pending || (entry.sessionId && entry.sessionId !== sessionId)) continue;
+      // Legacy records have no session identity. Only recover missing totals
+      // within their completion window; preserve any existing observed spend.
+      if (!entry.sessionId && (entry.inputTokens || entry.outputTokens || entry.cost)) continue;
+      const saved = usageFromMessages(messages, since, until);
+      if (!saved || saved.inputTokens + saved.outputTokens <= entry.inputTokens + entry.outputTokens) continue;
+      await this.append({ ...entry, sessionId, startedAt: new Date(since).toISOString(),
+        inputTokens: saved.inputTokens, outputTokens: saved.outputTokens, cacheTokens: saved.cacheTokens,
+        cost: saved.cost, models: saved.models });
+      changed = true;
     }
+    return changed;
   }
 
   /** Lifetime ledgered usage for one thread (completed + failed turns and title prompts). */
@@ -268,7 +327,8 @@ export class UsageLog {
     return [...byDay.values()].sort((a, b) => b.date.localeCompare(a.date));
   }
 
-  private async readEntries(): Promise<UsageEntry[]> {
+  private async readEntries(waitForWrites = true): Promise<UsageEntry[]> {
+    if (waitForWrites) await this.writes;
     let raw: string;
     try {
       raw = await fs.readFile(this.file, "utf8");
@@ -277,17 +337,20 @@ export class UsageLog {
       log("warn", "usage.read_failed", { file: this.file, error: String(error) });
       return [];
     }
-    const entries: UsageEntry[] = [];
-    for (const line of raw.split("\n")) {
+    const entries = new Map<string, UsageEntry>();
+    for (const [index, line] of raw.split("\n").entries()) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
         const parsed = JSON.parse(trimmed) as UsageEntry;
-        if (parsed?.v === 1 && typeof parsed.ts === "string") entries.push(parsed);
+        if (parsed?.v === 1 && typeof parsed.ts === "string") {
+          const id = parsed.id ?? `legacy:${index}:${createHash("sha256").update(trimmed).digest("hex")}`;
+          entries.set(id, { ...parsed, id });
+        }
       } catch {
         log("warn", "usage.entry_parse_failed", { file: this.file });
       }
     }
-    return entries;
+    return [...entries.values()];
   }
 }

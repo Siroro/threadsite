@@ -565,6 +565,40 @@ test("an aborted agent finish is continued by recovery, not committed as complet
   assert.ok(result.commit, "the continued work was committed");
 });
 
+test("restart recovery restores saved tokens and flushes the ledger before clearing the pending marker", async () => {
+  const f = await projectFixture("usage-recovery");
+  const startedAt = new Date(Date.now() - 30_000).toISOString();
+  const pending = { id: "durable-turn", prompt: "Add fog", initial: false, startedAt };
+  await f.store.patchProject(f.project.threadId, { pendingTurn: pending });
+  await f.usage.record({ id: pending.id, pending: true, sessionId: f.project.sessionId, startedAt,
+    threadId: f.project.threadId, project: f.project.displayName, kind: "site" });
+  const messages = [{ info: { id: "completed", role: "assistant", agent: "sitebuilder", finish: "stop",
+    providerID: "test", modelID: "model", tokens: { input: 1234, output: 456 }, cost: 0,
+    time: { created: Date.now() - 20_000, completed: Date.now() - 10_000 } }, parts: [] }];
+  Object.assign(f.opencode, {
+    health: async () => "ok (200)", watchExistingTurn: async () => async () => {},
+    isBusy: async () => false, listMessages: async () => messages, usageMessages: async () => messages,
+    prompt: async () => { throw new Error("Completed work must not be prompted again"); },
+  });
+  const patch = f.store.patchProject.bind(f.store);
+  let checked = false;
+  f.store.patchProject = async (threadId, changes) => {
+    if (Object.hasOwn(changes, "pendingTurn") && changes.pendingTurn === undefined) {
+      const total = await f.usage.threadTotal(threadId);
+      assert.equal(total.turns, 1);
+      assert.equal(total.inputTokens, 1234);
+      checked = true;
+    }
+    return patch(threadId, changes);
+  };
+  const result = await f.service.recoverTurn(f.project.threadId);
+  assert.ok(checked);
+  assert.equal(result.usage!.outputTokens, 456);
+  assert.equal(f.store.getProject(f.project.threadId)!.pendingTurn, undefined);
+  assert.equal(await f.service.reconcileProjectUsage(f.project.threadId), false);
+  assert.equal((await f.usage.threadTotal(f.project.threadId)).turns, 1);
+});
+
 test("resetting a thread reports its aborted turn as a user stop, not a failure", async () => {
   const f = await projectFixture("reset-stop");
   let prompted = false;

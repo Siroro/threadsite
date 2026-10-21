@@ -93,6 +93,13 @@ test("an errored project says so and keeps the card useful", () => {
   assert.ok(card.fields!.find((field) => field.name === "Links"));
 });
 
+test("missing provider counts are shown as unavailable instead of claiming zero usage", () => {
+  const card = embed(renderProjectCard({ project: record(), usage: usage({ inputTokens: 0, outputTokens: 0, cacheTokens: 0 }) }));
+  const lifetime = card.fields!.find((field) => field.name === "Lifetime usage")!.value;
+  assert.match(lifetime, /4 turns · 1 failed · token counts unavailable/);
+  assert.doesNotMatch(lifetime, /in 0|out 0/);
+});
+
 test("a missing prompt degrades gracefully instead of rendering empty", () => {
   const card = embed(renderProjectCard({ project: record({ initialPrompt: undefined }) }));
   assert.match(card.fields!.find((field) => field.name === "Original request")!.value, /\*\(not recorded\)\*/);

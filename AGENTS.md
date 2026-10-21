@@ -40,6 +40,7 @@ These instructions apply to this repository. This is the infrastructure that tur
 ## Behavior to preserve
 
 - One registered Discord thread owns its project workspace, agent session, and source repository. Preserve durable queue claims and turn identity through failures, stops, resets, and restarts.
+- Keep usage durable across restarts: reconcile billing from saved OpenCode messages, retain stable turn IDs in the usage ledger, and flush usage before clearing recovery markers. Live events and saved history overlap; never add both snapshots or count recovery as a second turn. Show missing provider counts as unavailable.
 - An ambiguous transport failure can leave the agent running. Reconcile persisted history and status before considering another prompt; avoid duplicate turns and do not reset files beneath an unconfirmed running turn.
 - Keep build/type/static validation mandatory. Browser QA is advisory and fail-open, including runtime findings: preserve actionable diagnostics for the agent's next turn and show warnings without triggering repair or blocking publication. Push accepted source before replacing the published site. A failed push must leave the previous live site available.
 - Preserve atomic publication and startup recovery of interrupted publishes. Keep old URL redirects and repository/project identity consistent during renames.
