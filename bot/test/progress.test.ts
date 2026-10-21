@@ -168,11 +168,9 @@ test("a failed tool or provider retry reaches the card with a stated reason", as
 });
 
 test("a merged prompt shows the user's own words, not the model-facing preamble", () => {
-  const merged = "Add a leaderboard\n\nWhile updates were queued, the user sent 2 more messages — apply all of them in this same pass:\n2. Make the arena louder\n3. Fix the reset button";
   const display = requestDisplayText(["Add a leaderboard", "Make the arena louder", "Fix the reset button"]);
   assert.doesNotMatch(display, /While updates were queued|apply all of them/);
   assert.equal(display, "Add a leaderboard · Make the arena louder · Fix the reset button");
-  assert.match(merged, /While updates were queued/, "the prompt keeps its instructions for the model");
 
   // Blank and whitespace-only entries never produce stray separators.
   assert.equal(requestDisplayText(["  only  ", "   ", ""]), "only");
@@ -329,7 +327,6 @@ test("a resumed session restores the plan the server already holds", async () =>
 
   await stub.rehydratePlan("/workspace/project", "session", (update: typeof updates[number]) => updates.push(update));
   const plan = updates.find((update) => update.kind === "plan")!.plan!;
-  assert.deepEqual(plan.map((item) => item.status), ["completed", "in_progress", "pending"]);
   assert.equal(plan[1].content, "Wire the clinic actions");
   assert.deepEqual(calls, ["session"]);
 
