@@ -1186,7 +1186,7 @@ export async function publishIndex(
   if (!config.publicIndexEnabled) return;
   await fs.mkdir(config.publishRoot, { recursive: true });
   const rows = projects
-    .filter((p) => p.status === "ready")
+    .filter((p) => p.status === "ready" && !p.pendingDeletion)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .map((project) => `
       <li>

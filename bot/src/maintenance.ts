@@ -10,6 +10,11 @@ import { OpenCodeHarness } from "./opencode.js";
 import { publishIndex } from "./publish.js";
 import { Store } from "./store.js";
 import type { ProjectRecord } from "./types.js";
+import { removalPaths } from "./project-removal.js";
+import { assertExclusiveResources } from "./project-removal.js";
+import { UsageLog } from "./usage.js";
+import { ProjectService } from "./project.js";
+export { checkedRemovalPath, removalPaths } from "./project-removal.js";
 
 export interface Selection { threads: string[]; repos: string[]; games: string[] }
 
@@ -27,39 +32,6 @@ export function selectProjects(projects: ProjectRecord[], selection: Selection):
     selected.add(matches[0].threadId);
   }
   return projects.filter((project) => selected.has(project.threadId));
-}
-
-/** Validate every ancestor before recursive removal; never follow a link outside a configured root. */
-export async function checkedRemovalPath(root: string, target: string): Promise<string> {
-  const base = path.resolve(root);
-  const absolute = path.resolve(target);
-  const relative = path.relative(base, absolute);
-  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error(`Refusing removal outside the configured root: ${absolute}`);
-  }
-  let current = base;
-  for (const part of relative.split(path.sep)) {
-    current = path.join(current, part);
-    const stat = await fs.lstat(current).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-      return undefined;
-    });
-    if (!stat) break;
-    if (stat.isSymbolicLink()) throw new Error(`Refusing removal through a symlink: ${current}`);
-  }
-  return absolute;
-}
-
-export async function removalPaths(project: ProjectRecord): Promise<string[]> {
-  if (!/^\d+$/.test(project.guildId) || !/^\d+$/.test(project.threadId)) throw new Error("Invalid project guild/thread identity.");
-  const expected = path.resolve(config.workspaceRoot, project.guildId, project.threadId);
-  if (path.resolve(project.workspacePath) !== expected) throw new Error(`Unexpected workspace path for ${project.threadId}: ${project.workspacePath}`);
-  const paths = [await checkedRemovalPath(config.workspaceRoot, expected)];
-  for (const slug of new Set([project.siteSlug, ...(project.siteAliases ?? [])])) {
-    if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug)) throw new Error(`Invalid site slug: ${slug}`);
-    paths.push(await checkedRemovalPath(config.publishRoot, path.join(config.publishRoot, slug)));
-  }
-  return paths;
 }
 
 export function assertIdle(project: ProjectRecord): void {
@@ -91,6 +63,7 @@ interface RemovalServices {
   busy(project: ProjectRecord): Promise<boolean>;
   deleteRepository(name: string): Promise<void>;
   deleteThread(project: ProjectRecord): Promise<void>;
+  removeProject?(project: ProjectRecord): Promise<void>;
 }
 
 /** Keep the registration on any failure so the exact same selection can be retried. */
@@ -98,10 +71,11 @@ export async function removeProjects(store: Store, selected: ProjectRecord[], mo
   const all = store.listProjects();
   // Preflight the whole selection before the first external deletion.
   for (const project of selected) {
-    assertIdle(project);
+    if (!project.pendingDeletion || mode === "forget") assertIdle(project);
     if (JSON.stringify(store.getProject(project.threadId)) !== JSON.stringify(project)) throw new Error("A selected record changed. Stop the bot and retry.");
     if (mode === "remove") {
       await removalPaths(project);
+      assertExclusiveResources(project, all);
       for (const other of all.filter((item) => item.threadId !== project.threadId)) {
         if (other.repoName === project.repoName || [other.siteSlug, ...(other.siteAliases ?? []), other.pendingRename?.siteSlug]
           .some((slug) => slug && [project.siteSlug, ...(project.siteAliases ?? [])].includes(slug))) {
@@ -110,16 +84,21 @@ export async function removeProjects(store: Store, selected: ProjectRecord[], mo
       }
     }
     // The agent can still be running after the bot container stops.
-    if (await services.busy(project)) throw new Error(`${project.repoName} still has an active agent turn; stop it before cleanup.`);
+    if (!project.pendingDeletion && await services.busy(project)) throw new Error(`${project.repoName} still has an active agent turn; stop it before cleanup.`);
   }
   if (!selected.length) return;
   console.log(`SQLite backup: ${await backupDatabase(store.file)}`);
   for (const project of selected) {
     if (mode === "remove") {
-      await services.deleteRepository(project.repoName);
-      await services.deleteThread(project);
-      // Recheck immediately before deleting local files.
-      for (const target of await removalPaths(project)) await fs.rm(target, { recursive: true, force: true, maxRetries: 3 });
+      if (services.removeProject) {
+        await services.deleteThread(project);
+        await services.removeProject(project);
+      } else {
+        await services.deleteRepository(project.repoName);
+        await services.deleteThread(project);
+        // Recheck immediately before deleting local files.
+        for (const target of await removalPaths(project)) await fs.rm(target, { recursive: true, force: true, maxRetries: 3 });
+      }
     }
     await store.deleteProject(project.threadId);
     console.log(`${mode === "remove" ? "Removed project" : "Forgot registration"}: ${project.threadId} · ${project.displayName}`);
@@ -153,7 +132,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const filtered = all.filter((project) => kind === "all" || (kind === "games" ? project.projectKind?.startsWith("game-") : !project.projectKind?.startsWith("game-")));
     const selected = command === "list" ? filtered : selectProjects(filtered, selection);
     for (const project of selected) {
-      const values = [project.threadId, project.projectKind ?? "site", project.status, project.displayName, project.repoName];
+      const values = [project.threadId, project.projectKind ?? "site", project.pendingDeletion ? "deleting" : project.status, project.displayName, project.repoName];
       const clean = values.map((value) => value.replace(/[\t\r\n\u001b]/g, " "));
       console.log(tsv ? clean.join("\t") : `${clean[0]} · ${clean[1]} · ${clean[2]} · ${clean[3]}\n  Repo: ${clean[4]}`);
       if (command !== "list") {
@@ -164,10 +143,12 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (!apply) { console.log("Preview only. Add --apply to proceed. The bot must be stopped during cleanup."); return; }
     const forgejo = new ForgejoClient();
     const agent = new OpenCodeHarness();
+    const projects = new ProjectService(store, agent, forgejo, new UsageLog(config.usageLogFile));
     await removeProjects(store, selected, command as "remove" | "forget", {
       busy: (project) => agent.isBusy(project.workspacePath, project.sessionId),
       deleteRepository: (name) => forgejo.deleteRepository(name),
       deleteThread: removeDiscordThread,
+      removeProject: (project) => projects.forceDeleteProject(project.threadId, "maintenance-remove"),
     });
     if (command === "remove") await publishIndex(store.listProjects(), (name) => forgejo.repoWebUrl(name));
   } finally { store.close(); }

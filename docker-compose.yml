@@ -118,6 +118,7 @@ services:
       MULTIPLAYER_ENABLED: ${MULTIPLAYER_ENABLED:-true}
       GAMESERVER_PUBLIC_URL: ${GAMESERVER_PUBLIC_URL:-ws://localhost:8090/ws}
       GAMESERVER_INTERNAL_URL: ${GAMESERVER_INTERNAL_URL:-http://gameserver:8090}
+      GAMESERVER_ADMIN_TOKEN_FILE: /run/threadsite-control/cleanup-token
       WORKSPACE_ROOT: /workspace
       PUBLISH_ROOT: /srv/sites
       STATE_FILE: /data/state.json
@@ -136,6 +137,7 @@ services:
       - ./data/workspaces:/workspace
       - ${SITES_HOST_PATH:-./data/sites}:/srv/sites
       - ./data/bot:/data
+      - cleanup-control:/run/threadsite-control
       - ./secrets/forgejo-token:/run/secrets/forgejo-token:ro
       - ./secrets/forgejo-admin-token:/run/secrets/forgejo-admin-token:ro
     networks:
@@ -183,8 +185,10 @@ services:
       # ARENA (single-mode) worlds are persisted here and survive restarts.
       GAMESERVER_STATE_DIR: ${GAMESERVER_STATE_DIR:-/data/threadsite-relay}
       GAMESERVER_PERSIST_INTERVAL_MS: ${GAMESERVER_PERSIST_INTERVAL_MS:-1000}
+      GAMESERVER_ADMIN_TOKEN_FILE: /run/threadsite-control/cleanup-token
     volumes:
       - ./data/gameserver:/data
+      - cleanup-control:/run/threadsite-control:ro
     ports:
       - "127.0.0.1:${GAMESERVER_PORT:-8090}:8090"
 
@@ -202,6 +206,7 @@ services:
 volumes:
   forgejo-data:
   opencode-data:
+  cleanup-control:
 
 networks:
   preview:

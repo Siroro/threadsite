@@ -40,6 +40,8 @@ export interface ProjectRecord {
   status: ProjectStatus;
   createdAt: string;
   updatedAt: string;
+  /** Durable deletion intent: block new work and retry teardown after failures/restarts. */
+  pendingDeletion?: { requestedAt: string; reason: string; lastError?: string; agentsDeleted?: boolean };
   /** The request that created the project, shown on the pinned project card. */
   initialPrompt?: string;
   /** The pinned project-card message; edited in place after every turn outcome. */
@@ -83,6 +85,8 @@ export interface ProjectRecord {
     password: string;
     createdAt: string;
   };
+  /** Allocated push accounts, including failed issuance/rotation awaiting cleanup. */
+  pushAccountNames?: string[];
   /**
    * When the last agent turn ran (success or failure). A non-initial turn
    * whose session has been idle longer than SESSION_IDLE_RESET_MS starts a

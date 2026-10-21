@@ -21,6 +21,8 @@ import type { WorkingTreeStats } from "./git.js";
 import { log, logError, serializeError } from "./logger.js";
 import { errorText, formatShortDuration, formatTokens, parseModel, safeChild, slugify, truncate, withTimeout } from "./util.js";
 import { browserQaFeedback, runBrowserQa as driveBrowserQa, type BrowserQaResult } from "./browser-qa.js";
+import { assertExclusiveResources, projectAccounts, projectRepos, removalPaths } from "./project-removal.js";
+import { deleteRelayGame } from "./relay-cleanup.js";
 
 export interface MutationResult {
   project: ProjectRecord;
@@ -116,6 +118,8 @@ export class ProjectService {
    */
   private readonly activeTurnThreads = new Set<string>();
   private identityTail: Promise<unknown> = Promise.resolve();
+  private readonly deletions = new Map<string, Promise<void>>();
+  private readonly runningOperations = new Map<string, number>();
 
   constructor(
     readonly store: Store,
@@ -175,6 +179,7 @@ export class ProjectService {
   }
 
   enqueue<T>(threadId: string, work: () => Promise<T>): Promise<T> {
+    if (this.store.getProject(threadId)?.pendingDeletion) return Promise.reject(new TurnStoppedError("Project deletion is pending."));
     let state = this.queues.get(threadId);
     if (!state) {
       state = { tail: Promise.resolve(), waiters: [] };
@@ -190,7 +195,10 @@ export class ProjectService {
       await Promise.race([previous.catch(() => undefined), gate.promise]);
       const index = state.waiters.indexOf(gate);
       if (index >= 0) state.waiters.splice(index, 1);
-      return work();
+      if (this.store.getProject(threadId)?.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
+      this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 0) + 1);
+      try { return await work(); }
+      finally { this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 1) - 1); }
     })();
     const tracked = next.finally(() => {
       if (this.queues.get(threadId) === state && state.tail === tracked) this.queues.delete(threadId);
@@ -247,6 +255,8 @@ export class ProjectService {
     /** Discord user who requested the project, pinged when the agent asks a question. */
     initiatorUserId?: string;
   }, onProgress?: ProgressCallback, onTitle?: (title: string) => Promise<void>): Promise<MutationResult> {
+    this.runningOperations.set(input.threadId, (this.runningOperations.get(input.threadId) ?? 0) + 1);
+    try {
     if (this.store.getProject(input.threadId)) throw new Error("This Discord thread already has a site.");
     // Bot-created threads carry a "site-"/"game-" prefix in their name; keep it
     // out of the slug so the initial repo isn't double-prefixed (site-site-…)
@@ -259,6 +269,31 @@ export class ProjectService {
     const workspacePath = safeChild(config.workspaceRoot, input.guildId, input.threadId);
     const siteDir = safeChild(workspacePath, "site");
     const projectKind = input.projectKind ?? "site";
+    const multiplayerMode = input.multiplayerMode ?? "arena";
+    const now = new Date().toISOString();
+    const project: ProjectRecord = {
+      threadId: input.threadId,
+      guildId: input.guildId,
+      parentChannelId: input.parentChannelId,
+      displayName: input.displayName,
+      workspacePath,
+      siteSlug,
+      repoName,
+      sessionId: "",
+      projectKind,
+      status: "creating",
+      createdAt: now,
+      updatedAt: now,
+      // The card's front page: the original request outlives pendingTurn. The
+      // card id arrives from the already-posted message, so it is stamped with
+      // the design version it was rendered at.
+      initialPrompt: truncate(input.initialPrompt, 2_000),
+      ...(projectKind !== "site" ? { multiplayerMode } : {}),
+      infoMessageId: input.infoMessageId,
+      infoCardVersion: input.infoMessageId ? PROJECT_CARD_VERSION : undefined,
+    };
+    await this.store.putProject(project);
+
 
     emit(onProgress, "📁 Preparing persistent workspace");
     const srcDir = safeChild(workspacePath, "site", "src");
@@ -269,7 +304,6 @@ export class ProjectService {
     // record. Harness build inputs and generated bundles are recreated locally
     // and never enter Forgejo.
     await fs.writeFile(path.join(workspacePath, ".gitignore"), `${GENERATED_GITIGNORE.join("\n")}\n`, "utf8");
-    const multiplayerMode = input.multiplayerMode ?? "arena";
     const multiplayer = multiplayerContext(projectKind, siteSlug, multiplayerMode);
     if (multiplayer) {
       // Games are multi-tenant clients of the shared relay: vendored protocol
@@ -310,29 +344,8 @@ export class ProjectService {
     emit(onProgress, "🧠 Starting the persistent agent session");
     const sessionId = await this.opencode.createSession(workspacePath, `Discord: ${input.displayName}`);
 
-    const now = new Date().toISOString();
-    const project: ProjectRecord = {
-      threadId: input.threadId,
-      guildId: input.guildId,
-      parentChannelId: input.parentChannelId,
-      displayName: input.displayName,
-      workspacePath,
-      siteSlug,
-      repoName,
-      sessionId,
-      projectKind,
-      status: "creating",
-      createdAt: now,
-      updatedAt: now,
-      // The card's front page: the original request outlives pendingTurn. The
-      // card id arrives from the already-posted message, so it is stamped with
-      // the design version it was rendered at.
-      initialPrompt: truncate(input.initialPrompt, 2_000),
-      ...(projectKind !== "site" ? { multiplayerMode } : {}),
-      infoMessageId: input.infoMessageId,
-      infoCardVersion: input.infoMessageId ? PROJECT_CARD_VERSION : undefined,
-    };
-    await this.store.putProject(project);
+    await this.store.patchProject(input.threadId, { sessionId });
+    project.sessionId = sessionId;
     log("info", "project.created", { threadId: input.threadId, projectKind, repoName, siteSlug });
 
     // Generate the AI thread title in parallel with the first build; it is applied
@@ -390,10 +403,16 @@ export class ProjectService {
       }
     }
     return result;
+    } catch (error) {
+      if (this.store.getProject(input.threadId)?.pendingDeletion) throw new TurnStoppedError("Project deleted during setup.", { cause: error });
+      throw error;
+    } finally { this.runningOperations.set(input.threadId, (this.runningOperations.get(input.threadId) ?? 1) - 1); }
   }
 
   /** Reserve names before remote changes so concurrent projects cannot choose the same URL. */
   async renameProject(threadId: string, name: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {
+    this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 0) + 1);
+    try {
     const displayName = name.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80);
     if (!displayName) throw new Error("Choose a non-empty project name.");
     if (this.store.getProject(threadId)?.pendingRename) await this.resumeRename(threadId, onProgress);
@@ -429,11 +448,14 @@ export class ProjectService {
     });
     this.identityTail = reserve;
     await reserve;
-    return this.resumeRename(threadId, onProgress);
+    return await this.resumeRename(threadId, onProgress);
+    } finally { this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 1) - 1); }
   }
 
   /** Every step can be repeated after failure or restart, using the persisted repo ID. */
   async resumeRename(threadId: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {
+    this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 0) + 1);
+    try {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
     const intent = project.pendingRename;
@@ -470,11 +492,13 @@ export class ProjectService {
       .catch((error) => log("warn", "project.index_refresh_failed", { threadId, error: errorText(error) }));
     log("info", "project.renamed", { threadId, siteSlug: project.siteSlug, repoName: project.repoName });
     return project;
+    } finally { this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 1) - 1); }
   }
 
   async mutate(threadId: string, prompt: string, initial = false, onProgress?: ProgressCallback, author?: CommitAuthor, statusMessageId?: string, images?: readonly PromptImage[], queuedStatusIds: readonly string[] = [], displayRequest?: string, requesterId?: string, instructionOverride?: string): Promise<MutationResult> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site. Use /site start first.");
+    if (project.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
     if (project.pendingRename) project = await this.resumeRename(threadId, onProgress);
     if (!prompt.trim() && !images?.length) throw new Error("Prompt is empty.");
     if (prompt.length > config.maxPromptChars) throw new Error(`Prompt exceeds MAX_PROMPT_CHARS (${config.maxPromptChars}).`);
@@ -624,7 +648,7 @@ export class ProjectService {
           // The session was replaced out from under this turn (e.g. /site-admin
           // reset deleted it) — recreating here would resurrect a turn the
           // reset just stopped.
-          if (this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;
+          if (this.store.getProject(threadId)?.pendingDeletion || this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;
           emit(onProgress, "♻️ Recreating a missing agent session");
           const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
           project = await this.store.patchProject(threadId, { sessionId });
@@ -687,7 +711,7 @@ export class ProjectService {
       // clearing the replacement's marker would silently lose its crash
       // recovery, and stamping error/lastTurnAt would overwrite its state.
       const owning = this.store.getProject(threadId);
-      if (owning && pendingTurnMatches(owning.pendingTurn, pendingMarker)) {
+      if (owning && !owning.pendingDeletion && pendingTurnMatches(owning.pendingTurn, pendingMarker)) {
         await this.store.patchProject(threadId, stoppedByUser
           ? {
             // A user stop is not a project failure: keep the prior status and
@@ -892,7 +916,7 @@ export class ProjectService {
     // other field derived from the worktree: once superseded, this turn's HEAD
     // observations describe the successor's commits, and persisting them would
     // make /site revert undo the wrong turn.
-    const ownsTurn = pendingTurnMatches(this.store.getProject(threadId)?.pendingTurn, input.pendingTurn);
+    const ownsTurn = !this.store.getProject(threadId)?.pendingDeletion && pendingTurnMatches(this.store.getProject(threadId)?.pendingTurn, input.pendingTurn);
     if (ownsTurn) {
       project = await this.store.patchProject(threadId, {
         ...(noChanges ? {} : {
@@ -971,6 +995,7 @@ export class ProjectService {
     let project = this.store.getProject(threadId);
     const pending = project?.pendingTurn;
     if (!project || !pending) throw new Error("This thread has no interrupted turn to recover.");
+    if (project.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
     const projectKind = project.projectKind ?? "site";
     const turnStartedAt = Date.now();
     // Hoisted for the failure ledger in the catch, mirroring mutate().
@@ -1012,7 +1037,7 @@ export class ProjectService {
           usage = result.usage;
         } catch (error) {
           if (!/404|not found|unknown session/i.test(errorText(error))) throw error;
-          if (this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;
+          if (this.store.getProject(threadId)?.pendingDeletion || this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;
           log("warn", "project.recovery_session_lost", { threadId, sessionId: project.sessionId });
           const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
           project = await this.store.patchProject(threadId, { sessionId });
@@ -1049,7 +1074,7 @@ export class ProjectService {
       // session and marker while this recovery was in flight, and the
       // replacement's crash-recovery marker must survive this failure.
       const owning = this.store.getProject(threadId);
-      if (owning && pendingTurnMatches(owning.pendingTurn, pending)) {
+      if (owning && !owning.pendingDeletion && pendingTurnMatches(owning.pendingTurn, pending)) {
         await this.store.patchProject(threadId, stoppedByUser
           ? {
             ...(owning.status === "creating" ? { status: "error" as const, lastError: "Initial build stopped at the user's request" } : {}),
@@ -1403,6 +1428,7 @@ export class ProjectService {
   async resetSession(threadId: string): Promise<{ project: ProjectRecord; stoppedTurn: boolean }> {
     const project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
+    if (project.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
 
     // A turn in its delivery tail (build/validate/commit/publish) has already
     // left the agent, so it is not "busy" — but it still holds the queue and
@@ -1492,7 +1518,7 @@ export class ProjectService {
    * project notes are untouched.
    */
   async resetAllSessions(): Promise<{ total: number; stopped: number; failed: number; aborted: number }> {
-    const projects = this.store.listProjects();
+    const projects = this.store.listProjects().filter((project) => !project.pendingDeletion);
     // Free every thread's queue first — instantly, before any service call —
     // so messages wedged behind a stuck turn proceed even while the agent
     // service is slow to abort it (or unreachable entirely). A turn already in
@@ -1558,7 +1584,7 @@ export class ProjectService {
       throw new Error("A model turn is still running in this thread. Wait for it to finish before deleting.");
     }
 
-    await this.removeProjectFootprint(project);
+    await this.forceDeleteProject(threadId, "project-delete");
   }
 
   /**
@@ -1566,42 +1592,71 @@ export class ProjectService {
    * unambiguous, so unlike deleteProject this does not wait behind the
    * thread's queue or a running turn: the queue is severed, the running turn
    * is aborted (questions rejected first — they hold turns open), and the
-   * teardown proceeds immediately. The aborted turn routes through the
+   * durable deletion blocks new work while existing delivery unwinds. The aborted turn routes through the
    * user-stop marker so it does not raise a spurious admin incident for a
    * thread that no longer exists.
    */
-  async forceDeleteProject(threadId: string): Promise<void> {
-    const project = this.store.getProject(threadId);
+  forceDeleteProject(threadId: string, reason = "thread-delete"): Promise<void> {
+    const running = this.deletions.get(threadId);
+    if (running) return running;
+    const task = this.removeDeletedProject(threadId, reason).finally(() => { this.deletions.delete(threadId); });
+    this.deletions.set(threadId, task);
+    return task;
+  }
+
+  private async removeDeletedProject(threadId: string, reason: string): Promise<void> {
+    let project = this.store.getProject(threadId);
     if (!project) return;
+    // Persist intent before the first external call. A failure must retain
+    // enough identity to retry, while preventing recovery or new publication.
+    project = await this.store.patchProject(threadId, {
+      pendingDeletion: project.pendingDeletion ?? { requestedAt: new Date().toISOString(), reason }, pendingQueue: undefined,
+    });
     this.severQueue(threadId);
-    if (await this.opencode.isBusy(project.workspacePath, project.sessionId).catch(() => false)) {
-      await this.rejectPendingQuestions(project.workspacePath);
-      const aborted = await this.opencode.abortTurn(project.workspacePath, project.sessionId).catch((error) => {
-        log("warn", "project.delete_abort_failed", { threadId, error: serializeError(error) });
-        return false;
+    if (this.activeTurnThreads.has(threadId)) this.stopRequested.add(threadId);
+    try {
+      assertExclusiveResources(project, this.store.listProjects());
+      await removalPaths(project);
+      if (!project.pendingDeletion?.agentsDeleted) await this.opencode.deleteSessionsInDirectory(project.workspacePath, project.sessionId);
+      // Delivery may already be building/pushing. Let it unwind before local
+      // deletion; deleting underneath it could resurrect published files.
+      const deadline = Date.now() + 30_000;
+      while (this.activeTurnThreads.has(threadId) || (this.runningOperations.get(threadId) ?? 0) > 0) {
+        if (Date.now() >= deadline) throw new Error("Waiting for the stopped project operation to finish; cleanup will retry.");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      project = this.store.getProject(threadId)!;
+      assertExclusiveResources(project, this.store.listProjects());
+      await removalPaths(project);
+      // Repeat after operations settle to catch a title/subagent created while
+      // the first stop was landing.
+      if (!project.pendingDeletion?.agentsDeleted) {
+        await this.opencode.deleteSessionsInDirectory(project.workspacePath, project.sessionId);
+        project = await this.store.patchProject(threadId, { pendingDeletion: { ...project.pendingDeletion!, agentsDeleted: true } });
+      }
+      if (project.multiplayerGameId || (project.projectKind?.startsWith("game-") && project.multiplayerMode !== "singleplayer")) {
+        await this.deleteRelayGame(project.multiplayerGameId ?? project.siteSlug);
+      }
+      for (const repo of projectRepos(project)) await this.forgejo.deleteRepository(repo);
+      for (const account of projectAccounts(project)) await this.forgejo.deletePushAccount(account);
+      for (const target of await removalPaths(project)) await fs.rm(target, { recursive: true, force: true, maxRetries: 3 });
+      await this.usageLog.forgetThread(threadId);
+      // Keep the retry marker even if gallery refresh fails.
+      await publishIndex(this.store.listProjects().filter((item) => item.threadId !== threadId), (repo) => this.forgejo.repoWebUrl(repo));
+      await this.store.deleteProject(threadId);
+      this.runningOperations.delete(threadId);
+      this.stopRequested.delete(threadId);
+      log("info", "project.deleted", { threadId, repoName: project.repoName, siteSlug: project.siteSlug });
+    } catch (error) {
+      const current = this.store.getProject(threadId);
+      if (current?.pendingDeletion) await this.store.patchProject(threadId, {
+        pendingDeletion: { ...current.pendingDeletion, lastError: truncate(errorText(error), 1000) },
       });
-      if (aborted) this.stopRequested.add(threadId);
+      throw error;
     }
-    await this.removeProjectFootprint(project);
   }
 
-  /** Shared teardown: workspace, Forgejo repo, published page, store record, gallery. */
-  private async removeProjectFootprint(project: ProjectRecord): Promise<void> {
-    const threadId = project.threadId;
-    await fs.rm(project.workspacePath, { recursive: true, force: true }).catch((error) => {
-      log("warn", "project.delete_workspace_failed", { threadId, error: serializeError(error) });
-    });
-    await this.forgejo.deleteRepository(project.repoName).catch((error) => {
-      log("warn", "project.delete_repo_failed", { threadId, repoName: project.repoName, error: serializeError(error) });
-    });
-    for (const slug of new Set([project.siteSlug, ...(project.siteAliases ?? []), ...(project.pendingRename ? [project.pendingRename.siteSlug] : [])])) {
-      await fs.rm(safeChild(config.publishRoot, slug), { recursive: true, force: true }).catch(() => undefined);
-    }
-
-    await this.store.deleteProject(threadId);
-    await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo)).catch(() => undefined);
-    log("info", "project.deleted", { threadId, repoName: project.repoName, siteSlug: project.siteSlug });
-  }
+  private deleteRelayGame = deleteRelayGame;
 
   /** Whether an agent turn is currently running for the project's session. */
   async agentBusy(threadId: string): Promise<boolean> {
@@ -1753,6 +1808,7 @@ export class ProjectService {
     }
 
     const { username, password } = generatePushCredentials();
+    await this.store.patchProject(threadId, { pushAccountNames: [...new Set([...projectAccounts(project), username])] });
     const domain = new URL(config.forgejoPublicUrl).hostname;
     await this.forgejo.createPushAccount(username, password, `${username}@noreply.${domain}`);
     await this.forgejo.addCollaborator(project.repoName, username);

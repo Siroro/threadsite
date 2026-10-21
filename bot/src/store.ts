@@ -164,10 +164,11 @@ export class Store {
   }
 
   listRecoveryProjects(): ProjectRecord[] {
-    return this.listProjects().filter((project) => project.pendingTurn || project.pendingQueue?.length || project.pendingRename || project.pendingThreadName);
+    return this.listProjects().filter((project) => !project.pendingDeletion && (project.pendingTurn || project.pendingQueue?.length || project.pendingRename || project.pendingThreadName));
   }
 
   async putProject(project: ProjectRecord): Promise<void> {
+    if (this.getProject(project.threadId)?.pendingDeletion && !project.pendingDeletion) throw new Error("Project deletion is pending.");
     this.db.prepare("INSERT INTO projects (thread_id, record) VALUES (?, ?) ON CONFLICT(thread_id) DO UPDATE SET record = excluded.record")
       .run(project.threadId, JSON.stringify(project));
   }
@@ -175,6 +176,7 @@ export class Store {
   async patchProject(threadId: string, patch: Partial<ProjectRecord>): Promise<ProjectRecord> {
     const current = this.getProject(threadId);
     if (!current) throw new Error(`Unknown project thread ${threadId}`);
+    if (current.pendingDeletion && !patch.pendingDeletion) throw new Error("Project deletion is pending.");
     const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
     await this.putProject(next);
     return next;

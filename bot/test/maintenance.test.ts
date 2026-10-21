@@ -85,6 +85,17 @@ test("forget preserves files and does not invoke thread or repository deletion",
   await fs.access(path.join(config.publishRoot, project.siteSlug));
 });
 
+test("production removal delegates full teardown after deleting the selected Discord thread", async () => {
+  const project = record("3002");
+  const f = await fixture("delegated", [project]);
+  await removeProjects(f.store, [project], "remove", { ...f.services, removeProject: async (selected) => {
+    assert.deepEqual(f.calls, [`thread:${selected.threadId}`]);
+    f.calls.push("full-teardown");
+  } });
+  assert.deepEqual(f.calls, [`thread:${project.threadId}`, "full-teardown"]);
+  assert.equal(f.store.getProject(project.threadId), undefined);
+});
+
 test("pending work, busy agents, and failures leave the record and files available for retry", async () => {
   const project = record("4001");
   const pending = record("4002", { pendingTurn: { prompt: "Saved edit", initial: false, startedAt: "now" } });

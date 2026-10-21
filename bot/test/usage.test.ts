@@ -103,3 +103,45 @@ test("prompt usage is recovered without any live events, including paginated and
   assert.equal(result.usage.inputTokens, 206 * 135);
   assert.deepEqual(cursors, ["m005"]);
 });
+
+test("project deletion erases every usage revision while preserving other projects and ignoring late events", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-delete-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 5 }));
+  const file = path.join(root, "usage.jsonl");
+  const log = new UsageLog(file);
+  const input = { id: "turn", threadId: "gone", project: "Private project name", kind: "site" };
+  await log.record({ ...input, pending: true });
+  await log.record({ ...input, usage: usageFromMessages([message("completed", Date.now())]) });
+  await log.record({ id: "other", threadId: "keep", project: "Keep", kind: "site" });
+  await log.forgetThread("gone");
+  await log.record(input);
+  assert.doesNotMatch(await fs.readFile(file, "utf8"), /Private project name|gone/);
+  assert.equal((await new UsageLog(file).threadTotal("gone")).turns, 0);
+  assert.equal((await new UsageLog(file).threadTotal("keep")).turns, 1);
+});
+
+test("strict session teardown covers children, rejects questions and propagates failed deletion", async () => {
+  const harness = new OpenCodeHarness();
+  const calls: string[] = [];
+  const stub = harness as any;
+  let fail = false;
+  stub.client = { session: {
+    list: async () => ({ data: [{ id: "root", directory: "/project" }, { id: "child", parentID: "root", directory: "/child" },
+      { id: "other", directory: "/other" }] }),
+    abort: async ({ sessionID }: any) => { calls.push(`abort:${sessionID}`); return { data: true }; },
+    delete: async ({ sessionID }: any) => {
+      calls.push(`delete:${sessionID}`);
+      return fail ? { error: "Forbidden", response: { status: 403 } } : { data: true };
+    },
+    status: async () => ({ data: {} }),
+  }, question: {
+    list: async () => ({ data: [{ id: "question", sessionID: "root" }] }),
+    reject: async () => { calls.push("reject-question"); return { data: true }; },
+  } };
+  await harness.deleteSessionsInDirectory("/project", "root");
+  assert.ok(calls.indexOf("reject-question") < calls.indexOf("abort:root"));
+  assert.ok(calls.includes("delete:child"));
+  assert.ok(!calls.some((call) => call.endsWith(":other")));
+  fail = true;
+  await assert.rejects(harness.deleteSessionsInDirectory("/project", "root"), /Forbidden/);
+});

@@ -171,6 +171,13 @@ export function createPreviewServer({ workspaceRoot }) {
         res.writeHead(302, { Location: `${pathname}/` }); res.end(); return;
       }
       const project = segments.slice(0, 2).join("/");
+      try { await checkedPath(root, project.split("/")); }
+      catch (error) {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+          for (const key of snapshots.keys()) if (key === project || key.startsWith(`${project}/`)) snapshots.delete(key);
+        }
+        throw error;
+      }
       const parts = segments.slice(2);
       let view;
       if (parts[0] === "__scratch") {
