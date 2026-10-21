@@ -51,6 +51,41 @@ services:
       - opencode-data:/opencode-data
     expose:
       - "4096"
+    networks:
+      - default
+      - preview
+    depends_on:
+      preview:
+        condition: service_healthy
+
+  # Existing Microsoft Playwright MCP, plus a read-only, in-memory TS preview.
+  # No host port, credentials, published files, or access to the default network.
+  preview:
+    build:
+      context: ./preview
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    shm_size: 256m
+    mem_limit: 1536m
+    cpus: 2
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      WORKSPACE_ROOT: /workspace
+      XDG_CACHE_HOME: /tmp/cache
+      XDG_CONFIG_HOME: /tmp/config
+    volumes:
+      - ./data/workspaces:/workspace:ro
+    expose:
+      - "8931"
+    networks:
+      - preview
 
   bot:
     build:
@@ -69,16 +104,38 @@ services:
       WORKSPACE_ROOT: /workspace
       PUBLISH_ROOT: /srv/sites
       STATE_FILE: /data/state.json
+      STATE_DB_FILE: /data/state.db
+      # Browser QA drives the preview service's Playwright MCP; the bot joins
+      # the internal preview network to reach it (no host exposure).
+      PREVIEW_MCP_URL: ${PREVIEW_MCP_URL:-http://preview:8931/mcp}
+    healthcheck:
+      # The bot's own HTTP listener (webhooks + /healthz, default port 8901).
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + (process.env.WEBHOOK_PORT || '8901') + '/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     volumes:
       - ./data/workspaces:/workspace
       - ${SITES_HOST_PATH:-./data/sites}:/srv/sites
       - ./data/bot:/data
       - ./secrets/forgejo-token:/run/secrets/forgejo-token:ro
       - ./secrets/forgejo-admin-token:/run/secrets/forgejo-admin-token:ro
+    networks:
+      - default
+      - preview
     depends_on:
-      - forgejo
-      - opencode
-      - gameserver
+      forgejo:
+        condition: service_started
+      opencode:
+        condition: service_healthy
+      gameserver:
+        condition: service_started
+      preview:
+        condition: service_started
+    ports:
+      # Loopback-only: serves /healthz and the Forgejo push webhook.
+      - "127.0.0.1:${BOT_HTTP_PORT:-8901}:8901"
 
   # One shared multi-tenant multiplayer relay for every generated game.
   # Tenancy is the game id (site slug); rooms are namespaced per game, so a
@@ -128,3 +185,7 @@ services:
 volumes:
   forgejo-data:
   opencode-data:
+
+networks:
+  preview:
+    internal: true

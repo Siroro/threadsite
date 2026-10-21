@@ -1,0 +1,24 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "isolated": true,
+    "launchOptions": {
+      "channel": "chromium",
+      "headless": true,
+      "chromiumSandbox": false,
+      "args": ["--enable-unsafe-swiftshader"]
+    },
+    "contextOptions": {
+      "viewport": { "width": 1440, "height": 900 },
+      "serviceWorkers": "block"
+    }
+  },
+  "capabilities": ["vision"],
+  "sharedBrowserContext": false,
+  "network": { "allowedOrigins": ["http://127.0.0.1:8080"] },
+  "imageResponses": "allow",
+  "webmcp": false,
+  "outputDir": "/tmp/threadsite-browser",
+  "outputMaxSize": 67108864,
+  "timeouts": { "action": 10000, "navigation": 30000 }
+}

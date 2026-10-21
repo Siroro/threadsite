@@ -1,6 +1,6 @@
 FROM node:24-bookworm-slim
 
-ARG OPENCODE_VERSION=1.18.25
+ARG OPENCODE_VERSION=1.18.27
 RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" \
     && mkdir -p /root/.config/opencode/tools /opencode-data /workspace /opt/threadsite
 
@@ -19,6 +19,7 @@ RUN apt-get update \
 
 COPY opencode.json /opt/threadsite/opencode.base.json
 COPY start.mjs /opt/threadsite/start.mjs
+COPY healthcheck.mjs /opt/threadsite/healthcheck.mjs
 COPY surplus-adapter.mjs /opt/threadsite/surplus-adapter.mjs
 COPY tools/asset_download.ts /root/.config/opencode/tools/asset_download.ts
 COPY tools/js_syntax_check.ts /root/.config/opencode/tools/js_syntax_check.ts
@@ -26,4 +27,5 @@ COPY tools/project_notes.ts /root/.config/opencode/tools/project_notes.ts
 
 WORKDIR /workspace
 EXPOSE 4096
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 CMD ["node", "/opt/threadsite/healthcheck.mjs"]
 CMD ["node", "/opt/threadsite/start.mjs"]

@@ -27,11 +27,19 @@ export function generatePushCredentials(): { username: string; password: string 
   return { username: `push-${randomCredential(6)}`, password: randomCredential(20) };
 }
 
+/**
+ * A git invocation that never returns parks the thread's queue forever: the
+ * per-thread chain has no other deadline, so a black-holed fetch/push would
+ * wedge the thread until restart. Generous enough for a large initial push.
+ */
+const GIT_TIMEOUT_MS = 60_000;
+
 async function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
     cwd,
     env: { ...process.env, ...env },
     maxBuffer: 4 * 1024 * 1024,
+    timeout: GIT_TIMEOUT_MS,
   });
   // trimEnd, not trim: porcelain status lines legitimately begin with a space
   // (unstaged column), and a leading trim would shift every parsed path.
@@ -111,8 +119,17 @@ export async function fetchAndRebase(workspace: string, forgejo: ForgejoClient):
  * Adopt whatever commit currently sits on origin/main: fetch, then hard-reset
  * the workspace to it. Used after an external push so the workspace, the repo,
  * and (on Publish) the live site all converge on the pushed commit.
+ *
+ * A hard reset discards uncommitted edits, so a dirty tree is refused here
+ * rather than at each caller: a turn whose commit failed deliberately leaves
+ * the agent's work in the tree, and adopting an external push must not eat it.
  */
 export async function syncToRemote(workspace: string, forgejo: ForgejoClient): Promise<{ commit: string }> {
+  if (!(await workingTreeClean(workspace))) {
+    throw new Error(
+      "The workspace has uncommitted changes (a previous turn's edits are still pending), so adopting the external push would discard them. Publish or revert that work first.",
+    );
+  }
   const auth = await pushAuthEnv(forgejo);
   try {
     await git(workspace, ["fetch", "origin", "main"], auth);
@@ -201,17 +218,48 @@ export async function commitHistory(workspace: string): Promise<{ current: strin
 export async function undoLastCommit(
   workspace: string,
   forgejo: ForgejoClient,
+  target?: string,
 ): Promise<{ undone: string; kept: string }> {
   const { current, previous } = await commitHistory(workspace);
-  if (!previous) {
+  const kept = target ?? previous;
+  if (!kept) {
     throw new Error("Only the initial workspace commit exists; there is no earlier published version to revert to.");
   }
-  await git(workspace, ["reset", "--hard", "HEAD~1"]);
+  if (!/^[0-9a-f]{7,40}$/i.test(kept)) throw new Error("Invalid revert commit.");
+  await git(workspace, ["merge-base", "--is-ancestor", kept, "HEAD"]);
+  await git(workspace, ["reset", "--hard", kept]);
   await git(workspace, ["clean", "-fd"]);
   // History is being rewritten on purpose: the undone turn's commit must leave
   // the public repository as well as the local worktree.
   await git(workspace, ["push", "--force", "origin", "main"], await pushAuthEnv(forgejo));
-  return { undone: current, kept: previous };
+  return { undone: current, kept: await git(workspace, ["rev-parse", "--short=10", "HEAD"]) };
+}
+
+/** Metadata renames do not constitute an accepted agent turn, including in older workspaces. */
+export async function turnRevertTarget(workspace: string, lastCommit?: string, beforeCommit?: string): Promise<{ current: string; target?: string; headDrifted: boolean }> {
+  const { current } = await commitHistory(workspace);
+  let headDrifted = Boolean(lastCommit && lastCommit !== current);
+  if (headDrifted && lastCommit) {
+    const ancestor = await git(workspace, ["merge-base", "--is-ancestor", lastCommit, "HEAD"]).then(() => true, () => false);
+    const commits = ancestor ? await git(workspace, ["log", "--format=%H", `${lastCommit}..HEAD`]) : "";
+    if (commits && (await Promise.all(commits.split("\n").map((commit) => isRenameMetadata(workspace, commit)))).every(Boolean)) headDrifted = false;
+  }
+  if (headDrifted) return { current, headDrifted };
+  if (beforeCommit) return { current, target: beforeCommit, headDrifted };
+  let authored = "HEAD";
+  while (await isRenameMetadata(workspace, authored)) {
+    authored = await git(workspace, ["rev-parse", `${authored}^`]);
+  }
+  const target = beforeCommit ?? await git(workspace, ["rev-parse", `${authored}^`]).catch(() => undefined);
+  return { current, target, headDrifted };
+}
+
+async function isRenameMetadata(workspace: string, commit: string): Promise<boolean> {
+  if (!(await git(workspace, ["log", "-1", "--format=%s", commit])).startsWith("Rename project to ")) return false;
+  const files = (await git(workspace, ["show", "--format=", "--name-only", commit])).split("\n").filter(Boolean);
+  // A requester can use the same words as a rename commit subject. Never skip
+  // an authored content change merely because its subject looks like metadata.
+  return files.every((file) => ["README.md", "AGENTS.md", "NETWORKING.md", ".gitignore"].includes(file) || file.startsWith("site/net/"));
 }
 
 export interface WorkingTreeSnapshot {
@@ -226,6 +274,7 @@ export interface WorkingTreeStats {
   deleted: number;
   additions: number;
   deletions: number;
+  paths?: string[];
 }
 
 /**
@@ -255,6 +304,7 @@ export async function workingTreeStats(workspace: string, baseline?: WorkingTree
   const status = await git(workspace, ["status", "--porcelain=v1", "--untracked-files=all"]);
   const stats: WorkingTreeStats = { files: 0, added: 0, modified: 0, deleted: 0, additions: 0, deletions: 0 };
   const currentPaths = new Set<string>();
+  const changedPaths = new Set<string>();
   for (const line of status.split("\n")) {
     if (!line) continue;
     const code = line.slice(0, 2);
@@ -264,6 +314,7 @@ export async function workingTreeStats(workspace: string, baseline?: WorkingTree
       const content = await fs.readFile(absolute).catch(() => undefined);
       const before = baseline?.files.get(file);
       if (content && (!before || before.hash !== requireHash(content))) {
+        changedPaths.add(file);
         stats.files += 1;
         stats.added += 1;
         // Binary assets have no meaningful line count — counting 0x0A bytes in
@@ -278,6 +329,7 @@ export async function workingTreeStats(workspace: string, baseline?: WorkingTree
     const current = await fs.readFile(absolute).catch(() => undefined);
     const changed = !before || !current || before.hash !== requireHash(current);
     if (!changed) continue;
+    changedPaths.add(file);
     stats.files += 1;
     currentPaths.add(file);
     if (code.includes("A")) stats.added += 1;
@@ -304,10 +356,12 @@ export async function workingTreeStats(workspace: string, baseline?: WorkingTree
     // untouched files — confirm the file is really gone before counting a deletion.
     const exists = await fs.access(path.join(workspace, file)).then(() => true, () => false);
     if (exists) continue;
+    changedPaths.add(file);
     stats.files += 1;
     stats.deleted += 1;
     stats.deletions += before.lines;
   }
+  stats.paths = [...changedPaths].sort();
   return stats;
 }
 
@@ -341,7 +395,7 @@ export interface CommitStats {
 export async function untrackGeneratedArtifacts(workspace: string): Promise<void> {
   await git(workspace, [
     "rm", "-r", "-f", "--cached", "--ignore-unmatch", "--",
-    "site/js", "site/net", "build-manifest.json",
+    ".opencode", "site/js", "build-manifest.json",
   ]);
 }
 
@@ -351,10 +405,12 @@ export async function commitAndPush(
   forgejo: ForgejoClient,
   author?: CommitAuthor,
 ): Promise<CommitStats | null> {
-  // Generated runtime and harness-owned net inputs used to be committed.
-  // Keep the files in the workspace for validation/publish, but stage their
-  // removal from existing repositories so the new ignore boundary migrates
-  // cleanly in one normal turn.
+  // Generated runtime and the curated .opencode skills used to be committed.
+  // Keep the files in the workspace for the agent and validation/publish, but
+  // stage their removal from existing repositories so the new ignore boundary
+  // migrates cleanly in one normal turn. The vendored net client under
+  // site/net/ is the exception: it stays tracked (small, stable, harness-owned
+  // input worth showing in the tree).
   await untrackGeneratedArtifacts(workspace);
   await git(workspace, ["add", "-A"]);
   // A turn that only asks a question (or answers without edits) stages nothing;

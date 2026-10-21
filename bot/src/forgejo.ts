@@ -44,7 +44,13 @@ export class ForgejoClient {
     const headers = new Headers(init.headers);
     headers.set("Authorization", `token ${token}`);
     if (init.body) headers.set("Content-Type", "application/json");
-    return fetch(joinUrl(config.forgejoInternalUrl, pathname), { ...init, headers });
+    // These calls run inside the per-thread queue; an unanswered connection
+    // would park the thread indefinitely. 15s is far beyond a healthy response.
+    return fetch(joinUrl(config.forgejoInternalUrl, pathname), {
+      ...init,
+      headers,
+      signal: init.signal ?? AbortSignal.timeout(15_000),
+    });
   }
 
   async ensureRepository(name: string, description: string): Promise<void> {
@@ -73,26 +79,33 @@ export class ForgejoClient {
     }
   }
 
-  /**
-   * Rename a repository and refresh its description. Forgejo leaves a redirect
-   * from the old name behind. A 404 on the old name still counts as success
-   * when the new name already exists: a previous attempt may have renamed the
-   * repo before a later step failed, and retried renames must converge instead
-   * of stranding a half-renamed project.
-   */
-  async renameRepository(currentName: string, newName: string, description?: string): Promise<void> {
-    if (currentName === newName) return;
+  /** Resolve the canonical name and ID, including Forgejo's old-name redirects. */
+  async repositoryInfo(name: string): Promise<{ id: number; name: string } | undefined> {
+    const response = await this.api(`/api/v1/repos/${encodeURIComponent(config.forgejoOwner)}/${encodeURIComponent(name)}`);
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw new Error(`Forgejo repository lookup failed (${response.status})`);
+    const repo = await response.json() as { id: number; name: string };
+    return { id: repo.id, name: repo.name };
+  }
+
+  /** Resume a rename only when the original or target still has the expected identity. */
+  async renameRepository(currentName: string, newName: string, description?: string, expectedId?: number): Promise<void> {
+    const current = await this.repositoryInfo(currentName);
+    const target = current?.name === newName ? current : await this.repositoryInfo(newName);
+    const repoId = expectedId ?? current?.id;
+    if (!repoId) throw new Error("Cannot verify the repository being renamed.");
+    if (current && current.id !== repoId) throw new Error("The original repository name now belongs to another repository.");
+    if (target && target.id !== repoId) throw new Error("That repository name is already in use.");
+    // Resolve retries by repository identity, never merely by the target's existence.
+    const source = current?.name ?? target?.name;
+    if (!source) throw new Error("The repository being renamed no longer exists.");
     const owner = encodeURIComponent(config.forgejoOwner);
-    const repo = encodeURIComponent(currentName);
+    const repo = encodeURIComponent(source);
     const response = await this.api(`/api/v1/repos/${owner}/${repo}`, {
       method: "PATCH",
       body: JSON.stringify({ name: newName, ...(description ? { description } : {}) }),
     });
     if (response.ok) return;
-    if (response.status === 404) {
-      const target = await this.api(`/api/v1/repos/${owner}/${encodeURIComponent(newName)}`);
-      if (target.ok) return;
-    }
     throw new Error(`Forgejo repository rename failed (${response.status}): ${await response.text()}`);
   }
 
@@ -168,14 +181,51 @@ export class ForgejoClient {
     }
   }
 
-  /** Full hash of the commit currently at the repo's main branch tip. */
+  /**
+   * Full hash of the commit currently at the repo's main branch tip.
+   * A 404 means the branch genuinely does not exist yet; anything else
+   * (revoked token, renamed repo, Forgejo 5xx) is an operational failure and
+   * must not masquerade as "nothing new" — that would silently disable
+   * external-push detection for the project.
+   */
   async mainCommitSha(repoName: string): Promise<string | undefined> {
     const owner = encodeURIComponent(config.forgejoOwner);
     const repo = encodeURIComponent(repoName);
     const response = await this.api(`/api/v1/repos/${owner}/${repo}/branches/main`);
-    if (!response.ok) return undefined;
+    if (response.status === 404) return undefined;
+    if (!response.ok) {
+      throw new Error(`Forgejo branch lookup failed (${response.status}): ${await response.text()}`);
+    }
     const body = (await response.json()) as { commit?: { id?: string } };
     return body.commit?.id;
+  }
+
+  /**
+   * Ensure a signed push webhook exists on the repo's main branch, pointing at
+   * the bot's HTTP endpoint. Idempotent: a hook with the same URL is left
+   * alone, so boot sweeps and rename retries do not pile up duplicates.
+   */
+  async ensurePushWebhook(repoName: string, url: string, secret: string): Promise<void> {
+    const owner = encodeURIComponent(config.forgejoOwner);
+    const repo = encodeURIComponent(repoName);
+    const existing = await this.api(`/api/v1/repos/${owner}/${repo}/hooks`);
+    if (existing.ok) {
+      const hooks = (await existing.json().catch(() => undefined)) as Array<{ config?: { url?: string } }> | undefined;
+      if (Array.isArray(hooks) && hooks.some((hook) => hook.config?.url === url)) return;
+    }
+    const created = await this.api(`/api/v1/repos/${owner}/${repo}/hooks`, {
+      method: "POST",
+      body: JSON.stringify({
+        type: "gitea",
+        active: true,
+        branch_filter: "main",
+        events: ["push"],
+        config: { url, content_type: "json", secret },
+      }),
+    });
+    if (!created.ok) {
+      throw new Error(`Forgejo webhook creation failed (${created.status}): ${await created.text()}`);
+    }
   }
 
   /** Whether /site pushkey can work: the admin token file must exist. */

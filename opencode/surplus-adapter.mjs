@@ -104,6 +104,20 @@ function effortVariantsFor(supportedParameters) {
   return variants;
 }
 
+// The marketplace treats either catalog signal as image support. Do not infer
+// vision from model names: a text model with a similar name still cannot see.
+function imageCapabilities(model) {
+  const inputs = model.architecture?.input_modalities ?? model.input_modalities ?? model.modalities?.input;
+  const features = model.supported_features;
+  if (!Array.isArray(inputs) && !Array.isArray(features)) return {};
+  const vision = (Array.isArray(inputs) && inputs.includes("image"))
+    || (Array.isArray(features) && features.includes("vision"));
+  return {
+    attachment: Boolean(vision),
+    modalities: { input: vision ? ["text", "image"] : ["text"], output: ["text"] },
+  };
+}
+
 /**
  * Artificial context ceiling for Surplus models. OpenCode decides when a session is
  * "full" (and therefore when auto-compaction fires) against limit.context, so capping
@@ -165,10 +179,12 @@ export async function buildSurplusProvider({ env = process.env, fetchImpl = glob
     discovered.set(id, contextCap ? { name: id, limit: { context: contextCap } } : { name: id });
   }
 
-  if (apiKey) {
+  // Discovery is public. Refresh capabilities even when the key is stored in
+  // OpenCode auth rather than supplied through this service's environment.
+  {
     try {
       const response = await fetchImpl(`${baseURL}/models`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
         signal: AbortSignal.timeout(15_000),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
@@ -187,7 +203,7 @@ export async function buildSurplusProvider({ env = process.env, fetchImpl = glob
         const output = positiveNumber(
           model.max_completion_tokens ?? model.max_output_tokens ?? model.top_provider?.max_completion_tokens,
         );
-        const entry = { name: String(model.name || model.id) };
+        const entry = { name: String(model.name || model.id), ...imageCapabilities(model) };
         if (context || output) {
           entry.limit = {};
           if (context) entry.limit.context = context;

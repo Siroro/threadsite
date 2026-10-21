@@ -1,0 +1,19 @@
+{
+  "name": "threadsite-preview",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node start.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "node test/browser-smoke.mjs",
+    "test:docker": "node test/docker-compose-smoke.mjs"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.83",
+    "esbuild": "0.28.2"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.27.1"
+  }
+}
