@@ -1540,7 +1540,8 @@ function successMessageText(result: MutationResult, isGame: boolean, note?: stri
       ? `ℹ️ **${result.project.displayName}** — no changes to the site this turn`
       : `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${commitStatsText(result)}`);
   const stats = turnStatsText(result);
-  const noteLine = note ? `\n${note}\n` : "\n";
+  const notes = [note, result.browserQaWarnings?.length ? `⚠️ Browser QA: ${truncate(result.browserQaWarnings[0], 220)} · findings saved for the next update` : undefined].filter(Boolean);
+  const noteLine = notes.length ? `\n${notes.join("\n")}\n` : "\n";
   const links = `# [${isGame ? "PLAY GAME" : "OPEN SITE"}](${projects.siteLink(result.project)})\n[git](<${projects.repoLink(result.project)}>)`;
   const budget = MAX_DISCORD_MESSAGE_CHARS - head.length - stats.length - noteLine.length - links.length - 1;
   return `${head}${agentSummaryText(result.agentSummary, budget)}\n${stats}${noteLine}${links}`;

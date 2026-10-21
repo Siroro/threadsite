@@ -41,7 +41,7 @@ These instructions apply to this repository. This is the infrastructure that tur
 
 - One registered Discord thread owns its project workspace, agent session, and source repository. Preserve durable queue claims and turn identity through failures, stops, resets, and restarts.
 - An ambiguous transport failure can leave the agent running. Reconcile persisted history and status before considering another prompt; avoid duplicate turns and do not reset files beneath an unconfirmed running turn.
-- Keep build/type/static validation and applicable browser QA before acceptance. Push accepted source before replacing the published site. A failed push must leave the previous live site available.
+- Keep build/type/static validation mandatory. Browser QA is advisory and fail-open, including runtime findings: preserve actionable diagnostics for the agent's next turn and show warnings without triggering repair or blocking publication. Push accepted source before replacing the published site. A failed push must leave the previous live site available.
 - Preserve atomic publication and startup recovery of interrupted publishes. Keep old URL redirects and repository/project identity consistent during renames.
 - Route every generated-workspace Git operation through `bot/src/git.ts`. Use explicit project repository/worktree paths and trust only that canonical workspace per invocation. Never use `safe.directory=*`, inherit Git routing from the server checkout, or let a missing project `.git` fall back to its parent repository.
 - Restart continuation prompts use an inactivity deadline: real agent progress extends it, pending user questions pause it, and status heartbeats alone do not extend it. Preserve abort-on-stall behavior and partial edits.
