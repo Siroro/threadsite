@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 #
-# ThreadSite start script — the one command for the server: update from git,
-# rebuild what changed, bring the stack up, and watch it get healthy.
-# Also covers the day-2 operations.
+# ThreadSite start script — the one command for the server. This repository is
+# main-only: every update tracks origin/main.
 #
 #   ./start.sh                 update to latest main, rebuild, up
-#   ./start.sh release/v2.5    same, tracking a specific branch
 #   ./start.sh --no-update     start the current code without touching git
+#   ./start.sh --force         update, discarding local edits to tracked files
 #   ./start.sh status          service health overview
 #   ./start.sh logs [service]  follow logs (default: bot)
 #   ./start.sh restart [svc]   restart one service, or the whole stack
@@ -19,19 +18,19 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-BRANCH="main"
 UPDATE=1
+FORCE=0
 COMMAND="up"
 SERVICE=""
 
-usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '3,20p'; }
+usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '3,16p'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     up|status|logs|restart|stop) COMMAND="$1" ;;
     --no-update) UPDATE=0 ;;
+    --force) FORCE=1 ;;
     -h|--help) usage; exit 0 ;;
-    main|release/*) BRANCH="$1" ;;
     bot|opencode|forgejo|gameserver|preview|httpd) SERVICE="$1" ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -103,9 +102,14 @@ case "$COMMAND" in
 
   up)
     if (( UPDATE )); then
-      # Update code and rebuild changed images. deploy.sh refuses to run over
-      # local tracked edits and self-heals git's dubious-ownership refusal.
-      ./scripts/deploy.sh "$BRANCH"
+      # Update to origin/main and rebuild changed images. Refuses to run over
+      # local tracked edits unless --force; self-heals git's dubious-ownership
+      # refusal; never touches untracked .env/secrets/data.
+      if (( FORCE )); then
+        ./scripts/deploy.sh --force
+      else
+        ./scripts/deploy.sh
+      fi
     else
       say "Skipping the git update (--no-update)."
     fi
@@ -121,6 +125,6 @@ case "$COMMAND" in
       warn "First run detected: bootstrap the Forgejo service user with"
       warn "  ./scripts/bootstrap-forgejo.sh"
     fi
-    say "Up to date on $BRANCH. Logs: ./start.sh logs   Status: ./start.sh status"
+    say "Up to date on main. Logs: ./start.sh logs   Status: ./start.sh status"
     ;;
 esac
