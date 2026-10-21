@@ -1,0 +1,23 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { randomBytes } from "node:crypto";
+import { config } from "./config.js";
+
+/** Private bot/relay volume; never mounted into generated sites or the agent. */
+export async function relayCleanupToken(): Promise<string> {
+  const file = config.gameserverAdminTokenFile;
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  try { await fs.writeFile(file, randomBytes(32).toString("hex"), { flag: "wx", mode: 0o600 }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  const token = (await fs.readFile(file, "utf8")).trim();
+  if (!/^[a-f0-9]{64}$/.test(token)) throw new Error("Invalid relay cleanup token file.");
+  return token;
+}
+
+export async function deleteRelayGame(gameId: string): Promise<void> {
+  if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(gameId)) throw new Error("Invalid relay game identity.");
+  const response = await fetch(`${config.gameserverInternalUrl}/admin/games/${encodeURIComponent(gameId)}`, {
+    method: "DELETE", headers: { Authorization: `Bearer ${await relayCleanupToken()}` }, signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`Relay game cleanup failed (${response.status}).`);
+}

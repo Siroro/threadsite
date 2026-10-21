@@ -303,6 +303,7 @@ export class OpenCodeHarness {
   // which steering can land: during reconcile the original request is already
   // gone, and after it returns there is nothing running to steer.
   private readonly livePromptRequests = new Set<string>();
+  private readonly promptControllers = new Map<string, AbortController>();
 
   // Live quota blocks by provider (free-tier exhaustion until the scheduled
   // retry/reset). Pruned lazily; a completed turn clears its provider's entry.
@@ -1215,14 +1216,18 @@ export class OpenCodeHarness {
   }
 
   private async sendPromptRaw(directory: string, sessionId: string, body: Record<string, unknown>): Promise<string> {
-    const result = await this.client.session.prompt({
+    const controller = new AbortController();
+    this.promptControllers.set(sessionId, controller);
+    let result;
+    try { result = await this.client.session.prompt({
       sessionID: sessionId,
       directory,
       agent: body.agent as string | undefined,
       model: body.model as { providerID: string; modelID: string } | undefined,
       variant: body.variant as string | undefined,
       parts: body.parts as Array<{ type: "text"; text: string } | { type: "file"; mime: string; url: string; filename?: string }>,
-    } as any);
+    } as any, { signal: controller.signal }); }
+    finally { if (this.promptControllers.get(sessionId) === controller) this.promptControllers.delete(sessionId); }
     const response = unwrap<{ info?: { error?: unknown }; parts?: Array<{ type: string; text?: string }> }>(result, "OpenCode prompt");
     // The session endpoint can return HTTP 200 with a terminal assistant error
     // and no text. Treating that as success would build/publish an unfinished
@@ -1332,7 +1337,7 @@ export class OpenCodeHarness {
 
   /** Every session known to the agent service, across all projects. */
   private async listAllSessions(): Promise<Array<{ id: string; directory: string; parentID?: string }>> {
-    const result = await this.client.session.list({} as any);
+    const result = await this.client.session.list({ limit: 100_000 } as any, { signal: AbortSignal.timeout(10_000) });
     const data = unwrap<any[]>(result, "OpenCode session list");
     if (!Array.isArray(data)) return [];
     return data
@@ -1434,6 +1439,50 @@ export class OpenCodeHarness {
       targets.set(session.id, session);
     }
     return this.sweepSessions([...targets.values()]);
+  }
+
+  /** Strict project teardown: an API failure must leave deletion retryable. */
+  async deleteSessionsInDirectory(directory: string, knownSessionId: string): Promise<void> {
+    if (knownSessionId) {
+      this.deliberateAborts.add(knownSessionId);
+      this.promptControllers.get(knownSessionId)?.abort(new Error("Project deleted"));
+    }
+    const all = await this.listAllSessions();
+    const ids = new Set(all.filter((session) => session.directory === directory).map((session) => session.id));
+    if (knownSessionId) ids.add(knownSessionId);
+    for (;;) {
+      const size = ids.size;
+      for (const session of all) if (session.parentID && ids.has(session.parentID)) ids.add(session.id);
+      if (ids.size === size) break;
+    }
+    const targets = new Map(all.filter((session) => ids.has(session.id)).map((session) => [session.id, session]));
+    if (knownSessionId && !targets.has(knownSessionId)) targets.set(knownSessionId, { id: knownSessionId, directory });
+    const request = { signal: AbortSignal.timeout(30_000) };
+    for (const targetDirectory of new Set([...targets.values()].map((session) => session.directory))) {
+      const questions = unwrap<Array<{ id: string; sessionID: string }>>(
+        await this.client.question.list({ directory: targetDirectory } as any, request), "OpenCode deletion questions");
+      for (const question of questions) {
+        if (!ids.has(question.sessionID)) continue;
+        const result = await this.client.question.reject({ requestID: question.id, directory: targetDirectory } as any, request);
+        if ((result as any).response?.status !== 404) unwrap(result, "OpenCode deletion question reject");
+      }
+    }
+    for (const session of targets.values()) {
+      this.deliberateAborts.add(session.id);
+      this.promptControllers.get(session.id)?.abort(new Error("Project deleted"));
+      // Session abort also releases pending tools/questions. Delete cascades
+      // persisted messages and child sessions on the agent service.
+      for (const operation of ["abort", "delete"] as const) {
+        const result = await this.client.session[operation]({ sessionID: session.id, directory: session.directory } as any, request);
+        if ((result as any).response?.status === 404) continue;
+        unwrap(result, `OpenCode project session ${operation}`);
+      }
+    }
+    const statuses = unwrap<Record<string, { type?: string }>>(
+      await this.client.session.status({ directory } as any, request), "OpenCode deletion status");
+    if ([...ids].some((id) => ["busy", "retry"].includes(statuses[id]?.type ?? ""))) {
+      throw new Error("An agent session is still stopping; project cleanup will retry.");
+    }
   }
 
   /** Answer a pending question request (one label list per asked question, in order). */

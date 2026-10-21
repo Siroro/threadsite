@@ -152,6 +152,8 @@ export const config = {
   multiplayerEnabled: boolEnv("MULTIPLAYER_ENABLED", true),
   gameserverPublicUrl: env("GAMESERVER_PUBLIC_URL", "ws://localhost:8090/ws"),
   gameserverInternalUrl: env("GAMESERVER_INTERNAL_URL", "http://gameserver:8090").replace(/\/$/, ""),
+  gameserverAdminTokenFile: env("GAMESERVER_ADMIN_TOKEN_FILE", "/run/threadsite-control/cleanup-token"),
+  projectCleanupIntervalMs: intEnv("PROJECT_CLEANUP_INTERVAL_MS", 60_000),
 
   // Git identity: the Discord requester authors each commit; the bot commits
   // and is credited as Co-authored-by. Defaulting the email to the Forgejo

@@ -631,7 +631,9 @@ For direct selection, names match exactly and options can be repeated. Commands 
 ./start.sh forget --repo site-deleted-game --apply
 ```
 
-Full removal deletes the selected Discord thread, Forgejo repository, workspace, published site/aliases and SQLite registration, then refreshes the site index. It saves a SQLite backup first; that backup contains metadata, not a copy of the deleted source files. Registration-only cleanup keeps the thread, repository and files. Existing agent session history and relay snapshots are retained.
+Full removal deletes the selected Discord thread, Forgejo repository and push accounts, OpenCode session history, relay rooms/snapshots, workspace/scratch files, published site/aliases, usage entries and SQLite registration, then refreshes the site index. CLI cleanup saves a SQLite metadata backup first. Registration-only cleanup keeps the thread, repository and files.
+
+Deleting the Discord thread automatically performs full project cleanup, including stopping active work. Failed cleanup retains a durable retry receipt and resumes on startup and every minute; the startup sweep also detects threads deleted while the bot was offline. Archiving a thread keeps its project. See the [thread deletion guide](docs/thread-deletion.md) for details.
 
 Cleanup refuses queued/interrupted work, active agent turns, shared resources, unexpected workspace locations and paths through symlinks. Stop unfinished work with `/site stop`, clear `/site queue`, or let recovery finish first. During `--apply`, start.sh temporarily stops a running bot and restores its running state afterward, including on failure. Other services stay running. A failed removal retains the registration so the same selection can be retried; resources already deleted during that attempt are treated as absent on retry. Cleanup does not update the checkout, prune Docker volumes or remove unrelated data.
 

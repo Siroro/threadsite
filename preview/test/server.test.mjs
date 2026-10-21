@@ -49,6 +49,18 @@ test("broken edits show build diagnostics instead of a stale compiled preview", 
   assert.equal((await get("js/main.js")).status, 500);
 });
 
+test("deleting the workspace revokes cached main and scratch browser bundles", async (t) => {
+  const { site, get } = await fixture(t);
+  await scratch(site, "car", 'document.title="private scratch";');
+  await get(); await get("__scratch/car/");
+  await fs.rm(path.dirname(site), { recursive: true, force: true });
+  for (const resource of ["js/main.js", "__scratch/car/js/main.js"]) {
+    const response = await get(resource);
+    assert.equal(response.status, 404);
+    assert.doesNotMatch(await response.text(), /private scratch|first preview/);
+  }
+});
+
 async function scratch(site, name, source) {
   const dir = path.join(path.dirname(site), "scratch", name);
   await fs.mkdir(path.join(dir, "src"), { recursive: true });

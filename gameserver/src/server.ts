@@ -51,6 +51,7 @@ const STATE_DIR = env("GAMESERVER_STATE_DIR", path.join(process.cwd(), "data", "
 const PERSIST_INTERVAL_MS = intEnv("GAMESERVER_PERSIST_INTERVAL_MS", 1000);
 const SHUTDOWN_FLUSH_TIMEOUT_MS = intEnv("GAMESERVER_SHUTDOWN_FLUSH_TIMEOUT_MS", 1000);
 const ALLOWED_ORIGINS = env("GAMESERVER_ALLOWED_ORIGINS").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+const ADMIN_TOKEN_FILE = env("GAMESERVER_ADMIN_TOKEN_FILE", "/run/threadsite-control/cleanup-token");
 
 type Frame = { t: string; [key: string]: unknown };
 type PlayerState = { from: string; cid: string | null; s: unknown; ts: number; pt?: number; pr?: boolean };
@@ -118,6 +119,8 @@ type DurableWorld = { version: 1; gameId: string; state: unknown; savedAt: numbe
 
 /** Latest persisted ARENA world per game; seeded from STATE_DIR at startup. */
 const durableWorlds = new Map<string, DurableWorld>();
+// Empty tombstones prevent stale browser tabs from recreating deleted worlds.
+const deletedGames = new Set<string>();
 
 function stateFile(gameId: string): string { return path.join(STATE_DIR, `${gameId}.json`); }
 
@@ -127,9 +130,13 @@ async function loadDurableWorlds(): Promise<void> {
   try { names = await fs.readdir(STATE_DIR); }
   catch { return; } // no directory yet: nothing was ever persisted
   for (const name of names) {
+    const match = /^([a-z0-9][a-z0-9-]{2,63})\.deleted$/.exec(name);
+    if (match) deletedGames.add(match[1]!);
+  }
+  for (const name of names) {
     const match = /^([a-z0-9][a-z0-9-]{2,63})\.json$/.exec(name);
     const gameId = match?.[1];
-    if (!gameId) continue;
+    if (!gameId || deletedGames.has(gameId)) continue;
     try {
       const raw = await fs.readFile(path.join(STATE_DIR, name), "utf8");
       const parsed = JSON.parse(raw) as Partial<DurableWorld>;
@@ -156,7 +163,9 @@ async function loadDurableWorlds(): Promise<void> {
 const durableTails = new Map<string, Promise<void>>();
 
 function persistWorld(gameId: string, state: unknown): Promise<void> {
+  if (deletedGames.has(gameId)) return Promise.resolve();
   const write = (durableTails.get(gameId) ?? Promise.resolve()).then(async () => {
+    if (deletedGames.has(gameId)) return;
     const durable: DurableWorld = { version: 1, gameId, state, savedAt: Date.now() };
     try {
       await fs.mkdir(STATE_DIR, { recursive: true });
@@ -269,6 +278,11 @@ function handleJoin(peer: Peer, msg: Frame): void {
     return;
   }
   const gameId = String(msg.game ?? "");
+  if (deletedGames.has(gameId)) {
+    send(peer, errorFrame("project_deleted", "This project's Discord thread was deleted."));
+    peer.ws.close(4004, "project deleted");
+    return;
+  }
   if (!GAME_ID_PATTERN.test(gameId)) {
     send(peer, errorFrame("bad_game", "join.game must be a lowercase harness game id (3-64 chars)."));
     return;
@@ -446,9 +460,50 @@ function statsPayload(): Record<string, unknown> {
   return { ok: true, protocol: PROTOCOL_VERSION, uptimeSec: Math.floor(process.uptime()), games: games.size, rooms, clients, durableWorlds: durableWorlds.size };
 }
 
+async function deleteGame(gameId: string): Promise<void> {
+  deletedGames.add(gameId);
+  await fs.mkdir(STATE_DIR, { recursive: true });
+  await fs.writeFile(path.join(STATE_DIR, `${gameId}.deleted`), "");
+  for (const room of games.get(gameId)?.values() ?? []) {
+    for (const peer of room.peers.values()) {
+      // Detach before closing: close/last-leave must not persist the old world.
+      peer.room = null;
+      peer.game = null;
+      peer.ws.close(4004, "project deleted");
+    }
+    room.peers.clear();
+  }
+  games.delete(gameId);
+  await durableTails.get(gameId);
+  await fs.rm(stateFile(gameId), { force: true });
+  for (const name of await fs.readdir(STATE_DIR)) {
+    if (new RegExp(`^${gameId}\\.json\\.\\d+\\.[a-f0-9]{8}\\.tmp$`).test(name)) await fs.rm(path.join(STATE_DIR, name), { force: true });
+  }
+  durableWorlds.delete(gameId);
+  durableTails.delete(gameId);
+}
+
 const server = http.createServer((req, res) => {
   let pathname = "/";
   try { pathname = new URL(req.url ?? "/", "http://internal").pathname; } catch { /* invalid -> 404 */ }
+  const deletion = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})$/.exec(pathname);
+  if (req.method === "DELETE" && deletion) {
+    void (async () => {
+      const token = (await fs.readFile(ADMIN_TOKEN_FILE, "utf8")).trim();
+      const actual = Buffer.from(String(req.headers.authorization ?? ""));
+      const expected = Buffer.from(`Bearer ${token}`);
+      if (!token || actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+        res.writeHead(403); res.end(); return;
+      }
+      await deleteGame(deletion[1]!);
+      res.writeHead(204); res.end();
+    })().catch((error) => {
+      console.warn(`[threadsite-gameserver] project_cleanup failed: ${String((error as Error).message)}`);
+      if (!res.headersSent) res.writeHead(503);
+      res.end();
+    });
+    return;
+  }
   if (req.method === "GET" && (pathname === "/health" || pathname === "/stats")) {
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(JSON.stringify(statsPayload()));

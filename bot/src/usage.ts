@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { log } from "./logger.js";
 import { usageFromMessages, type SessionMessage, type ModelUsage, type TurnUsage } from "./opencode.js";
 import { formatCost, formatTokens, truncate } from "./util.js";
@@ -104,6 +105,7 @@ function figuresLine(total: UsageTotal): string {
 
 export class UsageLog {
   private writes: Promise<void> = Promise.resolve();
+  private readonly forgottenThreads = new Set<string>();
   constructor(private readonly file: string) {}
 
   /**
@@ -129,6 +131,7 @@ export class UsageLog {
     /** Model to attribute tokens to when the turn reported no per-model breakdown. */
     fallbackModel?: string;
   }): Promise<void> {
+    if (this.forgottenThreads.has(input.threadId)) return;
     const usage = input.usage;
     const inputTokens = usage?.inputTokens ?? usage?.models?.reduce((sum, model) => sum + model.inputTokens, 0) ?? 0;
     const outputTokens = usage?.outputTokens ?? usage?.models?.reduce((sum, model) => sum + model.outputTokens, 0) ?? 0;
@@ -162,6 +165,7 @@ export class UsageLog {
 
   private async append(entry: UsageEntry): Promise<void> {
     const write = this.writes.then(async () => {
+      if (this.forgottenThreads.has(entry.threadId)) return;
       if (entry.id) {
         const previous = (await this.readEntries(false)).find((value) => value.id === entry.id);
         // A later recovery may temporarily lose access to history. Never
@@ -187,6 +191,7 @@ export class UsageLog {
 
   /** Fill old missed-event records from persisted history without adding turns. */
   async reconcileThread(threadId: string, sessionId: string, messages: SessionMessage[]): Promise<boolean> {
+    if (this.forgottenThreads.has(threadId)) return false;
     let previousEnd = 0;
     let changed = false;
     for (const entry of await this.readEntries()) {
@@ -206,6 +211,28 @@ export class UsageLog {
       changed = true;
     }
     return changed;
+  }
+
+  /** Remove every revision, and ignore late billing from the aborted turn. */
+  async forgetThread(threadId: string): Promise<void> {
+    this.forgottenThreads.add(threadId);
+    const write = this.writes.then(async () => {
+      const raw = await fs.readFile(this.file, "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return ""; throw error;
+      });
+      const lines = raw.split("\n").filter((line) => {
+        try { return JSON.parse(line).threadId !== threadId; } catch { return true; }
+      });
+      await fs.mkdir(path.dirname(this.file), { recursive: true });
+      const temporary = `${this.file}.${randomUUID()}.tmp`;
+      try {
+        const handle = await fs.open(temporary, "wx", 0o600);
+        try { await handle.writeFile(lines.join("\n")); await handle.sync(); } finally { await handle.close(); }
+        await fs.rename(temporary, this.file);
+      } finally { await fs.rm(temporary, { force: true }); }
+    });
+    this.writes = write.catch(() => undefined);
+    await write;
   }
 
   /** Lifetime ledgered usage for one thread (completed + failed turns and title prompts). */

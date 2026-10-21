@@ -37,6 +37,7 @@ import { multiplayerModeLabel, projectKindLabel } from "./templates.js";
 import type { CommitAuthor, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog, type UsageTotal } from "./usage.js";
 import { startWebhookServer } from "./webhook.js";
+import { reconcileProjectThreads } from "./thread-cleanup.js";
 import { commitAuthorIdentity, errorText, formatCost, formatShortDuration, formatTokens, formatUtcClock, MAX_DISCORD_MESSAGE_CHARS, requestDisplayText, slugify, stripSummaryPreamble, truncate, withTimeout } from "./util.js";
 
 // Stray async failures must log instead of killing the process: an unhandled
@@ -186,11 +187,30 @@ client.once(Events.ClientReady, (ready) => {
         : "bind failed (external-push poller active)",
     errorRecipients: config.errorReportUserIds.size,
   });
-  void recoverInterruptedTurns();
-  void reconcileProjectCards();
-  if (pushWebhooksLive) void ensureExistingProjectWebhooks();
-  startExternalPushPoller();
+  void (async () => {
+    // Reconcile deleted threads before any interrupted build can resume.
+    await sweepDeletedThreads();
+    void recoverInterruptedTurns();
+    void reconcileProjectCards();
+    if (pushWebhooksLive) void ensureExistingProjectWebhooks();
+    startExternalPushPoller();
+  })().catch((error) => logError("project.startup_cleanup_failed", error, {}));
+  const cleanupTimer = setInterval(() => { void sweepDeletedThreads(); }, config.projectCleanupIntervalMs);
+  cleanupTimer.unref();
 });
+
+let cleanupSweepRunning = false;
+async function sweepDeletedThreads(): Promise<void> {
+  if (cleanupSweepRunning) return;
+  cleanupSweepRunning = true;
+  try {
+    await reconcileProjectThreads(store, {
+      available: (project) => client.guilds.cache.get(project.guildId)?.available === true,
+      fetch: (id) => client.rest.get(Routes.channel(id)),
+      remove: (id, reason) => handleThreadDeleted(id, reason),
+    });
+  } finally { cleanupSweepRunning = false; }
+}
 
 // Push-key holders push straight to the repo's main branch. With webhooks on
 // (default), Forgejo tells the bot the moment it happens; the poller also runs
@@ -214,7 +234,7 @@ function stopExternalPushPoller(): void {
 }
 
 async function scanForExternalPushes(): Promise<void> {
-  const candidates = store.listProjects().filter((project) => project.status === "ready");
+  const candidates = store.listProjects().filter((project) => project.status === "ready" && !project.pendingDeletion);
   for (const project of candidates) {
     try {
       const sha = await forgejo.mainCommitSha(project.repoName);
@@ -236,7 +256,7 @@ async function scanForExternalPushes(): Promise<void> {
  */
 async function notifyExternalPushIfNeeded(project: ProjectRecord, sha: string, source: "webhook" | "poll" | "recheck"): Promise<void> {
   if (sha === project.lastSeenCommit) return;
-  if (project.pendingTurn || project.pendingRename) return;
+  if (project.pendingDeletion || project.pendingTurn || project.pendingRename) return;
   if (await projects.agentBusy(project.threadId).catch(() => true)) return;
   if (project.lastCommit && sha.startsWith(project.lastCommit)) {
     await store.patchProject(project.threadId, { lastSeenCommit: sha });
@@ -300,7 +320,7 @@ async function handleForgejoPush(event: { ref?: string; after?: string; reposito
 async function recheckExternalPush(threadId: string): Promise<void> {
   if (!pushWebhooksLive) return;
   const project = store.getProject(threadId);
-  if (!project || project.pendingTurn || project.pendingRename) return;
+  if (!project || project.pendingDeletion || project.pendingTurn || project.pendingRename) return;
   try {
     const sha = await forgejo.mainCommitSha(project.repoName);
     if (sha) await notifyExternalPushIfNeeded(project, sha, "recheck");
@@ -314,7 +334,7 @@ async function ensureExistingProjectWebhooks(): Promise<void> {
   const secret = store.getWebhookSecret();
   if (!secret) return;
   const url = `${config.webhookPublicUrl}/hooks/forgejo`;
-  const list = store.listProjects().filter((project) => project.status !== "creating");
+  const list = store.listProjects().filter((project) => project.status !== "creating" && !project.pendingDeletion);
   await Promise.all(list.map(async (project) => {
     await forgejo.ensurePushWebhook(project.repoName, url, secret).catch((error) => {
       log("warn", "webhook.ensure_failed", { repoName: project.repoName, error: serializeError(error) });
@@ -844,9 +864,10 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
 
 // Deleting a thread tears the project down: workspace, Forgejo repo, and published page.
 // Deletion intent is unambiguous, so this does not queue behind the thread's
-// running turn — forceDeleteProject severs the queue, aborts any running turn,
-// and removes everything immediately (no zombie records for deleted threads).
+// running turn — forceDeleteProject blocks new work, aborts the agent, waits
+// for active delivery, and retains a retry receipt until every resource is gone.
 async function handleThreadDeleted(threadId: string, reason: string): Promise<void> {
+  if (creatingThreads.has(threadId)) abandonedThreads.add(threadId);
   if (!store.getProject(threadId)) {
     // Deleted while createProject is still running: there is no record to tear
     // down yet, so mark it and let the creation closure remove what it builds.
@@ -858,7 +879,7 @@ async function handleThreadDeleted(threadId: string, reason: string): Promise<vo
   }
   pendingUpdates.delete(threadId);
   try {
-    await projects.forceDeleteProject(threadId);
+    await projects.forceDeleteProject(threadId, reason);
     log("info", "project.thread_deleted", { threadId, reason });
   } catch (error) {
     logError("project.thread_delete_failed", error, { threadId, reason });
@@ -871,7 +892,6 @@ client.on(Events.ThreadDelete, (thread) => {
 
 // Deleting a parent channel cascades thread deletions without individual ThreadDelete events.
 client.on(Events.ChannelDelete, (channel) => {
-  if (!("parentId" in channel) || !channel.parentId) return;
   for (const project of store.listProjects()) {
     if (project.parentChannelId === channel.id) void handleThreadDeleted(project.threadId, "parent-channel-delete");
   }
@@ -983,7 +1003,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         // A thread deleted mid-setup must not leave a repository and a live
         // site behind: the delete event found no record, so clean up here.
         if (abandonedThreads.has(thread.id) && store.getProject(thread.id)) {
-          await projects.forceDeleteProject(thread.id).catch((error) => {
+          void projects.forceDeleteProject(thread.id).catch((error) => {
             logError("project.abandoned_teardown_failed", error, { threadId: thread.id });
           });
         }
@@ -1341,7 +1361,7 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
         // A thread deleted mid-setup must not leave a repository and a live
         // site behind: the delete event found no record, so clean up here.
         if (abandonedThreads.has(thread.id) && store.getProject(thread.id)) {
-          await projects.forceDeleteProject(thread.id).catch((error) => {
+          void projects.forceDeleteProject(thread.id).catch((error) => {
             logError("project.abandoned_teardown_failed", error, { threadId: thread.id });
           });
         }
@@ -1731,6 +1751,7 @@ function previewProjectRecord(
  */
 async function reconcileProjectCards(): Promise<void> {
   for (const project of store.listProjects()) {
+    if (project.pendingDeletion) continue;
     const usageChanged = await projects.reconcileProjectUsage(project.threadId);
     if (!usageChanged && project.infoMessageId && project.infoCardVersion === PROJECT_CARD_VERSION) continue;
     await refreshProjectCard(project.threadId);
