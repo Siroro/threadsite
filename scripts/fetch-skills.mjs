@@ -4,28 +4,30 @@
  *
  * Game workspaces get the skills their kind needs (the map lives in
  * bot/src/skills.ts); the bytes ship in the bot image like the vendored
- * multiplayer client. This script is the curation record: it downloads the
- * pinned sources, validates each SKILL.md's frontmatter against OpenCode's
- * rules (name matches the directory, description unfolded to 1-1024 chars),
- * stamps a `license` field when the source omits one, and prepends a short
- * harness-context banner so vendored guidance never fights the workspace
- * rules in AGENTS.md (no npm, no import maps, engine preinstalled, harness
- * runs the only build).
+ * multiplayer client. This script downloads the ENGINE-NEUTRAL discipline
+ * and genre playbooks from the upstream catalog — the skills that need no
+ * per-skill wrangling — and keeps them loadable here: it validates each
+ * SKILL.md's frontmatter against OpenCode's rules (name matches the
+ * directory, description unfolded to 1-1024 chars), stamps a `license`
+ * field when the source omits one, and prepends a short harness-context
+ * banner so vendored guidance never fights the workspace rules in
+ * AGENTS.md (no npm, no import maps, engine preinstalled, harness runs
+ * the only build). A dead-skill scrub rewrites pointers to catalog skills
+ * ThreadSite does not ship (`godot-*`, `unity-*`, `dialogue-systems`,
+ * ...) into neutral phrases, and the fetch fails loudly if a dead
+ * reference survives, so upstream drift cannot silently reintroduce
+ * pointers to skills the agent cannot load.
  *
- * Two scrub passes keep the shipped set lean and loadable. Dead-skill
- * scrubbing rewrites pointers to upstream-catalog skills ThreadSite does not
- * ship (`godot-*`, `unity-*`, `unreal-*`, `shader-programming`, ...) into
- * engine-neutral phrases, and harness-conflict scrubbing drops sections and
- * lines that instruct npm/Vite workflows the workspace forbids; the fetch
- * fails loudly if a dead reference survives, so upstream drift cannot
- * silently reintroduce pointers to skills the agent cannot load.
+ * NOT managed here (maintained in-tree, never downloaded or overwritten):
+ * the authored skills (game-2d, game-3d, phaser-4) and
+ * threejs-game-studio, which is forked from chrislaupama/threejs-game-studio
+ * because it required heavy ThreadSite re-curation (Rapier/three-mesh-bvh
+ * physics guidance, harness-native release gates); edit those files
+ * directly and keep their banners' invariants.
  *
  * Run from the repo root whenever the curation changes (needs curl + tar):
  *
  *   node scripts/fetch-skills.mjs
- *
- * Authored skills (game-2d, game-3d, phaser-4) are NOT managed here and never touched;
- * re-running overwrites only the skills listed in SOURCES.
  */
 import { spawnSync } from "node:child_process";
 import { cp, mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -33,10 +35,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const TARGET = path.join(process.cwd(), "bot", "assets", "skills");
-
-/** The ThreadSite 3D skill package: one coordinator skill with internal
- * reference manuals, vendored selectively (no npm/Vite scaffold, no evals). */
-const THREEJS_SKILLS = ["threejs-game-studio"];
 
 /** Engine-neutral disciplines shared by both game kinds. */
 const DISCIPLINE_SKILLS = [
@@ -86,196 +84,7 @@ const DEAD_SKILL_REWRITES = [
   [/`prototype-fast`/g, "a rapid prototype"],
 ];
 
-/**
- * Sections/lines whose instructions assume a self-managed npm project —
- * exactly what the harness forbids in a ThreadSite workspace. Matched
- * verbatim from the vendored sources; the fetch fails if one disappears
- * upstream, so the list cannot silently rot.
- */
-const HARNESS_CONFLICT_REMOVALS = [
-  {
-    skill: "threejs-game-studio",
-    // The "Greenfield Scaffold" section: an npm/Vite project generator.
-    startMarker: "## Greenfield Scaffold",
-    endMarker: "\n## ",
-    reason: "npm/Vite scaffold is forbidden in ThreadSite workspaces",
-  },
-  {
-    skill: "threejs-game-studio",
-    // Novice default pointing at npm project management.
-    linePattern: /^- Vite \+ TypeScript \+ npm \+ `three` package imports\.$/,
-    reason: "npm/Vite default conflicts with the harness-managed build",
-  },
-];
-
-/**
- * Verbatim find/replace on the skill entry file where the guidance must be
- * kept but re-expressed for the harness (npm commands -> harness-native
- * verification). Applied before HARNESS_CONFLICT_REMOVALS; a stale find
- * that matches nothing is skipped and the removals/asserts still guard.
- */
-const HARNESS_CONFLICT_REPLACEMENTS = [
-  {
-    skill: "threejs-game-studio",
-    find: "At discovery:\n\n```bash\nnpm ls three\nnode -e \"import('three').then((THREE) => console.log(THREE.REVISION))\"\n```\n\nFor a greenfield project, check the current stable package through the bounded\nprobe after dependencies exist:\n\n```bash\nnpm --prefix <this-skill-dir> run probe:three -- <project>\n```\n\nThe probe limits npm lookup time to 20 seconds. If npm is unavailable, record\nthe offline result, use the reproducible verified lockfile, and do not claim a\nnewer stable target until the networked check can be rerun.",
-    replace: "At discovery, import `three` and log `THREE.REVISION` from the installed engine package to confirm the revision you are authoring against. The harness pins and installs the engine, so record the observed revision and never claim a newer stable target than what is installed.",
-  },
-  {
-    skill: "threejs-game-studio",
-    find: "Run\n`npm --prefix <this-skill-dir> run audit:project-local -- <project>` before\nrelease.",
-    replace: "Before release, walk every downloaded asset in `site/assets/` and confirm each entry in `ASSET_SOURCES.json` names its source and license.",
-  },
-  {
-    skill: "threejs-game-studio",
-    find: "For release or broad completion claims, prefer the unified ship check:\n\n```bash\nnpm --prefix <this-skill-dir> run ship-check -- /path/to/game\n```",
-    replace: "For release or broad completion claims, verify in a real browser against the published preview URL: every level loads, the core loop completes, no console errors, and performance holds on a mid-range laptop.",
-  },
-  {
-    skill: "threejs-game-studio",
-    find: "Copy `assets/game-report.template.md` and audit an ordinary broad report:\n\n```bash\nnpm --prefix <this-skill-dir> run audit:report -- /path/to/report.md\n```",
-    replace: "Copy `assets/game-report.template.md` and audit an ordinary broad report against it before claiming the matching tier.",
-  },
-  {
-    skill: "threejs-game-studio",
-    find: "The generated scaffold starts from that\nreproducible lockfile; compare it with current stable and upgrade intentionally\nwhen they differ.",
-    replace: "For a new project, use the installed revision as the baseline; upgrade intentionally when a newer stable is required.",
-  },
-  {
-    skill: "threejs-game-studio",
-    find: "For a maintenance refresh, run `npm run audit:official-links`; keep this\nnetworked link check separate from deterministic offline verification.",
-    replace: "For a maintenance refresh, spot-check the linked official pages; keep this networked check separate from deterministic offline verification.",
-  },
-  {
-    skill: "threejs-game-studio",
-    find: "- Use npm only for build-time installation. Bundle Three.js and official addons\n  with the application; do not hotlink runtime modules from a CDN.",
-    replace: "- The engine is bundled by the harness build; do not hotlink runtime modules from a CDN.",
-  },
-  {
-    skill: "threejs-game-studio",
-    find: "- Import or asset issues → `references/local-assets.md` + `npm run audit:assets`",
-    replace: "- Import or asset issues → `references/local-assets.md`",
-  },
-];
-
-/**
- * Same contract as HARNESS_CONFLICT_REPLACEMENTS but applied to the skill's
- * reference manuals (verbatim, all files), for npm commands and scaffold
- * pointers that live outside the entry file.
- */
-const REFERENCE_REPLACEMENTS = [
-  {
-    // Upstream made physics.md engine-neutral ("explicitly approved and
-    // locally pinned physics engine"); ThreadSite preinstalls Rapier and
-    // three-mesh-bvh for 3D projects and forbids vendoring a second engine,
-    // so restore the harness-specific decision guidance (the physics.md
-    // banner below carries the same message even if these anchors drift).
-    file: "references/physics.md",
-    find: "Adding a\nphysics engine is an architecture and dependency decision: obtain explicit\napproval, pin and host it according to the project's local-first policy, and\ndefine its world, stepping, synchronization, teardown, and asset ownership.\nPreserve an engine already owned by an existing project unless migration is in\nscope; do not expand it merely to avoid a small, well-bounded collision query.",
-    replace: "When a\ndesign genuinely needs a general physics engine, the decision is already made\nfor this workspace: use the **preinstalled `@dimforge/rapier3d-compat`**\n(`await RAPIER.init()` once at boot). Do not vendor Ammo, Cannon, Jolt, or any\nsecond engine, and define the world's stepping, synchronization, teardown, and\nasset ownership up front. Preserve an engine already owned by an existing\nproject unless migration is in scope; do not expand it merely to avoid a\nsmall, well-bounded collision query.",
-  },
-  {
-    file: "references/physics.md",
-    find: "| stacks, joints, ragdolls, arbitrary convex dynamics, robust vehicles | explicitly approved and locally pinned physics engine |",
-    replace: "| stacks, joints, ragdolls, arbitrary convex dynamics, robust vehicles | preinstalled Rapier (`@dimforge/rapier3d-compat`) |\n| fast queries against complex static meshes (hitscan, LOS, ground, picking) | preinstalled `three-mesh-bvh` on the static geometry |",
-  },
-  {
-    file: "references/physics.md",
-    find: "a project that promises local-only runtime assets.",
-    replace: "a project that promises local-only runtime assets — Rapier itself is already\npreinstalled here, so there is no gap for them to fill.",
-  },
-  {
-    // Rapier-specific lifecycle and failure modes upstream generalized away;
-    // they are exactly the traps a preinstalled-Rapier workspace hits.
-    file: "references/physics.md",
-    find: "- Results are stable under a seeded input replay when determinism matters.",
-    replace: "- Soak-test long enough to cross every lifecycle cap and expiry at least once (spawn max+1 of each pooled, capped, or retired entity kind) with a clean console — eviction-path bugs surface minutes into play, not on the first frame.\n- Results are stable under a seeded input replay when determinism matters.",
-  },
-  {
-    file: "references/physics.md",
-    find: "- A custom arcade solver is described as general rigid-body physics.",
-    replace: "- A cap-eviction destroys a physics body but leaves it in the tracking list, so the next eviction destroys it twice and panics inside WASM.\n- A swallowed Rapier exception hides a poisoned world: the game plays on until the next physics call, then fails with `recursive use of an object…` on every frame.\n- A custom arcade solver is described as general rigid-body physics.",
-  },
-  {
-    file: "references/local-assets.md",
-    find: "For imported models and textures, also run this package's asset checklist:\n\n```bash\nnpm --prefix <this-skill-dir> run audit:assets -- <project>\n```",
-    replace: "For imported models and textures, walk every file in `site/assets/` and confirm each entry in `ASSET_SOURCES.json` names its source and license before release.",
-  },
-  {
-    file: "references/local-assets.md",
-    find: "Run:\n\n```bash\nnpm run audit:local\n```\n\n",
-    replace: "Audit local-only status by confirming every runtime import resolves\ninside the workspace and the outbound-request list is empty.\n\n",
-  },
-  {
-    file: "references/upgrade-existing.md",
-    find: "Run:\n\n```bash\nnpm --prefix <skill-dir> run audit:project-apis -- <project>\nnpm --prefix <skill-dir> run probe:three -- <project>\nnpm ls three @types/three\n```",
-    replace: "Audit manually: walk the stale-API list above through the project source\nand confirm every flagged pattern against the installed engine package's real\nTypeScript declarations (the type-check gate fails misspelled or removed\nAPIs), and record `THREE.REVISION` from the installed package.",
-  },
-  {
-    file: "references/upgrade-existing.md",
-    find: "- `audit:project-apis` — curated stale-API and renderer-family patterns,\n  including legacy color-space properties and pointer-lock accessors\n- `audit:assets` — local glTF/texture checklist\n- `ship-check` — revision probe → APIs → local-only → build → canvas → report",
-    replace: "- Manual API audit — curated stale-API and renderer-family patterns from\n `official-docs.md`, checked against the installed revision's real types\n- Asset walk — every imported model/texture in `site/assets/` has source and\n license recorded in `ASSET_SOURCES.json`\n- Browser ship check — full loop, clean console, and canvas evidence on the\n harness preview URL",
-  },
-  {
-    file: "references/load-budgets.md",
-    find: "| `ship-check` outputs; mobile/a11y refs when claimed |",
-    replace: "| Browser ship evidence on the preview URL; mobile/a11y refs when claimed |",
-  },
-  {
-    file: "references/load-budgets.md",
-    find: "| Imported model path, provenance, axes, scale, bounds, or ownership | Relevant section of `local-assets.md`; run `audit:assets` |",
-    replace: "| Imported model path, provenance, axes, scale, bounds, or ownership | Relevant section of `local-assets.md`; walk `site/assets/` + `ASSET_SOURCES.json` |",
-  },
-  {
-    file: "references/load-budgets.md",
-    find: "| Revision-only pre-r185 / CDN / global THREE migration | `upgrade-existing.md`; run `audit:project-apis` |",
-    replace: "| Revision-only pre-r185 / CDN / global THREE migration | `upgrade-existing.md`; audit APIs against the installed types |",
-  },
-  {
-    file: "references/quality-gates.md",
-    find: "- `npm run audit:local` passes with no unapproved runtime package or network\n  source.",
-    replace: "- No unapproved runtime package or network source: every import resolves\n inside the workspace and the outbound-request list is empty.",
-  },
-  {
-    file: "references/qa-release.md",
-    find: "- `npm run setup:browsers` completed on fresh machines before Playwright or\n  canvas-inspector checks.",
-    replace: "- Browser QA runs through the harness preview (Chromium); no local browser\n setup is needed.",
-  },
-  {
-    file: "references/gameplay-architecture.md",
-    find: "- `npm run build` or equivalent.",
-    replace: "- The harness build and type-check gate pass.",
-  },
-  {
-    file: "references/quality-scorecard.md",
-    find: "Run the canvas inspector (`npm run inspect:canvas` or\n`scripts/inspect-threejs-canvas.ts`) on relevant viewports and cite its\n`metrics` and `renderBudget` blocks.",
-    replace: "Capture canvas evidence (`renderer.info`, viewport/DPR, or the page's\ndiagnostics overlay) on relevant viewports and cite the numbers.",
-  },
-  {
-    file: "references/technical-art.md",
-    find: "The canvas inspector\n(`npm run inspect:canvas`) compares live diagnostics against the same numbers\nand reports over-budget rows. In a non-scaffold project, capture equivalent\n`renderer.info` and viewport/DPR evidence directly when that command is absent.",
-    replace: "Capture live `renderer.info` and viewport/DPR evidence and compare it\nagainst the same numbers; report over-budget rows as documented tradeoffs.",
-  },
-  {
-    file: "references/webgpu.md",
-    find: "Run `npm run audit:structure` when changing this skill: it scans executable\nMarkdown examples and scaffold TypeScript for the deprecated API set verified\nagainst r185 and for renderer-family mixing. Re-audit the scanner rules on each\nThree.js upgrade.",
-    replace: "When changing this skill, re-scan its executable examples for the deprecated\nAPI set verified against the baseline revision and for renderer-family mixing,\nand re-check the scanner rules on each Three.js upgrade.",
-  },
-  {
-    file: "references/webgpu.md",
-    find: "The optional scaffold adapter at\n`assets/threejs-vite-game/src/examples/WebGpuRendererOption.ts` packages this\nownership pattern in compile-checked form.",
-    replace: "Keep this ownership pattern in compile-checked TypeScript under `site/src/` — the harness type-checks it on every turn.",
-  },
-];
-
 const BANNERS = {
-  "chrislaupama/threejs-game-studio":
-    "Vendored from chrislaupama/threejs-game-studio (MIT) by scripts/fetch-skills.mjs. "
-    + "ThreadSite context: three.js is preinstalled in this workspace's harness-managed node_modules — import it by "
-    + "its bare name (\"three\") with full TypeScript types. This workspace has NO npm, NO Vite, NO dev server, and "
-    + "NO project scaffold: author TypeScript under site/src, keep assets under site/assets, and the harness runs "
-    + "the only build (site/src TypeScript -> site/js ESM via esbuild). Map every project-setup/scaffold/build step "
-    + "of this skill onto the existing ThreadSite workspace layout; skip its npm/Vite instructions entirely. "
-    + "Verification happens in a real browser via the preview URL; see AGENTS.md.",
   "gamedev-skills/awesome-gamedev-agent-skills":
     "Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. "
     + "ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed "
@@ -283,61 +92,7 @@ const BANNERS = {
     + "The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md.",
 };
 
-/**
- * Per-file banner overrides keyed `<skill>/<path>`: reference manuals whose
- * harness context differs from the repo-wide banner. physics.md gets the
- * preinstalled Rapier/three-mesh-bvh context because upstream keeps it
- * engine-neutral while 3D workspaces here cannot vendor a second engine.
- */
-const FILE_BANNERS = {
-  "threejs-game-studio/references/physics.md":
-    "Vendored from chrislaupama/threejs-game-studio (MIT) by scripts/fetch-skills.mjs. "
-    + "ThreadSite context: three.js, @dimforge/rapier3d-compat (physics, WASM inlined), and three-mesh-bvh "
-    + "(BVH queries on static geometry) are preinstalled in this workspace's harness-managed node_modules — "
-    + "import them by bare name with full TypeScript types. This workspace has NO npm, NO Vite, NO dev server, "
-    + "and NO project scaffold: author TypeScript under site/src, keep assets under site/assets, and the harness "
-    + "runs the only build (site/src TypeScript -> site/js ESM via esbuild). Map every project-setup/scaffold/build "
-    + "step of this skill onto the existing ThreadSite workspace layout; skip its npm/Vite instructions entirely. "
-    + "The hand-rolled collision techniques below are the right tool for simple arcade games; when a design needs "
-    + "real rigid-body dynamics, use the preinstalled Rapier rather than vendoring any other engine. "
-    + "Verification happens in a real browser via the preview URL; see AGENTS.md.",
-};
-
-/**
- * Targeted frontmatter-description rewrites: a vendored description that
- * advertises workflows the workspace forbids (Vite/npm scaffolding) fights
- * the banner in the very text OpenCode shows and triggers on.
- */
-const FRONTMATTER_REPLACEMENTS = [
-  {
-    skill: "threejs-game-studio",
-    find: "Coordinates a local-first Vite and TypeScript workflow, loads renderer- and task-specific references, and verifies version-sensitive APIs against the installed Three.js runtime and current official documentation.",
-    replace: "Coordinates a local-first TypeScript workflow in the harness workspace, loads renderer- and task-specific references, and verifies version-sensitive APIs against the installed Three.js runtime and current official documentation.",
-  },
-];
-
 const SOURCES = [
-  {
-    repo: "chrislaupama/threejs-game-studio",
-    ref: "main",
-    license: "MIT",
-    // The skill lives at the repo root; ship only the coordinator, the
-    // reference manuals, and the scorecard/report anchors they point at —
-    // not the npm/Vite scaffold, evals, or repo tooling.
-    skills: [
-      {
-        name: "threejs-game-studio",
-        from: ".",
-        only: [
-          "SKILL.md",
-          "references",
-          "assets/scorecard-anchors",
-          "assets/game-report.template.md",
-          "assets/content-provenance.template.md",
-        ],
-      },
-    ],
-  },
   {
     repo: "gamedev-skills/awesome-gamedev-agent-skills",
     ref: "main",
@@ -379,39 +134,10 @@ const ENGINE_SKILL_NAME = /(?:godot|unity|unreal|phaser|pygame|bevy|love2d)-[\w-
 
 /**
  * Rewrite every mention of an upstream-catalog skill ThreadSite does not ship
- * into an engine-neutral phrase, and — for the skill entry file only — drop
- * the sections/lines that instruct npm/Vite project management the workspace
- * forbids. Runs on every vendored markdown file;
+ * into an engine-neutral phrase. Runs on every vendored markdown file;
  * assertNoDeadReferences afterwards guarantees the result.
  */
-function scrubMarkdown(text, skillName, isSkillEntry = false, relativeFile = "") {
-  for (const replacement of REFERENCE_REPLACEMENTS) {
-    if (replacement.file === relativeFile.replace(/\\/g, "/") && text.includes(replacement.find)) {
-      text = text.replace(replacement.find, replacement.replace);
-    }
-  }
-  if (isSkillEntry) {
-    for (const replacement of HARNESS_CONFLICT_REPLACEMENTS) {
-      if (replacement.skill === skillName && text.includes(replacement.find)) {
-        text = text.replace(replacement.find, replacement.replace);
-      }
-    }
-    for (const removal of HARNESS_CONFLICT_REMOVALS) {
-      if (removal.skill !== skillName) continue;
-      if (removal.startMarker !== undefined) {
-        const start = text.indexOf(removal.startMarker);
-        if (start === -1) fail(skillName, `harness-conflict section missing upstream (${removal.reason}); update fetch-skills.mjs`);
-        const end = text.indexOf(removal.endMarker, start + removal.startMarker.length);
-        text = text.slice(0, start) + text.slice(end === -1 ? text.length : end + 1);
-      } else {
-        const lines = text.split(/\r?\n/);
-        const kept = lines.filter((line) => !removal.linePattern.test(line));
-        if (kept.length === lines.length) fail(skillName, `harness-conflict line missing upstream (${removal.reason}); update fetch-skills.mjs`);
-        text = kept.join("\n");
-      }
-    }
-  }
-
+function scrubMarkdown(text, skillName) {
   for (const override of LINE_OVERRIDES) {
     if (override.skill === skillName && text.includes(override.find)) {
       text = text.replace(override.find, override.replace);
@@ -545,10 +271,7 @@ async function main() {
         const { frontmatter, body } = parseFrontmatter(skill.name, original);
         const name = /^name:\s*(.+)$/m.exec(frontmatter)?.[1]?.trim();
         if (name !== skill.name) fail(skill.name, `frontmatter name "${name}" does not match directory`);
-        let bounded = boundedFrontmatter(skill.name, frontmatter, source.license);
-        for (const fm of FRONTMATTER_REPLACEMENTS) {
-          if (fm.skill === skill.name && bounded.includes(fm.find)) bounded = bounded.replace(fm.find, fm.replace);
-        }
+        const bounded = boundedFrontmatter(skill.name, frontmatter, source.license);
         const length = descriptionText(skill.name, bounded).length;
         if (length < 1 || length > 1024) fail(skill.name, `description unfolds to ${length} chars (OpenCode allows 1-1024)`);
 
@@ -560,29 +283,16 @@ async function main() {
         const to = path.join(TARGET, skill.name);
         await rm(to, { recursive: true, force: true });
         await mkdir(to, { recursive: true });
-        if (skill.only) {
-          // Selective vendoring: copy only the listed files/dirs (paths
-          // relative to the skill source), preserving their subpaths.
-          for (const rel of skill.only) {
-            const sourcePath = path.join(from, ...rel.split("/"));
-            const targetPath = path.join(to, ...rel.split("/"));
-            await mkdir(path.dirname(targetPath), { recursive: true });
-            await cp(sourcePath, targetPath, { recursive: true, force: true });
-          }
-        } else {
-          await cp(from, to, { recursive: true, force: true });
-        }
-        // Scrub harness-conflicting instructions and dead skill references
-        // in every markdown file of the vendored skill, then re-write the
-        // normalized SKILL.md (its body was scrubbed too).
+        await cp(from, to, { recursive: true, force: true });
+        // Scrub dead skill references in every markdown file of the vendored
+        // skill, then re-write the normalized SKILL.md (its body was scrubbed
+        // too).
         for (const file of await listMarkdown(to)) {
           const isEntry = file === path.join(to, "SKILL.md");
-          const relative = path.relative(to, file).replace(/\\/g, "/");
           const text = isEntry ? normalized : await readFile(file, "utf8");
-          const scrubbed = scrubMarkdown(text, skill.name, isEntry, relative);
+          const scrubbed = scrubMarkdown(text, skill.name);
           assertNoDeadReferences(scrubbed, skill.name);
-          const banner = FILE_BANNERS[`${skill.name}/${relative}`] ?? BANNERS[source.repo];
-          await writeFile(file, isEntry ? scrubbed : `<!-- ${banner} -->\n\n${scrubbed}`, "utf8");
+          await writeFile(file, isEntry ? scrubbed : `<!-- ${BANNERS[source.repo]} -->\n\n${scrubbed}`, "utf8");
         }
         report.push({ skill: skill.name, source: source.repo, license: source.license, ...await dirStats(to) });
       }
