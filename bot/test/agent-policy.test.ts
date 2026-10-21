@@ -84,3 +84,31 @@ test("both game dimensions get design guidance and the original collection reque
     assert.ok(prompt.endsWith("GAME REQUEST:\nCreate a gem-collecting platformer"));
   }
 });
+
+test("title generation is a bounded tools-free request and cleans up failed attempts", async () => {
+  const { harness, stub } = fixture();
+  stub.createSession = async () => "title-session";
+  let aborted = 0;
+  let deleted = 0;
+  let requests = 0;
+  stub.prompt = () => assert.fail("titles must not enter the builder reconciliation loop");
+  stub.client.session.abort = async () => { aborted++; return {}; };
+  stub.client.session.delete = async () => { deleted++; return {}; };
+  stub.client.session.prompt = async (body: any, options: any) => {
+    requests++;
+    assert.deepEqual(body.tools, { "*": false });
+    assert.equal(body.agent, "titler");
+    assert.deepEqual(body.model, { providerID: "test", modelID: "backup" });
+    assert.ok(options.signal instanceof AbortSignal);
+    if (requests === 1) throw new Error("model timeout");
+    return { info: { id: "title-message", role: "assistant", time: { created: Date.now() }, tokens: { input: 100, output: 5 } },
+      parts: [{ type: "text", text: "Neon Drift" }] };
+  };
+  await assert.rejects(harness.generateTitle("/w", "Build a racing game", "test/backup"), /model timeout/);
+  const result = await harness.generateTitle("/w", "Build a racing game", "test/backup");
+  assert.equal(result.title, "Neon Drift");
+  assert.equal(result.usage.inputTokens, 100);
+  assert.equal(requests, 2);
+  assert.equal(aborted, 1);
+  assert.equal(deleted, 2);
+});

@@ -549,11 +549,11 @@ export class OpenCodeHarness {
     return block;
   }
 
-  async createSession(directory: string, title: string): Promise<string> {
+  async createSession(directory: string, title: string, signal?: AbortSignal): Promise<string> {
     const result = await this.client.session.create({
       directory,
       title,
-    } as any);
+    } as any, { signal: signal ?? AbortSignal.timeout(10_000) });
     const session = unwrap<{ id: string }>(result, "OpenCode session creation");
     if (!session?.id) throw new Error("OpenCode did not return a session id");
     log("info", "opencode.session_created", { sessionId: session.id, directory, title });
@@ -1026,16 +1026,38 @@ export class OpenCodeHarness {
   }
 
   async generateTitle(directory: string, requestText: string, model?: string): Promise<{ title?: string; usage: TurnUsage }> {
-    const sessionId = await this.createSession(directory, "ThreadSite thread title");
+    const deadline = AbortSignal.timeout(20_000);
+    const sessionId = await this.createSession(directory, "ThreadSite thread title", deadline);
+    let usage: TurnUsage | undefined;
+    let completed = false;
     try {
       const instruction =
         "Write a concise Discord thread title (3-6 words, Title Case, no quotes, no emoji, no trailing punctuation) " +
         "naming the website or game described by this request. Reply with only the title.\n\nREQUEST:\n" +
         truncate(requestText, 1200);
-      const raw = await this.prompt(directory, sessionId, instruction, model, undefined, "titler");
-      return { title: cleanThreadTitle(raw.text), usage: raw.usage };
+      // A title is a bounded, tools-free request. Do not enter the builder's
+      // long transport reconciliation or quota retry loop for a name.
+      const raw = unwrap<SessionMessage>(await this.client.session.prompt({
+        sessionID: sessionId, directory, agent: "titler", model: parseModel(model), tools: { "*": false },
+        parts: [{ type: "text", text: instruction }],
+      } as any, { signal: deadline }), "OpenCode project title");
+      usage = usageFromMessages([raw]);
+      if (raw.info?.error) throw new Error(`Title model failed: ${safeJson(raw.info.error)}`);
+      completed = true;
+      return { title: cleanThreadTitle(extractText(raw.parts)), usage: usage ?? usageOf(createTurnState(Date.now(), 0)) };
+    } catch (error) {
+      if (!usage) {
+        try {
+          const saved = unwrap<SessionMessage[]>(await this.client.session.messages({ sessionID: sessionId, directory, limit: 20 } as any,
+            { signal: AbortSignal.timeout(5_000) }), "OpenCode title usage");
+          usage = usageFromMessages(saved);
+        } catch { /* A failed provider may still have saved billable steps; unavailable history must not block fallback. */ }
+      }
+      throw enrichProviderError(error, model, usage);
     } finally {
-      await this.client.session.delete({ sessionID: sessionId, directory } as any)
+      const cleanup = { signal: AbortSignal.timeout(5_000) };
+      if (!completed) await this.client.session.abort({ sessionID: sessionId, directory } as any, cleanup).catch(() => undefined);
+      await this.client.session.delete({ sessionID: sessionId, directory } as any, { signal: AbortSignal.timeout(5_000) })
         .catch((error: unknown) => log("debug", "opencode.title_session_delete_failed", { sessionId, error: String(error) }));
     }
   }
