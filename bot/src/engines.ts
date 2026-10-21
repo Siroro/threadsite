@@ -222,16 +222,6 @@ export async function ensureEnginePackages(workspacePath: string, kind: ProjectK
   if (!packages.length) return false;
 
   let changed = false;
-  // v2.x workspaces may still carry the old harness-owned Pixi package. Remove
-  // it during the same freshness pass so the agent cannot silently keep using
-  // a renderer the current 2D rules no longer support.
-  if (kind === "game-2d") {
-    const legacyPixi = safeChild(workspacePath, "node_modules", "pixi.js");
-    if (await fs.access(legacyPixi).then(() => true, () => false)) {
-      await fs.rm(legacyPixi, { recursive: true, force: true });
-      changed = true;
-    }
-  }
   for (const engine of packages) {
     const packageDir = safeChild(workspacePath, "node_modules", engine.name);
     const manifestFile = path.join(packageDir, "package.json");

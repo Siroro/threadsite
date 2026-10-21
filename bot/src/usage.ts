@@ -214,6 +214,10 @@ export class UsageLog {
   }
 
   /** Remove every revision, and ignore late billing from the aborted turn. */
+  async threadIds(): Promise<string[]> {
+    return [...new Set((await this.readEntries()).map((entry) => entry.threadId))];
+  }
+
   async forgetThread(threadId: string): Promise<void> {
     this.forgottenThreads.add(threadId);
     const write = this.writes.then(async () => {

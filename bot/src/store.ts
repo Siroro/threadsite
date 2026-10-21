@@ -5,11 +5,9 @@ import { DatabaseSync } from "node:sqlite";
 import type { ProjectRecord, QueuedRequest } from "./types.js";
 import { needsProjectNaming } from "./naming.js";
 
-/** Database reads need durable identity; legacy markers predate explicit IDs. */
+/** Durable turn identity: matches by the stable id assigned when the turn is claimed. */
 export function pendingTurnMatches(current: ProjectRecord["pendingTurn"], expected: ProjectRecord["pendingTurn"]): boolean {
-  if (!current || !expected) return false;
-  if (current.id || expected.id) return Boolean(current.id && current.id === expected.id);
-  return current.startedAt === expected.startedAt && current.statusMessageId === expected.statusMessageId;
+  return Boolean(current && expected && current.id === expected.id);
 }
 
 /**
@@ -105,9 +103,7 @@ export class Store {
         // A corrupt row costs one project listing, not the whole store.
       }
     }
-    // A legacy/partial row may predate updatedAt; sorting must not throw on it
-    // (this runs in /healthz, the gallery refresh, and webhook dispatch).
-    return projects.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    return projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   listRecoveryProjects(): ProjectRecord[] {

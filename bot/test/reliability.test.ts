@@ -570,7 +570,7 @@ test("renaming a game keeps its multiplayer tenant through future builds", async
 test("stopping mid-recovery fails the turn instead of resurrecting it with a fresh prompt", async () => {
   const f = await projectFixture("stop-recovery");
   await f.store.patchProject(f.project.threadId, {
-    pendingTurn: { prompt: "Paint the arena", initial: false, startedAt: new Date(Date.now() - 60_000).toISOString(), statusMessageId: "status" },
+    pendingTurn: { id: "paint-turn", prompt: "Paint the arena", initial: false, startedAt: new Date(Date.now() - 60_000).toISOString(), statusMessageId: "status" },
   });
   let busy = true;
   let prompted = false;
@@ -646,7 +646,7 @@ test("a recovery wait that outlives the window aborts the orphaned agent turn", 
     abortTurn: async () => { aborted = true; return true; },
   });
   await f.store.patchProject(f.project.threadId, {
-    pendingTurn: { prompt: "Stuck turn", initial: false, startedAt: new Date().toISOString(), statusMessageId: "status" },
+    pendingTurn: { id: "stuck-turn", prompt: "Stuck turn", initial: false, startedAt: new Date().toISOString(), statusMessageId: "status" },
   });
   try {
     await assert.rejects(f.service.recoverTurn(f.project.threadId), /kept running past the recovery window/i);
@@ -661,7 +661,7 @@ test("an aborted agent finish is continued by recovery, not committed as complet
   const f = await projectFixture("aborted-finish");
   await f.store.patchProject(f.project.threadId, {
     pendingTurn: {
-      prompt: "Add fog of war", initial: false, beforeCommit: f.base,
+      id: "fog-turn", prompt: "Add fog of war", initial: false, beforeCommit: f.base,
       startedAt: new Date(Date.now() - 30_000).toISOString(), statusMessageId: "status",
     },
   });
@@ -785,7 +785,7 @@ test("switching multiplayer rewrites the wiring and runs a question-first agent 
   await assert.rejects(f.service.switchMultiplayer(f.project.threadId, "singleplayer", "status-3"), /already runs singleplayer only/);
 });
 
-test("a message during a running turn steers the live session instead of queueing", async () => {
+test("only a reply to the running turn's status message steers the live session", async () => {
   const f = await projectFixture("steer");
   // A real harness with a stubbed transport, so the steering path exercised is
   // the production one (promptAsync into the busy session, no abort).
@@ -811,15 +811,18 @@ test("a message during a running turn steers the live session instead of queuein
 
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   // Idle thread: nothing to steer.
-  assert.equal(await service.steerActiveTurn(f.project.threadId, "nope"), false);
+  assert.equal(await service.steerActiveTurn(f.project.threadId, "nope", "status"), false);
 
   const turning = service.mutate(f.project.threadId, "Add snow tiles", false, undefined, undefined, "status").then(
     (result) => result,
     (error: unknown) => error,
   );
   while (!releasePrompt) await settle();
-  // Mid-turn: the message goes straight into the busy session.
-  assert.equal(await service.steerActiveTurn(f.project.threadId, "make the snow ice-blue"), true);
+  // Ordinary messages and replies to other messages queue instead of steering.
+  assert.equal(await service.steerActiveTurn(f.project.threadId, "make the snow ice-blue"), false);
+  assert.equal(await service.steerActiveTurn(f.project.threadId, "make the snow ice-blue", "another-message"), false);
+  // A reply to the running turn's status message goes straight into the busy session.
+  assert.equal(await service.steerActiveTurn(f.project.threadId, "make the snow ice-blue", "status"), true);
   assert.equal(asyncCalls.length, 1);
   assert.match(asyncCalls[0].parts[0].text, /make the snow ice-blue/);
   assert.match(asyncCalls[0].parts[0].text, /steering update for the CURRENT task/);
@@ -831,7 +834,7 @@ test("a message during a running turn steers the live session instead of queuein
   assert.ok(result.commit || result.noChanges);
 
   // Once the turn settles there is nothing running to steer.
-  assert.equal(await service.steerActiveTurn(f.project.threadId, "late"), false);
+  assert.equal(await service.steerActiveTurn(f.project.threadId, "late", "status"), false);
 });
 
 test("modelBreakdown rolls up per-model usage globally and per thread", async () => {

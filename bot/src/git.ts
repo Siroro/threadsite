@@ -426,7 +426,7 @@ export interface CommitStats {
  * Migrate generated runtime files out of an existing repository's index while
  * leaving the workspace copies intact for validation and publication.
  */
-export async function untrackGeneratedArtifacts(workspace: string): Promise<void> {
+async function untrackGeneratedArtifacts(workspace: string): Promise<void> {
   await git(workspace, [
     "rm", "-r", "-f", "--cached", "--ignore-unmatch", "--",
     ".opencode", "scratch", "site/js", "build-manifest.json",

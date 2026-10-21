@@ -29,10 +29,10 @@ import { getLogFile, log, logError, recentIncidents, recordIncident, serializeEr
 import { multiplayerRelayStatus } from "./multiplayer.js";
 import { OpenCodeHarness, formatTurnUsage, type PromptImage, type QuotaBlock } from "./opencode.js";
 import { PROJECT_CARD_VERSION, renderProjectCard, type ProjectCardMessage, type ProjectCardState } from "./project-card.js";
-import { DiscordProgress, formatElapsed, type ProgressCallback } from "./progress.js";
+import { DiscordProgress, type ProgressCallback } from "./progress.js";
 import { ProjectService, TurnStoppedError, type MutationResult, type StopTurnOutcome } from "./project.js";
 import { recoverPublishRoot } from "./publish.js";
-import { Store } from "./store.js";
+import { Store, pendingTurnMatches } from "./store.js";
 import { multiplayerModeLabel, projectKindLabel } from "./templates.js";
 import type { CommitAuthor, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog, type UsageTotal } from "./usage.js";
@@ -386,6 +386,12 @@ async function recoverInterruptedTurns(): Promise<void> {
       if (!status && thread) {
         status = await thread.send("♻️ Resuming the turn that was in flight when the bot restarted…").catch(() => undefined);
       }
+      if (status && status.id !== project.pendingTurn.statusMessageId) {
+        const fresh = store.getProject(project.threadId);
+        if (fresh?.pendingTurn && pendingTurnMatches(fresh.pendingTurn, project.pendingTurn)) {
+          await store.patchProject(project.threadId, { pendingTurn: { ...fresh.pendingTurn, statusMessageId: status.id } });
+        }
+      }
       const progress = status
         ? new DiscordProgress(status, `♻️ Recovering ${project.displayName}`, Date.parse(project.pendingTurn.startedAt))
         : undefined;
@@ -678,12 +684,9 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  // A message during the turn's agent phase steers the running turn: it is
-  // submitted straight into the busy session, where the agent reads it as part
-  // of the current work — no waiting for the next update pass. Images cannot
-  // ride a steering send and a turn in its delivery tail cannot take one;
-  // those fall through to the queue as always.
-  if (!imageAttachments.length && await projects.steerActiveTurn(message.channel.id, prompt)) {
+  // Only an explicit Discord reply to the current turn's status can steer it.
+  // Ordinary messages, replies to other messages, images and late replies queue.
+  if (!imageAttachments.length && await projects.steerActiveTurn(message.channel.id, prompt, message.reference?.messageId)) {
     await status.edit("🧭 Sent to the running turn").catch(() => undefined);
     return;
   }
@@ -1024,7 +1027,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     await interaction.reply({
       content:
         "**ThreadSite** — every normal message in a project thread edits its site or game.\n" +
-        "Reply while a turn runs to **steer it live** — the agent reads your message mid-turn. Send several between turns and they merge into one update. Image attachments reach the model when it can see them (images queue for the next pass rather than steering). " +
+        "Use Discord Reply on the **running turn's status message** to steer it live. Other messages queue for the next update; several queued requests may merge into one update. Image attachments reach the model when it can see them and always queue for the next pass. " +
         "The live status message carries a **Stop** button while a turn runs; `/site stop` works even if that message is gone. " +
         "A turn with no progress for a few minutes is flagged on the card. Failures offer rollback or keep.\n\n" +
         "**/site start** — create a site (works in any channel)\n" +
@@ -1610,7 +1613,7 @@ function agentSummaryText(raw: string | undefined, budget: number): string {
 // usage and the context size the model ended on, when the agent reported them.
 function turnStatsText(result: MutationResult): string {
   const usage = result.usage ? formatTurnUsage(result.usage) : "";
-  return `-# ⏱️ ${formatElapsed(result.durationMs)}${usage ? ` · 🧠 ${usage}` : ""}`;
+  return `-# ⏱️ ${formatShortDuration(result.durationMs)}${usage ? ` · 🧠 ${usage}` : ""}`;
 }
 
 /**

@@ -19,7 +19,7 @@ import { UsageLog } from "./usage.js";
 import type { ProgressCallback, ProgressPhase } from "./progress.js";
 import type { WorkingTreeStats } from "./git.js";
 import { log, logError, serializeError } from "./logger.js";
-import { errorText, formatShortDuration, formatTokens, parseModel, safeChild, slugify, truncate, withTimeout } from "./util.js";
+import { errorText, formatShortDuration, formatTokens, parseModel, safeChild, slugify, truncate, withTimeout, sleep } from "./util.js";
 import { browserQaFeedback, runBrowserQa as driveBrowserQa, type BrowserQaResult } from "./browser-qa.js";
 import { assertExclusiveResources, projectAccounts, projectRepos, removalPaths } from "./project-removal.js";
 import { deleteRelayGame } from "./relay-cleanup.js";
@@ -1408,10 +1408,10 @@ export class ProjectService {
    * nothing is steerable right now (idle, delivering, or recovering), so the
    * caller can queue the message instead.
    */
-  async steerActiveTurn(threadId: string, text: string): Promise<boolean> {
+  async steerActiveTurn(threadId: string, text: string, replyToMessageId?: string): Promise<boolean> {
     if (!this.activeTurnThreads.has(threadId) || this.delivering.has(threadId)) return false;
     const project = this.store.getProject(threadId);
-    if (!project) return false;
+    if (!project || !replyToMessageId || project.pendingTurn?.statusMessageId !== replyToMessageId) return false;
     const steered = await this.opencode.steer(project.workspacePath, project.sessionId, text);
     if (steered) log("info", "project.turn_steered", { threadId, sessionId: project.sessionId });
     return steered;
@@ -1627,23 +1627,9 @@ export class ProjectService {
     return summary;
   }
 
-  /** Tear down a project entirely: workspace, Forgejo repo, published page, and record. */
-  async deleteProject(threadId: string): Promise<void> {
-    const project = this.store.getProject(threadId);
-    if (!project) return;
-
-    // A live agent turn is still writing into the workspace; deleting underneath
-    // it would corrupt the store record vs. reality.
-    if (await this.opencode.isBusy(project.workspacePath, project.sessionId).catch(() => false)) {
-      throw new Error("A model turn is still running in this thread. Wait for it to finish before deleting.");
-    }
-
-    await this.forceDeleteProject(threadId, "project-delete");
-  }
-
   /**
    * Delete a project whose Discord thread is gone. Deletion intent is
-   * unambiguous, so unlike deleteProject this does not wait behind the
+   * unambiguous, so this does not wait behind the
    * thread's queue or a running turn: the queue is severed, the running turn
    * is aborted (questions rejected first — they hold turns open), and the
    * durable deletion blocks new work while existing delivery unwinds. The aborted turn routes through the
@@ -1891,12 +1877,17 @@ export class ProjectService {
    * workspace back to the previously published commit and reports; the pushed
    * commit stays in the repo, the live site keeps the older version.
    */
+  /** Refuse while an agent turn is live; the message names the blocked action. */
+  private async assertIdle(project: ProjectRecord, action: string): Promise<void> {
+    if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
+      throw new Error(`A model turn is currently running in this thread. Wait for it to finish before ${action}.`);
+    }
+  }
+
   async publishExternalPush(threadId: string): Promise<{ project: ProjectRecord; commit: string; validationError?: string }> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
-    if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
-      throw new Error("A model turn is currently running in this thread. Wait for it to finish before publishing the external push.");
-    }
+    await this.assertIdle(project, "publishing the external push");
 
     const previousHead = await currentHead(project.workspacePath).catch(() => undefined);
     const { commit } = await syncToRemote(project.workspacePath, this.forgejo);
@@ -1944,9 +1935,7 @@ export class ProjectService {
   async adoptExternalCommit(threadId: string): Promise<{ project: ProjectRecord; commit: string }> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
-    if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
-      throw new Error("A model turn is currently running in this thread. Wait for it to finish before adopting the external push.");
-    }
+    await this.assertIdle(project, "adopting the external push");
     const { commit } = await syncToRemote(project.workspacePath, this.forgejo);
     project = await this.store.patchProject(threadId, { lastSeenCommit: commit });
     log("info", "project.external_push_adopted", { threadId, commit: commit.slice(0, 10) });
@@ -1970,9 +1959,7 @@ export class ProjectService {
   }> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
-    if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
-      throw new Error("A model turn is currently running in this thread. Wait for it to finish before syncing.");
-    }
+    await this.assertIdle(project, "syncing");
     // A dirty tree means a failed turn's partial edits are sitting uncommitted;
     // rebasing would destroy them, so refuse and point at the rollback choice.
     if (!(await workingTreeClean(project.workspacePath))) {
@@ -2047,9 +2034,7 @@ export class ProjectService {
   async compact(threadId: string): Promise<{ model: string }> {
     const project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
-    if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
-      throw new Error("A model turn is still running in this thread. Wait for it to finish before compacting.");
-    }
+    await this.assertIdle(project, "compacting");
     const model = (await this.opencode.lastAssistantModel(project.workspacePath, project.sessionId))
       ?? parseModel(this.store.getModel());
     if (!model) {
@@ -2063,9 +2048,7 @@ export class ProjectService {
   async revert(threadId: string): Promise<RevertResult> {
     const project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
-    if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
-      throw new Error("A model turn is still running in this thread. Wait for it to finish before reverting.");
-    }
+    await this.assertIdle(project, "reverting");
 
     const messageID = await this.opencode.lastUserMessageId(project.workspacePath, project.sessionId);
     if (!messageID) throw new Error("This session has no turns to revert yet.");
@@ -2136,9 +2119,6 @@ async function readProjectNotes(workspacePath: string): Promise<string | undefin
   return notes?.trim() ? notes : undefined;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function formatWorkingTreeStats(stats: WorkingTreeStats): string {
   const kinds = [

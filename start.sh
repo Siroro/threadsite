@@ -15,6 +15,7 @@
 #   ./start.sh cleanup         select projects interactively for removal
 #   ./start.sh remove --thread ID          preview full project removal
 #   ./start.sh forget --repo NAME --apply  forget a registration, keeping files
+#   ./start.sh purge                       preview orphaned resources; --apply removes them
 #
 # .env, secrets/ and data/ are untracked and never touched by updates.
 # Bundled Apache profile: COMPOSE_PROFILES=bundled-static ./start.sh
@@ -34,7 +35,7 @@ usage() { sed -n '3,/^set -/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     up|status|logs|restart|stop) COMMAND="$1" ;;
-    projects|threads|repos|games|cleanup|remove|forget)
+    projects|threads|repos|games|cleanup|remove|forget|purge)
       COMMAND="$1"; shift; MAINTENANCE_ARGS=("$@"); break ;;
     --no-update) UPDATE=0 ;;
     --force) FORCE=1 ;;
@@ -166,7 +167,7 @@ case "$COMMAND" in
     cleanup_menu
     ;;
 
-  remove|forget)
+  remove|forget|purge)
     remove_projects "$COMMAND" "${MAINTENANCE_ARGS[@]}"
     ;;
 

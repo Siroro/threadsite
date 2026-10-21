@@ -6,6 +6,43 @@ function joinUrl(base: string, pathname: string): string {
 }
 
 export class ForgejoClient {
+  /** Only the configured ThreadSite owner is inventoried; never scan the whole instance. */
+  async listOwnedRepositories(): Promise<Array<{ id: number; name: string; description: string }>> {
+    const owner = encodeURIComponent(config.forgejoOwner);
+    const endpoint = config.forgejoOwnerType === "org" ? `/api/v1/orgs/${owner}/repos` : `/api/v1/users/${owner}/repos`;
+    return this.pages(endpoint);
+  }
+
+  private async pages<T>(endpoint: string, admin = false): Promise<T[]> {
+    const entries: T[] = [];
+    const seen = new Set<number>();
+    for (let page = 1; ; page++) {
+      const response = await this.api(`${endpoint}?limit=50&page=${page}`, {}, admin);
+      if (!response.ok) throw new Error(`Forgejo inventory failed (${response.status}): ${endpoint}`);
+      const items = await response.json() as Array<T & { id: number }>;
+      if (!Array.isArray(items) || items.some((item) => !Number.isSafeInteger(item.id) || seen.has(item.id))) throw new Error("Forgejo inventory pagination did not advance.");
+      for (const item of items) { seen.add(item.id); entries.push(item); }
+      if (items.length < 50) return entries;
+    }
+  }
+
+  async isManagedRepository(repo: { name: string; description?: string }): Promise<boolean> {
+    if (/^(?:static website|[23]D static web game) generated from Discord thread /i.test(repo.description ?? "")) return true;
+    const response = await this.api(`/api/v1/repos/${encodeURIComponent(config.forgejoOwner)}/${encodeURIComponent(repo.name)}/contents/README.md`);
+    if (response.status === 404) return false;
+    if (!response.ok) throw new Error(`Forgejo repository ownership check failed (${response.status}): ${repo.name}`);
+    const readme = await response.json() as { content?: string; encoding?: string; size?: number };
+    return readme.encoding === "base64" && (readme.size ?? Infinity) <= 64 * 1024
+      && Buffer.from(readme.content ?? "", "base64").toString("utf8").includes("maintained by the ThreadSite Discord harness.");
+  }
+
+  async listManagedPushAccounts(): Promise<string[]> {
+    const users = await this.pages<{ login: string; email: string; restricted: boolean }>("/api/v1/admin/users", true);
+    const domain = new URL(config.forgejoPublicUrl).hostname;
+    return users.filter((user) => user.restricted && /^push-[a-z0-9]{6}$/.test(user.login)
+      && user.email === `${user.login}@noreply.${domain}`).map((user) => user.login);
+  }
+
   private async token(): Promise<string> {
     if (config.forgejoToken) return config.forgejoToken;
     try {

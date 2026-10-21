@@ -97,17 +97,6 @@ test("queue entries are released when a turn fails before claiming them", async 
   assert.deepEqual(store.listRecoveryProjects(), []);
 });
 
-test("a legacy project row without updatedAt does not break listings", async () => {
-  const store = await openStore(path.join(root, "legacy-row.db"));
-  const legacy = record("legacy", root);
-  delete (legacy as { updatedAt?: string }).updatedAt;
-  await store.putProject(legacy);
-  await store.putProject(record("modern", root));
-  assert.deepEqual(store.listProjects().map((project) => project.threadId).sort(), ["legacy", "modern"]);
-  // /healthz, the gallery refresh, and webhook dispatch all call this.
-  assert.equal(store.listRecoveryProjects().length, 0);
-});
-
 async function siteTree(name: string, files: Record<string, string>): Promise<string> {
   const dir = path.join(root, name);
   for (const [relative, content] of Object.entries(files)) {

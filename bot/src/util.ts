@@ -37,22 +37,6 @@ export async function ensureGitignoreLines(workspacePath: string, required: read
 }
 
 /**
- * Remove ignore entries a previous harness boundary wrote (e.g. site/net/,
- * now committed for visibility) so un-ignoring migrates existing workspaces.
- * Only exact matches managed by the harness are dropped; user rules survive.
- */
-export async function removeGitignoreLines(workspacePath: string, stale: readonly string[]): Promise<boolean> {
-  const file = path.join(workspacePath, ".gitignore");
-  const current = await fs.readFile(file, "utf8").catch(() => "");
-  if (!current) return false;
-  const staleSet = new Set(stale);
-  const kept = current.split(/\r?\n/).filter((line) => !staleSet.has(line.trim()));
-  if (kept.length === current.split(/\r?\n/).length) return false;
-  await fs.writeFile(file, `${kept.join("\n")}`, "utf8");
-  return true;
-}
-
-/**
  * Build a git author identity from the Discord user who requested a change.
  * Display/nick names become the git author name; the unique @username becomes
  * a stable noreply email so Forgejo does not mix different users together.
@@ -198,4 +182,9 @@ export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | und
       () => resolve(undefined),
     );
   });
+}
+
+/** Delay helper for poll/backoff loops. */
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

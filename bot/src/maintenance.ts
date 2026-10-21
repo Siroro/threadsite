@@ -14,6 +14,9 @@ import { removalPaths } from "./project-removal.js";
 import { assertExclusiveResources } from "./project-removal.js";
 import { UsageLog } from "./usage.js";
 import { ProjectService } from "./project.js";
+import { applyPurge, planPurge, type PurgePlan, type PurgeServices } from "./purge.js";
+import { deleteRelayGame, listRelayGames } from "./relay-cleanup.js";
+import { errorText } from "./util.js";
 export { checkedRemovalPath, removalPaths } from "./project-removal.js";
 
 export interface Selection { threads: string[]; repos: string[]; games: string[] }
@@ -67,7 +70,7 @@ interface RemovalServices {
 }
 
 /** Keep the registration on any failure so the exact same selection can be retried. */
-export async function removeProjects(store: Store, selected: ProjectRecord[], mode: "remove" | "forget", services: RemovalServices): Promise<void> {
+export async function removeProjects(store: Store, selected: ProjectRecord[], mode: "remove" | "forget", services: RemovalServices, options: { backup?: boolean } = {}): Promise<void> {
   const all = store.listProjects();
   // Preflight the whole selection before the first external deletion.
   for (const project of selected) {
@@ -87,7 +90,7 @@ export async function removeProjects(store: Store, selected: ProjectRecord[], mo
     if (!project.pendingDeletion && await services.busy(project)) throw new Error(`${project.repoName} still has an active agent turn; stop it before cleanup.`);
   }
   if (!selected.length) return;
-  console.log(`SQLite backup: ${await backupDatabase(store.file)}`);
+  if (options.backup) console.log(`SQLite backup: ${await backupDatabase(store.file)}`);
   for (const project of selected) {
     if (mode === "remove") {
       if (services.removeProject) {
@@ -105,16 +108,71 @@ export async function removeProjects(store: Store, selected: ProjectRecord[], mo
   }
 }
 
+function printPurgePlan(plan: PurgePlan): void {
+  const section = (label: string, values: string[]) => {
+    console.log(`\n${label}: ${values.length}`);
+    for (const value of values) console.log(`  ${value}`);
+  };
+  section("Missing Discord threads (full teardown)", plan.missingThreads.map((project) =>
+    `${project.threadId} · ${project.displayName} · ${project.repoName}`));
+  section("Orphaned workspaces", plan.workspaces.map((workspace) => workspace.directory));
+  section("Orphaned Forgejo repositories", plan.repositories.map((repo) => `${repo.name} (${repo.id})`));
+  section("Orphaned published folders", plan.published);
+  section("Orphaned push accounts", plan.accounts);
+  section("Orphaned relay worlds", plan.games);
+  section("Orphaned usage records", plan.usageThreads);
+  if (plan.warnings.length) {
+    section("Warnings (resources retained)", plan.warnings);
+  }
+  if (!plan.missingThreads.length && !plan.workspaces.length && !plan.repositories.length && !plan.published.length
+    && !plan.accounts.length && !plan.games.length && !plan.usageThreads.length) console.log("\nNothing to purge.");
+}
+
+async function purge(store: Store, forgejo: ForgejoClient, agent: OpenCodeHarness, projects: ProjectService,
+  usage: UsageLog, apply: boolean, backup: boolean): Promise<void> {
+  const rest = new REST({ version: "10" }).setToken(config.discordToken);
+  const services: PurgeServices = {
+    thread: async (threadId) => await rest.get(Routes.channel(threadId)) as { guild_id?: string; type: number },
+    repositories: () => forgejo.listOwnedRepositories(),
+    managedRepository: (repo) => forgejo.isManagedRepository(repo),
+    repository: (name) => forgejo.repositoryInfo(name),
+    sessions: () => agent.workspaceSessions(),
+    accounts: () => forgejo.listManagedPushAccounts(),
+    games: () => listRelayGames(),
+    usageThreads: () => usage.threadIds(),
+    removeProject: (threadId) => projects.forceDeleteProject(threadId, "maintenance-purge"),
+    removeSessions: (directory, knownId) => agent.deleteSessionsInDirectory(directory, knownId),
+    removeRepository: (name) => forgejo.deleteRepository(name),
+    removeAccount: (name) => forgejo.deletePushAccount(name),
+    removeGame: (game) => deleteRelayGame(game),
+    forgetUsage: (threadId) => usage.forgetThread(threadId),
+    refreshIndex: async () => { await publishIndex(store.listProjects(), (name) => forgejo.repoWebUrl(name)); },
+  };
+  const plan = await planPurge(store, services);
+  printPurgePlan(plan);
+  if (!apply) {
+    console.log("\nPreview only. Add --apply to proceed. The bot must be stopped during cleanup.");
+    return;
+  }
+  // Purge has no selection to review afterward, so an explicit --backup is the
+  // only chance to keep the registrations it is about to delete.
+  if (backup && plan.missingThreads.length) console.log(`SQLite backup: ${await backupDatabase(store.file)}`);
+  await applyPurge(store, plan, services);
+  console.log("Purge complete.");
+}
+
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const command = args.shift() ?? "list";
-  if (!["list", "remove", "forget"].includes(command)) throw new Error(`Unknown maintenance command: ${command}`);
+  if (!["list", "remove", "forget", "purge"].includes(command)) throw new Error(`Unknown maintenance command: ${command}`);
   const selection: Selection = { threads: [], repos: [], games: [] };
   let apply = false;
+  let backup = false;
   let tsv = false;
   let kind = "all";
   while (args.length) {
     const option = args.shift();
     if (option === "--apply") apply = true;
+    else if (option === "--backup") backup = true;
     else if (option === "--tsv") tsv = true;
     else if (["--thread", "--repo", "--game", "--kind"].includes(option ?? "")) {
       const value = args.shift();
@@ -124,10 +182,20 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     } else throw new Error(`Unknown option: ${option}`);
   }
   if (!["all", "games", "sites"].includes(kind)) throw new Error("--kind must be all, games or sites");
-  if (command === "list" && apply) throw new Error("--apply is only valid with remove or forget.");
+  if (command === "list" && apply) throw new Error("--apply is only valid with remove, forget or purge.");
+  if (command === "purge" && (selection.threads.length || selection.repos.length || selection.games.length || kind !== "all" || tsv)) {
+    throw new Error("purge inventories every orphaned resource; it takes only --apply and --backup.");
+  }
   await fs.access(config.stateDbFile);
   const store = await Store.open(config.stateDbFile);
   try {
+    const forgejo = new ForgejoClient();
+    const agent = new OpenCodeHarness();
+    const usage = new UsageLog(config.usageLogFile);
+    if (command === "purge") {
+      await purge(store, forgejo, agent, new ProjectService(store, agent, forgejo, usage), usage, apply, backup);
+      return;
+    }
     const all = store.listProjects();
     const filtered = all.filter((project) => kind === "all" || (kind === "games" ? project.projectKind?.startsWith("game-") : !project.projectKind?.startsWith("game-")));
     const selected = command === "list" ? filtered : selectProjects(filtered, selection);
@@ -141,19 +209,17 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     }
     if (command === "list") { if (!selected.length && !tsv) console.log("No registered projects match."); return; }
     if (!apply) { console.log("Preview only. Add --apply to proceed. The bot must be stopped during cleanup."); return; }
-    const forgejo = new ForgejoClient();
-    const agent = new OpenCodeHarness();
-    const projects = new ProjectService(store, agent, forgejo, new UsageLog(config.usageLogFile));
+    const projects = new ProjectService(store, agent, forgejo, usage);
     await removeProjects(store, selected, command as "remove" | "forget", {
       busy: (project) => agent.isBusy(project.workspacePath, project.sessionId),
       deleteRepository: (name) => forgejo.deleteRepository(name),
       deleteThread: removeDiscordThread,
       removeProject: (project) => projects.forceDeleteProject(project.threadId, "maintenance-remove"),
-    });
+    }, { backup });
     if (command === "remove") await publishIndex(store.listProjects(), (name) => forgejo.repoWebUrl(name));
   } finally { store.close(); }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  await main().catch((error: unknown) => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
+  await main().catch((error: unknown) => { console.error(errorText(error)); process.exitCode = 1; });
 }
