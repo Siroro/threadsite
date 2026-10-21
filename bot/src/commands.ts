@@ -22,6 +22,15 @@ export const siteCommand = new SlashCommandBuilder()
     .setName("info")
     .setDescription("Show the live site and source repository for this thread"))
   .addSubcommand((sub) => sub
+    .setName("rename")
+    .setDescription("Rename this project, its site URL and its source repository")
+    .addStringOption((option) => option
+      .setName("name")
+      .setDescription("The new project name")
+      .setRequired(true)
+      .setMinLength(1)
+      .setMaxLength(80)))
+  .addSubcommand((sub) => sub
     .setName("republish")
     .setDescription("Rebuild and republish the current authored source without asking the model"))
   .addSubcommand((sub) => sub
@@ -31,11 +40,20 @@ export const siteCommand = new SlashCommandBuilder()
     .setName("compact")
     .setDescription("Compact this thread's agent session context now"))
   .addSubcommand((sub) => sub
+    .setName("stop")
+    .setDescription("Interrupt this thread's running turn without dropping its agent session"))
+  .addSubcommand((sub) => sub
+    .setName("queue")
+    .setDescription("Show messages waiting for the next update pass and cancel individual entries"))
+  .addSubcommand((sub) => sub
     .setName("reset")
-    .setDescription("Drop this thread's agent session and start fresh on the next message (site and history are kept)"))
+    .setDescription("Stop this thread's running turn and drop its agent session (site and history are kept)"))
   .addSubcommand((sub) => sub
     .setName("revert")
     .setDescription("Undo the last accepted turn: reset git, force-push, and republish the previous version"))
+  .addSubcommand((sub) => sub
+    .setName("help")
+    .setDescription("Show how ThreadSite works and what every command does"))
   .addSubcommand((sub) => sub
     .setName("pushkey")
     .setDescription("Issue repo-scoped git push credentials for this thread's repository, or rotate the existing ones")
@@ -86,7 +104,8 @@ export const adminCommand = new SlashCommandBuilder()
       .setName("model")
       .setDescription("provider/model-id, or 'default' to let the default apply")
       .setRequired(true)
-      .setMaxLength(200)))
+      .setMaxLength(200)
+      .setAutocomplete(true)))
   .addSubcommand((sub) => sub
     .setName("effort")
     .setDescription("Change the reasoning effort (model variant) used on every future Discord mutation")

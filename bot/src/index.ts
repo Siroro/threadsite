@@ -1,5 +1,7 @@
+import fs from "node:fs/promises";
 import {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
@@ -11,6 +13,8 @@ import {
   REST,
   Routes,
   ThreadAutoArchiveDuration,
+  type Attachment,
+  type AutocompleteInteraction,
   type ChatInputCommandInteraction,
   type ButtonInteraction,
   type Message,
@@ -20,16 +24,18 @@ import { AdminReporter } from "./admin-reporter.js";
 import { commandJson } from "./commands.js";
 import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
-import { getLogFile, log, logError, recentIncidents, recordIncident } from "./logger.js";
+import { getLogFile, log, logError, recentIncidents, recordIncident, serializeError } from "./logger.js";
 import { multiplayerRelayStatus } from "./multiplayer.js";
-import { OpenCodeHarness, formatTurnUsage } from "./opencode.js";
+import { OpenCodeHarness, formatTurnUsage, type PromptImage, type QuotaBlock } from "./opencode.js";
 import { DiscordProgress, formatElapsed } from "./progress.js";
-import { ProjectService, type MutationResult } from "./project.js";
+import { ProjectService, TurnStoppedError, type MutationResult, type StopTurnOutcome } from "./project.js";
+import { recoverPublishRoot } from "./publish.js";
 import { Store } from "./store.js";
 import { projectKindLabel } from "./templates.js";
-import type { ProjectKind, ProjectRecord } from "./types.js";
+import type { CommitAuthor, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog, type UsageTotal } from "./usage.js";
-import { commitAuthorIdentity, errorText, formatCost, formatTokens, MAX_DISCORD_MESSAGE_CHARS, slugify, stripSummaryPreamble, truncate } from "./util.js";
+import { startWebhookServer } from "./webhook.js";
+import { commitAuthorIdentity, errorText, formatCost, formatShortDuration, formatTokens, formatUtcClock, MAX_DISCORD_MESSAGE_CHARS, slugify, stripSummaryPreamble, truncate, withTimeout } from "./util.js";
 
 // Stray async failures must log instead of killing the process: an unhandled
 // rejection is process-fatal on Node 22 and would take every in-flight thread
@@ -41,7 +47,19 @@ process.on("uncaughtException", (error) => {
   logError("process.uncaught_exception", error, {});
 });
 
-const store = await Store.open(config.stateFile, config.defaultModel);
+// Version stamps read package.json next to the running code (bot/ under tsx,
+// dist's parent under node, /app in the image) — a literal here has drifted
+// from package.json before.
+const botVersion = await fs
+  .readFile(new URL("../package.json", import.meta.url), "utf8")
+  .then((raw) => (JSON.parse(raw) as { version?: string }).version)
+  .catch(() => undefined);
+
+const store = await Store.open(config.stateDbFile, config.defaultModel);
+// A publish that died between its two renames leaves the live site missing
+// with its content in a .backup-* directory; restore it before any turn can
+// republish over the gap.
+await recoverPublishRoot();
 const opencode = new OpenCodeHarness();
 const forgejo = new ForgejoClient();
 const usageLog = new UsageLog(config.usageLogFile);
@@ -57,6 +75,36 @@ const client = new Client({
   ],
 });
 const adminReporter = new AdminReporter(client);
+
+// The HTTP listener always runs (it serves /healthz for the container
+// healthcheck); WEBHOOK_ENABLED decides whether push events are acted on and
+// hooks registered. Liveness is known only after the port actually binds — a
+// failed bind falls back to the external-push poller instead of going deaf.
+const webhookSecret = await store.ensureWebhookSecret();
+const webhookServer = startWebhookServer({
+  port: config.webhookPort,
+  secret: webhookSecret,
+  onPush: (event) => (config.webhookEnabled ? handleForgejoPush(event) : Promise.resolve()),
+  health: () => ({
+    uptimeSec: Math.round(process.uptime()),
+    projects: store.listProjects().length,
+    activeTurns: projects.activeTurnCount(),
+    pendingTurns: store.listProjects().filter((project) => project.pendingTurn).length,
+    agentService: config.opencodeUrl,
+  }),
+});
+const webhookListenerLive = await webhookServer.listening.then(
+  () => true,
+  (error) => {
+    logError("webhook.bind_failed", error, {});
+    webhookServer.close();
+    return false;
+  },
+);
+const pushWebhooksLive = config.webhookEnabled && webhookListenerLive;
+
+// Set once shutdown begins: new turns are refused, in-flight ones drain.
+let shuttingDown = false;
 
 // Live turn status messages that may carry agent-question buttons, keyed by the
 // Discord status message id. Registered when a turn starts, removed when the
@@ -125,55 +173,151 @@ async function handleQuestionButton(interaction: ButtonInteraction): Promise<voi
 client.once(Events.ClientReady, (ready) => {
   log("info", "discord.ready", {
     user: ready.user.tag,
-    version: "2.3.0",
+    version: botVersion ?? "unknown",
     projects: store.listProjects().length,
     model: store.getModel() || "the model default",
     multiplayer: config.multiplayerEnabled ? config.gameserverPublicUrl : "disabled",
+    webhook: pushWebhooksLive
+      ? `listening on :${config.webhookPort}`
+      : webhookListenerLive
+        ? "listener only (push webhooks disabled)"
+        : "bind failed (external-push poller active)",
     errorRecipients: config.errorReportUserIds.size,
   });
   void recoverInterruptedTurns();
-  startExternalPushPoller();
+  if (pushWebhooksLive) void ensureExistingProjectWebhooks();
+  else startExternalPushPoller();
 });
 
-// Push-key holders push straight to the repo's main branch; the bot only finds
-// out by comparing Forgejo's main tip against the last commit it saw. Each new
-// external commit gets one message in the thread with Publish/Dismiss buttons.
+// Push-key holders push straight to the repo's main branch. With webhooks on
+// (default), Forgejo tells the bot the moment it happens; the poller stays as
+// a fallback for deployments that disable the webhook listener.
+let externalPushTimer: NodeJS.Timeout | undefined;
+
 function startExternalPushPoller(): void {
   if (config.externalPushPollMs <= 0) return;
   let scanning = false;
-  setInterval(() => {
+  externalPushTimer = setInterval(() => {
     if (scanning) return;
     scanning = true;
     void scanForExternalPushes().finally(() => { scanning = false; });
-  }, config.externalPushPollMs).unref();
+  }, config.externalPushPollMs);
+  externalPushTimer.unref();
+}
+
+function stopExternalPushPoller(): void {
+  if (externalPushTimer) clearInterval(externalPushTimer);
+  externalPushTimer = undefined;
 }
 
 async function scanForExternalPushes(): Promise<void> {
   const candidates = store.listProjects().filter((project) => project.status === "ready");
   for (const project of candidates) {
     try {
-      if (await projects.agentBusy(project.threadId)) continue;
       const sha = await forgejo.mainCommitSha(project.repoName);
-      if (!sha || sha === project.lastSeenCommit) continue;
-      // The bot's own push sets lastSeenCommit on success, but a turn that
-      // committed and then failed before patching the store could leave the
-      // poller one commit behind; a busy check right now closes that window.
-      if (await projects.agentBusy(project.threadId)) continue;
-      await store.patchProject(project.threadId, { lastSeenCommit: sha });
-      const channel = await client.channels.fetch(project.threadId).catch(() => undefined);
-      const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
-      if (!thread) continue;
-      await thread.send({
-        content:
-          `📥 **External push detected** on \`${project.repoName}\` · commit \`${sha.slice(0, 10)}\` — pushed with a repo push key.\n` +
-          "Publish it to the live site, or dismiss it (the commit stays in git history either way).",
-        components: [externalPushRow()],
-      }).catch(() => undefined);
-      log("info", "project.external_push_detected", { threadId: project.threadId, commit: sha.slice(0, 10) });
+      if (!sha) continue;
+      await notifyExternalPushIfNeeded(project, sha, "poll");
     } catch (error) {
       logError("project.external_push_scan_failed", error, { threadId: project.threadId });
     }
   }
+}
+
+/**
+ * One shared external-push decision for the webhook and the poller. Guards,
+ * in order: nothing new on main; a bot turn mid-flight (its own push, or a
+ * user push that the post-turn recheck will pick up); and the bot's own
+ * commit landing before the store catches up — recognized silently via
+ * lastCommit so the thread never gets a bogus "external push" for its own
+ * turn. Only a genuinely foreign, fully idle push prompts the thread.
+ */
+async function notifyExternalPushIfNeeded(project: ProjectRecord, sha: string, source: "webhook" | "poll" | "recheck"): Promise<void> {
+  if (sha === project.lastSeenCommit) return;
+  if (project.pendingTurn || project.pendingRename) return;
+  if (await projects.agentBusy(project.threadId).catch(() => true)) return;
+  if (project.lastCommit && sha.startsWith(project.lastCommit)) {
+    await store.patchProject(project.threadId, { lastSeenCommit: sha });
+    return;
+  }
+  // lastSeenCommit is written only after a successful send, so two deliveries
+  // arriving together (a webhook plus the poller, or a retried hook with a new
+  // delivery id) would otherwise both reach the thread. The key is
+  // thread+commit: a later commit still gets its own prompt.
+  const key = `${project.threadId}:${sha}`;
+  if (externalPushInFlight.has(key)) return;
+  externalPushInFlight.add(key);
+  try {
+    await deliverExternalPushPrompt(project, sha, source);
+  } finally {
+    externalPushInFlight.delete(key);
+  }
+}
+
+async function deliverExternalPushPrompt(project: ProjectRecord, sha: string, source: "webhook" | "poll" | "recheck"): Promise<void> {
+  const channel = await client.channels.fetch(project.threadId).catch(() => undefined);
+  const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
+  // Mark the commit seen only after the prompt is actually delivered. Patching
+  // first meant a failed send (thread deleted, permissions revoked) suppressed
+  // the push permanently: neither the webhook nor the poller would mention it
+  // again.
+  if (!thread) {
+    log("warn", "project.external_push_undeliverable", { source, threadId: project.threadId, commit: sha.slice(0, 10) });
+    return;
+  }
+  try {
+    await thread.send({
+      content:
+        `📥 **External push detected** on \`${project.repoName}\` · commit \`${sha.slice(0, 10)}\` — pushed with a repo push key.\n` +
+        "Publish it to the live site, or dismiss it (the commit stays in git history either way).",
+      components: [externalPushRow()],
+    });
+  } catch (error) {
+    logError("project.external_push_notify_failed", error, { source, threadId: project.threadId, commit: sha.slice(0, 10) });
+    return;
+  }
+  await store.patchProject(project.threadId, { lastSeenCommit: sha });
+  log("info", "project.external_push_detected", { source, threadId: project.threadId, commit: sha.slice(0, 10) });
+}
+
+/** Signed Forgejo push event: react instantly when it touches a known repo's main. */
+async function handleForgejoPush(event: { ref?: string; after?: string; repository?: { name?: string } }): Promise<void> {
+  if (event.ref !== "refs/heads/main" || !event.after) return;
+  const repoName = event.repository?.name;
+  if (!repoName) return;
+  const project = store.listProjects().find((candidate) => candidate.repoName === repoName && candidate.status !== "creating");
+  if (!project) return;
+  await notifyExternalPushIfNeeded(project, event.after, "webhook");
+}
+
+/**
+ * A push that arrived while a turn was running was skipped by the guards in
+ * notifyExternalPushIfNeeded; once the turn settles, look once more so it is
+ * not lost to the one-shot webhook.
+ */
+async function recheckExternalPush(threadId: string): Promise<void> {
+  if (!pushWebhooksLive) return;
+  const project = store.getProject(threadId);
+  if (!project || project.pendingTurn || project.pendingRename) return;
+  try {
+    const sha = await forgejo.mainCommitSha(project.repoName);
+    if (sha) await notifyExternalPushIfNeeded(project, sha, "recheck");
+  } catch (error) {
+    logError("project.external_push_recheck_failed", error, { threadId });
+  }
+}
+
+/** Backfill: make sure every existing project's repo has the push webhook. */
+async function ensureExistingProjectWebhooks(): Promise<void> {
+  const secret = store.getWebhookSecret();
+  if (!secret) return;
+  const url = `${config.webhookPublicUrl}/hooks/forgejo`;
+  const list = store.listProjects().filter((project) => project.status !== "creating");
+  await Promise.all(list.map(async (project) => {
+    await forgejo.ensurePushWebhook(project.repoName, url, secret).catch((error) => {
+      log("warn", "webhook.ensure_failed", { repoName: project.repoName, error: serializeError(error) });
+    });
+  }));
+  log("info", "webhook.boot_sweep_done", { projects: list.length });
 }
 
 function externalPushRow(): ActionRowBuilder<ButtonBuilder> {
@@ -190,56 +334,131 @@ function externalPushRow(): ActionRowBuilder<ButtonBuilder> {
 // message per request instead of a frozen leftover plus a new one; a fresh
 // message is posted only as a fallback (e.g. the original was deleted).
 async function recoverInterruptedTurns(): Promise<void> {
-  const interrupted = store.listProjects().filter((project) => project.pendingTurn);
+  const interrupted = store.listRecoveryProjects();
   if (!interrupted.length) return;
   log("info", "project.recovery_boot_scan", { interrupted: interrupted.length });
+  // Reserve every persisted backlog before the first Discord fetch can yield to new messages.
+  for (const project of interrupted) {
+    pendingUpdates.set(project.threadId, { entries: [], scheduled: true });
+  }
   for (const project of interrupted) {
     const channel = await client.channels.fetch(project.threadId).catch(() => undefined);
     const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
-    let status: Message | undefined;
-    if (thread && project.pendingTurn?.statusMessageId) {
-      const resumed = await thread.messages.fetch(project.pendingTurn.statusMessageId).catch(() => undefined);
-      if (resumed && resumed.author.id === client.user?.id) status = resumed;
+    if (project.pendingRename || project.pendingThreadName) {
+      projects.enqueue(project.threadId, async () => {
+        const renamed = await projects.resumeRename(project.threadId);
+        if (channel?.isThread()) await applyAiThreadTitle(channel, renamed.displayName);
+      }).catch((error) => logError("project.rename_recovery_failed", error, { threadId: project.threadId }));
     }
-    if (!status && thread) {
-      status = await thread.send("♻️ Resuming the turn that was in flight when the bot restarted…").catch(() => undefined);
-    }
-    const progress = status ? new DiscordProgress(status, `♻️ Recovering ${project.displayName}`) : undefined;
-    if (status && progress) registerQuestionButtons(status, progress);
-    progress?.update("♻️ Resuming the interrupted turn");
-    const deliver: (content: string) => Promise<unknown> = status
-      ? (content) => setStatusMessage(status, content).catch(() => undefined)
-      : thread
-        ? (content) => thread.send(content).catch(() => undefined)
-        : async () => undefined;
-    projects.enqueue(project.threadId, async () => {
-      try {
-        const result = await projects.recoverTurn(project.threadId, progress?.callback);
-        progress?.close();
-        const isGame = result.project.projectKind === "game-2d" || result.project.projectKind === "game-3d";
-        if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
-          await deliver(finishedWithErrorsMessageText(result));
-          await sendOutcomeFollowUp(thread, result, { operation: "restart-recovery", guildId: project.guildId });
-        } else {
-          const recoveryHead = result.noChanges
-            ? "♻️ Recovered the interrupted turn after a restart · no changes to the site"
-            : `♻️ Recovered the interrupted turn after a restart · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})`;
-          await deliver(successMessageText(result, isGame, undefined, recoveryHead));
-        }
-      } catch (error) {
-        progress?.close();
-        const incident = await reportFailure(error, {
-          operation: "restart-recovery",
-          guildId: project.guildId,
-          threadId: project.threadId,
-          project,
-          model: store.getModel() || "the model default",
-        });
-        await deliver(
-          `❌ Could not recover the interrupted turn from the last restart · reference \`${incident.id}\`. Partial edits were kept — send a message to try again.`,
-        );
+    if (project.pendingTurn) {
+      let status: Message | undefined;
+      if (thread && project.pendingTurn?.statusMessageId) {
+        const resumed = await thread.messages.fetch(project.pendingTurn.statusMessageId).catch(() => undefined);
+        if (resumed && resumed.author.id === client.user?.id) status = resumed;
       }
-    }).catch((error) => logError("project.queue_failed", error, { threadId: project.threadId }));
+      if (!status && thread) {
+        status = await thread.send("♻️ Resuming the turn that was in flight when the bot restarted…").catch(() => undefined);
+      }
+      const progress = status ? new DiscordProgress(status, `♻️ Recovering ${project.displayName}`) : undefined;
+      if (status && progress) registerQuestionButtons(status, progress);
+      progress?.enableStopButton();
+      progress?.update("♻️ Resuming the interrupted turn");
+      const deliver: (content: string) => Promise<unknown> = status
+        ? (content) => setStatusMessage(status, content).catch(() => undefined)
+        : thread
+          ? (content) => thread.send(content).catch(() => undefined)
+          : async () => undefined;
+      projects.enqueue(project.threadId, async () => {
+        try {
+          const result = await projects.recoverTurn(project.threadId, progress?.callback);
+          await progress?.close();
+          const isGame = result.project.projectKind === "game-2d" || result.project.projectKind === "game-3d";
+          if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
+            await deliver(finishedWithErrorsMessageText(result));
+            await sendOutcomeFollowUp(thread, result, { operation: "restart-recovery", guildId: project.guildId });
+          } else {
+            const recoveryHead = result.noChanges
+              ? "♻️ Recovered the interrupted turn after a restart · no changes to the site"
+              : `♻️ Recovered the interrupted turn after a restart · commit \`${result.commit}\` · ${result.commitFiles} file${result.commitFiles === 1 ? "" : "s"} changed (+${result.additions}/−${result.deletions})`;
+            await deliver(successMessageText(result, isGame, undefined, recoveryHead));
+          }
+        } catch (error) {
+          await progress?.close();
+          if (error instanceof TurnStoppedError) {
+            await deliver("🛑 **Stopped at your request** — the recovered turn's partial edits are preserved in the workspace. Reply here to build on them.");
+            return;
+          }
+          const incident = await reportFailure(error, {
+            operation: "restart-recovery",
+            guildId: project.guildId,
+            threadId: project.threadId,
+            project,
+            model: store.getModel() || "the model default",
+          });
+          await deliver(
+            `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Could not recover the interrupted turn from the last restart · reference \`${incident.id}\`. Partial edits were kept — send a message to try again.`,
+          );
+        } finally {
+          void recheckExternalPush(project.threadId);
+        }
+      }).catch((error) => logError("project.queue_failed", error, { threadId: project.threadId }));
+    }
+
+    // Messages coalesced for the next pass when the bot stopped were
+    // acknowledged in the thread but never started; re-run them as one
+    // catch-up turn behind the recovery so nothing is silently lost.
+    const queuedAtBoot = project.pendingQueue?.filter((entry) => entry.prompt.trim()) ?? [];
+    if (queuedAtBoot.length && thread) {
+      projects.enqueue(project.threadId, async () => {
+        const fresh = store.getProject(project.threadId);
+        // Re-read on the queue: /site queue (or a cancelled entry) may have
+        // withdrawn some of these between boot and this closure running.
+        const queued = fresh?.pendingQueue?.filter((entry) => entry.prompt.trim()) ?? [];
+        if (!fresh || !queued.length) {
+          const accumulator = pendingUpdates.get(project.threadId);
+          if (accumulator) {
+            accumulator.scheduled = false;
+            if (accumulator.entries.length) scheduleUpdateDrain(project.threadId, project.projectKind === "game-2d" || project.projectKind === "game-3d");
+            else pendingUpdates.delete(project.threadId);
+          }
+          return;
+        }
+        const live = await thread.messages.fetch(queued[0].statusMessageId).catch(() => undefined);
+        const status = live && live.author.id === client.user?.id
+          ? live
+          : await thread.send(`🔁 Re-running ${queued.length} message${queued.length === 1 ? "" : "s"} that were queued when the bot restarted…`).catch(() => undefined);
+        if (!status) return;
+        const isGame = fresh.projectKind === "game-2d" || fresh.projectKind === "game-3d";
+        const progress = new DiscordProgress(status, `🔁 Catching up ${fresh.displayName}`);
+        registerQuestionButtons(status, progress);
+        const entries: QueuedUpdate[] = [];
+        for (const [index, entry] of queued.entries()) {
+          const previous = index === 0 ? status : await thread.messages.fetch(entry.statusMessageId).catch(() => undefined);
+          const message = previous?.author.id === client.user?.id ? previous
+            : await thread.send("🔁 Restored a queued request after restart.");
+          entries.push({
+            prompt: entry.prompt,
+            requestStatusId: entry.statusMessageId,
+            images: entry.images ?? [],
+            author: entry.author,
+            status: message && message.author.id === client.user?.id ? message : status,
+            ...(index === 0 ? { progress } : {}),
+          });
+        }
+        log("info", "project.queued_messages_recovered", { threadId: project.threadId, messages: queued.length });
+        const accumulator = pendingUpdates.get(project.threadId)!;
+        accumulator.entries.unshift(...entries);
+        accumulator.scheduled = false;
+        scheduleUpdateDrain(project.threadId, isGame);
+      }).catch((error) => logError("project.queue_failed", error, { threadId: project.threadId }));
+    } else {
+      const accumulator = pendingUpdates.get(project.threadId);
+      if (accumulator) {
+        accumulator.scheduled = false;
+        if (accumulator.entries.length) scheduleUpdateDrain(project.threadId, project.projectKind === "game-2d" || project.projectKind === "game-3d");
+        else pendingUpdates.delete(project.threadId);
+      }
+    }
   }
 }
 
@@ -248,6 +467,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       if (interaction.customId.startsWith("q:") || interaction.customId.startsWith("qskip:")) {
         await handleQuestionButton(interaction);
+      } else if (interaction.customId === "threadsite:stop") {
+        await handleStopButton(interaction);
+      } else if (interaction.customId.startsWith("threadsite:qcancel:")) {
+        await handleQueueCancelButton(interaction);
       } else if (interaction.customId.startsWith("threadsite:ext")) {
         await handleExternalPushButton(interaction);
       } else {
@@ -263,6 +486,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const text = `❌ ${truncate(errorText(error), 1800)}`;
       if (interaction.deferred || interaction.replied) await interaction.editReply(text).catch(() => undefined);
       else await interaction.reply({ content: text, flags: MessageFlags.Ephemeral }).catch(() => undefined);
+    }
+    return;
+  }
+  if (interaction.isAutocomplete()) {
+    try {
+      await handleAutocomplete(interaction);
+    } catch (error) {
+      logError("discord.autocomplete_failed", error, {
+        command: interaction.commandName,
+        userId: interaction.user.id,
+        guildId: interaction.guildId,
+      });
+      await interaction.respond([]).catch(() => undefined);
     }
     return;
   }
@@ -285,69 +521,302 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
+// Per-thread update coalescing: while a turn is running (or queued), further
+// messages merge into ONE follow-up turn instead of each becoming a full
+// sequential agent turn. The accumulator exists from the first message of a
+// burst until no entries remain after a drain; entries carry their own status
+// replies so every message gets a visible outcome.
+interface QueuedUpdate {
+  prompt: string;
+  images: PromptImage[];
+  author?: CommitAuthor;
+  status: Message;
+  /** Original persisted key, retained when recovery replaces a deleted status message. */
+  requestStatusId?: string;
+  /** Progress instance already live on this status (the burst-initial message). */
+  progress?: DiscordProgress;
+}
+
+interface PendingUpdate {
+  entries: QueuedUpdate[];
+  /** True while a drain closure sits on the project queue. */
+  scheduled: boolean;
+}
+
+const pendingUpdates = new Map<string, PendingUpdate>();
+/**
+ * Persisted request ids that a drain has taken but has not started prompting
+ * yet. `/site queue` must not remove these from the store: the in-memory batch
+ * already holds the prompt, so cancelling would still run it.
+ */
+const inFlightQueuedRequests = new Set<string>();
+
+// Threads whose project is still being created. The store record only appears
+// at the very end of createProject (after engine install, repo creation, and
+// webhook registration), so message handlers and thread deletion must consult
+// this set for that window — otherwise messages are dropped silently and a
+// deleted thread still gets a published site.
+const creatingThreads = new Set<string>();
+// Threads deleted while their project was being created. The creation closure
+// checks this when it finishes and tears the fresh project down.
+const abandonedThreads = new Set<string>();
+// External-push prompts currently being delivered, keyed thread:commit.
+const externalPushInFlight = new Set<string>();
+
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.guildId || !message.channel.isThread()) return;
   const project = store.getProject(message.channel.id);
-  if (!project) return;
+  if (!project) {
+    // The thread exists but its record does not yet: setup is still running.
+    // Acknowledge instead of dropping the message on the floor.
+    if (creatingThreads.has(message.channel.id)) {
+      await message
+        .reply("⏳ This thread is still being set up — please send that again once the first build starts.")
+        .catch(() => undefined);
+    }
+    return;
+  }
+  if (shuttingDown) {
+    await message.reply("♻️ The bot is restarting — please send this again in a moment.").catch(() => undefined);
+    return;
+  }
   const content = message.content.trim();
-  if (!content) return;
+  const imageAttachments = [...message.attachments.values()].filter((attachment) =>
+    (attachment.contentType ?? "").startsWith("image/")
+  );
+  if (!content && !imageAttachments.length) {
+    if (message.attachments.size > 0) {
+      // A PDF/zip/log attachment with no text: nothing will ever consume it, so
+      // say so instead of leaving the message unanswered.
+      await message
+        .reply("🚫 Only images can be attached right now — describe the change you want in text instead.")
+        .catch(() => undefined);
+    }
+    return;
+  }
+
+  // Acknowledge first: the capability check below calls the agent service,
+  // whose HTTP timeouts are disabled by design, so a wedged service would
+  // otherwise leave the message with no reply at all.
+  const status = await message.reply("⏳ Saving your request…").catch(() => undefined);
+  if (!status) {
+    log("warn", "discord.reply_failed", { threadId: message.channel.id });
+    return;
+  }
+
+  // Images only reach the agent when the model the next turn will run on is
+  // verified vision-capable; anything else drops them, and an image-only
+  // message says so in the thread instead of vanishing silently.
+  let images: PromptImage[] = [];
+  if (imageAttachments.length) {
+    const accepts = await withTimeout(
+      projects.modelAcceptsImages(message.channel.id).catch(() => undefined),
+      3000,
+    );
+    if (accepts === true) {
+      images = await downloadImageAttachments(imageAttachments);
+      log("info", "discord.images_forwarded", { threadId: message.channel.id, requested: imageAttachments.length, downloaded: images.length });
+      if (!images.length && !content) {
+        await status.edit("🚫 The image could not be downloaded, so there was nothing to send. Please try attaching it again.").catch(() => undefined);
+        return;
+      }
+    } else if (!content) {
+      await status.edit(
+        accepts === undefined
+          ? "🚫 Could not confirm that this project's model can see images, so the attachment was not sent. Describe the change you want in text instead."
+          : "🚫 This project's model can't see images, so the attachment was not sent. Describe the change you want in text instead.",
+      ).catch(() => undefined);
+      return;
+    }
+  }
+  const prompt = content
+    || (images.length ? `The user attached ${images.length} image${images.length === 1 ? "" : "s"} to this message.` : "");
+  if (!prompt) {
+    await status.edit("🚫 There was nothing to send. Describe the change you want in text instead.").catch(() => undefined);
+    return;
+  }
+  const author = commitAuthorIdentity({
+    displayName: message.member?.displayName,
+    globalName: message.author.globalName,
+    username: message.author.username,
+    id: message.author.id,
+  });
 
   const isGame = project.projectKind === "game-2d" || project.projectKind === "game-3d";
-  const status = await message.reply(isGame ? "🎮 Queued game update…" : "🛠️ Queued site update…");
-  const progress = new DiscordProgress(status, `${isGame ? "🎮 Updating" : "🛠️ Updating"} ${project.displayName}`);
-  registerQuestionButtons(status, progress);
-  progress.update("⏱️ Waiting for the project queue");
 
-  projects.enqueue(message.channel.id, async () => {
-    try {
-      const result = await projects.mutate(
-        message.channel.id,
-        content,
-        false,
-        progress.callback,
-        commitAuthorIdentity({
-          displayName: message.member?.displayName,
-          globalName: message.author.globalName,
-          username: message.author.username,
-          id: message.author.id,
-        }),
-        status.id,
-      );
-      progress.close();
-      if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
-        await setStatusMessage(status, finishedWithErrorsMessageText(result));
-        await sendOutcomeFollowUp(message.channel, result, {
-          operation: "thread-update",
-          guildId: message.guildId,
-          requesterId: message.author.id,
-        });
-      } else {
-        await setStatusMessage(status, successMessageText(result, isGame));
-      }
-    } catch (error) {
-      progress.close();
-      const incident = await reportFailure(error, {
-        operation: "thread-update",
-        guildId: message.guildId,
-        threadId: message.channel.id,
-        requesterId: message.author.id,
-        project,
-        model: store.getModel() || "the model default",
-      });
-      await setStatusMessage(
-        status,
-        `❌ Update failed · reference \`${incident.id}\`. The previous published version is unchanged.`,
-        (await offerEditsChoice(project, error)) ? [failureEditsRow()] : undefined,
-      );
-    }
-  }).catch((error) => logError("project.queue_failed", error, { threadId: message.channel.id }));
+  try {
+    // Save every accepted message, including the first one, before exposing it to a drain.
+    await store.appendQueuedRequest(message.channel.id, {
+      prompt, author, statusMessageId: status.id, images: images.length ? images : undefined,
+    });
+  } catch (error) {
+    await status.edit("❌ Could not save this request. Please send it again.").catch(() => undefined);
+    throw error;
+  }
+  await status.edit("✅ Request saved — queued for the next update pass.").catch(() => undefined);
+  let pending = pendingUpdates.get(message.channel.id);
+  if (!pending) {
+    pending = { entries: [], scheduled: false };
+    pendingUpdates.set(message.channel.id, pending);
+  }
+  pending.entries.push({ prompt, images, author, status });
+  const running = store.getProject(message.channel.id);
+  if (running?.pendingTurn?.statusMessageId) {
+    liveProgress.get(running.pendingTurn.statusMessageId)?.callback({
+      kind: "queue", text: "Saved requests", queuedRequests: running.pendingQueue?.length ?? 0,
+    });
+  }
+  scheduleUpdateDrain(message.channel.id, isGame);
 });
 
-// Deleting a thread tears the project down: workspace, Forgejo repo, and published page.
-async function handleThreadDeleted(threadId: string, reason: string): Promise<void> {
-  if (!store.getProject(threadId)) return;
+function scheduleUpdateDrain(threadId: string, isGame: boolean): void {
+  const pending = pendingUpdates.get(threadId);
+  if (!pending || pending.scheduled) return;
+  pending.scheduled = true;
+  projects.enqueue(threadId, async () => {
+    // Take over scheduling duty only now that this closure actually runs:
+    // appends from here on must trigger a fresh drain after this turn.
+    const state = pendingUpdates.get(threadId);
+    if (state) state.scheduled = false;
+    const batch = takeUpdateBatch(threadId);
+    try {
+      if (batch) await runUpdateTurn(threadId, isGame, batch);
+    } finally {
+      // Overflow was put back into the accumulator and is cancellable again.
+      if (batch) for (const entry of batch) inFlightQueuedRequests.delete(entry.requestStatusId ?? entry.status.id);
+    }
+  }).catch((error) => logError("project.queue_failed", error, { threadId })).finally(() => {
+    const state = pendingUpdates.get(threadId);
+    if (!state) return;
+    if (state.entries.length) scheduleUpdateDrain(threadId, isGame);
+    else pendingUpdates.delete(threadId);
+  });
+}
+
+/**
+ * Take the in-memory batch. Its persisted requests stay queued until mutate()
+ * atomically replaces exactly the consumed entries with a pendingTurn marker.
+ */
+function takeUpdateBatch(threadId: string): QueuedUpdate[] | undefined {
+  const pending = pendingUpdates.get(threadId);
+  if (!pending || !pending.entries.length) return undefined;
+  const entries = pending.entries;
+  pending.entries = [];
+  for (const entry of entries) inFlightQueuedRequests.add(entry.requestStatusId ?? entry.status.id);
+  return entries;
+}
+
+/**
+ * Merge a batch into one prompt (first message plus a numbered list of the
+ * rest, so the commit subject still reads as the user's own request). Entries
+ * that no longer fit under the prompt cap overflow back into the accumulator
+ * and become their own follow-up turn.
+ */
+function mergeUpdateBatch(batch: QueuedUpdate[]): { prompt: string; images: PromptImage[]; overflow: QueuedUpdate[] } {
+  const head = batch[0].prompt;
+  const images = [...batch[0].images];
+  const rest: string[] = [];
+  let used = head.length;
+  for (let index = 1; index < batch.length; index += 1) {
+    const entry = batch[index];
+    if (used + entry.prompt.length + 8 > config.maxPromptChars - 160) {
+      return {
+        prompt: composeMergedPrompt(head, rest),
+        images,
+        overflow: batch.slice(index),
+      };
+    }
+    rest.push(`${rest.length + 2}. ${entry.prompt}`);
+    images.push(...entry.images);
+    used += entry.prompt.length + 8;
+  }
+  return { prompt: composeMergedPrompt(head, rest), images, overflow: [] };
+}
+
+function composeMergedPrompt(head: string, rest: string[]): string {
+  if (!rest.length) return head;
+  return `${head}\n\nWhile updates were queued, the user sent ${rest.length} more message${rest.length === 1 ? "" : "s"} — apply all of them in this same pass:\n${rest.join("\n")}`;
+}
+
+async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpdate[]): Promise<void> {
+  const first = batch[0];
+  const project = store.getProject(threadId);
+  if (!project) {
+    for (const entry of batch) await entry.status.edit("❌ This thread's project no longer exists.").catch(() => undefined);
+    return;
+  }
+  const progress = first.progress ?? new DiscordProgress(first.status, `${isGame ? "🎮 Updating" : "🛠️ Updating"} ${project.displayName}`);
+  if (!first.progress) registerQuestionButtons(first.status, progress);
+  const merged = mergeUpdateBatch(batch);
+  const consumed = batch.slice(0, batch.length - merged.overflow.length);
+  for (const entry of consumed.slice(1)) {
+    await entry.progress?.close();
+    unregisterQuestionButtons(entry.status.id);
+    await entry.status.edit({ content: "🔗 Merged into the update above — its request is part of that turn.", embeds: [], components: [] }).catch(() => undefined);
+  }
+  if (merged.overflow.length) {
+    const pending = pendingUpdates.get(threadId);
+    if (pending) pending.entries.unshift(...merged.overflow);
+  }
+  progress.enableStopButton();
   try {
-    await projects.enqueue(threadId, () => projects.deleteProject(threadId));
+    const result = await projects.mutate(threadId, merged.prompt, false, progress.callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id));
+    await progress.close();
+    if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
+      await setStatusMessage(first.status, finishedWithErrorsMessageText(result));
+      const outcomeChannel = first.status.channel;
+      await sendOutcomeFollowUp("send" in outcomeChannel ? outcomeChannel : undefined, result, {
+        operation: "thread-update",
+        guildId: project.guildId,
+      });
+    } else {
+      await setStatusMessage(first.status, successMessageText(result, isGame));
+      await postQaScreenshot(first.status.channel, result, "📸 How the site looks right now:");
+    }
+  } catch (error) {
+    await progress.close();
+    if (error instanceof TurnStoppedError) {
+      await setStatusMessage(
+        first.status,
+        "🛑 **Stopped at your request** — the agent's partial edits are preserved in the workspace. Reply here to build on them, or roll them back below.",
+        (await offerEditsChoice(store.getProject(threadId), error)) ? [failureEditsRow()] : undefined,
+      );
+      return;
+    }
+    const incident = await reportFailure(error, {
+      operation: "thread-update",
+      guildId: project.guildId,
+      threadId,
+      project,
+      model: store.getModel() || "the model default",
+    });
+    await setStatusMessage(
+      first.status,
+      `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Update failed · reference \`${incident.id}\`. The previous published version is unchanged.`,
+      (await offerEditsChoice(project, error)) ? [failureEditsRow()] : undefined,
+    );
+  } finally {
+    void recheckExternalPush(threadId);
+  }
+}
+
+// Deleting a thread tears the project down: workspace, Forgejo repo, and published page.
+// Deletion intent is unambiguous, so this does not queue behind the thread's
+// running turn — forceDeleteProject severs the queue, aborts any running turn,
+// and removes everything immediately (no zombie records for deleted threads).
+async function handleThreadDeleted(threadId: string, reason: string): Promise<void> {
+  if (!store.getProject(threadId)) {
+    // Deleted while createProject is still running: there is no record to tear
+    // down yet, so mark it and let the creation closure remove what it builds.
+    if (creatingThreads.has(threadId)) {
+      abandonedThreads.add(threadId);
+      log("warn", "project.thread_deleted_during_creation", { threadId, reason });
+    }
+    return;
+  }
+  pendingUpdates.delete(threadId);
+  try {
+    await projects.forceDeleteProject(threadId);
     log("info", "project.thread_deleted", { threadId, reason });
   } catch (error) {
     logError("project.thread_delete_failed", error, { threadId, reason });
@@ -387,17 +856,22 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     const prompt = interaction.options.getString("prompt", true).trim();
     const requestedName = interaction.options.getString("name")?.trim();
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (shuttingDown) throw new Error("The bot is restarting — try again in a moment.");
 
     const { thread, created } = await resolveOrCreateThread(interaction, requestedName || prompt);
     if (store.getProject(thread.id)) throw new Error("That thread already has a site. Just reply in the thread to mutate it.");
     const status = await thread.send("🛠️ Preparing this thread's persistent site…");
     const progress = new DiscordProgress(status, `🛠️ Building ${requestedName || thread.name}`);
     registerQuestionButtons(status, progress);
+    progress.enableStopButton();
     progress.update("📋 Request accepted");
 
     await interaction.editReply(`Created/attached <#${thread.id}>. The public thread will show live build stages; detailed failures stay private.`);
+    creatingThreads.add(thread.id);
     projects.enqueue(thread.id, async () => {
       try {
+        // The thread may have been deleted while this job waited in the queue.
+        if (abandonedThreads.has(thread.id)) return;
         const result = await projects.createProject({
           threadId: thread.id,
           guildId: interaction.guildId!,
@@ -407,14 +881,12 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
           renameable: created && !requestedName,
           initiator: interactionInitiator(interaction),
           statusMessageId: status.id,
-        }, progress.callback, created && !requestedName
-          ? (title) => applyAiThreadTitle(thread, title)
-          : undefined);
-        progress.close();
+        }, progress.callback, (title) => applyAiThreadTitle(thread, title));
+        await progress.close();
         if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
           await setStatusMessage(
             status,
-            finishedWithErrorsMessageText(result, "From now on, **every normal message in this thread edits this same site**."),
+            finishedWithErrorsMessageText(result, "From now on, **every normal message in this thread edits this same site**. Run `/site help` for details."),
           );
           await sendOutcomeFollowUp(thread, result, {
             operation: "initial-site-build",
@@ -424,11 +896,19 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         } else {
           await setStatusMessage(
             status,
-            successMessageText(result, false, "From now on, **every normal message in this thread edits this same site**."),
+            successMessageText(result, false, "From now on, **every normal message in this thread edits this same site**. Run `/site help` for details."),
           );
+          await postQaScreenshot(thread, result, "📸 How the new site looks:");
         }
       } catch (error) {
-        progress.close();
+        await progress.close();
+        if (error instanceof TurnStoppedError) {
+          await setStatusMessage(
+            status,
+            "🛑 **Stopped at your request** — the partial first build is preserved in the workspace. Reply here to continue from it.",
+          );
+          return;
+        }
         const project = store.getProject(thread.id);
         const incident = await reportFailure(error, {
           operation: "initial-site-build",
@@ -443,11 +923,48 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
           : "Run `/site start` again inside this thread after the setup issue is fixed.";
         await setStatusMessage(
           status,
-          `❌ Initial generation failed · reference \`${incident.id}\`. ${retry}`,
+          `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Initial generation failed · reference \`${incident.id}\`. ${retry}`,
           (await offerEditsChoice(project, error)) ? [failureEditsRow()] : undefined,
         );
+      } finally {
+        // A thread deleted mid-setup must not leave a repository and a live
+        // site behind: the delete event found no record, so clean up here.
+        if (abandonedThreads.has(thread.id) && store.getProject(thread.id)) {
+          await projects.forceDeleteProject(thread.id).catch((error) => {
+            logError("project.abandoned_teardown_failed", error, { threadId: thread.id });
+          });
+        }
+        creatingThreads.delete(thread.id);
+        abandonedThreads.delete(thread.id);
+        void recheckExternalPush(thread.id);
       }
     }).catch((error) => logError("project.queue_failed", error, { threadId: thread.id }));
+    return;
+  }
+
+  if (sub === "help") {
+    await interaction.reply({
+      content:
+        "**ThreadSite** — every normal message in a project thread edits its site or game.\n" +
+        "Send several in a row and they merge into one update. Image attachments reach the model when it can see them. " +
+        "The live status message carries a **Stop** button while a turn runs; `/site stop` works even if that message is gone. " +
+        "A turn with no progress for a few minutes is flagged on the card. Failures offer rollback or keep.\n\n" +
+        "**/site start** — create a site (works in any channel)\n" +
+        "**/makegam** — create a 2D or 3D game thread\n" +
+        "**/site info** — links, project type, model, usage\n" +
+        "**/site rename name:…** — change the project name and links (old site links redirect)\n" +
+        "**/site sync** — adopt commits pushed to the repo from outside the bot\n" +
+        "**/site republish** — rebuild and republish without the model\n" +
+        "**/site compact** — summarize the session context now\n" +
+        "**/site stop** — interrupt the running turn without dropping its session\n" +
+        "**/site queue** — show queued messages and cancel individual entries\n" +
+        "**/site revert** — undo the last accepted turn\n" +
+        "**/site reset** — stop the running turn and drop the agent session (site kept)\n" +
+        "**/site pushkey** — issue repo-scoped git push credentials\n" +
+        "**/site-admin** — admin: model, effort, usage, errors, reset (Manage Server)\n\n" +
+        "Deleting the Discord thread deletes the project, workspace, repository, and published site.",
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
@@ -470,6 +987,19 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     return;
   }
 
+  if (sub === "rename") {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const name = interaction.options.getString("name", true);
+    const renamed = await projects.enqueue(project.threadId, () => projects.renameProject(project.threadId, name));
+    let titleUpdated = true;
+    await applyAiThreadTitle(interaction.channel, renamed.displayName).catch((error) => {
+      titleUpdated = false;
+      log("warn", "project.thread_rename_failed", { threadId: project.threadId, error: serializeError(error) });
+    });
+    await interaction.editReply(`Renamed to **${renamed.displayName}**.\n[open site](${projects.siteLink(renamed)}) · [source](${projects.repoLink(renamed)})\nOld site links redirect to the new address.${titleUpdated ? "" : "\nThe thread title could not be updated yet; it will be retried."}`);
+    return;
+  }
+
   if (sub === "republish") {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const updated = await projects.enqueue(project.threadId, () => projects.republish(project.threadId));
@@ -483,7 +1013,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     const progress = status ? new DiscordProgress(status, `📥 Syncing ${project.displayName}`) : undefined;
     try {
       const result = await projects.enqueue(project.threadId, () => projects.sync(project.threadId, progress?.callback));
-      progress?.close();
+      await progress?.close();
       if (result.validationError) {
         await interaction.editReply(
           `⚠️ Synced to \`${result.commit}\`, but validation failed — the live site keeps the previous version.\n` +
@@ -500,7 +1030,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         );
       }
     } finally {
-      progress?.close();
+      await progress?.close();
     }
     return;
   }
@@ -515,11 +1045,46 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     return;
   }
 
+  if (sub === "stop") {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    // Deliberately not queued: a stop that waited behind the turn it targets
+    // would be useless when the turn is wedged on an unreachable provider.
+    const outcome = await projects.stopTurn(project.threadId);
+    await interaction.editReply(stopOutcomeText(outcome));
+    if (outcome.stopped) log("info", "discord.stop_command_used", { threadId: project.threadId, userId: interaction.user.id });
+    return;
+  }
+
+  if (sub === "queue") {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    await showQueue(interaction, project.threadId);
+    return;
+  }
+
   if (sub === "reset") {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    await projects.enqueue(project.threadId, () => projects.resetSession(project.threadId));
+    // Deliberately not queued: the reset must not wait behind the very turn it
+    // is meant to stop. It severs the thread's queue, aborts a running turn,
+    // and swaps in a fresh session; the stopped turn (if any) reports failure
+    // in the thread through its normal path.
+    const stoppedStatusId = project.pendingTurn?.statusMessageId;
+    const { stoppedTurn } = await projects.resetSession(project.threadId);
+    if (stoppedStatusId) {
+      // The stopped turn's live status message would otherwise keep its
+      // heartbeat forever (its prompt may never settle); retire it now.
+      await liveProgress.get(stoppedStatusId)?.close();
+      unregisterQuestionButtons(stoppedStatusId);
+      const stopped = await interaction.channel?.messages.fetch(stoppedStatusId).catch(() => undefined);
+      if (stopped && stopped.author.id === client.user?.id) {
+        await stopped.edit({
+          content: "🛑 This turn was stopped by `/site reset` — its agent session was dropped. Send a new message to continue.",
+          embeds: [], components: [],
+        }).catch(() => undefined);
+      }
+    }
     await interaction.editReply(
-      "🔄 Agent session dropped. The next message in this thread starts a fresh conversation — " +
+      `🔄 Agent session dropped${stoppedTurn ? " — the running turn was stopped and will report a failure in this thread" : ""}. ` +
+      "Anything waiting in this thread's queue was released, and the next message starts a fresh conversation — " +
       "the site, git history, and project notes are all kept.",
     );
     return;
@@ -567,17 +1132,22 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
   const prompt = interaction.options.getString("prompt", true).trim();
   const requestedName = interaction.options.getString("name")?.trim();
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (shuttingDown) throw new Error("The bot is restarting — try again in a moment.");
 
   const { thread, created } = await resolveOrCreateThread(interaction, requestedName || prompt, "game");
   if (store.getProject(thread.id)) throw new Error("That thread already has a project. Use a fresh thread for /makegam, then reply normally to mutate the game.");
   const status = await thread.send(`🎮 Preparing a persistent **${dimension.toUpperCase()} static web game**…`);
   const progress = new DiscordProgress(status, `🎮 Building ${requestedName || thread.name}`);
   registerQuestionButtons(status, progress);
+  progress.enableStopButton();
   progress.update(`🕹️ ${dimension.toUpperCase()} game profile selected`);
 
   await interaction.editReply(`Created/attached <#${thread.id}>. The thread will show live research/edit/publish stages; detailed failures stay private.`);
+  creatingThreads.add(thread.id);
   projects.enqueue(thread.id, async () => {
     try {
+      // The thread may have been deleted while this job waited in the queue.
+      if (abandonedThreads.has(thread.id)) return;
       const result = await projects.createProject({
         threadId: thread.id,
         guildId: interaction.guildId!,
@@ -588,10 +1158,8 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
         renameable: created && !requestedName,
         initiator: interactionInitiator(interaction),
         statusMessageId: status.id,
-      }, progress.callback, created && !requestedName
-        ? (title) => applyAiThreadTitle(thread, title)
-        : undefined);
-      progress.close();
+      }, progress.callback, (title) => applyAiThreadTitle(thread, title));
+      await progress.close();
         if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
           await setStatusMessage(status, finishedWithErrorsMessageText(result));
         await sendOutcomeFollowUp(thread, result, {
@@ -601,9 +1169,17 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
         });
       } else {
         await setStatusMessage(status, successMessageText(result, true));
+        await postQaScreenshot(thread, result, "📸 How the new game looks:");
       }
     } catch (error) {
-      progress.close();
+      await progress.close();
+      if (error instanceof TurnStoppedError) {
+        await setStatusMessage(
+          status,
+          "🛑 **Stopped at your request** — the partial first build is preserved in the workspace. Reply here to continue from it.",
+        );
+        return;
+      }
       const project = store.getProject(thread.id);
       const incident = await reportFailure(error, {
         operation: `initial-${dimension}-game-build`,
@@ -616,13 +1192,24 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
       const retry = project
         ? "Reply in this thread to retry after the configuration/provider issue is fixed."
         : "Run `/makegam` again inside this thread after the setup issue is fixed.";
-      await setStatusMessage(
-        status,
-        `❌ Initial game generation failed · reference \`${incident.id}\`. ${retry}`,
-        (await offerEditsChoice(project, error)) ? [failureEditsRow()] : undefined,
-      );
-    }
-  }).catch((error) => logError("project.queue_failed", error, { threadId: thread.id }));
+        await setStatusMessage(
+          status,
+          `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Initial game generation failed · reference \`${incident.id}\`. ${retry}`,
+          (await offerEditsChoice(project, error)) ? [failureEditsRow()] : undefined,
+        );
+      } finally {
+        // A thread deleted mid-setup must not leave a repository and a live
+        // site behind: the delete event found no record, so clean up here.
+        if (abandonedThreads.has(thread.id) && store.getProject(thread.id)) {
+          await projects.forceDeleteProject(thread.id).catch((error) => {
+            logError("project.abandoned_teardown_failed", error, { threadId: thread.id });
+          });
+        }
+        creatingThreads.delete(thread.id);
+        abandonedThreads.delete(thread.id);
+        void recheckExternalPush(thread.id);
+      }
+    }).catch((error) => logError("project.queue_failed", error, { threadId: thread.id }));
 }
 
 async function handleAdminCommand(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -636,6 +1223,10 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
       `Model: \`${store.getModel() || "the model default"}\`\n` +
       `Effort: \`${store.getEffort() || "auto"}\`\n` +
       `Agent service: ${await opencode.health()}\n` +
+      `Provider quota: ${opencode.quotaStatus()}\n` +
+      `Failover: ${config.opencodeFailoverModels.length ? config.opencodeFailoverModels.join(", ") : "disabled (fail fast on quota)"}\n` +
+      `Light turns: ${config.opencodeLightModel ? `${config.opencodeLightModel} (≤ ${config.opencodeLightPromptChars} chars, no images)` : "disabled"}\n` +
+      `Browser QA: ${config.browserQaEnabled ? `enabled (${config.previewMcpUrl})` : "disabled"}\n` +
       `Web search: enabled for agent research\n` +
       `Asset tool: guarded downloads to site/assets\n` +
       `Multiplayer relay: ${await multiplayerRelayStatus()}\n` +
@@ -727,6 +1318,48 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
   }
 }
 
+// Autocomplete currently serves only /site-admin model: the agent service's
+// current free OpenCode models plus the configured Surplus models, filtered by
+// what the admin has typed. Choice names are the exact "provider/model-id"
+// strings the command accepts; "default" is offered too since it clears the
+// override. The command stays free-text — unlisted provider/model ids remain
+// valid.
+async function handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
+  if (interaction.commandName !== "site-admin" || interaction.options.getSubcommand(false) !== "model") {
+    await interaction.respond([]);
+    return;
+  }
+  // The chat-input command enforces Manage Server (or an allowlisted admin
+  // id); the autocomplete must not become a way for other members to
+  // enumerate the deployment's model list just because a server admin
+  // overrode the command's default permissions.
+  if (!isAdmin(interaction)) {
+    await interaction.respond([]);
+    return;
+  }
+  const typed = interaction.options.getFocused().trim().toLowerCase();
+  // Discord drops the suggestion list unless the autocomplete answers within
+  // ~3s. The provider list is cached on the harness, so this normally answers
+  // instantly; the race only falls back to "default" when the agent service is
+  // unreachable or wedged.
+  const catalog = await Promise.race([
+    opencode.listSelectableModels(),
+    new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 2_500)),
+  ]);
+  const matchTier = (id: string): number => {
+    if (!typed) return 1;
+    if (id === typed) return 0;
+    if (id.startsWith(typed)) return 1;
+    return 2;
+  };
+  const choices = ["default", ...catalog]
+    .filter((id) => id.length <= 100 && (!typed || id.toLowerCase().includes(typed)))
+    .sort((a, b) => matchTier(a) - matchTier(b) || a.localeCompare(b))
+    .slice(0, 25)
+    .map((id) => ({ name: id, value: id }));
+  await interaction.respond(choices);
+}
+
 // Final success message: status line, agent summary, stats, then the play/open
 // and git links. The summary gets whatever budget the fixed parts leave free;
 // a fixed 1600-char allowance let long project names and URLs push the whole
@@ -794,11 +1427,11 @@ function turnStatsText(result: MutationResult): string {
  * error report. Best-effort delivery; the outcome message already went out.
  */
 async function sendOutcomeFollowUp(
-  channel: { send: (options: { content: string }) => Promise<unknown> } | undefined,
+  channel: { send?: (options: { content: string }) => Promise<unknown> } | undefined,
   result: MutationResult,
   context: { operation: string; guildId?: string | null; requesterId?: string },
 ): Promise<void> {
-  if (!channel) return;
+  if (!channel?.send) return;
   const blocks: string[] = [];
   if (result.validationError) {
     blocks.push(
@@ -846,7 +1479,7 @@ function threadUsageText(total: UsageTotal, includeCost: boolean): string {
     + `Models: ${models.join(" · ")}${more > 0 ? ` · +${more} more` : ""}`;
 }
 
-function isAdmin(interaction: ChatInputCommandInteraction): boolean {
+function isAdmin(interaction: ChatInputCommandInteraction | AutocompleteInteraction): boolean {
   if (config.adminUserIds.has(interaction.user.id)) return true;
   return interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false;
 }
@@ -886,6 +1519,24 @@ async function resolveOrCreateThread(
 // but only when ThreadSite itself created the thread from a prompt slug.
 async function applyAiThreadTitle(thread: ThreadChannel, title: string): Promise<void> {
   await thread.setName(truncate(title, 100));
+  if (store.getProject(thread.id)?.pendingThreadName === title) {
+    await store.patchProject(thread.id, { pendingThreadName: undefined });
+  }
+}
+
+/** Post the browser-QA screenshot of a successful turn as a thread attachment (best-effort). */
+async function postQaScreenshot(channel: unknown, result: MutationResult, caption: string): Promise<void> {
+  if (!result.screenshot) return;
+  const send = (channel as { send?: (options: { content: string; files?: unknown[] }) => Promise<unknown> } | undefined)?.send;
+  if (typeof send !== "function") return;
+  try {
+    await send.call(channel, {
+      content: caption,
+      files: [new AttachmentBuilder(Buffer.from(result.screenshot), { name: "preview.png" })],
+    });
+  } catch (error) {
+    log("debug", "discord.qa_screenshot_post_failed", { error: String(error) });
+  }
 }
 
 function failureEditsRow(): ActionRowBuilder<ButtonBuilder> {
@@ -909,10 +1560,11 @@ async function setStatusMessage(
 ): Promise<void> {
   // The outcome message replaces the live status: any pending agent-question
   // buttons on it are gone, so stop routing clicks for this message.
+  await liveProgress.get(status.id)?.close();
   unregisterQuestionButtons(status.id);
   // Discord keeps existing components when an edit omits them — an explicit
   // empty array is what actually strips leftover question buttons.
-  const payload = { content: truncate(content, MAX_DISCORD_MESSAGE_CHARS), components: components ?? [] };
+  const payload = { content: truncate(content, MAX_DISCORD_MESSAGE_CHARS), embeds: [], components: components ?? [], allowedMentions: { parse: [] as never[] } };
   try {
     await status.edit(payload);
   } catch (error) {
@@ -947,6 +1599,7 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
   }
   const publish = interaction.customId === "threadsite:extpub";
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (shuttingDown) throw new Error("The bot is restarting — try again in a moment.");
   if (await projects.agentBusy(interaction.channel.id)) {
     throw new Error("An agent turn is currently running in this thread. Wait for it to finish before deciding.");
   }
@@ -975,12 +1628,141 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
   log("info", "discord.external_push_button_used", { action: publish ? "publish" : "dismiss", threadId: interaction.channel.id, userId: interaction.user.id });
 }
 
+/** One wording for the Stop button and `/site stop`; the slash command exists
+ * so a deleted status message or a turn that never rendered one is still
+ * interruptible. */
+function stopOutcomeText(outcome: StopTurnOutcome): string {
+  if (outcome.stopped) {
+    return "🛑 Stop requested — the running update is being interrupted. Its partial edits are kept; the status message will show the outcome.";
+  }
+  if (outcome.queueFreed) {
+    return "⚠️ The agent service is not answering, so the running update could not be aborted. " +
+      "The thread's queue has been freed so new messages are not blocked — check the agent service if this persists.";
+  }
+  if (outcome.delivering) {
+    return "⏳ The agent has already finished and the update is now being validated, committed, and published. " +
+      "There is nothing left to interrupt; the status message will show the result.";
+  }
+  return "No model turn is currently running in this thread.";
+}
+
+// Stop on a live status message: abort the running agent turn but keep the
+// session, workspace, and history — the gentle alternative to /site reset.
+// Works from the moment the button renders (queued turns report "nothing to
+// stop" until the model actually starts).
+async function handleStopButton(interaction: ButtonInteraction): Promise<void> {
+  if (!interaction.inGuild() || !interaction.channel?.isThread()) {
+    throw new Error("This button only works inside a project thread.");
+  }
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const outcome = await projects.stopTurn(interaction.channel.id);
+  await interaction.editReply(stopOutcomeText(outcome));
+  if (outcome.stopped) log("info", "discord.stop_button_used", { threadId: interaction.channel.id, userId: interaction.user.id });
+}
+
+/** How many queued entries `/site queue` lists and offers cancel buttons for. */
+const MAX_QUEUE_LIST = 20;
+
+/**
+ * `/site queue`: make the backlog visible and withdraw individual waiting
+ * messages. Entries a drain has already taken are reported separately — they
+ * cannot be cancelled without removing the prompt from under the live batch.
+ */
+async function showQueue(interaction: ChatInputCommandInteraction, threadId: string): Promise<void> {
+  const project = store.getProject(threadId);
+  const all = project?.pendingQueue ?? [];
+  const preparing = all.filter((entry) => inFlightQueuedRequests.has(entry.statusMessageId)).length;
+  const queue = all.filter((entry) => !inFlightQueuedRequests.has(entry.statusMessageId));
+  if (!queue.length) {
+    await interaction.editReply(
+      preparing
+        ? `📭 Nothing else is queued. ${preparing} message${preparing === 1 ? " is" : "s are"} already part of the update being prepared — use \`/site stop\` to interrupt that turn.`
+        : "📭 Nothing is queued in this thread — the next message starts a new update pass immediately.",
+    );
+    return;
+  }
+
+  const listed = queue.slice(0, MAX_QUEUE_LIST);
+  const lines = listed.map((entry, index) => {
+    const prompt = truncate(entry.prompt.replace(/\s+/g, " ").trim(), 70);
+    const author = entry.author?.name ? ` — ${truncate(entry.author.name, 30)}` : "";
+    const images = entry.images?.length ? ` · ${entry.images.length} image${entry.images.length === 1 ? "" : "s"}` : "";
+    return `**${index + 1}.** ${prompt}${author}${images}`;
+  });
+  const header = `📬 **${queue.length}** message${queue.length === 1 ? "" : "s"} waiting for the next update pass. They run together after the current turn; cancel any with the buttons below.`;
+  const preparingLine = preparing ? `\n⏳ ${preparing} more ${preparing === 1 ? "is" : "are"} already part of the update being prepared and can only be interrupted with \`/site stop\`.` : "";
+  const moreLine = queue.length > listed.length ? `\n… and **${queue.length - listed.length}** more; cancel these or run \`/site queue\` again.` : "";
+  const content = truncate(`${header}\n${lines.join("\n")}${preparingLine}${moreLine}`, MAX_DISCORD_MESSAGE_CHARS - 20);
+
+  const rows: Array<ActionRowBuilder<ButtonBuilder>> = [];
+  for (let start = 0; start < listed.length; start += 5) {
+    const row = new ActionRowBuilder<ButtonBuilder>();
+    for (let index = start; index < Math.min(start + 5, listed.length); index += 1) {
+      row.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`threadsite:qcancel:${listed[index].statusMessageId}`)
+          .setLabel(`Cancel ${index + 1}`)
+          .setStyle(ButtonStyle.Secondary),
+      );
+    }
+    rows.push(row);
+  }
+  await interaction.editReply({ content, components: rows });
+}
+
+/** Remove one waiting request from the in-memory batch and the durable queue. */
+async function handleQueueCancelButton(interaction: ButtonInteraction): Promise<void> {
+  if (!interaction.inGuild() || !interaction.channel?.isThread()) {
+    throw new Error("This button only works inside a project thread.");
+  }
+  const statusId = interaction.customId.slice("threadsite:qcancel:".length);
+  if (!/^\d{5,25}$/.test(statusId)) throw new Error("That queue entry id is invalid.");
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const threadId = interaction.channel.id;
+  if (inFlightQueuedRequests.has(statusId)) {
+    await interaction.editReply("⏳ That request is already part of the update being prepared and can no longer be cancelled. Use `/site stop` to interrupt the turn.");
+    return;
+  }
+  const pending = pendingUpdates.get(threadId);
+  const index = pending
+    ? pending.entries.findIndex((entry) => (entry.requestStatusId ?? entry.status.id) === statusId)
+    : -1;
+  const memory = index >= 0 ? pending!.entries.splice(index, 1)[0] : undefined;
+  const stored = await store.cancelQueuedRequest(threadId, statusId);
+  if (!memory && !stored.removed) {
+    await interaction.editReply("That request is no longer queued — it already started, finished, or was cancelled.");
+    return;
+  }
+
+  // The original acknowledgement message should say what happened to its request.
+  const original = memory?.status
+    ?? await interaction.channel.messages.fetch(statusId).catch(() => undefined);
+  if (original && original.author.id === client.user?.id) {
+    await original.edit({ content: "🚫 **Cancelled** — this queued request will not run.", embeds: [], components: [] }).catch(() => undefined);
+  }
+  if (memory) {
+    await memory.progress?.close();
+    unregisterQuestionButtons(memory.status.id);
+  }
+
+  const fresh = store.getProject(threadId);
+  const remaining = fresh?.pendingQueue?.length ?? 0;
+  if (fresh?.pendingTurn?.statusMessageId) {
+    liveProgress.get(fresh.pendingTurn.statusMessageId)?.callback({ kind: "queue", text: "Saved requests", queuedRequests: remaining });
+  }
+  const preview = truncate((stored.prompt ?? memory?.prompt ?? "").replace(/\s+/g, " ").trim(), 120);
+  await interaction.editReply(`🚫 Cancelled${preview ? `: **${preview}**` : " that request"} · **${remaining}** still queued.`);
+  log("info", "discord.queue_request_cancelled", { threadId, statusId, userId: interaction.user.id });
+}
+
 async function handleFailureButton(interaction: ButtonInteraction): Promise<void> {
   if (!interaction.inGuild() || !interaction.channel?.isThread()) {
     throw new Error("This button only works inside a project thread.");
   }
   const action = interaction.customId === "threadsite:rollback" ? "rollback" : "keep";
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (shuttingDown) throw new Error("The bot is restarting — try again in a moment.");
   if (await projects.agentBusy(interaction.channel.id)) {
     throw new Error("An agent turn is currently running in this thread. Wait for it to finish before deciding.");
   }
@@ -998,6 +1780,24 @@ async function handleFailureButton(interaction: ButtonInteraction): Promise<void
   log("info", "discord.failure_button_used", { action, threadId: interaction.channel.id, userId: interaction.user.id });
 }
 
+/**
+ * Public wording for a quota-exhaustion failure (the OpenCode free tier's
+ * daily limit): deliberately generic — the thread only learns the provider is
+ * down and when to try again. The reason, subscribe pitch, and link go to
+ * admins via the incident DM (one per block; see reportFailure). Ordinary
+ * provider failures return undefined and keep the incident-reference wording.
+ */
+function quotaNotice(error: unknown): string | undefined {
+  const block = (error as { quotaBlock?: QuotaBlock } | undefined)?.quotaBlock;
+  if (!block || block.until <= Date.now()) return undefined;
+  return `🚫 The AI provider is unavailable until ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())}) — new requests will fail fast until then. An admin has been notified with the details; try again after the reset.`;
+}
+
+// One admin DM per quota block (provider -> block.until): later fail-fast
+// incidents during the same outage are still recorded for /site-admin errors
+// and the log, but do not re-DM on every failed turn.
+const quotaBlocksNotified = new Map<string, number>();
+
 async function reportFailure(  error: unknown,
   context: {
     operation: string;
@@ -1008,6 +1808,9 @@ async function reportFailure(  error: unknown,
     model?: string;
   },
 ): Promise<{ id: string; notified: boolean }> {
+  const quotaBlock = (error as { quotaBlock?: QuotaBlock } | undefined)?.quotaBlock;
+  const quotaDmSent = quotaBlock ? quotaBlocksNotified.get(quotaBlock.provider) === quotaBlock.until : false;
+  if (quotaBlock && !quotaDmSent) quotaBlocksNotified.set(quotaBlock.provider, quotaBlock.until);
   const incident = await recordIncident(error, {
     operation: context.operation,
     guildId: context.guildId,
@@ -1019,6 +1822,55 @@ async function reportFailure(  error: unknown,
     sessionId: context.project?.sessionId,
     model: context.model,
   });
-  const notified = await adminReporter.notify(incident);
+  const notified = quotaDmSent ? false : await adminReporter.notify(incident);
   return { id: incident.id, notified };
 }
+
+// Discord CDN attachment URLs expire, so image bytes are downloaded at message
+// receipt — before the turn waits behind the project queue — and embedded as
+// data URIs that travel with the prompt request itself.
+const MAX_TURN_IMAGES = 4;
+const MAX_TURN_IMAGE_BYTES = 8 * 1024 * 1024;
+
+async function downloadImageAttachments(attachments: Attachment[]): Promise<PromptImage[]> {
+  const images: PromptImage[] = [];
+  for (const attachment of attachments.slice(0, MAX_TURN_IMAGES)) {
+    if (attachment.size > MAX_TURN_IMAGE_BYTES) {
+      log("warn", "discord.image_attachment_too_large", { bytes: attachment.size });
+      continue;
+    }
+    try {
+      const response = await fetch(attachment.url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const mime = attachment.contentType ?? "image/png";
+      const base64 = Buffer.from(await response.arrayBuffer()).toString("base64");
+      images.push({ mime, filename: attachment.name ?? undefined, dataUrl: `data:${mime};base64,${base64}` });
+    } catch (error) {
+      logError("discord.image_download_failed", error, { url: attachment.url });
+    }
+  }
+  return images;
+}
+
+// Graceful shutdown: docker stop sends SIGTERM with ~10s before SIGKILL.
+// Stop taking new work immediately, give in-flight turns a bounded window to
+// finish and report their outcomes in their threads, then close Discord and
+// exit. Turns that miss the window are recovered by the next boot's
+// pendingTurn pass, exactly like a crash — but most restarts now avoid the
+// spurious "update failed" messages a hard kill produces.
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log("info", "process.shutdown_begin", { signal, activeTurns: projects.activeTurnCount(), drainMs: config.shutdownDrainMs });
+  stopExternalPushPoller();
+  webhookServer?.close();
+  const deadline = Date.now() + config.shutdownDrainMs;
+  while (Date.now() < deadline && projects.activeTurnCount() > 0) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  log("info", "process.shutdown_exit", { activeTurnsRemaining: projects.activeTurnCount() });
+  await client.destroy().catch(() => undefined);
+  process.exit(0);
+}
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));

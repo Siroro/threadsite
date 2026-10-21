@@ -12,7 +12,8 @@ export function slugify(input: string, fallback = "site"): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
+    .slice(0, 48)
+    .replace(/-+$/g, "");
   return value || fallback;
 }
 
@@ -32,6 +33,22 @@ export async function ensureGitignoreLines(workspacePath: string, required: read
   if (!missing.length) return false;
   const prefix = current && !current.endsWith("\n") ? `${current}\n` : current;
   await fs.writeFile(file, `${prefix}${missing.join("\n")}\n`, "utf8");
+  return true;
+}
+
+/**
+ * Remove ignore entries a previous harness boundary wrote (e.g. site/net/,
+ * now committed for visibility) so un-ignoring migrates existing workspaces.
+ * Only exact matches managed by the harness are dropped; user rules survive.
+ */
+export async function removeGitignoreLines(workspacePath: string, stale: readonly string[]): Promise<boolean> {
+  const file = path.join(workspacePath, ".gitignore");
+  const current = await fs.readFile(file, "utf8").catch(() => "");
+  if (!current) return false;
+  const staleSet = new Set(stale);
+  const kept = current.split(/\r?\n/).filter((line) => !staleSet.has(line.trim()));
+  if (kept.length === current.split(/\r?\n/).length) return false;
+  await fs.writeFile(file, `${kept.join("\n")}`, "utf8");
   return true;
 }
 
@@ -88,6 +105,29 @@ export function formatTokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`.replace(/\.0$/, "");
   if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`.replace(/\.0$/, "");
   return String(count);
+}
+
+/** Compact duration for Discord: 41000 -> "41s", 720000 -> "12m", 11652000 -> "3h 14m". */
+export function formatShortDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s";
+  const seconds = Math.ceil(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+/** Clock time for reset/deadline display, e.g. epoch ms -> "23:59 UTC". */
+export function formatUtcClock(ms: number): string {
+  return `${new Date(ms).toISOString().slice(11, 16)} UTC`;
+}
+
+/** Token throughput for Discord: 42 -> "42", 7.4 -> "7.4". */
+export function formatTokensPerSecond(rate: number): string {
+  if (!Number.isFinite(rate) || rate <= 0) return "0";
+  return rate >= 10 ? String(Math.round(rate)) : rate.toFixed(1).replace(/\.0$/, "");
 }
 
 /** USD cost with enough precision for both sub-cent per-turn amounts and large totals. */

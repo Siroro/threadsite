@@ -1,6 +1,6 @@
 {
   "name": "threadsite-gameserver",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,11 +13,11 @@
     "test:stall": "node host-stall-test.mjs"
   },
   "dependencies": {
-    "ws": "8.21.3"
+    "ws": "8.22.0"
   },
   "devDependencies": {
-    "@types/node": "24.13.3",
-    "@types/ws": "8.18.1",
+    "@types/node": "24.19.2",
+    "@types/ws": "8.18.2",
     "typescript": "5.9.3"
   }
 }

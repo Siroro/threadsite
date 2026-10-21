@@ -54,6 +54,11 @@ export const config = {
   errorReportUserIds,
   errorDmEnabled: boolEnv("ERROR_DM_ENABLED", true),
   progressUpdateMs: intEnv("PROGRESS_UPDATE_MS", 1800),
+  // A turn that emits no progress for this long is flagged as possibly wedged
+  // on the live card, with /site stop as the escape hatch. Request timeouts
+  // against the agent service are disabled, so this is the visible watchdog,
+  // not an automatic abort. 0 disables the warning.
+  turnStallWarnMs: msEnv("TURN_STALL_WARN_MS", 5 * 60 * 1000),
 
   opencodeUrl: env("OPENCODE_URL", "http://opencode:4096").replace(/\/$/, ""),
   opencodeUsername: env("OPENCODE_SERVER_USERNAME", "opencode"),
@@ -61,6 +66,11 @@ export const config = {
   defaultModel: env("OPENCODE_DEFAULT_MODEL"),
   opencodeReconcileTimeoutMs: intEnv("OPENCODE_RECONCILE_TIMEOUT_MS", 30 * 60 * 1000),
   opencodeReconcilePollMs: intEnv("OPENCODE_RECONCILE_POLL_MS", 1500),
+  // A provider retry whose next attempt is scheduled further out than this is
+  // an exhausted quota (e.g. the OpenCode free tier's daily reset at midnight
+  // UTC), not transient backoff: the stalled turn is aborted, the failure
+  // names the reset time, and further prompts fail fast until then.
+  opencodeQuotaBlockMinRetryMs: intEnv("OPENCODE_QUOTA_BLOCK_MIN_RETRY_MS", 10 * 60 * 1000),
   // Headers/body timeouts for HTTP requests to the OpenCode service. Agent
   // turns routinely outlive undici's 5-minute defaults while the turn keeps
   // running server-side, so these default to disabled (0) — the reconcile
@@ -87,16 +97,47 @@ export const config = {
   // accounts that /site pushkey issues. Absent = pushkey is disabled.
   forgejoAdminTokenFile: env("FORGEJO_ADMIN_TOKEN_FILE", "/run/secrets/forgejo-admin-token"),
   // How often to poll each project's Forgejo main branch for commits pushed
-  // from outside the bot (push-key holders). 0 disables external-push polling.
+  // from outside the bot (push-key holders). Fallback only: with webhooks
+  // enabled (default) the poller does not start at all. 0 disables polling.
   externalPushPollMs: msEnv("EXTERNAL_PUSH_POLL_MS", 60 * 1000),
+
+  // Forgejo push webhooks: the bot listens on WEBHOOK_PORT for HMAC-signed
+  // push events and reacts instantly instead of polling. WEBHOOK_PUBLIC_URL is
+  // how Forgejo reaches the bot (docker service DNS by default).
+  webhookEnabled: boolEnv("WEBHOOK_ENABLED", true),
+  webhookPort: intEnv("WEBHOOK_PORT", 8901),
+  webhookPublicUrl: env("WEBHOOK_PUBLIC_URL", "http://bot:8901").replace(/\/$/, ""),
+
+  // Graceful shutdown: on SIGTERM, stop taking new work and wait this long for
+  // in-flight turns before exiting (docker stop allows 10s by default).
+  shutdownDrainMs: msEnv("SHUTDOWN_DRAIN_MS", 8000),
 
   workspaceRoot: path.resolve(env("WORKSPACE_ROOT", "/workspace")),
   publishRoot: path.resolve(env("PUBLISH_ROOT", "/srv/sites")),
+  // Legacy single-file state; imported into the SQLite store on first boot.
   stateFile: path.resolve(env("STATE_FILE", "/data/state.json")),
+  // SQLite store (projects + settings). Defaults next to STATE_FILE.
+  stateDbFile: path.resolve(env("STATE_DB_FILE", env("STATE_FILE", "/data/state.json").replace(/\.json$/i, "") + ".db")),
   // Append-only JSONL token/cost ledger backing /site-admin usage.
   usageLogFile: path.resolve(env("USAGE_LOG_FILE", "/data/usage-log.jsonl")),
   publicSitesBaseUrl: env("PUBLIC_SITES_BASE_URL", "http://localhost:8080").replace(/\/$/, ""),
   publicIndexEnabled: boolEnv("PUBLIC_INDEX_ENABLED", true),
+
+  // Provider resilience: when the active model's provider hits a quota block,
+  // turns are re-routed to the first healthy model in this list instead of
+  // failing fast until the provider resets. Empty = fail fast (old behavior).
+  opencodeFailoverModels: env("OPENCODE_FAILOVER_MODELS").split(",").map((x) => x.trim()).filter(Boolean),
+  // Autopilot economy: short non-initial mutations (no images) below
+  // OPENCODE_LIGHT_PROMPT_CHARS run on this cheaper model instead of the default.
+  opencodeLightModel: env("OPENCODE_LIGHT_MODEL"),
+  opencodeLightPromptChars: intEnv("OPENCODE_LIGHT_PROMPT_CHARS", 400),
+
+  // Browser QA: after static validation, load the site in the preview
+  // service's Playwright browser, collect console/request errors, and capture a
+  // screenshot for the thread. Unreachable preview = QA skipped, never blocks.
+  browserQaEnabled: boolEnv("BROWSER_QA_ENABLED", true),
+  browserQaTimeoutMs: intEnv("BROWSER_QA_TIMEOUT_MS", 25_000),
+  previewMcpUrl: env("PREVIEW_MCP_URL", "http://preview:8931/mcp"),
 
   // 3D games bundling Rapier (~2.5MB minified with inlined WASM) plus real
   // GLB/texture/audio assets need headroom well past the old 10MB.

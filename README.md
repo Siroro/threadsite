@@ -1,4 +1,4 @@
-# ThreadSite V2.4 — Discord threads that become persistent websites & multiplayer games
+# ThreadSite V2.5 — Discord threads that become persistent websites & multiplayer games
 
 ThreadSite is a small Discord harness for an AI coding agent. One Discord thread maps to one persistent static website **or static web game** and one public Forgejo repository.
 
@@ -14,6 +14,7 @@ ThreadSite is a small Discord harness for an AI coding agent. One Discord thread
 - `/site sync` pulls commits that were pushed to the repository from outside the bot (e.g. with a repo push key) into the workspace, rebases any local-only commits on top, rebuilds, and republishes from the result. It is the manual recovery path when a push from Discord was rejected because the remote had moved ahead.
 - `/site pushkey` issues repo-scoped git push credentials for this thread's repository; pushes made with them are detected by a poller and offered to the thread with Publish/Dismiss buttons, and a rejected bot push rebases on top of them automatically on the next commit.
 - `/site compact` asks the agent to compact this thread's session context immediately (see below).
+- `/site stop` interrupts the running turn — even when its live status message was deleted or never rendered — while keeping the agent session, workspace, edits, and history. `/site queue` shows the messages waiting for the next update pass and offers a cancel button for each waiting entry.
 - `/site revert` undoes the last accepted turn: it reverts the agent conversation, resets git to the previous commit, force-pushes the repository, and republishes the previous site.
 - The publish root also gets an automatically generated `index.html` listing all ready sites and their source repos.
 
@@ -41,6 +42,8 @@ OPENCODE_RECONCILE_POLL_MS=1500
 
 If the recovery window expires while the agent service still reports the session busy, ThreadSite attempts an HTTP session abort. If that abort cannot be confirmed, it preserves the worktree instead of resetting files underneath a potentially still-running agent.
 
+Provider retries are classified before waiting on them. A retry with no action, or one scheduled to resume within `OPENCODE_QUOTA_BLOCK_MIN_RETRY_MS` (default 10 minutes), is transient backoff: the turn waits it out and the progress line shows the next-attempt ETA. A retry carrying a quota action — e.g. the OpenCode free tier's `free_tier_limit`, whose next attempt is the daily UTC-midnight reset — is an exhausted quota, not backoff: the thread only sees a generic "AI provider unavailable" line with the resume time, the stalled turn is aborted instead of parking the Discord thread and the project queue for hours, and further prompts to that provider fail fast until it lifts. The quota reason, subscribe pitch, and link go to administrators only — one incident DM per block (repeat fail-fast incidents stay in `/site-admin errors` without re-DMing) and the `Provider quota:` line in `/site-admin status`.
+
 V2.1 also recursively serializes `Error.cause` into the private JSONL log and administrator DMs. Docker warn/error log lines are emitted as JSON strings so nested causes such as `ECONNRESET`, `UND_ERR_SOCKET`, DNS, TLS, or timeout information are not collapsed to Node's `[Object]` display.
 
 ## Why static-only
@@ -51,7 +54,7 @@ This harness intentionally does **not** let the model run `npm install`, shell c
 
 Projects are authored in **TypeScript under `site/src/`**. The model never runs a build; the *harness* runs the only one before every publish. It bundles and minifies each top-level `site/src/*.ts` entry into browser JavaScript under the gitignored `site/js/` workspace directory with **esbuild** (imports followed, modules merged and tree-shaken, code-split chunks under `js/chunks/`). Forgejo stores authored source, HTML/CSS and assets—not compiler output. Apache receives the runtime boundary: minified bundles, HTML/CSS and assets, with `site/src/` and the unbundled networking client excluded. There is no runtime or deferred build. Bundler failures surface as code-framed `file:line:col` errors and feed the same one-shot repair round-trip as validation errors.
 
-Game repos get their **engine installed the way a dependency manager would**: 3D games get a curated stack — three.js (r185) plus `@dimforge/rapier3d-compat` (0.12) for physics and `three-mesh-bvh` (0.9) for BVH-accelerated queries against static geometry — and 2D games get Phaser 4.2.1, all in a harness-managed `node_modules/` at the workspace root (gitignored, never published, re-seeded on drift). Authored code imports the bare package names (`import * as THREE from "three"`, `import RAPIER from "@dimforge/rapier3d-compat"`, `import * as Phaser from "phaser"`) and esbuild resolves them by walking up from `site/src/` exactly like normal npm usage. Three.js remains tree-shakeable; Phaser is seeded from its official minified ESM distribution so its framework baseline stays well inside the static-site budget; Rapier is the `-compat` build whose WASM is base64-inlined into the single ESM file, so it bundles with no `.wasm` asset handling. Every package ships its **real TypeScript declarations**, so the agent's editor and the validation gate check engine usage against the actual APIs — wrong argument types and misspelled members fail the turn. Each game repo also carries a per-kind **engine playbook as an OpenCode skill** — `.opencode/skills/game-2d` + `phaser-4` for Phaser, `game-3d` for three.js — seeded, re-checked, and committed on the same schedule as the engine package, so the agent loads the deep engine how-to (bootstrap patterns, lighting and batching budgets, physics and character-controller discipline, disposal, asset pipelines) on demand while AGENTS.md stays the compact rulebook; site projects get no skill.
+Game repos get their **engine installed the way a dependency manager would**: 3D games get a curated stack — three.js (r185) plus `@dimforge/rapier3d-compat` (0.12) for physics and `three-mesh-bvh` (0.9) for BVH-accelerated queries against static geometry — and 2D games get Phaser 4.2.1, all in a harness-managed `node_modules/` at the workspace root (gitignored, never published, re-seeded on drift). Authored code imports the bare package names (`import * as THREE from "three"`, `import RAPIER from "@dimforge/rapier3d-compat"`, `import * as Phaser from "phaser"`) and esbuild resolves them by walking up from `site/src/` exactly like normal npm usage. Three.js remains tree-shakeable; Phaser is seeded from its official minified ESM distribution so its framework baseline stays well inside the static-site budget; Rapier is the `-compat` build whose WASM is base64-inlined into the single ESM file, so it bundles with no `.wasm` asset handling. Every package ships its **real TypeScript declarations**, so the agent's editor and the validation gate check engine usage against the actual APIs — wrong argument types and misspelled members fail the turn. Each game repo also carries a per-kind **engine playbook as an OpenCode skill** — `.opencode/skills/game-2d` + `phaser-4` for Phaser, `game-3d` for three.js — seeded and re-checked on the same schedule as the engine package (gitignored with the rest of `.opencode/`, never published), so the agent loads the deep engine how-to (bootstrap patterns, lighting and batching budgets, physics and character-controller discipline, disposal, asset pipelines) on demand while AGENTS.md stays the compact rulebook; site projects get no skill.
 
 The one deliberate runtime exception is the **harness-owned multiplayer relay**: the model never writes server code, it only uses the vendored browser client (`site/net/threadsite-net.js`) pointed at the shared relay whose URL and game id the harness injects. The relay is part of the infrastructure, not part of any generated deliverable, and games must stay fully playable solo when it is unreachable.
 
@@ -69,6 +72,22 @@ This is still user-generated HTML/JS. **Serve generated sites from a separate or
 
 The agent SDK supports a headless client/server integration and explicit per-message model selection. Provider credentials can also be persisted through its auth service.
 
+## Browser and visual feedback
+
+The `preview` service runs Microsoft's [Playwright MCP](https://github.com/microsoft/playwright-mcp), connected to OpenCode as `playwright`. Agents can open the current workspace, inspect screenshots, click canvas/WebGL coordinates, use keyboard controls, resize the viewport and read browser console/network diagnostics before finishing a turn. Browser instructions are included in every project's `AGENTS.md`.
+
+A small ThreadSite preview server compiles the current `site/src/` graph **in memory** with the production esbuild settings whenever the browser navigates to or reloads `http://127.0.0.1:8080/<guild-id>/<thread-id>/`. This lets the model inspect edits before the final harness build. It does not write generated bundles, commit or publish anything. Broken builds show their diagnostics instead of the previous preview. Static projects without TypeScript also work.
+
+After each validated build the harness also runs its own browser pass through the same service: it loads the preview, parses the MCP tools' plain-text console and network diagnostics, checks that the page actually rendered text, a canvas, media, or real layout (a blank page is a hard failure), and captures the screenshot posted to the thread. That pass feeds the automatic repair round-trip just like a build or type error.
+
+Screenshots are returned as actual MCP images. The selected model/provider must accept image input; text-only models can inspect accessibility snapshots and runtime diagnostics but cannot judge pixels. Surplus discovery preserves image support from `architecture.input_modalities` **or** `supported_features: ["vision"]`, including when credentials are stored through `/site-admin token`. No vision capability is inferred from a model name.
+
+The service has read-only workspace access, temporary browser output, no credentials or exposed host port, a dedicated internal Docker network and separate browser contexts per MCP connection. Only the local preview origin is allowed; external services and the multiplayer relay are unavailable, so preview games in solo mode. Final build/type/static validation and publication still run normally. Compose waits for preview health before starting OpenCode, and OpenCode health before starting the bot. Existing deployments need `docker compose up -d --build preview opencode bot`; starting `opencode` also starts its preview dependency.
+
+To verify locally, run `npm --prefix preview ci && npm --prefix preview test`. The browser smoke test additionally needs Docker: `docker build -t threadsite-preview-test:local ./preview`, then `npm --prefix preview run test:browser`. To also verify screenshot delivery through the pinned OpenCode server without spending model tokens, build `docker build -t threadsite-opencode-test:local ./opencode` and run the browser test with `PREVIEW_TEST_OPENCODE_IMAGE=threadsite-opencode-test:local` in its environment.
+
+For the complete Docker integration check, run **`npm --prefix preview run test:docker`**. It builds the production bot, OpenCode and preview images through the real Compose file, then uses an isolated Compose project and a scripted provider to exercise website, Phaser and three.js projects. The real bot SDK harness drives agent file edits, browser forms/clicks/keyboard/navigation/scroll, desktop/mobile screenshots and reloads after source changes; the test checks screenshot bytes reach the provider, compares preview JavaScript with the final bot build byte for byte, runs static/type validation, publishes and fetches the result from Apache. It also verifies terminal assistant failures are rejected rather than treated as empty success. No real Discord login or paid model inference is used, and the fixture containers, volumes and temporary workspaces are removed afterward. Preview and bot esbuild versions must match; the unit suite checks this to prevent compiler drift.
+
 ## 1. Discord app setup
 
 Create a Discord application/bot and invite it with permissions to:
@@ -77,6 +96,7 @@ Create a Discord application/bot and invite it with permissions to:
 - Send messages
 - Create public threads
 - Send messages in threads
+- Embed Links (recommended for live progress cards; text fallback is automatic)
 - Read message history
 - Use application commands
 
@@ -149,7 +169,7 @@ SURPLUS_API_KEY=inf_your_key_here
 SURPLUS_BASE_URL=https://api.surplusintelligence.ai/v1
 ```
 
-When the agent container starts with `SURPLUS_API_KEY` set, its startup script calls Surplus `GET /v1/models`, keeps tool-capable (or capability-unspecified) models suitable for an agent, and carries context/output limits through when the catalog provides them, and merges that live catalog into the generated provider config. `SURPLUS_MODELS` is a comma-separated fallback/extra list and is useful when a newly-added model is not returned by discovery yet.
+When the agent container starts, its startup script calls the public Surplus `GET /v1/models`, keeps tool-capable (or capability-unspecified) models suitable for an agent, and carries context/output limits and advertised image-input support into the generated provider config. Discovery also runs when the key is stored in OpenCode auth. `SURPLUS_MODELS` is a comma-separated fallback/extra list and is useful when a newly-added model is not returned by discovery yet.
 
 Examples:
 
@@ -165,7 +185,7 @@ You can also leave `SURPLUS_API_KEY` blank and store a key later with:
 /site-admin token provider:surplus token:inf_...
 ```
 
-In that mode the agent platform uses the fallback IDs from `SURPLUS_MODELS`; if you want another model ID, add it to `SURPLUS_MODELS` and recreate the agent container. If `SURPLUS_API_KEY` is set in the environment, that environment key is explicitly placed in the generated provider configuration and therefore should be treated as the authoritative Surplus credential.
+The public catalog is still discovered in that mode; if discovery fails, the agent platform uses the fallback IDs from `SURPLUS_MODELS`. To add an ID absent from the catalog, add it to `SURPLUS_MODELS` and recreate the agent container (fallback entries do not guess image support). If `SURPLUS_API_KEY` is set in the environment, that environment key is explicitly placed in the generated provider configuration and therefore should be treated as the authoritative Surplus credential.
 
 ## 3. Start the agent service and Forgejo, then bootstrap the Forgejo bot user
 
@@ -238,17 +258,30 @@ now make the visual design look like a financial terminal without losing the jok
 
 ### Live progress during a turn
 
-While the model works, the thread's status message is edited in place with a compact rolling view:
+While a turn runs, its Discord message updates in place as a live status card:
 
-- a short tail of the last few activity lines (tool use, web research, asset downloads, file edits, retries, compaction), newest at the bottom, including the current todo item (`🗺️ 3/7 — add particle effects`),
-- a summary line of what the model is currently narrating (`💭 Refactoring player controls and collision logic…`), condensed from the streamed text,
-- a small subtext line with session context usage (`🧠 context 62.4k / 100k · this turn 19.5k tok · compacted 2×`), where the ceiling is the model's advertised context window (including the Surplus cap), `this turn … tok` counts the tokens generated while handling the current Discord request (it is not a number of turns), and the compaction count is session-lifetime.
+- a **Prepare → Build → Check → Publish** stage rail, with the current activity and its duration during longer operations;
+- the request being handled and a short excerpt of the agent's public update;
+- the actual todo plan, with completed, current, pending and skipped work;
+- changed-file counts, added/removed lines and relative filenames;
+- input/output tokens, cache share, context-window usage, model steps and generation speed when available (the model name itself is never shown);
+- a timestamped recent-activity trail, action counts, saved requests waiting for the next pass, and project links.
 
-The edit cadence is unchanged (`PROGRESS_UPDATE_MS`); streaming text is only re-rendered on that cadence, not per token. When the turn finishes, the final status message keeps up to ~1600 characters of the agent's own summary, using most of Discord's 2000-character message allowance.
+Questions switch to a shorter amber card with the question, option descriptions and answer/skip buttons close at hand, including on mobile. The selected answer and responder remain visible afterward. The Stop button remains available while work runs. A full context window is shown as context usage, not a percentage estimate of how close the whole job is to completion. Provider spend, the model name and private reasoning are never included in the public card.
+
+Because HTTP request timeouts to the agent service are disabled by design, a provider that stops emitting events would otherwise leave the card heartbeating forever. The card therefore tracks real agent activity (not its own heartbeat) and, after `TURN_STALL_WARN_MS` without any event, switches to an amber **No progress for Nm** state that points at `/site stop`. The warning is suppressed while the thread is queued or waiting for an answer, where idleness is expected. It is a visible watchdog, not an automatic abort.
+
+`/site stop` (and the Stop button) aborts only the running agent turn: the session, workspace, partial edits, and git history are kept. It is deliberately not queued, so it still works when the turn is wedged on an unreachable agent or when the live status message was deleted before the button could be pressed. `/site queue` lists the backlog with its authors and offers **Cancel N** buttons; cancelling withdraws one waiting request from both the in-memory batch and SQLite and marks its acknowledgement message cancelled. Requests already being prepared by a drain are reported as in-flight instead of being silently removed.
+
+Edits respect `PROGRESS_UPDATE_MS`, coalesce rapid events and serialize Discord requests. Quiet turns retain a heartbeat, and stale live throughput estimates disappear. Closing a feed waits for its last edit before posting the final result so a late update cannot overwrite it. Servers without **Embed Links** permission automatically get a compact text version with the same controls. Final messages clear the live card and retain the agent's outcome summary; successful browser-QA screenshots are still posted normally.
 
 ### AI-generated thread titles
 
-When `/site start` or `/makegam` creates a new thread and no explicit `name` option was given, the thread starts with the usual prompt slug and a parallel tiny `titler` agent session generates a concise 3–6 word title from the request. If the first build succeeds, the AI title is adopted end-to-end: the Discord thread is renamed **and** the Forgejo repository and the published directory are renamed to match, keeping the unique thread-id suffix (so `Sumo Shove` becomes repo `site-sumo-shove-abc123` and `https://…/sumo-shove-abc123/`). The old published directory is removed and Forgejo leaves a redirect from the old repo name; if any rename step fails, the original slug simply stays. If title generation fails or times out, the slug name remains everywhere.
+When `/site start` or `/makegam` creates a new thread and no explicit `name` option was given, a parallel `titler` session generates a concise title. After the first successful build, that title becomes the Discord thread name, source repository name and public site URL. Explicit names get the same URL treatment. For example, **Sumo Shove** becomes repository `site-sumo-shove` and `https://…/sumo-shove/`; a short unique suffix is added only when the name is already taken. If title generation fails or times out, the original name remains.
+
+Use **`/site rename name:"Fresh Name"`** in an existing project thread to rename the project and refresh both links without asking the model. The bot updates the repository, git remote, README and gallery. Existing site links redirect to the new address, including existing subpages, query strings and fragments; Forgejo keeps its repository redirects. Renames preserve the multiplayer tenant and its world state. A durable rename record lets delivery resume after a disconnect or restart, and the bot checks repository IDs before resuming so an unrelated repository is never adopted. Thread-title changes that fail are retried after restart.
+
+Rename commits are metadata, not an additional agent turn: `/site revert` undoes the complete previous agent turn while preserving the current project name and links, including in projects renamed by older versions.
 
 ### `/site compact` and `/site revert`
 
@@ -279,7 +312,7 @@ Discord thread message
   -> harness build: bundle/minify site/src/ -> gitignored site/js/ (esbuild, tree-shaken)
   -> validate static tree (bundle errors and type errors get one repair round-trip)
   -> bot writes README metadata
-  -> commit/push authored source to public Forgejo (no site/js, site/net, or build manifest)
+  -> commit/push authored source + the vendored net client (site/net/) to public Forgejo (no site/js or build manifest)
   -> atomically replace the published Apache directory with runtime files (no site/src or site/net)
   -> refresh the public all-sites index
 ```
@@ -308,7 +341,7 @@ A single relay therefore serves any number of games and any number of rooms per 
 
 On creation — and re-checked before every mutation, in case the agent removed them:
 
-- gitignored `site/net/threadsite-net.js` + declarations — regenerated from the harness's TypeScript networking source and bundled into the minified game output. The zero-dependency client owns reconnects, half-open detection, bounded backpressure, expiring reliable events, relay clocks, transform interpolation/extrapolation, room generations, authority epochs and safe host handoff. `createAuthoritativeSession()` and the typed `world`, `transforms`, `intents`, `events`, `presence`, `clock`, `run`, and `entities` facades remove routine synchronization decisions and stable-ID reconciliation from generated games. `net-config.js` carries this game's tenant identity. Neither the unbundled client nor config is committed or copied to Apache.
+- the committed `site/net/threadsite-net.js` + declarations — regenerated from the harness's TypeScript networking source and bundled into the minified game output. The zero-dependency client owns reconnects, half-open detection, bounded backpressure, expiring reliable events, relay clocks, transform interpolation/extrapolation, room generations, authority epochs and safe host handoff. `createAuthoritativeSession()` and the typed `world`, `transforms`, `intents`, `events`, `presence`, `clock`, `run`, and `entities` facades remove routine synchronization decisions and stable-ID reconciliation from generated games. `net-config.js` carries this game's tenant identity. The unbundled client and config stay visible in the Forgejo repo but are never copied to Apache.
 - the engine packages in the harness-managed workspace `node_modules/` — three.js (r185) + Rapier compat + three-mesh-bvh for 3D projects, Phaser 4.2.1 for 2D projects — imported by bare package name and type-checked against their real declarations; the harness seeds Phaser's official compact ESM build into the published bundle.
 - the `AGENTS.md` multiplayer section — the full protocol reference, the authority-selection rules (host-authoritative shared world by default for real-time action games with shared enemies/damage/pickups while player controls stay locally responsive; peer-owned state only when players are genuinely independent), stable live peer identity vs reconnect cid, relay-time interpolation, background-tab host handoff, host-migration notes, untrusted-input validation rules, and the required lobby/room-code/offline-fallback UX. Agents are told to design **multiplayer-first**, treating solo play as the same game with one player.
 
@@ -508,7 +541,9 @@ Project files plus `AGENTS.md` remain the durable source of truth, so after comp
 
 ## Persistence and recovery
 
-- Discord thread -> project/session mappings live in `data/bot/state.json`.
+Every accepted thread update is saved before it is marked queued, including its author and image attachments. Starting a batch atomically moves only its consumed requests into the in-flight turn record, leaving overflow and newly arrived requests queued. Startup restores queued requests even when no agent turn was running; replacement status messages retain the original request IDs so deleted Discord messages do not cause duplicate work. `/site queue` lists the waiting entries and can withdraw one from both the in-memory batch and SQLite; entries already claimed by a drain are reported as in-flight rather than removed under the running turn.
+
+- Discord thread -> project/session mappings live in SQLite at `data/bot/state.db`. A legacy `STATE_FILE` ending in `.json` is imported once into the adjacent `.db`; the JSON file is kept as a backup.
 - Project git worktrees live in `data/workspaces/<guild>/<thread>`.
 - Published sites live at `SITES_HOST_PATH`.
 - Agent auth/session state is in the `opencode-data` Docker volume.
@@ -537,6 +572,10 @@ This is suitable for a private/friends Discord or a carefully permissioned serve
 - Git credentials exist only in the bot container and are supplied to `git push` via `GIT_ASKPASS`; the model/agent container never receives the Forgejo token. The human Forgejo admin password is not mounted into the bot container.
 - A failed validation or git push leaves the previous published website in place.
 - Site limits are controlled with `MAX_SITE_BYTES`, `MAX_SITE_FILES`, and `MAX_PROMPT_CHARS`.
+
+## Local regression checks
+
+Run `npm --prefix bot test` for production import containment, restart-safe queue handoff, clean naming, collisions, interrupted renames and revert coverage. Run `npm --prefix bot run build` for the bot compiler check and `npm --prefix preview test` for preview regression checks. Tests use temporary files, local git repositories and a fake agent/Forgejo service; no Discord login or paid inference is needed.
 
 ## Updating pinned versions
 

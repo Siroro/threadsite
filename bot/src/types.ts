@@ -14,6 +14,13 @@ export interface CommitAuthor {
   email: string;
 }
 
+export interface QueuedRequest {
+  prompt: string;
+  statusMessageId: string;
+  author?: CommitAuthor;
+  images?: Array<{ mime: string; filename?: string; dataUrl: string }>;
+}
+
 export interface ProjectRecord {
   threadId: string;
   guildId: string;
@@ -30,6 +37,21 @@ export interface ProjectRecord {
   lastError?: string;
   /** Short hash of the commit belonging to the last accepted turn; used by /site revert. */
   lastCommit?: string;
+  /** Pre-turn commit; metadata-only rename commits belong to the same undo boundary. */
+  lastTurnBaseCommit?: string;
+  /** Stable relay tenant: renaming public URLs must not reset a game's world. */
+  multiplayerGameId?: string;
+  siteAliases?: string[];
+  pendingThreadName?: string;
+  /** Durable rename intent, resumed before further work if delivery is interrupted. */
+  pendingRename?: {
+    displayName: string;
+    siteSlug: string;
+    repoName: string;
+    fromSiteSlug: string;
+    fromRepoName: string;
+    repoId: number;
+  };
   /**
    * Full hash of the commit the bot last saw on the repo's main branch, set on
    * every bot push and adoption. The external-push poller compares against it,
@@ -64,19 +86,31 @@ export interface ProjectRecord {
    * Cleared on every terminal outcome.
    */
   pendingTurn?: {
+    id?: string;
     prompt: string;
     initial: boolean;
     startedAt: string;
     author?: CommitAuthor;
     /** The live status message the turn was streaming into, so recovery can resume editing it. */
     statusMessageId?: string;
+    beforeCommit?: string;
+    images?: QueuedRequest["images"];
   };
+  /**
+   * Prompts accumulated for the thread's next turn while a turn runs or waits
+   * (update coalescing), each with its status message id. Mirrored into the
+   * store so a restart can re-run messages that were acknowledged in the
+   * thread but never started; consumed entries are atomically handed to pendingTurn.
+   */
+  pendingQueue?: QueuedRequest[];
 }
 
 export interface PersistedSettings {
   model?: string;
   /** Model variant (reasoning effort) sent with every prompt; "auto" is stored as undefined. */
   effort?: string;
+  /** Stable HMAC secret shared with the Forgejo push webhooks; generated once. */
+  webhookSecret?: string;
 }
 
 export interface PersistedState {

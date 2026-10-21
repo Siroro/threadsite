@@ -5,14 +5,27 @@ import { Agent } from "undici";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { config } from "./config.js";
 import { log, logError, serializeError } from "./logger.js";
-import type { ProgressCallback } from "./progress.js";
-import { cleanThreadTitle, errorText, formatTokens, parseModel, truncate } from "./util.js";
+import type { ProgressCallback, ProgressUpdate } from "./progress.js";
+import { cleanThreadTitle, errorText, formatShortDuration, formatTokens, formatTokensPerSecond, formatUtcClock, parseModel, truncate } from "./util.js";
 
 // Sent to a session whose turn was killed by an agent-service restart. The
 // workspace keeps the turn's partial edits, so this must continue, not restart.
 const CONTINUE_AFTER_RESTART =
   "Your previous turn was interrupted by a service restart. Inspect the workspace for partial edits from that turn, "
-+ "continue exactly where it left off, finish the requested change (do not start over), and summarize what you did.";
+  + "continue exactly where it left off, finish the requested change (do not start over), and summarize what you did.";
+
+// Live throughput meter (⚡ tok/s): streaming part updates carry no token
+// counts, so live samples estimate tokens from text growth at ~5 bytes/token
+// (the heuristic opencode-tps uses); exact figures still arrive per step in
+// step-finish parts and drive the turn-average rate.
+const LIVE_TPS_WINDOW_MS = 5_000;
+const LIVE_TPS_STALE_MS = 1_500;
+const LIVE_TPS_MIN_WINDOW_MS = 250;
+const LIVE_STATS_EMIT_MS = 3_000;
+// A generation window longer than this means the anchors were lost (stream
+// drop, parked turn); counting it would sink the turn average, so the step's
+// tokens stay in the totals but drop out of the rate.
+const MAX_TIMED_STEP_MS = 10 * 60_000;
 
 // Undici's default 5-minute headers/body timeouts kill requests for long agent
 // turns while the turn keeps running server-side; 0 disables them and the
@@ -110,6 +123,8 @@ interface TurnState {
   /** Effective context window of the active model, when the provider list resolved it. */
   contextLimit?: number;
   cost: number;
+  /** Model steps (step-finish parts) completed this turn, root and subagents. */
+  steps: number;
   /** Session-lifetime compaction count; starts at the pre-turn baseline. */
   compactions: number;
   /** Value `compactions` started at, so per-turn deltas are distinguishable. */
@@ -121,6 +136,26 @@ interface TurnState {
   messageModels: Map<string, string>;
   /** Per-model token/cost totals; steps whose model was never observed land in "unknown". */
   modelUsage: Map<string, { inputTokens: number; outputTokens: number; cacheTokens: number; cost: number }>;
+  /** Turn start (prompt snapshot time): fallback timing anchor. */
+  startedAt: number;
+  /** Wall-clock generation time (ms) summed over timed steps; tok/s denominator. */
+  generationMs: number;
+  /** Output tokens produced within those timed windows; tok/s numerator. */
+  timedOutputTokens: number;
+  /** When each in-flight assistant message was first sighted; per-step timing anchor. */
+  stepStartAtByMessage: Map<string, number>;
+  /** Time of the most recent step-finish; fallback anchor for messages first seen late. */
+  lastStepFinishAt: number;
+  /** Rolling live-meter samples: estimated tokens with timestamps. */
+  liveTokenSamples: Array<{ tokens: number; at: number }>;
+  /** Last accumulated byte length per streaming part key, for growth sampling. */
+  livePartBytes: Map<string, number>;
+  /** Parts already sampled via delta events; growth sampling skips them so the two never double-count. */
+  deltaFedParts: Set<string>;
+  /** When the ⚡ live stats line was last emitted (throttle). */
+  lastLiveStatsAt: number;
+  /** Quota-exhaustion action observed mid-turn (free_tier_limit etc.), so the failure names the reset. */
+  quotaBlock?: QuotaBlock;
 }
 
 /** Token/context/cost accounting attributed to one model within a turn. */
@@ -151,16 +186,53 @@ export interface TurnUsage {
   contextLimit?: number;
   /** Compactions that fired during this turn. */
   compactions: number;
+  /** Model steps completed during the turn (root and subagent sessions). */
+  steps: number;
   /** Provider-reported USD cost across the turn; 0 when pricing is unknown. */
   cost: number;
+  /** Wall-clock generation time across timed model steps; tok/s denominator. */
+  generationMs?: number;
+  /** Output tokens produced within those timed windows; tok/s numerator. */
+  timedOutputTokens?: number;
+  /** Output-token throughput across timed steps (tokens/second); undefined when no step was timed. */
+  outputTokensPerSecond?: number;
   /** Per-model token/cost breakdown across every step of the turn. */
   models: ModelUsage[];
+}
+
+/** An image attachment forwarded into a prompt as a data-URI file part. */
+export interface PromptImage {
+  mime: string;
+  filename?: string;
+  dataUrl: string;
 }
 
 /** Result of one completed prompt: the assistant text plus its turn usage. */
 export interface PromptResult {
   text: string;
   usage: TurnUsage;
+}
+
+/**
+ * A provider quota exhausted until a known reset time — typically OpenCode's
+ * free-tier daily limit, whose retry action schedules the next attempt at the
+ * UTC-midnight reset. While a block is live, prompts to that provider fail
+ * fast instead of every turn re-discovering the outage the slow way.
+ */
+export interface QuotaBlock {
+  /** Provider the quota belongs to ("opencode" for the hosted free tier). */
+  provider: string;
+  /** Machine-readable action reason, e.g. "free_tier_limit". */
+  reason: string;
+  /** Short human title from the action, e.g. "Free limit reached". */
+  title?: string;
+  /** Action guidance, e.g. the subscribe pitch. */
+  message?: string;
+  /** Action link (subscribe/upgrade page), when offered. */
+  link?: string;
+  linkLabel?: string;
+  /** Epoch ms when the provider retries — effectively the quota reset. */
+  until: number;
 }
 
 /**
@@ -178,37 +250,107 @@ export class OpenCodeHarness {
     fetch: authFetch,
   });
 
-  // "providerID/modelID" -> advertised context limit, from OpenCode's provider list
-  // (which already reflects the generated SURPLUS_CONTEXT_CAP values). Cached briefly.
-  private providerLimits?: { expires: number; promise: Promise<Map<string, number>> };
+  // OpenCode's provider list (which already reflects the generated
+  // SURPLUS_CONTEXT_CAP values), cached briefly. Serves context-limit lookups
+  // and the /site-admin model autocomplete, so autocomplete keystrokes never
+  // stampede the agent service.
+  private providerCatalog?: { expires: number; promise: Promise<any[]> };
 
-  private providerContextLimits(): Promise<Map<string, number>> {
-    if (this.providerLimits && this.providerLimits.expires > Date.now()) return this.providerLimits.promise;
-    const promise = this.fetchProviderContextLimits();
-    this.providerLimits = { expires: Date.now() + 10 * 60_000, promise };
+  // Sessions this harness deliberately aborted (reset sweeps, recovery
+  // timeouts). An abort rejects the in-flight prompt with transport-shaped
+  // error text; prompt() consumes the mark so that rejection is failed
+  // outright instead of reconciling — the reconcile path can re-send the
+  // prompt (continueAfterRestart), resurrecting exactly the turn the abort
+  // stopped. Cleared when a prompt on the session completes normally or the
+  // session is swept away.
+  private readonly deliberateAborts = new Set<string>();
+
+  // Live quota blocks by provider (free-tier exhaustion until the scheduled
+  // retry/reset). Pruned lazily; a completed turn clears its provider's entry.
+  private readonly quotaBlocked = new Map<string, QuotaBlock>();
+
+  private providerList(): Promise<any[]> {
+    if (this.providerCatalog && this.providerCatalog.expires > Date.now()) return this.providerCatalog.promise;
+    const promise = this.fetchProviderList().catch((error: unknown) => {
+      log("debug", "opencode.provider_list_failed", { error: String(error) });
+      return [] as any[];
+    });
+    // Cache only a real catalog. A transient failure (service restart, brief
+    // unreachability) resolves [] and must not be pinned for the TTL — an
+    // empty catalog blanks context-limit lookups, the compaction threshold,
+    // and the model autocomplete for the next 10 minutes.
+    void promise.then((providers) => {
+      if (providers.length === 0) this.providerCatalog = undefined;
+    });
+    this.providerCatalog = { expires: Date.now() + 10 * 60_000, promise };
     return promise;
   }
 
-  private async fetchProviderContextLimits(): Promise<Map<string, number>> {
+  private async fetchProviderList(): Promise<any[]> {
+    const result = await this.client.provider.list({} as any);
+    const payload = unwrap<any>(result, "OpenCode provider list");
+    const providers = payload?.all;
+    if (!Array.isArray(providers)) throw new Error("OpenCode provider list returned an unexpected payload");
+    return providers;
+  }
+
+  /** "providerID/modelID" -> advertised context limit, derived from the cached provider list. */
+  private async providerContextLimits(): Promise<Map<string, number>> {
     const map = new Map<string, number>();
-    try {
-      const result = await this.client.provider.list({} as any);
-      const payload = unwrap<any>(result, "OpenCode provider list");
-      const providers = payload?.all;
-      if (!Array.isArray(providers)) return map;
-      for (const provider of providers) {
-        const providerID = typeof provider?.id === "string" ? provider.id : undefined;
-        const models = provider?.models;
-        if (!providerID || !models || typeof models !== "object") continue;
-        for (const [modelID, model] of Object.entries(models as Record<string, unknown>)) {
-          const context = Number((model as any)?.limit?.context ?? 0);
-          if (context > 0) map.set(`${providerID}/${modelID}`, context);
-        }
+    for (const provider of await this.providerList()) {
+      const providerID = typeof provider?.id === "string" ? provider.id : undefined;
+      const models = provider?.models;
+      if (!providerID || !models || typeof models !== "object") continue;
+      for (const [modelID, model] of Object.entries(models as Record<string, unknown>)) {
+        const context = Number((model as any)?.limit?.context ?? 0);
+        if (context > 0) map.set(`${providerID}/${modelID}`, context);
       }
-    } catch (error) {
-      log("debug", "opencode.provider_limits_failed", { error: String(error) });
     }
     return map;
+  }
+
+  /**
+   * Model ids selectable from Discord for the /site-admin model autocomplete:
+   * OpenCode's current zero-cost (free-tier) models plus every configured
+   * Surplus model, as "providerID/modelID" strings sorted alphabetically.
+   * Paid OpenCode models are omitted — this deployment rides the free tier
+   * plus Surplus.
+   */
+  async listSelectableModels(): Promise<string[]> {
+    const ids: string[] = [];
+    for (const provider of await this.providerList()) {
+      const providerID = typeof provider?.id === "string" ? provider.id : undefined;
+      if (providerID !== "opencode" && providerID !== "surplus") continue;
+      const models = provider?.models;
+      if (!models || typeof models !== "object") continue;
+      for (const [modelID, model] of Object.entries(models as Record<string, unknown>)) {
+        const cost = (model as any)?.cost;
+        const free = (cost && typeof cost === "object"
+          && Number(cost.input ?? 0) === 0 && Number(cost.output ?? 0) === 0)
+          || /-free$/.test(modelID);
+        if (providerID === "opencode" && !free) continue;
+        ids.push(`${providerID}/${modelID}`);
+      }
+    }
+    return ids.sort((a, b) => a.localeCompare(b));
+  }
+
+  /**
+   * Whether a provider/model accepts image attachments, from the cached
+   * provider catalog's per-model metadata. Undefined when the model is not in
+   * the catalog (or the catalog is unreachable) — callers treat that as "do
+   * not forward images" rather than guessing.
+   */
+  async modelAcceptsAttachments(providerID: string, modelID: string): Promise<boolean | undefined> {
+    for (const provider of await this.providerList()) {
+      if (typeof provider?.id !== "string" || provider.id !== providerID) continue;
+      const models = provider?.models;
+      if (!models || typeof models !== "object") continue;
+      const model = (models as Record<string, unknown>)[modelID] as { attachment?: boolean } | undefined;
+      if (!model) return undefined;
+      return model.attachment === true;
+    }
+    return undefined;
   }
 
   private async applyContextLimit(turn: TurnState, onProgress: ProgressCallback | undefined): Promise<void> {
@@ -217,8 +359,148 @@ export class OpenCodeHarness {
     const limit = (await this.providerContextLimits()).get(`${model.providerID}/${model.modelID}`);
     if (!limit || !turn.model || turn.model.providerID !== model.providerID) return;
     turn.contextLimit = limit;
-    const stats = composeStats(turn);
-    if (stats) emit(onProgress, { kind: "stats", text: stats });
+    emitPublicMetrics(turn, onProgress);
+  }
+
+  /**
+   * Live quota block for a provider, pruning expired entries first. A prompt
+   * without an explicit model follows the server's default provider, so any
+   * live block applies — failing fast with the named provider beats parking
+   * every queued turn on the same outage.
+   */
+  private quotaBlockedFor(providerID?: string): QuotaBlock | undefined {
+    for (const [provider, block] of this.quotaBlocked) {
+      if (block.until <= Date.now()) this.quotaBlocked.delete(provider);
+    }
+    if (!this.quotaBlocked.size) return undefined;
+    if (providerID) return this.quotaBlocked.get(providerID);
+    return [...this.quotaBlocked.values()].sort((a, b) => b.until - a.until)[0];
+  }
+
+  private clearQuotaBlock(providerID?: string): void {
+    if (providerID) this.quotaBlocked.delete(providerID);
+  }
+
+  /**
+   * First configured failover model that is not the current one and whose
+   * provider is not itself quota-blocked; undefined when none is usable.
+   */
+  private failoverCandidate(current?: { providerID: string; modelID: string }): string | undefined {
+    const currentId = current ? `${current.providerID}/${current.modelID}` : undefined;
+    for (const candidate of config.opencodeFailoverModels) {
+      if (candidate === currentId) continue;
+      let parsed: { providerID: string; modelID: string } | undefined;
+      try {
+        parsed = parseModel(candidate);
+      } catch {
+        continue; // malformed entry in OPENCODE_FAILOVER_MODELS
+      }
+      if (!parsed) continue;
+      if (this.quotaBlockedFor(parsed.providerID)) continue;
+      return candidate;
+    }
+    return undefined;
+  }
+
+  /**
+   * Failover model for a turn that failed mid-flight on a provider quota
+   * block (the outage was discovered by sending): the first healthy candidate
+   * that is not the model just attempted. Callers retry the same prompt with
+   * it once.
+   */
+  failoverModelForError(error: unknown, attemptedModel?: string): string | undefined {
+    const block = (error as { quotaBlock?: QuotaBlock } | undefined)?.quotaBlock;
+    if (!block || block.until <= Date.now()) return undefined;
+    let current: { providerID: string; modelID: string } | undefined;
+    try {
+      current = attemptedModel ? parseModel(attemptedModel) : undefined;
+    } catch {
+      current = undefined;
+    }
+    return this.failoverCandidate(current);
+  }
+
+  /** Quota context for error enrichment: what the turn observed, else any live block for the model's provider. */
+  private quotaContext(turn: TurnState, parsed?: { providerID: string; modelID: string }): QuotaBlock | undefined {
+    return turn.quotaBlock ?? this.quotaBlockedFor(parsed?.providerID);
+  }
+
+  /** Human-readable quota-breaker state (with cause) for the admin-only /site-admin status. */
+  quotaStatus(): string {
+    const blocks = [...this.quotaBlocked.entries()]
+      .filter(([, block]) => block.until > Date.now())
+      .map(([provider, block]) => `${provider} blocked until ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())}) · ${block.title ?? block.reason}${block.link ? ` · ${block.link}` : ""}`);
+    return blocks.length ? blocks.join("; ") : "no active quota blocks";
+  }
+
+  /**
+   * Process a "retry" session status. Transient backoff gets a wait-eta
+   * progress line. A quota action (free_tier_limit etc.) whose next attempt is
+   * scheduled past the block threshold — the daily reset, hours out — engages
+   * the fail-fast breaker, tells the user what happened and when it resets,
+   * and aborts the stalled session so the turn fails in seconds instead of
+   * waiting out the provider's retry schedule. Returns the block that engaged,
+   * so callers that are still waiting (reconcile) can stop.
+   */
+  private handleRetryStatus(
+    status: any,
+    context: { sessionId: string; directory?: string; onProgress?: ProgressCallback; turn?: TurnState; actor?: string },
+  ): QuotaBlock | undefined {
+    const attempt = status?.attempt;
+    const next = typeof status?.next === "number" ? status.next : undefined;
+    const retryIn = next !== undefined ? next - Date.now() : undefined;
+    const quota = classifyQuotaAction(status?.action);
+    if (!quota || (retryIn !== undefined && retryIn <= config.opencodeQuotaBlockMinRetryMs)) {
+      log("warn", "opencode.provider_retry", {
+        sessionId: context.sessionId,
+        attempt,
+        next,
+        message: status?.message,
+        action: status?.action,
+      });
+      emit(context.onProgress, {
+        text: `⏳ ${context.actor ?? "Provider"} retry #${attempt ?? "?"}`,
+        // A quota action's message ("Free usage exceeded…") is admin-only, so
+        // it is never echoed to the thread even when the retry looks transient.
+        detail: retryIn !== undefined && retryIn > 0
+          ? `next try in ~${formatShortDuration(retryIn)}`
+          : quota ? undefined
+          : truncate(String(status?.message ?? ""), 100) || undefined,
+      });
+      return undefined;
+    }
+
+    // No usable next (or one already past): a made-up short block still stops
+    // turn-after-turn from re-discovering the outage; it self-expires.
+    const block: QuotaBlock = { ...quota, until: retryIn !== undefined && retryIn > 0 ? next! : Date.now() + 30 * 60_000 };
+    this.quotaBlocked.set(block.provider, block);
+    if (context.turn) context.turn.quotaBlock = block;
+    log("error", "opencode.quota_blocked", {
+      sessionId: context.sessionId,
+      provider: block.provider,
+      reason: block.reason,
+      until: new Date(block.until).toISOString(),
+      message: block.message,
+      link: block.link,
+      attempt,
+      action: status?.action,
+    });
+    // Thread-facing wording stays generic ("provider unavailable"); the reason,
+    // subscribe pitch, and link are admin-only (log event + incident DM).
+    emit(context.onProgress, {
+      text: "🚫 AI provider unavailable",
+      detail: `retries resume ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())})`,
+    });
+    // The provider will not answer until the reset; waiting inside this turn
+    // only parks the Discord thread and the project queue for hours. Abort the
+    // session — prompt() treats the resulting rejection as a deliberate stop
+    // and fails the turn with this quota context instead of reconciling.
+    if (context.directory && !this.deliberateAborts.has(context.sessionId)) {
+      void this.abortTurn(context.directory, context.sessionId).catch((error: unknown) => {
+        log("warn", "opencode.quota_abort_failed", { sessionId: context.sessionId, error: serializeError(error) });
+      });
+    }
+    return block;
   }
 
   async createSession(directory: string, title: string): Promise<string> {
@@ -240,12 +522,47 @@ export class OpenCodeHarness {
     onProgress?: ProgressCallback,
     agent = "sitebuilder",
     variant?: string,
+    images?: readonly PromptImage[],
   ): Promise<PromptResult> {
+    let parsed = parseModel(model);
+    // Fail fast while the provider's quota is known-exhausted: sending anyway
+    // parks the turn (and the project queue) on a retry scheduled hours out —
+    // unless a healthy failover model is configured, in which case the turn
+    // switches to it instead of waiting out the outage.
+    const block = this.quotaBlockedFor(parsed?.providerID);
+    if (block) {
+      const fallback = this.failoverCandidate(parsed);
+      if (!fallback) {
+        log("warn", "opencode.prompt_blocked_by_quota", {
+          sessionId,
+          provider: block.provider,
+          model: model || "default",
+          until: new Date(block.until).toISOString(),
+        });
+        throw quotaBlockedError(block, model);
+      }
+      log("warn", "opencode.quota_failover", { sessionId, from: model || "default", to: fallback, provider: block.provider });
+      emit(onProgress, { text: `⚠️ \`${model || "the default model"}\` is quota-blocked — switching to \`${fallback}\`` });
+      model = fallback;
+      parsed = parseModel(fallback);
+    }
+    // Image attachments ride as data-URI file parts after the text — the same
+    // shape opencode's own paste-image path produces. Data URIs keep the bytes
+    // with the request, so nothing depends on the (expiring) Discord CDN URL.
     const body: any = {
       agent,
-      parts: [{ type: "text", text }],
+      parts: [
+        { type: "text", text },
+        ...(images?.length
+          ? images.map((image) => ({
+            type: "file",
+            mime: image.mime,
+            url: image.dataUrl,
+            ...(image.filename ? { filename: image.filename } : {}),
+          }))
+          : []),
+      ],
     };
-    const parsed = parseModel(model);
     if (parsed) body.model = parsed;
     // Model variant, i.e. reasoning effort (opencode "variant"). Omitted for "auto"
     // so the model's built-in default variant applies.
@@ -261,12 +578,22 @@ export class OpenCodeHarness {
       cacheTokens: 0,
       contextTokens: 0,
       cost: 0,
+      steps: 0,
       compactions: snapshot.compactions,
       baselineCompactions: snapshot.compactions,
       model: parsed ? { providerID: parsed.providerID, modelID: parsed.modelID } : undefined,
       childSessions: new Set<string>(),
       messageModels: new Map(),
       modelUsage: new Map(),
+      startedAt: snapshot.startedAt,
+      generationMs: 0,
+      timedOutputTokens: 0,
+      stepStartAtByMessage: new Map(),
+      lastStepFinishAt: snapshot.startedAt,
+      liveTokenSamples: [],
+      livePartBytes: new Map(),
+      deltaFedParts: new Set(),
+      lastLiveStatsAt: 0,
     };
     if (turn.model) void this.applyContextLimit(turn, onProgress);
     let stream = await this.startEventStream(directory, sessionId, onProgress, turn).catch((error) => {
@@ -274,20 +601,39 @@ export class OpenCodeHarness {
       return undefined;
     });
 
-    emit(onProgress, { text: "🧠 Model is working" });
+    emit(onProgress, { text: "🧠 Model is working", phase: "working" });
     log("info", "opencode.prompt_started", {
       sessionId,
       model: model || "default",
       variant: variant || "auto",
       promptChars: text.length,
+      images: images?.length ?? 0,
       baselineMessages: snapshot.ids.size,
     });
 
     try {
       const summary = await this.sendPromptRaw(directory, sessionId, body);
+      // A stale abort mark must not poison a later genuine-transport recovery
+      // on a session that carried on normally.
+      this.deliberateAborts.delete(sessionId);
+      // A completed turn proves the provider is answering again; drop a stale
+      // quota block (the reset landed early or the outage was misread).
+      this.clearQuotaBlock(turn.model?.providerID ?? parsed?.providerID);
       log("info", "opencode.prompt_completed", { sessionId, model: model || "default" });
       return { text: summary, usage: usageOf(turn) };
     } catch (error) {
+      // A deliberate abort (reset sweep, recovery timeout) rejects the request
+      // with the same transport-shaped text as a dropped connection, but
+      // reconciling it would be wrong: the reconcile path can re-send the
+      // prompt and resurrect the turn that was stopped on purpose. Fail it.
+      if (this.deliberateAborts.delete(sessionId)) {
+        const enriched = enrichProviderError(error, model, usageOf(turn), this.quotaContext(turn, parsed));
+        logError("opencode.prompt_aborted", enriched, {
+          sessionId,
+          model: model || "default",
+        });
+        throw enriched;
+      }
       if (isTransportLikeError(error)) {
         log("warn", "opencode.prompt_transport_lost", {
           sessionId,
@@ -323,7 +669,7 @@ export class OpenCodeHarness {
           emit(onProgress, { text: "✅ Recovered the completed agent turn" });
           return { text: recovered, usage: usageOf(turn) };
         } catch (recoveryError) {
-          const enriched = enrichProviderError(recoveryError, model, usageOf(turn));
+          const enriched = enrichProviderError(recoveryError, model, usageOf(turn), this.quotaContext(turn, parsed));
           logError("opencode.prompt_recovery_failed", enriched, {
             sessionId,
             model: model || "default",
@@ -335,7 +681,7 @@ export class OpenCodeHarness {
         }
       }
 
-      const enriched = enrichProviderError(error, model, usageOf(turn));
+      const enriched = enrichProviderError(error, model, usageOf(turn), this.quotaContext(turn, parsed));
       logError("opencode.prompt_failed", enriched, {
         sessionId,
         model: model || "default",
@@ -570,10 +916,15 @@ export class OpenCodeHarness {
         const type = (lastStatus as any)?.type;
 
         if (type === "retry") {
-          emit(onProgress, {
-            text: `⏳ Provider retry #${(lastStatus as any)?.attempt ?? "?"}`,
-            detail: truncate(String((lastStatus as any)?.message ?? ""), 100) || undefined,
-          });
+          const block = this.handleRetryStatus(lastStatus, { sessionId, directory, onProgress });
+          if (block) {
+            const error = new OpenCodeReconciliationError(
+              `Provider quota exhausted while reconciling: ${block.reason} on ${block.provider}, retries resume ~${formatUtcClock(block.until)}.`,
+              { phase: "quota-blocked", quotaBlock: block, model },
+            );
+            (error as any).quotaBlock = block;
+            throw error;
+          }
         } else if (type === "busy") {
           idleWithoutTurnSince = undefined;
         } else {
@@ -630,9 +981,17 @@ export class OpenCodeHarness {
       agent: body.agent as string | undefined,
       model: body.model as { providerID: string; modelID: string } | undefined,
       variant: body.variant as string | undefined,
-      parts: body.parts as Array<{ type: string; text: string }>,
+      parts: body.parts as Array<{ type: "text"; text: string } | { type: "file"; mime: string; url: string; filename?: string }>,
     } as any);
-    const response = unwrap<{ parts?: Array<{ type: string; text?: string }> }>(result, "OpenCode prompt");
+    const response = unwrap<{ info?: { error?: unknown }; parts?: Array<{ type: string; text?: string }> }>(result, "OpenCode prompt");
+    // The session endpoint can return HTTP 200 with a terminal assistant error
+    // and no text. Treating that as success would build/publish an unfinished
+    // turn, including when a browser tool or its provider request failed.
+    if (response.info?.error) {
+      throw new OpenCodeRequestError(`OpenCode assistant failed: ${safeJson(response.info.error)}`, {
+        operation: "OpenCode prompt", assistantError: response.info.error,
+      });
+    }
     return extractText(response.parts);
   }
 
@@ -709,14 +1068,25 @@ export class OpenCodeHarness {
     return data;
   }
 
-  /** Best-effort HTTP abort of a still-running turn; used when recovery stops waiting. */
+  /** Best-effort HTTP abort of a still-running turn; used when recovery or a reset stops waiting. */
   async abortTurn(directory: string, sessionId: string): Promise<boolean> {
-    const result = await this.client.session.abort({
-      sessionID: sessionId,
-      directory,
-    } as any);
-    unwrap(result, "OpenCode abort");
-    log("warn", "opencode.session_aborted_after_recovery_timeout", { sessionId });
+    // Mark BEFORE the request: the service rejects the in-flight prompt as soon
+    // as it processes the abort, so the prompt's catch can run before this
+    // await resumes. Marking afterwards let that rejection race past and the
+    // reconcile path then resurrected the very turn being stopped.
+    this.deliberateAborts.add(sessionId);
+    try {
+      const result = await this.client.session.abort({
+        sessionID: sessionId,
+        directory,
+      } as any);
+      unwrap(result, "OpenCode abort");
+    } catch (error) {
+      // The abort never landed, so nothing will consume the mark.
+      this.deliberateAborts.delete(sessionId);
+      throw error;
+    }
+    log("warn", "opencode.session_aborted", { sessionId });
     return true;
   }
 
@@ -743,17 +1113,15 @@ export class OpenCodeHarness {
   }
 
   /**
-   * Server-wide hard stop: reject every pending question, abort every busy
-   * turn, wait for the aborts to land, then delete every session except the
-   * `keep` set (freshly created replacements). Covers sessions the Discord
-   * store no longer tracks — orphans, subagent children, abandoned titler
-   * runs — so nothing on the service can keep working or be resumed.
+   * Stop a set of agent sessions: reject their pending questions (a parked
+   * question holds its turn open), abort their busy turns, wait briefly for
+   * the aborts to land, then delete the sessions. Best-effort per step — a
+   * failed reject/abort/delete is logged and the sweep moves on.
    */
-  async stopAllSessions(keep: ReadonlySet<string>): Promise<{ sessions: number; aborted: number }> {
-    const all = await this.listAllSessions();
-    const targets = all.filter((session) => !keep.has(session.id));
+  private async sweepSessions(targets: Array<{ id: string; directory: string }>): Promise<{ sessions: number; aborted: number }> {
     const directoryOf = new Map(targets.map((session) => [session.id, session.directory]));
-    const busy = await this.listBusySessionIds().catch(() => new Set<string>());
+    const busyAll = await this.listBusySessionIds().catch(() => new Set<string>());
+    const busy = new Set(targets.filter((session) => busyAll.has(session.id)).map((session) => session.id));
 
     // A turn parked on a question must be released before an abort can land;
     // question listing is directory-scoped, so walk the known ones.
@@ -761,7 +1129,7 @@ export class OpenCodeHarness {
       const pending = await this.listPendingQuestions(directory).catch(() => []);
       for (const request of pending) {
         await this.rejectQuestion(directory, request.id).catch((error) => {
-          log("warn", "opencode.admin_reset_question_reject_failed", { requestID: request.id, directory, error: serializeError(error) });
+          log("warn", "opencode.reset_question_reject_failed", { requestID: request.id, directory, error: serializeError(error) });
         });
       }
     }
@@ -771,7 +1139,7 @@ export class OpenCodeHarness {
       const directory = directoryOf.get(sessionId);
       if (!directory) continue;
       const ok = await this.abortTurn(directory, sessionId).catch((error) => {
-        log("warn", "opencode.admin_reset_abort_failed", { sessionId, directory, error: serializeError(error) });
+        log("warn", "opencode.reset_abort_failed", { sessionId, directory, error: serializeError(error) });
         return false;
       });
       if (ok) aborted += 1;
@@ -779,17 +1147,49 @@ export class OpenCodeHarness {
 
     // Give the aborts a moment to land so the deletes do not race dying turns.
     for (let i = 0; i < 20 && busy.size > 0; i += 1) {
-      const stillBusy = await this.listBusySessionIds().catch(() => busy);
-      if (stillBusy.size === 0) break;
+      const stillBusy = await this.listBusySessionIds().catch(() => undefined);
+      if (stillBusy && ![...busy].some((id) => stillBusy.has(id))) break;
       await sleep(500);
     }
 
     for (const session of targets) {
       await this.client.session.delete({ sessionID: session.id, directory: session.directory || undefined } as any)
-        .catch((error: unknown) => log("warn", "opencode.admin_reset_delete_failed", { sessionId: session.id, directory: session.directory, error: serializeError(error) }));
+        .catch((error: unknown) => log("warn", "opencode.reset_delete_failed", { sessionId: session.id, directory: session.directory, error: serializeError(error) }));
+      this.deliberateAborts.delete(session.id);
     }
-    log("warn", "opencode.admin_reset_sweep", { sessions: targets.length, aborted, busySeen: busy.size, kept: keep.size });
     return { sessions: targets.length, aborted };
+  }
+
+  /**
+   * Server-wide hard stop (/site-admin reset): delete every session except
+   * the `keep` set (freshly created replacements). Covers sessions the
+   * Discord store no longer tracks — orphans, subagent children, abandoned
+   * titler runs — so nothing on the service can keep working or be resumed.
+   */
+  async stopAllSessions(keep: ReadonlySet<string>): Promise<{ sessions: number; aborted: number }> {
+    const all = await this.listAllSessions();
+    const targets = all.filter((session) => !keep.has(session.id));
+    const sweep = await this.sweepSessions(targets);
+    log("warn", "opencode.admin_reset_sweep", { sessions: sweep.sessions, aborted: sweep.aborted, kept: keep.size });
+    return sweep;
+  }
+
+  /**
+   * Directory-scoped hard stop (/site reset): stop every session living in
+   * this project's workspace — the tracked session (targeted by id even when
+   * the service no longer lists it) plus same-directory strays like subagent
+   * children and abandoned titler runs — except the `keep` set (the freshly
+   * created replacement).
+   */
+  async stopSessionsInDirectory(directory: string, knownSessionId: string, keep: ReadonlySet<string>): Promise<{ sessions: number; aborted: number }> {
+    const all = await this.listAllSessions();
+    const targets = new Map<string, { id: string; directory: string }>();
+    if (knownSessionId && !keep.has(knownSessionId)) targets.set(knownSessionId, { id: knownSessionId, directory });
+    for (const session of all) {
+      if (keep.has(session.id) || session.directory !== directory) continue;
+      targets.set(session.id, session);
+    }
+    return this.sweepSessions([...targets.values()]);
   }
 
   /** Answer a pending question request (one label list per asked question, in order). */
@@ -842,7 +1242,7 @@ export class OpenCodeHarness {
       throw new Error("OpenCode event stream returned no body");
     }
 
-    const done = this.consumeEventStream(response.body, sessionId, onProgress, controller.signal, turn)
+    const done = this.consumeEventStream(response.body, directory, sessionId, onProgress, controller.signal, turn)
       .catch((error) => {
         if (!controller.signal.aborted) log("warn", "opencode.event_stream_failed", { sessionId, error: serializeError(error) });
       });
@@ -855,6 +1255,7 @@ export class OpenCodeHarness {
 
   private async consumeEventStream(
     body: ReadableStream<Uint8Array>,
+    directory: string,
     sessionId: string,
     onProgress: ProgressCallback | undefined,
     signal: AbortSignal,
@@ -877,7 +1278,7 @@ export class OpenCodeHarness {
           const payload = line.slice(5).trim();
           if (!payload) continue;
           try {
-            this.handleEvent(JSON.parse(payload), sessionId, onProgress, turn);
+            this.handleEvent(JSON.parse(payload), directory, sessionId, onProgress, turn);
           } catch (error) {
             log("debug", "opencode.event_parse_failed", { sessionId, error: String(error) });
           }
@@ -888,7 +1289,7 @@ export class OpenCodeHarness {
     }
   }
 
-  private handleEvent(event: any, sessionId: string, onProgress: ProgressCallback | undefined, turn: TurnState): void {
+  private handleEvent(event: any, directory: string, sessionId: string, onProgress: ProgressCallback | undefined, turn: TurnState): void {
     const properties = event?.properties ?? {};
     const eventSessionId = properties.sessionID ?? properties.part?.sessionID ?? properties.info?.sessionID;
     if (eventSessionId && eventSessionId !== sessionId) {
@@ -897,7 +1298,7 @@ export class OpenCodeHarness {
       // turn stats; everything else from unknown sessions stays filtered out.
       const isChild = eventSessionId && turn.childSessions.has(eventSessionId);
       if (!isChild) return;
-      this.handleChildEvent(event, properties, eventSessionId, sessionId, onProgress, turn);
+      this.handleChildEvent(event, properties, eventSessionId, directory, sessionId, onProgress, turn);
       return;
     }
 
@@ -910,11 +1311,21 @@ export class OpenCodeHarness {
       return;
     }
 
+    if (event?.type === "message.part.delta") {
+      sampleStreamDelta(properties, turn, onProgress);
+      return;
+    }
+
     if (event?.type === "message.updated") {
       // Track assistant message IDs so streaming text parts can be attributed to the
-      // model's output rather than the echoed user prompt.
+      // model's output rather than the echoed user prompt. The first sighting of
+      // a message also opens its generation window for the tok/s rate.
       if (properties.info?.role === "assistant" && properties.info.id) {
-        turn.assistantMessageIds.add(String(properties.info.id));
+        const id = String(properties.info.id);
+        if (!turn.assistantMessageIds.has(id)) {
+          turn.assistantMessageIds.add(id);
+          turn.stepStartAtByMessage.set(id, Date.now());
+        }
         const providerID = properties.info.providerID;
         const modelID = properties.info.modelID;
         if (providerID && modelID) {
@@ -931,16 +1342,7 @@ export class OpenCodeHarness {
     if (event?.type === "session.status") {
       const status = properties.status;
       if (status?.type === "busy") emit(onProgress, { text: "🧠 Model is thinking" });
-      if (status?.type === "retry") {
-        log("warn", "opencode.provider_retry", {
-          sessionId,
-          attempt: status.attempt,
-          next: status.next,
-          message: status.message,
-          action: status.action,
-        });
-        emit(onProgress, { text: `⏳ Provider retry #${status.attempt ?? "?"}` });
-      }
+      if (status?.type === "retry") this.handleRetryStatus(status, { sessionId, directory, onProgress, turn });
       return;
     }
 
@@ -1006,8 +1408,7 @@ export class OpenCodeHarness {
       turn.compactions += 1;
       log("info", "opencode.session_compacted", { sessionId, total: turn.compactions });
       emit(onProgress, { text: "🧠 Context compacted — continuing automatically" });
-      const stats = composeStats(turn);
-      if (stats) emit(onProgress, { kind: "stats", text: stats });
+      emitPublicMetrics(turn, onProgress);
       return;
     }
 
@@ -1019,6 +1420,10 @@ export class OpenCodeHarness {
 
     if (event?.type === "todo.updated") {
       const todos = Array.isArray(properties.todos) ? properties.todos : [];
+      emit(onProgress, { kind: "plan", text: "Updated plan", plan: todos.map((todo: any) => ({
+        content: String(todo?.content ?? ""),
+        status: ["completed", "cancelled", "in_progress"].includes(todo?.status) ? todo.status : "pending",
+      })) });
       const done = todos.filter((todo: any) => todo?.status === "completed" || todo?.status === "cancelled").length;
       const active = todos.find((todo: any) => todo?.status === "in_progress");
       if (active?.content) {
@@ -1038,23 +1443,38 @@ export class OpenCodeHarness {
     if (part.type === "step-finish") {
       const step = stepFigures(part);
       accumulateStep(turn, step, part.messageID);
+      turn.liveTokenSamples.length = 0;
       // Every step re-processes the full context, so billed input accumulates
       // per step while the context display only wants the newest window size.
       turn.contextTokens = step.inputTokens;
-      const stats = composeStats(turn);
-      if (stats) emit(onProgress, { kind: "stats", text: stats });
+      emitPublicMetrics(turn, onProgress);
       return;
     }
 
     if (part.type === "text" && !part.synthetic && turn.assistantMessageIds.has(part.messageID)) {
+      samplePartGrowth(turn, part, onProgress);
       const text = String(part.text ?? "").trim();
       if (text) emit(onProgress, { kind: "thought", text });
+      return;
+    }
+
+    // Reasoning streams as its own part type and often dominates output tokens;
+    // it feeds the live meter (not the thought line, which stays prose-only).
+    if (part.type === "reasoning" && !part.synthetic && turn.assistantMessageIds.has(part.messageID)) {
+      samplePartGrowth(turn, part, onProgress);
       return;
     }
 
     if (part.type !== "tool") return;
     const state = part.state ?? {};
     const tool = String(part.tool || "tool");
+
+    // Generation is paused while tools run; drop live samples and settle the
+    // stats line back to completed-step figures so the ⚡ rate cannot go stale.
+    if (turn.liveTokenSamples.length && ["running", "completed", "error"].includes(String(state.status))) {
+      turn.liveTokenSamples.length = 0;
+      emitPublicMetrics(turn, onProgress);
+    }
 
     if (state.status === "error") {
       log("warn", "opencode.tool_error", {
@@ -1063,13 +1483,13 @@ export class OpenCodeHarness {
         error: state.error,
         title: state.title,
       });
-      emit(onProgress, { text: `⚠️ ${toolLabel(tool)} hit an error` });
+      emit(onProgress, { text: `⚠️ ${toolLabel(tool)} hit an error`, tool: { id: `${sessionId}:${part.callID ?? part.id}`, name: tool, status: "error" } });
       return;
     }
 
     if (state.status !== "running" && state.status !== "completed") return;
-    const progress = describeTool(tool, state.input, state.status, state.title);
-    if (progress) emit(onProgress, progress);
+    const progress = describeTool(tool, state.input, state.status, state.title, directory);
+    if (progress) emit(onProgress, { ...progress, tool: { id: `${sessionId}:${part.callID ?? part.id}`, name: tool, status: state.status } });
   }
 
   // Events from a subagent's child session: attributed, prefixed activity lines
@@ -1078,16 +1498,30 @@ export class OpenCodeHarness {
     event: any,
     properties: any,
     childSessionId: string,
+    directory: string,
     rootSessionId: string,
     onProgress: ProgressCallback | undefined,
     turn: TurnState,
   ): void {
     const label = "🤖 Subagent";
 
+    if (event?.type === "message.part.delta") {
+      sampleStreamDelta(properties, turn, onProgress);
+      return;
+    }
+
     if (event?.type === "message.updated") {
       const info = properties.info;
-      if (info?.role === "assistant" && info.id && info.providerID && info.modelID) {
-        turn.messageModels.set(String(info.id), `${info.providerID}/${info.modelID}`);
+      if (info?.role === "assistant" && info.id) {
+        const id = String(info.id);
+        // First sighting opens the child step's generation window (tok/s rate).
+        if (!turn.assistantMessageIds.has(id)) {
+          turn.assistantMessageIds.add(id);
+          turn.stepStartAtByMessage.set(id, Date.now());
+        }
+        if (info.providerID && info.modelID) {
+          turn.messageModels.set(id, `${info.providerID}/${info.modelID}`);
+        }
       }
       return;
     }
@@ -1095,7 +1529,7 @@ export class OpenCodeHarness {
     if (event?.type === "session.status") {
       const type = properties.status?.type;
       if (type === "busy") emit(onProgress, { text: `${label} is working` });
-      else if (type === "retry") emit(onProgress, { text: `⏳ ${label} retrying (#${properties.status?.attempt ?? "?"})` });
+      else if (type === "retry") this.handleRetryStatus(properties.status, { sessionId: childSessionId, directory, onProgress, turn, actor: "Subagent" });
       return;
     }
 
@@ -1105,19 +1539,32 @@ export class OpenCodeHarness {
 
     if (part.type === "step-finish") {
       accumulateStep(turn, stepFigures(part), part.messageID);
-      const stats = composeStats(turn);
-      if (stats) emit(onProgress, { kind: "stats", text: stats });
+      turn.liveTokenSamples.length = 0;
+      emitPublicMetrics(turn, onProgress);
       return;
     }
 
     if (part.type === "text" && !part.synthetic) {
+      samplePartGrowth(turn, part, onProgress);
       const text = singleLineText(String(part.text ?? ""));
       if (text) emit(onProgress, { text: `${label}: ${truncate(text, 100)}` });
       return;
     }
 
+    if (part.type === "reasoning" && !part.synthetic) {
+      samplePartGrowth(turn, part, onProgress);
+      return;
+    }
+
     if (part.type !== "tool") return;
     const state = part.state ?? {};
+
+    // Subagent tool runs pause generation just like root ones; settle the ⚡ line.
+    if (turn.liveTokenSamples.length && ["running", "completed", "error"].includes(String(state.status))) {
+      turn.liveTokenSamples.length = 0;
+      emitPublicMetrics(turn, onProgress);
+    }
+
     if (state.status === "error") {
       log("warn", "opencode.subagent_tool_error", {
         sessionId: rootSessionId,
@@ -1125,12 +1572,13 @@ export class OpenCodeHarness {
         tool: String(part.tool || "tool"),
         error: state.error,
       });
-      emit(onProgress, { text: `⚠️ ${label} tool error` });
+      emit(onProgress, { text: `⚠️ ${label} tool error`, tool: { id: `${childSessionId}:${part.callID ?? part.id}`, name: String(part.tool || "tool"), status: "error" } });
       return;
     }
     if (state.status !== "running" && state.status !== "completed") return;
-    const described = describeTool(String(part.tool || "tool"), state.input, state.status, state.title);
-    if (described) emit(onProgress, { text: `${label} — ${described.text}`, detail: described.detail });
+    const described = describeTool(String(part.tool || "tool"), state.input, state.status, state.title, directory);
+    if (described) emit(onProgress, { text: `${label} — ${described.text}`, detail: described.detail,
+      tool: { id: `${childSessionId}:${part.callID ?? part.id}`, name: String(part.tool || "tool"), status: state.status } });
   }
 }
 
@@ -1178,6 +1626,7 @@ function accumulateStep(
   step: { inputTokens: number; outputTokens: number; cacheTokens: number; cost: number },
   messageId: unknown,
 ): void {
+  turn.steps += 1;
   turn.outputTokens += step.outputTokens;
   turn.inputTokens += step.inputTokens;
   turn.cacheTokens += step.cacheTokens;
@@ -1190,15 +1639,126 @@ function accumulateStep(
   bucket.cacheTokens += step.cacheTokens;
   bucket.cost += step.cost;
   turn.modelUsage.set(key, bucket);
+  closeStepWindow(turn, step, messageId);
 }
 
-function composeStats(turn: TurnState): string {
-  const text = formatTurnUsage(usageOf(turn));
-  return text ? `🧠 ${text}` : "";
+/**
+ * Close the finished step's generation window: its output tokens over the time
+ * from the message's first sighting to its step-finish. Anchoring per message
+ * keeps tool execution and question waits between steps out of the rate, and
+ * stays correct when subagent children generate concurrently. Steps whose
+ * window cannot be trusted (anchors lost to a stream drop, or absurdly long)
+ * keep their tokens in the totals but drop out of the rate.
+ */
+function closeStepWindow(
+  turn: TurnState,
+  step: { outputTokens: number },
+  messageId: unknown,
+): void {
+  const finishedAt = Date.now();
+  if (typeof messageId === "string") {
+    const startedAt = turn.stepStartAtByMessage.get(messageId) ?? turn.lastStepFinishAt;
+    turn.stepStartAtByMessage.delete(messageId);
+    const elapsed = finishedAt - startedAt;
+    if (step.outputTokens > 0 && elapsed > 0 && elapsed <= MAX_TIMED_STEP_MS) {
+      turn.generationMs += elapsed;
+      turn.timedOutputTokens += step.outputTokens;
+    }
+    // The message is finished; its live-meter tracking goes with it.
+    const prefix = `${messageId}:`;
+    for (const key of turn.livePartBytes.keys()) if (key.startsWith(prefix)) turn.livePartBytes.delete(key);
+    for (const key of turn.deltaFedParts) if (key.startsWith(prefix)) turn.deltaFedParts.delete(key);
+  }
+  // Advance even for untimed steps so the next fallback window starts fresh.
+  turn.lastStepFinishAt = finishedAt;
+}
+
+/** Rough token estimate for live metering: ~5 bytes per token, like opencode-tps. */
+function estimateTokens(bytes: number): number {
+  return Math.max(1, Math.ceil(bytes / 5));
+}
+
+function pushLiveSample(turn: TurnState, tokens: number): void {
+  const now = Date.now();
+  turn.liveTokenSamples.push({ tokens, at: now });
+  const cutoff = now - LIVE_TPS_WINDOW_MS;
+  while (turn.liveTokenSamples.length && turn.liveTokenSamples[0].at < cutoff) turn.liveTokenSamples.shift();
+}
+
+/**
+ * Live-meter sampling from a streaming delta event, when the service forwards
+ * them over SSE. Deltas are exact chunks, so a part that has produced deltas
+ * stops growth-sampling — the two would double-count.
+ */
+function sampleStreamDelta(properties: any, turn: TurnState, onProgress: ProgressCallback | undefined): void {
+  const part = properties?.part;
+  const delta = typeof properties?.delta === "string" ? properties.delta : undefined;
+  const messageID = typeof part?.messageID === "string"
+    ? part.messageID
+    : (typeof properties?.messageID === "string" ? properties.messageID : "");
+  if (!part?.id || !messageID || !delta) return;
+  turn.deltaFedParts.add(`${messageID}:${part.id}`);
+  pushLiveSample(turn, estimateTokens(Buffer.byteLength(delta, "utf8")));
+  emitLiveStats(turn, onProgress);
+}
+
+/**
+ * Live-meter sampling from a message.part.updated text/reasoning part: the part
+ * carries its accumulated text, so growth since the last sighting becomes one
+ * estimated-token sample. Parts fed by delta events are skipped.
+ */
+function samplePartGrowth(turn: TurnState, part: any, onProgress: ProgressCallback | undefined): void {
+  if (!part?.id || typeof part.text !== "string") return;
+  const key = `${part.messageID}:${part.id}`;
+  if (turn.deltaFedParts.has(key)) return;
+  const bytes = Buffer.byteLength(part.text, "utf8");
+  const previous = turn.livePartBytes.get(key) ?? 0;
+  turn.livePartBytes.set(key, bytes);
+  if (bytes <= previous) return;
+  pushLiveSample(turn, estimateTokens(bytes - previous));
+  emitLiveStats(turn, onProgress);
+}
+
+/** Emit the ⚡ live tok/s stats line, throttled; skips when the stream has gone quiet. */
+function emitLiveStats(turn: TurnState, onProgress: ProgressCallback | undefined): void {
+  const now = Date.now();
+  if (now - turn.lastLiveStatsAt < LIVE_STATS_EMIT_MS) return;
+  const samples = turn.liveTokenSamples;
+  const last = samples[samples.length - 1];
+  if (!last || now - last.at > LIVE_TPS_STALE_MS) return;
+  let tokens = 0;
+  let duration = 0;
+  for (let i = 0; i < samples.length; i += 1) {
+    tokens += samples[i].tokens;
+    if (i > 0) duration += samples[i].at - samples[i - 1].at;
+  }
+  // Divide by the span the samples cover, not the whole window, so generation
+  // that began mid-window is not undercounted; the tail cap keeps a single
+  // burst from dividing by near-zero.
+  duration += Math.min(now - last.at, 1_000);
+  const rate = (tokens / Math.max(duration, LIVE_TPS_MIN_WINDOW_MS)) * 1000;
+  turn.lastLiveStatsAt = now;
+  emitPublicMetrics(turn, onProgress, rate);
+}
+
+function emitPublicMetrics(turn: TurnState, callback: ProgressCallback | undefined, liveRate?: number): void {
+  const usage = usageOf(turn);
+  emit(callback, {
+    kind: "metrics", text: "Usage updated",
+    metrics: {
+      contextTokens: usage.contextTokens, contextLimit: usage.contextLimit,
+      inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheTokens: usage.cacheTokens,
+      steps: usage.steps, compactions: usage.compactions, liveTokensPerSecond: liveRate,
+      outputTokensPerSecond: usage.outputTokensPerSecond,
+    },
+  });
 }
 
 /** Snapshot of a TurnState's user-facing usage fields. */
 function usageOf(turn: TurnState): TurnUsage {
+  const rate = turn.generationMs > 0 && turn.timedOutputTokens > 0
+    ? (turn.timedOutputTokens * 1000) / turn.generationMs
+    : undefined;
   return {
     inputTokens: turn.inputTokens,
     outputTokens: turn.outputTokens,
@@ -1206,14 +1766,18 @@ function usageOf(turn: TurnState): TurnUsage {
     contextTokens: turn.contextTokens,
     contextLimit: turn.contextLimit,
     compactions: turn.compactions - turn.baselineCompactions,
+    steps: turn.steps,
     cost: turn.cost,
+    ...(rate !== undefined
+      ? { outputTokensPerSecond: rate, generationMs: turn.generationMs, timedOutputTokens: turn.timedOutputTokens }
+      : {}),
     models: [...turn.modelUsage.entries()]
       .map(([model, usage]) => ({ model, ...usage }))
       .sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens)),
   };
 }
 
-/** Public turn-usage line: current context size, cumulative billed tokens, cache share, cost. */
+/** Public turn-usage line: context size, cumulative billed tokens, cache share, model steps. */
 export function formatTurnUsage(usage: TurnUsage): string {
   const parts: string[] = [];
   if (usage.contextTokens > 0) {
@@ -1228,6 +1792,12 @@ export function formatTurnUsage(usage: TurnUsage): string {
     const cached = usage.cacheTokens > 0 ? ` (${formatTokens(usage.cacheTokens)} cached)` : "";
     parts.push(`in ${formatTokens(usage.inputTokens)}${cached} · out ${formatTokens(usage.outputTokens)} tok`);
   }
+  // Turn-average throughput: exact provider token counts over the wall-clock
+  // generation windows timed across the turn's model steps.
+  if (usage.outputTokensPerSecond !== undefined && usage.outputTokensPerSecond > 0) {
+    parts.push(`~${formatTokensPerSecond(usage.outputTokensPerSecond)} tok/s`);
+  }
+  if (usage.steps > 0) parts.push(`${usage.steps} step${usage.steps === 1 ? "" : "s"}`);
   // Cost is deliberately absent: token counts are fine to show publicly, but
   // spend data is admin-only (/site-admin usage).
   if (usage.compactions > 0) parts.push(`compacted ${usage.compactions}×`);
@@ -1238,6 +1808,8 @@ export function formatTurnUsage(usage: TurnUsage): string {
 export function addUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): TurnUsage | undefined {
   if (!a) return b;
   if (!b) return a;
+  const generationMs = (a.generationMs ?? 0) + (b.generationMs ?? 0);
+  const timedOutputTokens = (a.timedOutputTokens ?? 0) + (b.timedOutputTokens ?? 0);
   // Context size/limit describe the model's latest window, not amounts to sum.
   return {
     inputTokens: a.inputTokens + b.inputTokens,
@@ -1246,7 +1818,13 @@ export function addUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): Tu
     contextTokens: b.contextTokens || a.contextTokens,
     contextLimit: b.contextLimit ?? a.contextLimit,
     compactions: a.compactions + b.compactions,
+    steps: a.steps + b.steps,
     cost: a.cost + b.cost,
+    // Throughput combines as summed numerator over summed denominator, not an
+    // average of rates, so a fast title pass cannot skew a slow build turn.
+    ...(generationMs > 0 && timedOutputTokens > 0
+      ? { generationMs, timedOutputTokens, outputTokensPerSecond: (timedOutputTokens * 1000) / generationMs }
+      : {}),
     models: mergeModelUsage([...(a.models ?? []), ...(b.models ?? [])]),
   };
 }
@@ -1266,12 +1844,12 @@ export function mergeModelUsage(entries: ModelUsage[]): ModelUsage[] {
   return [...merged.values()].sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens));
 }
 
-function emit(callback: ProgressCallback | undefined, update: { text: string; detail?: string; kind?: "activity" | "thought" | "stats" | "question"; question?: { requestID: string; questions: any[]; resolved?: boolean } }): void {
+function emit(callback: ProgressCallback | undefined, update: ProgressUpdate): void {
   if (!callback) return;
   Promise.resolve(callback(update)).catch((error) => log("debug", "progress.callback_failed", { error: String(error) }));
 }
 
-function describeTool(tool: string, input: any, status: string, title?: string): { text: string; detail?: string } | undefined {
+function describeTool(tool: string, input: any, status: string, title?: string, directory?: string): { text: string; detail?: string } | undefined {
   const normalized = tool.toLowerCase().replace(/-/g, "_");
   if (normalized === "task") {
     const agent = typeof input?.agent === "string" && input.agent ? input.agent : "subagent";
@@ -1283,34 +1861,92 @@ function describeTool(tool: string, input: any, status: string, title?: string):
   }
   if (normalized === "websearch") return { text: status === "running" ? "🔎 Searching the web" : "🔎 Web research gathered" };
   if (normalized === "webfetch") return { text: status === "running" ? "🌐 Reading a web reference" : "🌐 Web reference read" };
+  if (normalized.startsWith("playwright_")) {
+    const screenshot = normalized.includes("screenshot");
+    return { text: status === "running"
+      ? screenshot ? "📸 Inspecting the rendered preview" : "🌐 Testing the browser preview"
+      : screenshot ? "📸 Preview screenshot captured" : "🌐 Browser check complete" };
+  }
   if (normalized === "asset_download") {
     const destination = typeof input?.destination === "string" ? path.basename(input.destination) : undefined;
     return { text: status === "running" ? "📥 Downloading a media asset" : "📦 Asset saved locally", detail: destination };
   }
   if (["edit", "write", "apply_patch"].includes(normalized)) {
     const target = input?.filePath ?? input?.path ?? input?.file;
-    const detail = typeof target === "string" ? path.basename(target) : undefined;
+    const detail = typeof target === "string" ? projectFileLabel(target, directory) : undefined;
     return { text: status === "running" ? "✏️ Editing code" : "✅ File edit complete", detail };
   }
   if (["read", "glob", "grep", "list"].includes(normalized)) {
-    return { text: status === "running" ? "📚 Inspecting the project" : "📚 Project context inspected" };
+    const target = input?.filePath ?? input?.path;
+    return { text: status === "running" ? "📚 Inspecting the project" : "📚 Project context inspected",
+      detail: typeof target === "string" ? projectFileLabel(target, directory) : undefined };
   }
-  if (["todowrite", "todoread"].includes(normalized)) return { text: "🗺️ Organising the build" };
+  if (normalized === "bash") return { text: status === "running" ? "⚙️ Running a command" : "✓ Command finished" };
+  if (["todowrite", "todoread"].includes(normalized)) return { text: status === "running" ? "🗺️ Organising the build" : "🗺️ Plan updated" };
   if (title) return { text: status === "running" ? `⚙️ ${toolLabel(tool)}` : `✅ ${truncate(String(title), 90)}` };
-  return status === "running" ? { text: `⚙️ ${toolLabel(tool)}` } : undefined;
+  return { text: status === "running" ? `⚙️ ${toolLabel(tool)}` : `✓ ${toolLabel(tool)} finished` };
+}
+
+function projectFileLabel(file: string, directory?: string): string {
+  const relative = directory && path.isAbsolute(file) ? path.relative(directory, file) : file;
+  return truncate(!relative || relative.startsWith("..") || path.isAbsolute(relative) ? path.basename(file) : relative.replaceAll(path.sep, "/"), 140);
 }
 
 function toolLabel(tool: string): string {
   return tool.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function enrichProviderError(error: unknown, model?: string, usage?: TurnUsage): Error {
-  if (error instanceof Error && (error as any).providerHint) return error;
+/**
+ * Classify a retry action as an exhausted quota. Transient backoff carries no
+ * action at all; quota outages do, e.g. OpenCode's free tier:
+ * { reason: "free_tier_limit", provider: "opencode", title: "Free limit reached",
+ *   message: "Subscribe to OpenCode Go…", label: "subscribe", link: "https://opencode.ai/go" }
+ */
+function classifyQuotaAction(action: unknown): Omit<QuotaBlock, "until"> | undefined {
+  if (!action || typeof action !== "object") return undefined;
+  const record = action as Record<string, unknown>;
+  const reason = typeof record.reason === "string" ? record.reason : "";
+  if (!/free|tier|quota|credit|billing|payment|subscribe/i.test(reason)) return undefined;
+  const link = typeof record.link === "string" && /^https?:\/\//.test(record.link) ? record.link : undefined;
+  return {
+    provider: typeof record.provider === "string" && record.provider ? record.provider : "opencode",
+    reason,
+    title: typeof record.title === "string" ? record.title : undefined,
+    message: typeof record.message === "string" ? record.message : undefined,
+    link,
+    linkLabel: typeof record.label === "string" ? record.label : undefined,
+  };
+}
+
+/** The fail-fast error thrown while a provider's quota block is live. */
+function quotaBlockedError(block: QuotaBlock, model?: string): Error {
+  const extras = [block.message, block.link ? `${block.linkLabel ?? "link"}: ${block.link}` : undefined]
+    .filter(Boolean)
+    .join(" · ");
+  const error = new Error(
+    `Provider quota exhausted${model ? ` for ${model}` : ""}: ${block.reason} on ${block.provider}. `
+    + `Retries resume ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())}).`
+    + (extras ? ` ${extras}` : ""),
+  );
+  error.name = "OpenCodeQuotaError";
+  (error as any).providerHint = "Provider quota exhausted (free tier)";
+  (error as any).model = model;
+  (error as any).quotaBlock = block;
+  return error;
+}
+
+function enrichProviderError(error: unknown, model?: string, usage?: TurnUsage, quota?: QuotaBlock): Error {
+  const block = quota ?? (error as any)?.quotaBlock;
+  if (error instanceof Error && (error as any).providerHint) {
+    if (block) (error as any).quotaBlock ??= block;
+    return error;
+  }
 
   const text = diagnosticText(error);
   let hint = "OpenCode/provider failure";
   // Persisted provider/session errors take precedence over the original transport cause used to discover them.
-  if (/\b401\b|unauthori[sz]ed|invalid api key|authentication/i.test(text)) hint = "Provider authentication failed";
+  if (block || /free.?tier|free usage|subscribe to (?:opencode|go)\b/i.test(text)) hint = "Provider quota exhausted (free tier)";
+  else if (/\b401\b|unauthori[sz]ed|invalid api key|authentication/i.test(text)) hint = "Provider authentication failed";
   else if (/\b402\b|payment|required|billing|credit/i.test(text)) hint = "Provider billing/credits problem";
   else if (/\b429\b|rate.?limit|too many requests|quota/i.test(text)) hint = "Provider rate limit/quota reached";
   else if (/model.+(?:not found|unknown|invalid)|\b404\b.+model/i.test(text)) hint = "Configured model is unavailable";
@@ -1318,9 +1954,15 @@ function enrichProviderError(error: unknown, model?: string, usage?: TurnUsage):
   else if (/timeout|timed out|ETIMEDOUT/i.test(text) && !isTransportLikeError(error)) hint = "Provider request timed out";
   else if (isTransportLikeError(error)) hint = "OpenCode transport failure";
 
-  const enriched = new Error(`${hint}${model ? ` for ${model}` : ""}: ${errorText(error)}`, { cause: error });
+  const quotaNote = block
+    ? ` Quota resets ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())})`
+      + (block.message ? ` — ${block.message}` : "")
+      + (block.link ? ` ${block.link}` : "")
+    : "";
+  const enriched = new Error(`${hint}${model ? ` for ${model}` : ""}: ${errorText(error)}${quotaNote}`, { cause: error });
   (enriched as any).providerHint = hint;
   (enriched as any).model = model;
+  if (block) (enriched as any).quotaBlock = block;
   // The event stream usually observed real model steps before the failure;
   // keep them so the failed turn can still be ledgered (errorUsage).
   if (usage) (enriched as any).turnUsage = usage;
@@ -1330,6 +1972,9 @@ function enrichProviderError(error: unknown, model?: string, usage?: TurnUsage):
 }
 
 function isTransportLikeError(error: unknown): boolean {
+  // A persisted assistant failure is conclusive; reconnecting cannot recover
+  // it even when the provider's error happens to mention a socket or network.
+  if (error instanceof OpenCodeRequestError && error.details.assistantError) return false;
   const text = diagnosticText(error);
   return /fetch failed|network|socket|connection (?:reset|closed|refused)|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|UND_ERR_|SocketError|HeadersTimeoutError|other side closed|terminated|aborted/i.test(text);
 }

@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { config } from "./config.js";
 import { engineTypeEntries } from "./engines.js";
+import { log } from "./logger.js";
 import type { ProjectRecord } from "./types.js";
 import { htmlEscape, safeChild } from "./util.js";
 
@@ -831,40 +832,138 @@ export async function publishSite(siteDir: string, siteSlug: string): Promise<vo
   // Apache receives runtime files only. Authored TypeScript and the unbundled
   // harness net client are build inputs; esbuild has already folded them into
   // the minified site/js bundles.
-  await fs.cp(siteDir, staging, {
-    recursive: true,
-    dereference: false,
-    force: true,
-    filter: (source) => {
-      const relative = path.relative(siteDir, source);
-      if (!relative) return true;
-      const root = relative.split(path.sep)[0];
-      return root !== "src" && root !== "net";
-    },
-  });
-  await stampDeployVersion(staging, await workspaceCommit(siteDir));
-  await versionAssetReferences(staging);
+  try {
+    await fs.cp(siteDir, staging, {
+      recursive: true,
+      dereference: false,
+      force: true,
+      filter: (source) => {
+        const relative = path.relative(siteDir, source);
+        if (!relative) return true;
+        const root = relative.split(path.sep)[0];
+        return root !== "src" && root !== "net";
+      },
+    });
+    await stampDeployVersion(staging, await workspaceCommit(siteDir));
+    await versionAssetReferences(staging);
+  } catch (error) {
+    // publishRoot is Apache's DocumentRoot: a leftover .staging-* tree would be
+    // served (or at least sit there) forever, and dot-dirs are invisible to
+    // every other sweep in this module.
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
 
   let hadOld = false;
   try {
     await fs.rename(target, backup);
     hadOld = true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   try {
     await fs.rename(staging, target);
-    if (hadOld) await fs.rm(backup, { recursive: true, force: true });
+    if (hadOld) await fs.rm(backup, { recursive: true, force: true }).catch(() => undefined);
   } catch (error) {
-    await fs.rm(staging, { recursive: true, force: true });
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
     if (hadOld) await fs.rename(backup, target).catch(() => undefined);
     throw error;
   }
 }
 
+/**
+ * Recover from a publish that died between the two renames (a crash or a
+ * container stop leaves the live site missing with its content in
+ * `.backup-*`), and delete staging/backup leftovers from failed publishes.
+ * Runs at boot, before anything republishes.
+ */
+export async function recoverPublishRoot(): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(config.publishRoot);
+  } catch {
+    return; // publishRoot does not exist yet
+  }
+  const stale: Array<{ name: string; slug: string; kind: "staging" | "backup" }> = [];
+  for (const name of entries) {
+    const match = /^\.(staging|backup)-(.+)-[0-9a-f]{10}$/.exec(name);
+    if (match) stale.push({ name, slug: match[2], kind: match[1] as "staging" | "backup" });
+  }
+  let restored = 0;
+  let removed = 0;
+  for (const entry of stale) {
+    const absolute = safeChild(config.publishRoot, entry.name);
+    if (entry.kind === "staging") {
+      await fs.rm(absolute, { recursive: true, force: true }).catch(() => undefined);
+      removed += 1;
+      continue;
+    }
+    // A backup only matters when the live directory it belongs to is missing.
+    const live = safeChild(config.publishRoot, entry.slug);
+    const liveExists = await fs.access(live).then(() => true, () => false);
+    if (!liveExists) {
+      await fs.rename(absolute, live).catch(() => undefined);
+      restored += 1;
+    } else {
+      await fs.rm(absolute, { recursive: true, force: true }).catch(() => undefined);
+      removed += 1;
+    }
+  }
+  if (restored || removed) log("info", "publish.stale_swept", { restored, removed });
+}
+
 /** Local asset file types whose references get versioned query strings. */
 const CACHEABLE_ASSET_RE = /\.(?:css|js|mjs)$/i;
+
+/**
+ * Keep shared links (including subpages, query strings and fragments) usable
+ * after a rename. The alias directory is the site's previous publish target,
+ * so everything in it is replaced: HTML becomes a redirect stub and every
+ * other asset (js/, css/, images) is deleted, otherwise the old URLs keep
+ * serving the pre-rename site indefinitely.
+ */
+export async function publishSiteRedirects(aliases: readonly string[], siteSlug: string): Promise<void> {
+  for (const alias of aliases) {
+    if (alias === siteSlug) continue;
+    const root = safeChild(config.publishRoot, alias);
+    await fs.mkdir(root, { recursive: true });
+    const pages = new Set(["index.html"]);
+    const staleFiles: string[] = [];
+    const directories: string[] = [];
+    async function walk(dir: string): Promise<void> {
+      for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+        if (entry.isSymbolicLink()) throw new Error("Redirect directories must not contain symlinks.");
+        const file = safeChild(root, path.relative(root, dir), entry.name);
+        if (entry.isDirectory()) {
+          directories.push(file);
+          await walk(file);
+        } else if (/\.html?$/i.test(entry.name)) {
+          pages.add(path.relative(root, file));
+        } else {
+          staleFiles.push(file);
+        }
+      }
+    }
+    if ((await fs.lstat(root)).isSymbolicLink()) throw new Error("Redirect directories must not be symlinks.");
+    await walk(root);
+    for (const page of pages) {
+      const relative = page.replaceAll(path.sep, "/").replace(/(^|\/)index\.html$/i, "$1");
+      const url = `${config.publicSitesBaseUrl}/${encodeURIComponent(siteSlug)}/${relative.split("/").map(encodeURIComponent).join("/")}`;
+      const literal = JSON.stringify(url).replaceAll("<", "\\u003c");
+      await fs.writeFile(safeChild(root, page), `<!doctype html><meta charset="utf-8"><title>Site moved</title><meta http-equiv="refresh" content="0;url=${htmlEscape(url)}"><link rel="canonical" href="${htmlEscape(url)}"><script>location.replace(${literal}+location.search+location.hash)</script><a href="${htmlEscape(url)}">Open the renamed site</a>\n`, "utf8");
+    }
+    for (const file of staleFiles) await fs.rm(file, { recursive: true, force: true }).catch(() => undefined);
+    // Deepest first, so a directory emptied by the deletions goes away too.
+    for (const dir of directories.sort((a, b) => b.length - a.length)) {
+      await fs.rmdir(dir).catch(() => undefined);
+    }
+    await fs.writeFile(path.join(root, VERSION_FILE), JSON.stringify({ version: `redirect-${siteSlug}` }), "utf8");
+  }
+}
 
 /**
  * Deploy identity for the update check: a digest over the staged tree's
@@ -1080,7 +1179,10 @@ export function siteUrl(project: ProjectRecord): string {
   return `${config.publicSitesBaseUrl}/${encodeURIComponent(project.siteSlug)}/`;
 }
 
-export async function publishIndex(projects: ProjectRecord[], repoUrl: (repo: string) => string): Promise<void> {
+export async function publishIndex(
+  projects: ProjectRecord[],
+  repoUrl: (repo: string) => string,
+): Promise<void> {
   if (!config.publicIndexEnabled) return;
   await fs.mkdir(config.publishRoot, { recursive: true });
   const rows = projects

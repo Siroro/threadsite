@@ -1,23 +1,25 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
-import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
+import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, turnRevertTarget, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
 import { ensureMultiplayerFiles, multiplayerContext } from "./multiplayer.js";
-import { OpenCodeHarness, addUsage, errorUsage, type PromptResult, type TurnUsage } from "./opencode.js";
-import { publishIndex, publishSite, siteUrl, validateSite } from "./publish.js";
+import { OpenCodeHarness, addUsage, errorUsage, type PromptImage, type PromptResult, type TurnUsage } from "./opencode.js";
+import { publishIndex, publishSite, publishSiteRedirects, siteUrl, validateSite } from "./publish.js";
 import { buildSite, GENERATED_GITIGNORE } from "./build.js";
 import { enginePackages, ensureEnginePackages } from "./engines.js";
 import { ensureSkillFiles, skillNames } from "./skills.js";
-import { Store } from "./store.js";
+import { Store, pendingTurnMatches } from "./store.js";
 import { initialProjectInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, repairInstruction } from "./templates.js";
 import { starterHtml, starterSource } from "./starter.js";
 import type { CommitAuthor, MultiplayerContext, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog } from "./usage.js";
-import type { ProgressCallback } from "./progress.js";
+import type { ProgressCallback, ProgressPhase } from "./progress.js";
 import type { WorkingTreeStats } from "./git.js";
 import { log, logError, serializeError } from "./logger.js";
-import { errorText, parseModel, safeChild, slugify, truncate, withTimeout } from "./util.js";
+import { errorText, formatTokens, parseModel, safeChild, slugify, truncate, withTimeout } from "./util.js";
+import { runBrowserQa as driveBrowserQa, type BrowserQaResult } from "./browser-qa.js";
 
 export interface MutationResult {
   project: ProjectRecord;
@@ -37,6 +39,8 @@ export interface MutationResult {
   durationMs: number;
   /** Token/context usage of the turn, when the agent service reported it. */
   usage?: TurnUsage;
+  /** PNG screenshot of the finished result from browser QA, when captured. */
+  screenshot?: Uint8Array;
   /** Validation errors that kept the turn unpublished; the work is committed. */
   validationError?: string;
   /** Commit/publish pipeline failure after the agent finished; see commit for how far it got. */
@@ -52,8 +56,56 @@ export interface RevertResult {
   conversationReverted: boolean;
 }
 
+/** What a Stop request actually managed to do (see ProjectService.stopTurn). */
+export interface StopTurnOutcome {
+  /** An agent turn was running and the abort landed. */
+  stopped: boolean;
+  /** The turn is past the agent phase (build/commit/publish) and finishes on its own. */
+  delivering: boolean;
+  /** The agent service did not answer, so the wedged queue was freed instead. */
+  queueFreed: boolean;
+}
+
+/**
+ * A turn stopped mid-flight at the user's request (the Stop button): the agent
+ * turn was aborted but the session, workspace, and history are all kept, and
+ * whatever partial edits the agent had made are preserved. Carries the
+ * original rejection as its cause.
+ */
+export class TurnStoppedError extends Error {}
+
+/**
+ * Per-thread queue state. `tail` orders newly enqueued work; `waiters` holds
+ * the not-yet-started items' gates, oldest first, so a hard reset can sever
+ * the chain when the item holding the queue can never settle on its own
+ * (agent HTTP timeouts are disabled by design, so a turn wedged on a dead
+ * agent connection would otherwise block the thread forever).
+ */
+interface QueueState {
+  tail: Promise<unknown>;
+  waiters: Array<{ resolve: () => void }>;
+}
+
+function unreleased(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
 export class ProjectService {
-  private readonly queues = new Map<string, Promise<unknown>>();
+  private readonly queues = new Map<string, QueueState>();
+  /** Threads whose running turn the user asked to stop via the Stop button. */
+  private readonly stopRequested = new Set<string>();
+  /**
+   * Threads whose turn has left the agent and is now in the delivery tail
+   * (restore/validate/commit/publish). Such a turn is not "busy" but still
+   * holds the queue and releases it on its own, so the hard resets must not
+   * sever it — that would start a second pipeline on the same worktree.
+   */
+  private readonly delivering = new Set<string>();
+  /** Turns currently between mutate()/recoverTurn() entry and settlement. */
+  private activeTurns = 0;
+  private identityTail: Promise<unknown> = Promise.resolve();
 
   constructor(
     readonly store: Store,
@@ -63,25 +115,63 @@ export class ProjectService {
   ) {}
 
   /** Recreate ignored harness build inputs after a checkout/clean or on a fresh host. */
-  private async ensureHarnessBuildInputs(project: ProjectRecord, siteSlug = project.siteSlug): Promise<void> {
+  private async ensureHarnessBuildInputs(project: ProjectRecord): Promise<void> {
     await ensureEnginePackages(project.workspacePath, project.projectKind ?? "site");
-    const multiplayer = multiplayerContext(project.projectKind ?? "site", siteSlug);
+    const multiplayer = multiplayerContext(project.projectKind ?? "site", project.multiplayerGameId ?? project.siteSlug);
     if (multiplayer) await ensureMultiplayerFiles(project.workspacePath, multiplayer, project.projectKind ?? "site");
   }
 
   enqueue<T>(threadId: string, work: () => Promise<T>): Promise<T> {
-    const previous = this.queues.get(threadId) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(work);
+    let state = this.queues.get(threadId);
+    if (!state) {
+      state = { tail: Promise.resolve(), waiters: [] };
+      this.queues.set(threadId, state);
+    }
+    const previous = state.tail;
+    const gate = unreleased();
+    state.waiters.push(gate);
+    const next = (async () => {
+      // Wait for the previous item — unless a hard reset severs the chain,
+      // which means the item holding the queue was abandoned and may never
+      // settle; waiting on it would wedge the thread forever.
+      await Promise.race([previous.catch(() => undefined), gate.promise]);
+      const index = state.waiters.indexOf(gate);
+      if (index >= 0) state.waiters.splice(index, 1);
+      return work();
+    })();
     const tracked = next.finally(() => {
-      if (this.queues.get(threadId) === tracked) this.queues.delete(threadId);
+      if (this.queues.get(threadId) === state && state.tail === tracked) this.queues.delete(threadId);
     });
     // The map only tracks ordering. Without a handler here, a failed work item
     // would surface its rejection through this promise as an unhandled
     // rejection, which is process-fatal on Node 22 and kills every in-flight
     // thread turn instead of failing just this one.
     tracked.catch(() => undefined);
-    this.queues.set(threadId, tracked);
+    state.tail = tracked;
     return next;
+  }
+
+  /**
+   * Detach the thread's queue from an item that may never settle, used by the
+   * hard resets. Only the FIRST waiter is released: the item directly behind
+   * the abandoned queue holder proceeds (concurrently with the abandoned
+   * item, which reports its own failure in the thread), and every waiter
+   * behind it stays serialized through its predecessor — releasing them all
+   * at once would run N concurrent mutate pipelines on one worktree. When
+   * nothing is waiting, the tail itself is the abandoned item, so the chain
+   * is rebased: work enqueued after the sever must not wait on a promise
+   * that may never settle.
+   */
+  private severQueue(threadId: string): void {
+    const state = this.queues.get(threadId);
+    if (!state) return;
+    const head = state.waiters.shift();
+    if (head) {
+      head.resolve();
+    } else {
+      state.tail = Promise.resolve();
+    }
+    log("warn", "project.queue_severed", { threadId, releasedWaiter: Boolean(head) });
   }
 
   async createProject(input: {
@@ -104,8 +194,8 @@ export class ProjectService {
     // when the AI title never lands.
     const displaySource = input.renameable ? input.displayName.replace(/^(?:site|game)-/, "") : input.displayName;
     const baseSlug = slugify(displaySource);
-    const suffix = input.threadId.slice(-6);
-    const siteSlug = `${baseSlug}-${suffix}`.slice(0, 63);
+    // Temporary identity uses the complete snowflake; short suffixes can collide.
+    const siteSlug = `${baseSlug.slice(0, 62 - input.threadId.length)}-${input.threadId}`;
     const repoName = `site-${siteSlug}`.slice(0, 80);
     const workspacePath = safeChild(config.workspaceRoot, input.guildId, input.threadId);
     const siteDir = safeChild(workspacePath, "site");
@@ -116,8 +206,9 @@ export class ProjectService {
     await fs.mkdir(srcDir, { recursive: true });
     await fs.writeFile(path.join(siteDir, "index.html"), starterHtml(input.displayName), "utf8");
     await fs.writeFile(path.join(srcDir, "main.ts"), starterSource(projectKind), "utf8");
-    // Authored source is the Git record. Harness build inputs and generated
-    // bundles are recreated locally and never enter Forgejo.
+    // Authored source plus the vendored net client (site/net/) is the Git
+    // record. Harness build inputs and generated bundles are recreated locally
+    // and never enter Forgejo.
     await fs.writeFile(path.join(workspacePath, ".gitignore"), `${GENERATED_GITIGNORE.join("\n")}\n`, "utf8");
     const multiplayer = multiplayerContext(projectKind, siteSlug);
     if (multiplayer) {
@@ -148,6 +239,13 @@ export class ProjectService {
 
     emit(onProgress, "🌱 Creating/checking Forgejo repository");
     await this.forgejo.ensureRepository(repoName, `${projectKindLabel(projectKind)} generated from Discord thread ${input.displayName}`);
+    if (config.webhookEnabled) {
+      const secret = this.store.getWebhookSecret();
+      if (secret) {
+        emit(onProgress, "🔗 Registering the Forgejo push webhook");
+        await this.forgejo.ensurePushWebhook(repoName, `${config.webhookPublicUrl}/hooks/forgejo`, secret);
+      }
+    }
     emit(onProgress, "🧱 Initialising git workspace");
     await ensureGitRepository(workspacePath, repoName, this.forgejo);
     await ensureLocalBaseline(workspacePath);
@@ -201,101 +299,149 @@ export class ProjectService {
       // Applied only after the build actually ships: a turn that failed
       // validation or delivery keeps its slug name (see titlePromise above).
       if (title && !result.validationError && !result.deliveryError && result.commit) {
-        // Adopt the AI title end-to-end: Discord thread name, Forgejo repo,
-        // published directory, README, and index. The thread-id suffix is kept
-        // on the new slug so identities stay unique and stable.
-        let project = result.project;
-        const suffix = input.threadId.slice(-6);
-        const baseSlug = slugify(title);
-        let siteSlug = baseSlug ? `${baseSlug}-${suffix}`.slice(0, 63) : project.siteSlug;
-        let repoName = siteSlug !== project.siteSlug ? `site-${siteSlug}`.slice(0, 80) : project.repoName;
-        if (siteSlug !== project.siteSlug && !await this.adoptTitleIdentity(project, title, siteSlug, repoName, onProgress)) {
-          siteSlug = project.siteSlug;
-          repoName = project.repoName;
+        try {
+          const renamed = await this.renameProject(input.threadId, title, onProgress);
+          await onTitle(renamed.displayName).catch((error) => {
+            log("warn", "project.thread_rename_failed", { threadId: input.threadId, error: serializeError(error) });
+          });
+          result = { ...result, project: renamed, commit: renamed.lastCommit ?? result.commit };
+        } catch (error) {
+          log("warn", "project.title_rename_failed", { threadId: input.threadId, error: serializeError(error) });
+          emit(onProgress, "⚠️ The site is live; its rename will be retried on the next update or restart");
+          result = { ...result, project: this.store.getProject(input.threadId) ?? result.project };
         }
-        project = await this.store.patchProject(input.threadId, { displayName: title, siteSlug, repoName });
-        await this.writeReadme(project);
-        await onTitle(title).catch((error) => {
+      }
+    }
+    if (!titlePromise && !result.validationError && !result.deliveryError && result.commit) {
+      try {
+        const renamed = await this.renameProject(input.threadId, input.displayName, onProgress);
+        if (onTitle) await onTitle(renamed.displayName).catch((error) => {
           log("warn", "project.thread_rename_failed", { threadId: input.threadId, error: serializeError(error) });
         });
-        await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo)).catch(() => undefined);
-        log("info", "project.renamed_by_ai", { threadId: input.threadId, title, siteSlug, repoName });
-        result = { ...result, project };
+        result = { ...result, project: renamed, commit: renamed.lastCommit ?? result.commit };
+      } catch (error) {
+        log("warn", "project.initial_rename_failed", { threadId: input.threadId, error: serializeError(error) });
+        result = { ...result, project: this.store.getProject(input.threadId) ?? result.project };
       }
     }
     return result;
   }
 
-  /**
-   * Move every external identity of the project — Forgejo repo name and
-   * description, git remote, published directory, committed README — onto the
-   * AI title's slug. Each step is idempotent, so the retry after a partial
-   * failure converges instead of stranding a half-renamed project. Returns
-   * false (and says so in the thread) when both attempts fail.
-   */
-  private async adoptTitleIdentity(
-    project: ProjectRecord,
-    title: string,
-    siteSlug: string,
-    repoName: string,
-    onProgress?: ProgressCallback,
-  ): Promise<boolean> {
-    const description = `${projectKindLabel(project.projectKind)} — ${title}`;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        emit(onProgress, "🏷️ Renaming repository and site to match the title");
-        await this.forgejo.renameRepository(project.repoName, repoName, description);
-        // Repoint the workspace remote at the renamed repository (Forgejo
-        // also leaves a redirect, but the remote should carry the new name).
-        await ensureGitRepository(project.workspacePath, repoName, this.forgejo);
-        // Restamp the multiplayer tenant id so the published net-config
-        // matches the new slug.
-        const multiplayer = multiplayerContext(project.projectKind ?? "site", siteSlug);
-        if (multiplayer) {
-          await ensureMultiplayerFiles(project.workspacePath, multiplayer, project.projectKind ?? "site");
-        }
-        await this.writeReadme({ ...project, displayName: title, siteSlug, repoName });
-        await this.ensureHarnessBuildInputs(project, siteSlug);
-        await buildSite(project.workspacePath);
-        await validateSite(safeChild(project.workspacePath, "site"));
-        // Commit the restamped README before publishing so the deploy stamp
-        // names the exact Forgejo commit. Ignored tenant config/bundles remain
-        // in the workspace for the runtime copy.
-        await commitAndPush(project.workspacePath, `Rename project to ${title}`, this.forgejo);
-        await publishSite(safeChild(project.workspacePath, "site"), siteSlug);
-        await fs.rm(safeChild(config.publishRoot, project.siteSlug), { recursive: true, force: true }).catch(() => undefined);
-        log("info", "project.renamed_slug", { threadId: project.threadId, from: project.siteSlug, to: siteSlug, repoName });
-        return true;
-      } catch (error) {
-        if (attempt > 1) {
-          log("warn", "project.title_rename_failed", { threadId: project.threadId, error: serializeError(error) });
-          emit(onProgress, `⚠️ Keeping \`${project.repoName}\` — renaming the repository and site to the title failed`);
-          return false;
-        }
-        await sleep(2_000);
+  /** Reserve names before remote changes so concurrent projects cannot choose the same URL. */
+  async renameProject(threadId: string, name: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {
+    const displayName = name.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80);
+    if (!displayName) throw new Error("Choose a non-empty project name.");
+    if (this.store.getProject(threadId)?.pendingRename) await this.resumeRename(threadId, onProgress);
+    const reserve = this.identityTail.catch(() => undefined).then(async () => {
+      const project = this.store.getProject(threadId);
+      if (!project) throw new Error("This thread is not attached to a site.");
+      if (project.status !== "ready" || project.pendingTurn || await this.agentBusy(threadId)) {
+        throw new Error("Finish or recover the current update before renaming this project.");
       }
-    }
-    return false;
+      if (!await workingTreeClean(project.workspacePath)) throw new Error("Finish or roll back the workspace edits before renaming.");
+      const source = await this.forgejo.repositoryInfo(project.repoName);
+      if (!source) throw new Error("The source repository could not be found.");
+      const base = slugify(displayName);
+      const candidates = [base, `${base}-${threadId.slice(-6)}`, `${base.slice(0, 62 - threadId.length)}-${threadId}`];
+      for (const siteSlug of candidates) {
+        const repoName = `site-${siteSlug}`;
+        const occupied = this.store.listProjects().some((other) => other.threadId !== threadId &&
+          [other.siteSlug, ...(other.siteAliases ?? []), other.pendingRename?.siteSlug].includes(siteSlug));
+        if (occupied) continue;
+        const owned = siteSlug === project.siteSlug || project.siteAliases?.includes(siteSlug);
+        if (!owned && await fs.lstat(safeChild(config.publishRoot, siteSlug)).then(() => true, () => false)) continue;
+        const target = await this.forgejo.repositoryInfo(repoName);
+        if (target && target.id !== source.id) continue;
+        await this.store.patchProject(threadId, {
+          multiplayerGameId: project.multiplayerGameId ?? project.siteSlug,
+          pendingRename: { displayName, siteSlug, repoName, fromSiteSlug: project.siteSlug, fromRepoName: project.repoName, repoId: source.id },
+        });
+        return;
+      }
+      throw new Error("That project name is already in use. Choose another name.");
+    });
+    this.identityTail = reserve;
+    await reserve;
+    return this.resumeRename(threadId, onProgress);
   }
 
-  async mutate(threadId: string, prompt: string, initial = false, onProgress?: ProgressCallback, author?: CommitAuthor, statusMessageId?: string): Promise<MutationResult> {
+  /** Every step can be repeated after failure or restart, using the persisted repo ID. */
+  async resumeRename(threadId: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {
+    let project = this.store.getProject(threadId);
+    if (!project) throw new Error("This thread is not attached to a site.");
+    const intent = project.pendingRename;
+    if (!intent) return project;
+    emit(onProgress, "🏷️ Updating the project name, repository and live links");
+    await this.forgejo.renameRepository(intent.fromRepoName, intent.repoName,
+      `${projectKindLabel(project.projectKind)} — ${intent.displayName}`, intent.repoId);
+    // Persist a successful remote rename immediately, even if later delivery fails.
+    project = await this.store.patchProject(threadId, { repoName: intent.repoName });
+    await ensureGitRepository(project.workspacePath, intent.repoName, this.forgejo);
+    const secret = this.store.getWebhookSecret();
+    if (config.webhookEnabled && secret) {
+      await this.forgejo.ensurePushWebhook(intent.repoName, `${config.webhookPublicUrl}/hooks/forgejo`, secret);
+    }
+    const renamed = { ...project, displayName: intent.displayName, siteSlug: intent.siteSlug };
+    await this.writeReadme(renamed);
+    await this.ensureHarnessBuildInputs(renamed);
+    const siteDir = safeChild(project.workspacePath, "site");
+    await buildSite(project.workspacePath);
+    await validateSite(siteDir);
+    const committed = await commitAndPush(project.workspacePath, `Rename project to ${intent.displayName}`, this.forgejo);
+    // A previous attempt may have committed locally before its push failed.
+    if (!committed) await syncWithRemote(project.workspacePath, this.forgejo);
+    await this.ensureHarnessBuildInputs(renamed);
+    await buildSite(project.workspacePath);
+    await validateSite(siteDir);
+    const head = await currentHead(project.workspacePath);
+    await publishSite(siteDir, intent.siteSlug);
+    const aliases = [...new Set([...(project.siteAliases ?? []), intent.fromSiteSlug])].filter((slug) => slug !== intent.siteSlug);
+    await publishSiteRedirects(aliases, intent.siteSlug);
+    project = await this.store.patchProject(threadId, {
+      displayName: intent.displayName, siteSlug: intent.siteSlug, repoName: intent.repoName,
+      siteAliases: aliases, lastCommit: head.slice(0, 10), lastSeenCommit: head, pendingRename: undefined,
+      pendingThreadName: intent.displayName,
+    });
+    await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo))
+      .catch((error) => log("warn", "project.index_refresh_failed", { threadId, error: errorText(error) }));
+    log("info", "project.renamed", { threadId, siteSlug: project.siteSlug, repoName: project.repoName });
+    return project;
+  }
+
+  async mutate(threadId: string, prompt: string, initial = false, onProgress?: ProgressCallback, author?: CommitAuthor, statusMessageId?: string, images?: readonly PromptImage[], queuedStatusIds: readonly string[] = []): Promise<MutationResult> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site. Use /site start first.");
-    if (!prompt.trim()) throw new Error("Prompt is empty.");
+    if (project.pendingRename) project = await this.resumeRename(threadId, onProgress);
+    if (!prompt.trim() && !images?.length) throw new Error("Prompt is empty.");
     if (prompt.length > config.maxPromptChars) throw new Error(`Prompt exceeds MAX_PROMPT_CHARS (${config.maxPromptChars}).`);
 
     // Hoisted so the failure ledger in the catch can see what the turn spent
     // even when a later stage (repair, validation tail, store) throws.
     let usage: TurnUsage | undefined;
+    // The durable marker ID lets the catch and delivery tail check ownership
+    // across database reads — a hard
+    // reset (or a successor released by one) may swap in another meanwhile.
+    let pendingMarker: ProjectRecord["pendingTurn"];
+    // Whether this turn claimed the persisted queue. Anything that throws
+    // before startQueuedTurn() must release the batch instead: the caller
+    // already told the user "Request saved", and an unclaimed entry would sit
+    // in SQLite until a restart replayed it (or, for an image-only entry,
+    // forever — boot recovery skips text-less prompts).
+    let queueClaimed = false;
     const turnStartedAt = Date.now();
+    this.activeTurns += 1;
     try {
+      await onProgress?.({ text: "📁 Preparing your update", phase: "preparing", context: {
+        request: prompt, repoUrl: this.repoLink(project),
+        siteUrl: project.status !== "creating" ? this.siteLink(project) : undefined,
+      } });
       let agentSummary: string;
       const projectKind = project.projectKind ?? "site";
       // The workspace path never changes across patchProject updates below.
       const workspacePath = project.workspacePath;
       // Repair harness-owned multiplayer files (vendored client, net config,
       // multiplayer AGENTS.md section) in case a previous turn removed them.
-      const multiplayer = multiplayerContext(projectKind, project.siteSlug);
+      const multiplayer = multiplayerContext(projectKind, project.multiplayerGameId ?? project.siteSlug);
       if (multiplayer) {
         emit(onProgress, "🕹️ Ensuring multiplayer client files");
         await ensureMultiplayerFiles(workspacePath, multiplayer, projectKind);
@@ -320,12 +466,31 @@ export class ProjectService {
       if (await ensureSkillFiles(workspacePath, projectKind)) {
         emit(onProgress, "🎓 Restored the curated game skills (.opencode/skills)");
       }
+      // Authoritative image gate, re-checked inside the queue: the model the
+      // pre-check in index.ts verified may have changed (admin override, fresh
+      // session) by the time this turn actually runs. Anything not positively
+      // vision-capable is dropped rather than sent.
+      let turnImages = images;
+      if (images?.length) {
+        const parsed = parseModel(this.store.getModel())
+          ?? await this.opencode.lastAssistantModel(workspacePath, project.sessionId);
+        const accepts = parsed ? await this.opencode.modelAcceptsAttachments(parsed.providerID, parsed.modelID) : undefined;
+        if (accepts !== true) {
+          turnImages = undefined;
+          emit(onProgress, "⚠️ The current model can't see images — the attachment(s) were dropped");
+          log("info", "project.images_dropped", { threadId, count: images.length, model: parsed ? `${parsed.providerID}/${parsed.modelID}` : "unknown" });
+          if (!prompt.trim()) throw new Error("The model this thread runs on cannot see images and the message had no text.");
+        }
+      }
       // Durable project memory: read fresh each turn so notes land in the very
       // turn after they are written. Missing file is fine (nothing noted yet).
       const notes = await readProjectNotes(project.workspacePath);
-      const instruction = initial
+      let instruction = initial
         ? initialProjectInstruction(projectKind, prompt, notes)
         : mutationInstruction(projectKind, prompt, notes);
+      if (turnImages?.length) {
+        instruction += `\n\nThe user's Discord message included ${turnImages.length} attached image${turnImages.length === 1 ? "" : "s"}, delivered with this prompt.`;
+      }
 
       // Session context lifecycle before the prompt: a long-idle thread starts
       // a fresh session, a heavy previous turn compacts first. Initial turns
@@ -335,25 +500,38 @@ export class ProjectService {
         if (lifecycle) project = lifecycle;
       }
 
+      // Autopilot economy: short follow-up mutations without images run on the
+      // configured light model; initial builds, image turns, long briefs, and
+      // any explicit /site-admin override keep the default routing.
+      const requestedModel = this.store.getModel()
+        ?? (config.opencodeLightModel && !initial && prompt.length <= config.opencodeLightPromptChars && !turnImages?.length
+          ? config.opencodeLightModel
+          : undefined);
+      if (requestedModel && requestedModel === config.opencodeLightModel) {
+        emit(onProgress, `🪶 Short change — using the light model \`${requestedModel}\``);
+      }
+
       const turnBaseline = await captureWorkingTreeSnapshot(workspacePath);
       let stopChangesTimer = () => {};
       const updateChanges = () => {
         void workingTreeStats(workspacePath, turnBaseline)
-          .then((changes) => onProgress?.({ kind: "changes", text: formatWorkingTreeStats(changes) }))
+          .then((changes) => onProgress?.({ kind: "changes", text: formatWorkingTreeStats(changes), files: changes }))
           .catch(() => undefined);
       };
       updateChanges();
       const changesTimer = onProgress ? setInterval(updateChanges, 3000) : undefined;
       stopChangesTimer = () => { if (changesTimer) clearInterval(changesTimer); };
-      emit(onProgress, initial ? "✨ Building the first version" : "🧠 Applying your requested revision");
+      emit(onProgress, initial ? "✨ Building the first version" : "🧠 Applying your requested revision", undefined, "working");
       // Persist the in-flight request first: if the bot dies mid-turn, boot
       // recovery uses it to continue, commit, and publish this work.
-      project = await this.store.patchProject(threadId, {
-        pendingTurn: { prompt, initial, startedAt: new Date().toISOString(), author, statusMessageId },
-      });
+      pendingMarker = { id: randomUUID(), prompt, initial, startedAt: new Date().toISOString(), author, statusMessageId,
+        beforeCommit: await currentHead(workspacePath), images: turnImages ? [...turnImages] : undefined };
+      project = await this.store.startQueuedTurn(threadId, pendingMarker, queuedStatusIds);
+      queueClaimed = true;
+      await onProgress?.({ kind: "queue", text: "Saved requests", queuedRequests: project.pendingQueue?.length ?? 0 });
       try {
         try {
-          const result = await this.opencode.prompt(project.workspacePath, project.sessionId, instruction, this.store.getModel(), onProgress, "sitebuilder", this.store.getEffort());
+          const result = await this.promptWithFailover(project.workspacePath, project.sessionId, instruction, onProgress, turnImages, requestedModel);
           agentSummary = result.text;
           usage = result.usage;
         } catch (error) {
@@ -365,11 +543,15 @@ export class ProjectService {
           emit(onProgress, "♻️ Recreating a missing agent session");
           const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
           project = await this.store.patchProject(threadId, { sessionId });
-          const result = await this.opencode.prompt(project.workspacePath, sessionId, instruction, this.store.getModel(), onProgress, "sitebuilder", this.store.getEffort());
+          const result = await this.promptWithFailover(project.workspacePath, sessionId, instruction, onProgress, turnImages, requestedModel);
           agentSummary = result.text;
           usage = result.usage;
         }
         stopChangesTimer();
+        // Capture the last edits even when the turn finished between 3s polls.
+        await workingTreeStats(workspacePath, turnBaseline)
+          .then((changes) => onProgress?.({ kind: "changes", text: formatWorkingTreeStats(changes), files: changes }))
+          .catch(() => undefined);
       } catch (error) {
         stopChangesTimer();
         // Keep whatever the agent wrote — the failed turn's edits stay in the
@@ -391,8 +573,13 @@ export class ProjectService {
         }
         throw error;
       }
+      // The agent is done; from here the turn is in its delivery tail. Tracked
+      // explicitly so a reset can tell "finishing" from "wedged" without
+      // trusting pendingTurn, which can also be a stale crash marker.
+      this.delivering.add(threadId);
       const result = await this.completeTurn({
         project, prompt, initial, projectKind, multiplayer, agentSummary, author, onProgress, usage, startedAt: turnStartedAt,
+        pendingTurn: pendingMarker,
       });
       // Ledger every finished turn here — published or not — so a turn records
       // exactly once; thrown failures record in the catch below.
@@ -419,17 +606,53 @@ export class ProjectService {
         fallbackModel: this.store.getModel(),
         failed: true,
       });
-      // The failed attempt still landed its prompt (and possibly partial work)
-      // in the session, so it counts as activity for the idle-reset rule even
-      // though no fresh usage reading could be observed.
-      await this.store.patchProject(threadId, {
-        status: "error",
-        lastError: truncate(errorText(error), 1000),
-        pendingTurn: undefined,
-        lastTurnAt: new Date().toISOString(),
-      });
-      logError("project.mutation_failed", error, { threadId, initial, model: this.store.getModel() || "default" });
-      throw error;
+      const stoppedByUser = this.stopRequested.delete(threadId);
+      // The turn failed before it could claim the persisted batch: release it
+      // now, or the acknowledged messages stay in pendingQueue and replay (or
+      // are reported by boot recovery) after a restart that may be hours away.
+      if (!queueClaimed && queuedStatusIds.length) {
+        await this.store.dropQueuedRequests(threadId, queuedStatusIds).catch((dropError) => {
+          log("warn", "project.queue_release_failed", { threadId, error: errorText(dropError) });
+        });
+      }
+      // Touch the project record only while this turn still owns the
+      // in-flight marker. A hard reset (or a successor released by one) can
+      // swap the session and pendingTurn while this failure is still landing:
+      // clearing the replacement's marker would silently lose its crash
+      // recovery, and stamping error/lastTurnAt would overwrite its state.
+      const owning = this.store.getProject(threadId);
+      if (owning && pendingTurnMatches(owning.pendingTurn, pendingMarker)) {
+        await this.store.patchProject(threadId, stoppedByUser
+          ? {
+            // A user stop is not a project failure: keep the prior status and
+            // error — except a half-built initial project, which never shipped.
+            ...(owning.status === "creating" ? { status: "error" as const, lastError: "Initial build stopped at the user's request" } : {}),
+            pendingTurn: undefined,
+            lastTurnAt: new Date().toISOString(),
+          }
+          : {
+            status: "error" as const,
+            lastError: truncate(errorText(error), 1000),
+            pendingTurn: undefined,
+            lastTurnAt: new Date().toISOString(),
+          });
+      } else if (queueClaimed) {
+        // The turn did claim the marker, so a mismatch means a reset or a
+        // successor replaced it while this turn was failing.
+        log("warn", "project.mutation_superseded", { threadId, initial });
+      } else {
+        // Failed before the turn claimed anything; there is no record to update.
+        log("warn", "project.mutation_failed_before_start", { threadId, initial });
+      }
+      logError("project.mutation_failed", error, { threadId, initial, model: this.store.getModel() || "default", stoppedByUser });
+      throw stoppedByUser
+        ? new TurnStoppedError("The update was stopped at the user's request.", { cause: error })
+        : error;
+    } finally {
+      this.activeTurns -= 1;
+      this.delivering.delete(threadId);
+      // A stop that raced an already-completing turn must not poison the next one.
+      this.stopRequested.delete(threadId);
     }
   }
 
@@ -457,6 +680,8 @@ export class ProjectService {
     onProgress?: ProgressCallback;
     usage?: TurnUsage;
     startedAt: number;
+    /** The in-flight marker this turn wrote, if any — see the clear below. */
+    pendingTurn?: ProjectRecord["pendingTurn"];
   }): Promise<MutationResult> {
     const threadId = input.project.threadId;
     let project = input.project;
@@ -475,23 +700,37 @@ export class ProjectService {
     await restoreHarnessFiles();
     let stats: { files: number; bytes: number } | undefined;
     let validationError: string | undefined;
+    // The QA screenshot from the last successful browser pass rides the
+    // result so the thread sees what shipped (also after a repair round-trip).
+    let qaScreenshot: Uint8Array | undefined;
     // The static build step of deployment: bundle site/src/ TypeScript into
     // site/js/ (with code-framed bundler errors an agent can act on), then
-    // validate the resulting tree. Kept as one unit so a bundle failure feeds
-    // the same repair round-trip as a validation failure.
+    // validate the resulting tree, then load it in a real browser. Kept as one
+    // unit so a bundle, validation, or browser-QA failure feeds the same
+    // repair round-trip.
     const buildAndValidate = async (): Promise<{ files: number; bytes: number }> => {
+      emit(input.onProgress, "⚙️ Compiling the current source", undefined, "checking");
       const built = await buildSite(workspacePath);
       if (!built.skipped) {
         emit(input.onProgress, `⚙️ Bundled TypeScript · ${built.emitted} output file${built.emitted === 1 ? "" : "s"}${built.pruned ? ` · ${built.pruned} stale pruned` : ""}`);
       }
-      emit(input.onProgress, "🧪 Validating static output");
-      return validateSite(siteDir);
+      emit(input.onProgress, "🧪 Validating static output", undefined, "checking");
+      const validated = await validateSite(siteDir);
+      const qa = await this.runBrowserQa(project, input.onProgress);
+      if (qa?.screenshotPng) qaScreenshot = qa.screenshotPng;
+      if (qa?.softNotes.length) {
+        emit(input.onProgress, `ℹ️ Browser QA: ${qa.softNotes.length} warning${qa.softNotes.length === 1 ? "" : "s"} from unavailable external resources (ignored)`);
+      }
+      if (qa?.hardErrors.length) {
+        throw new Error(`Browser QA error: the page failed in a real browser.\n${qa.hardErrors.join("\n")}`);
+      }
+      return validated;
     };
     try {
       stats = await buildAndValidate();
     } catch (error) {
       const firstError = errorText(error);
-      if (!/JavaScript (?:syntax|type-check) error|TypeScript compile error|Broken local reference/i.test(firstError)) {
+      if (!/JavaScript (?:syntax|type-check) error|TypeScript compile error|Broken local reference|Browser QA error/i.test(firstError)) {
         // Structural problems (missing index.html, dotfiles, blocked file
         // types, size caps) get no repair round-trip; they commit unpublished,
         // exactly like a failed repair.
@@ -500,7 +739,7 @@ export class ProjectService {
         // One repair attempt: feed the validation error back to the same agent
         // session, which can see the files it just wrote, then re-validate.
         log("warn", "project.validation_javascript_retry", { threadId, error: firstError });
-        emit(input.onProgress, "🔧 Validation errors found — asking the agent to repair them");
+        emit(input.onProgress, "🔧 Validation errors found — asking the agent to repair them", undefined, "working");
         try {
           const repaired = await this.opencode.prompt(
             workspacePath,
@@ -544,7 +783,7 @@ export class ProjectService {
       deliveryError = `Updating project metadata failed: ${errorText(error)}`;
     }
     if (!deliveryError) {
-      emit(input.onProgress, "⬆️ Committing and pushing to Forgejo");
+      emit(input.onProgress, "⬆️ Committing and pushing to Forgejo", undefined, "publishing");
       // A validated turn that only fails later keeps a clean subject; a turn
       // that never validated says so in git history.
       const subject = validationError
@@ -574,21 +813,36 @@ export class ProjectService {
     // workspace. That is a normal outcome, not a delivery failure — leave the
     // project's status and lastError exactly as they were.
     const noChanges = !commitStats && !deliveryError;
-    project = await this.store.patchProject(threadId, {
-      ...(noChanges ? {} : {
-        status: published ? "ready" : "error",
-        lastError: published ? undefined : truncate(validationError || deliveryError || "the turn did not publish", 1000),
-      }),
-      ...(commitStats ? { lastCommit: commitStats.commit } : {}),
-      // Keep the external-push poller in sync: after the bot's own push,
-      // origin/main's tip is exactly this turn's commit.
-      ...(commitStats ? { lastSeenCommit: await currentHead(workspacePath) } : {}),
-      pendingTurn: undefined,
-      // Record when the session was last used and how full its context window
-      // ended; the next turn's lifecycle check reads both.
-      lastTurnAt: new Date().toISOString(),
-      ...(usage?.contextTokens ? { lastTurnUsage: { contextTokens: usage.contextTokens, contextLimit: usage.contextLimit } } : {}),
-    });
+    // Clear the in-flight marker only while this turn still owns it: a hard
+    // reset can swap in a fresh session and a successor's marker while this
+    // (stopped) turn finishes its delivery tail, and wiping the successor's
+    // marker would silently lose its crash recovery. The same applies to every
+    // other field derived from the worktree: once superseded, this turn's HEAD
+    // observations describe the successor's commits, and persisting them would
+    // make /site revert undo the wrong turn.
+    const ownsTurn = pendingTurnMatches(this.store.getProject(threadId)?.pendingTurn, input.pendingTurn);
+    if (ownsTurn) {
+      project = await this.store.patchProject(threadId, {
+        ...(noChanges ? {} : {
+          status: published ? "ready" : "error",
+          lastError: published ? undefined : truncate(validationError || deliveryError || "the turn did not publish", 1000),
+        }),
+        ...(commitStats ? { lastCommit: commitStats.commit } : {}),
+        ...(commitStats ? { lastTurnBaseCommit: (await commitHistory(workspacePath)).previous } : {}),
+        // Keep the external-push poller in sync: after the bot's own push,
+        // origin/main's tip is exactly this turn's commit.
+        ...(commitStats ? { lastSeenCommit: await currentHead(workspacePath) } : {}),
+        pendingTurn: undefined,
+        // Record when the session was last used and how full its context window
+        // ended; the next turn's lifecycle check reads both.
+        lastTurnAt: new Date().toISOString(),
+        ...(usage?.contextTokens ? { lastTurnUsage: { contextTokens: usage.contextTokens, contextLimit: usage.contextLimit } } : {}),
+      });
+    } else {
+      // A successor owns the record now; report its state, not a stale snapshot.
+      log("warn", "project.complete_superseded", { threadId, commit: commitStats?.commit });
+      project = this.store.getProject(threadId) ?? project;
+    }
 
     if (published) {
       emit(input.onProgress, "🗂️ Refreshing the public gallery");
@@ -619,6 +873,7 @@ export class ProjectService {
       agentSummary,
       usage,
       durationMs: Date.now() - input.startedAt,
+      ...(qaScreenshot ? { screenshot: qaScreenshot } : {}),
       ...(commitStats
         ? { commit: commitStats.commit, commitFiles: commitStats.files, additions: commitStats.additions, deletions: commitStats.deletions }
         : { commitFiles: 0, additions: 0, deletions: 0 }),
@@ -647,6 +902,7 @@ export class ProjectService {
     // Hoisted for the failure ledger in the catch, mirroring mutate().
     let usage: TurnUsage | undefined;
     log("info", "project.recovery_started", { threadId, initial: pending.initial, startedAt: pending.startedAt });
+    this.activeTurns += 1;
 
     try {
       emit(onProgress, "🔌 Waiting for the agent service to be reachable");
@@ -664,7 +920,7 @@ export class ProjectService {
       } else {
         const notes = await readProjectNotes(project.workspacePath);
         try {
-          const result = await this.recoveryPrompt(project.workspacePath, project.sessionId, recoveryInstruction(pending.prompt, notes), onProgress, threadId);
+          const result = await this.recoveryPrompt(project.workspacePath, project.sessionId, recoveryInstruction(pending.prompt, notes), onProgress, threadId, pending.images);
           agentSummary = result.text;
           usage = result.usage;
         } catch (error) {
@@ -676,22 +932,26 @@ export class ProjectService {
           const instruction = pending.initial
             ? initialProjectInstruction(projectKind, pending.prompt, notes)
             : mutationInstruction(projectKind, pending.prompt, notes);
-          const result = await this.recoveryPrompt(project.workspacePath, sessionId, instruction, onProgress, threadId);
+          const result = await this.recoveryPrompt(project.workspacePath, sessionId, instruction, onProgress, threadId, pending.images);
           agentSummary = result.text;
           usage = result.usage;
         }
       }
+      // Agent phase over: recovery's delivery tail holds the queue the same
+      // way a normal turn's does (see ProjectService.delivering).
+      this.delivering.add(threadId);
       const result = await this.completeTurn({
         project,
         prompt: pending.prompt,
         initial: pending.initial,
         projectKind,
-        multiplayer: multiplayerContext(projectKind, project.siteSlug),
+        multiplayer: multiplayerContext(projectKind, project.multiplayerGameId ?? project.siteSlug),
         agentSummary,
         author: pending.author,
         onProgress,
         usage,
         startedAt: turnStartedAt,
+        pendingTurn: pending,
       });
       await this.usageLog.record({
         threadId,
@@ -714,14 +974,61 @@ export class ProjectService {
         fallbackModel: this.store.getModel(),
         failed: true,
       });
-      await this.store.patchProject(threadId, {
-        status: "error",
-        lastError: truncate(errorText(error), 1000),
-        pendingTurn: undefined,
-        lastTurnAt: new Date().toISOString(),
-      });
-      logError("project.recovery_failed", error, { threadId });
-      throw error;
+      const stoppedByUser = this.stopRequested.delete(threadId);
+      // Same ownership guard as mutate(): a hard reset may have swapped the
+      // session and marker while this recovery was in flight, and the
+      // replacement's crash-recovery marker must survive this failure.
+      const owning = this.store.getProject(threadId);
+      if (owning && pendingTurnMatches(owning.pendingTurn, pending)) {
+        await this.store.patchProject(threadId, stoppedByUser
+          ? {
+            ...(owning.status === "creating" ? { status: "error" as const, lastError: "Initial build stopped at the user's request" } : {}),
+            pendingTurn: undefined,
+            lastTurnAt: new Date().toISOString(),
+          }
+          : {
+            status: "error" as const,
+            lastError: truncate(errorText(error), 1000),
+            pendingTurn: undefined,
+            lastTurnAt: new Date().toISOString(),
+          });
+      } else {
+        log("warn", "project.recovery_superseded", { threadId });
+      }
+      logError("project.recovery_failed", error, { threadId, stoppedByUser });
+      throw stoppedByUser
+        ? new TurnStoppedError("The recovered update was stopped at the user's request.", { cause: error })
+        : error;
+    } finally {
+      this.activeTurns -= 1;
+      this.delivering.delete(threadId);
+      this.stopRequested.delete(threadId);
+    }
+  }
+
+  /**
+   * One agent prompt with mid-flight quota failover: when the send fails on a
+   * provider quota block and a healthy failover model is configured, the same
+   * prompt is retried once on it. (The pre-send check inside prompt() already
+   * switched before sending when it could; this covers blocks discovered by
+   * sending.)
+   */
+  private async promptWithFailover(
+    workspacePath: string,
+    sessionId: string,
+    instruction: string,
+    onProgress: ProgressCallback | undefined,
+    images: readonly PromptImage[] | undefined,
+    requestedModel: string | undefined,
+  ): Promise<PromptResult> {
+    try {
+      return await this.opencode.prompt(workspacePath, sessionId, instruction, requestedModel, onProgress, "sitebuilder", this.store.getEffort(), images);
+    } catch (error) {
+      const retryModel = this.opencode.failoverModelForError(error, requestedModel);
+      if (!retryModel) throw error;
+      log("warn", "project.quota_failover_retry", { sessionId, from: requestedModel || "default", to: retryModel, error: serializeError(error) });
+      emit(onProgress, `⚠️ The provider quota ran out mid-turn — retrying with \`${retryModel}\``);
+      return this.opencode.prompt(workspacePath, sessionId, instruction, retryModel, onProgress, "sitebuilder", this.store.getEffort(), images);
     }
   }
 
@@ -736,8 +1043,9 @@ export class ProjectService {
     instruction: string,
     onProgress: ProgressCallback | undefined,
     threadId: string,
+    images?: readonly PromptImage[],
   ): Promise<PromptResult> {
-    const pending = this.opencode.prompt(workspacePath, sessionId, instruction, this.store.getModel(), onProgress, "sitebuilder", this.store.getEffort());
+    const pending = this.promptWithFailover(workspacePath, sessionId, instruction, onProgress, images, this.store.getModel());
     let timedOut = false;
     let timer: NodeJS.Timeout | undefined;
     try {
@@ -881,47 +1189,132 @@ export class ProjectService {
     }
   }
 
-  /** Drop the current agent session and start a fresh one on the next message. */
-  async resetSession(threadId: string): Promise<ProjectRecord> {
+  /**
+   * Hard per-thread reset for /site reset: free the thread's queue, stop its
+   * agent session — abort a running turn, discard pending questions, delete
+   * the session — and swap in a fresh one. Nothing here waits behind the
+   * thread's queue; a reset must work exactly when a turn is stuck holding
+   * it. The fresh session is created and committed to the store BEFORE the
+   * old one is stopped, so the interrupted turn's "session vanished" recovery
+   * path sees the store's session id change and fails instead of recreating
+   * its session. The stopped turn reports failure in the thread through its
+   * normal path; messages queued behind it run on the fresh session at once.
+   * Sites, git history, and project notes are untouched.
+   */
+  async resetSession(threadId: string): Promise<{ project: ProjectRecord; stoppedTurn: boolean }> {
     const project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
-    if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
-      throw new Error("A model turn is still running in this thread. Wait for it to finish before resetting.");
+
+    // A turn in its delivery tail (build/validate/commit/publish) has already
+    // left the agent, so it is not "busy" — but it still holds the queue and
+    // will release it on its own. Severing then would release the next waiter
+    // into a second pipeline on the same worktree (index.lock failures, a site
+    // flipping between two versions). Only a genuinely stuck holder is freed.
+    // Re-read at each decision point: a turn can enter its tail during the
+    // session call below.
+    const deliveryTail = (): boolean => this.delivering.has(threadId);
+    const freeQueue = (): boolean => {
+      if (deliveryTail()) return false;
+      this.severQueue(threadId);
+      return true;
+    };
+
+    let sessionId: string | undefined;
+    try {
+      sessionId = await withTimeout(this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`), 60_000);
+    } catch (error) {
+      // No replacement session exists, so released queue items would prompt
+      // the wedged one — but leaving the thread wedged is worse; free it and
+      // report the service trouble.
+      const freed = freeQueue();
+      throw new Error(
+        freed
+          ? `The thread's queue was freed, but starting a fresh agent session failed: ${errorText(error)}`
+          : `Starting a fresh agent session failed: ${errorText(error)}. The current turn is still finishing its delivery and will release the queue when it completes.`,
+      );
     }
-    const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
-    // The new session has no turns yet, so it can be neither stale nor due for
-    // compaction; clearing both keeps the lifecycle rules from acting on the
-    // previous session's history.
-    const updated = await this.store.patchProject(threadId, { sessionId, lastTurnUsage: undefined, lastTurnAt: undefined });
-    log("info", "project.session_reset", { threadId, oldSessionId: project.sessionId, sessionId });
-    return updated;
+    if (!sessionId) {
+      const freed = freeQueue();
+      throw new Error(
+        freed
+          ? "The thread's queue was freed, but the agent service did not answer the fresh-session request within 60s. " +
+            "Try /site reset again once the service is reachable."
+          : "The agent service did not answer the fresh-session request within 60s. The current turn is still finishing its delivery and will release the queue when it completes.",
+      );
+    }
+    // Clear pendingTurn so boot recovery cannot resurrect the stopped turn,
+    // and the fresh-session lifecycle fields (nothing has run on it yet, so
+    // it can be neither idle-stale nor due for compaction). A delivery tail is
+    // the exception: it is finishing, not stopped, and it must keep ownership
+    // so it can record its own commit and clear the marker when it completes.
+    const updated = await this.store.patchProject(threadId, {
+      sessionId,
+      ...(deliveryTail() ? {} : { pendingTurn: undefined }),
+      lastTurnUsage: undefined,
+      lastTurnAt: undefined,
+    });
+    const sweep = await this.opencode
+      .stopSessionsInDirectory(project.workspacePath, project.sessionId, new Set([sessionId]))
+      .catch((error) => {
+        log("warn", "project.reset_sweep_failed", { threadId, error: serializeError(error) });
+        return undefined;
+      });
+    // Sever only now that the store points at the fresh session: released
+    // queue items read the project fresh inside mutate() and must land on
+    // the new session, not the one the sweep is about to delete. A delivery
+    // tail is left alone — it releases the queue itself when it finishes.
+    freeQueue();
+    log("info", "project.session_reset", {
+      threadId,
+      oldSessionId: project.sessionId,
+      sessionId,
+      stoppedSessions: sweep?.sessions ?? 0,
+      abortedTurns: sweep?.aborted ?? 0,
+    });
+    return { project: updated, stoppedTurn: (sweep?.aborted ?? 0) > 0 };
   }
 
   /**
-   * Admin-wide hard reset: stop EVERY active session on the agent service —
-   * abort running turns, discard pending questions, and delete each session —
-   * then start a fresh session for every project the store tracks. The sweep
-   * also covers sessions the store no longer knows about (orphans, subagent
-   * children, abandoned titler runs), so nothing survives to keep working or
-   * be resumed. Unlike resetSession this does not refuse while a turn runs —
-   * the turn is stopped and its Discord turn fails through the normal failure
-   * path. Sites, git history, and project notes are untouched.
+   * Admin-wide hard reset: free every thread's queue, start a fresh session
+   * for every project the store tracks, then stop EVERY other session on the
+   * agent service — abort running turns, discard pending questions, and
+   * delete each session. The sweep also covers sessions the store no longer
+   * knows about (orphans, subagent children, abandoned titler runs), so
+   * nothing survives to keep working or be resumed. Fresh sessions are
+   * created and committed to the store BEFORE the old ones are stopped, so
+   * interrupted turns' "session vanished" recovery path sees the session id
+   * change and fails instead of recreating its session. The stopped Discord
+   * turns fail through their normal failure path. Sites, git history, and
+   * project notes are untouched.
    */
   async resetAllSessions(): Promise<{ total: number; stopped: number; failed: number; aborted: number }> {
-    // Sweep first, while every existing session is still listed; fresh
-    // sessions created afterwards are the only thing left alive on the service.
-    const sweep = await this.opencode.stopAllSessions(new Set()).catch((error) => {
-      logError("project.admin_reset_sweep_failed", error, {});
-      return { sessions: 0, aborted: 0 };
-    });
-
     const projects = this.store.listProjects();
+    // Free every thread's queue first — instantly, before any service call —
+    // so messages wedged behind a stuck turn proceed even while the agent
+    // service is slow to abort it (or unreachable entirely). A turn already in
+    // its delivery tail is skipped: it releases the queue itself, and severing
+    // would start a second pipeline on the same worktree.
+    const deliveryTails = new Set<string>();
+    for (const project of projects) {
+      if (this.delivering.has(project.threadId)) deliveryTails.add(project.threadId);
+      else this.severQueue(project.threadId);
+    }
+
+    const fresh = new Set<string>();
     const outcomes = await Promise.all(projects.map(async (project) => {
       try {
         const sessionId = await this.opencode.createSession(project.workspacePath, `Discord: ${project.displayName}`);
+        fresh.add(sessionId);
         // Clear pendingTurn so boot recovery does not resurrect the aborted
         // turn after the next restart, and mirror resetSession for the rest.
-        await this.store.patchProject(project.threadId, { sessionId, pendingTurn: undefined, lastTurnUsage: undefined, lastTurnAt: undefined });
+        // A delivery tail keeps its marker: it is finishing and must record
+        // its own commit rather than have that write skipped as superseded.
+        await this.store.patchProject(project.threadId, {
+          sessionId,
+          ...(deliveryTails.has(project.threadId) ? {} : { pendingTurn: undefined }),
+          lastTurnUsage: undefined,
+          lastTurnAt: undefined,
+        });
         log("info", "project.session_admin_reset", { threadId: project.threadId, oldSessionId: project.sessionId, sessionId });
         return true;
       } catch (error) {
@@ -929,6 +1322,12 @@ export class ProjectService {
         return false;
       }
     }));
+    // With the replacements alive, sweep everything else on the service;
+    // the fresh sessions are the only thing left running afterwards.
+    const sweep = await this.opencode.stopAllSessions(fresh).catch((error) => {
+      logError("project.admin_reset_sweep_failed", error, {});
+      return { sessions: 0, aborted: 0 };
+    });
     const summary = {
       total: projects.length,
       stopped: outcomes.filter(Boolean).length,
@@ -950,13 +1349,45 @@ export class ProjectService {
       throw new Error("A model turn is still running in this thread. Wait for it to finish before deleting.");
     }
 
+    await this.removeProjectFootprint(project);
+  }
+
+  /**
+   * Delete a project whose Discord thread is gone. Deletion intent is
+   * unambiguous, so unlike deleteProject this does not wait behind the
+   * thread's queue or a running turn: the queue is severed, the running turn
+   * is aborted (questions rejected first — they hold turns open), and the
+   * teardown proceeds immediately. The aborted turn routes through the
+   * user-stop marker so it does not raise a spurious admin incident for a
+   * thread that no longer exists.
+   */
+  async forceDeleteProject(threadId: string): Promise<void> {
+    const project = this.store.getProject(threadId);
+    if (!project) return;
+    this.severQueue(threadId);
+    if (await this.opencode.isBusy(project.workspacePath, project.sessionId).catch(() => false)) {
+      await this.rejectPendingQuestions(project.workspacePath);
+      const aborted = await this.opencode.abortTurn(project.workspacePath, project.sessionId).catch((error) => {
+        log("warn", "project.delete_abort_failed", { threadId, error: serializeError(error) });
+        return false;
+      });
+      if (aborted) this.stopRequested.add(threadId);
+    }
+    await this.removeProjectFootprint(project);
+  }
+
+  /** Shared teardown: workspace, Forgejo repo, published page, store record, gallery. */
+  private async removeProjectFootprint(project: ProjectRecord): Promise<void> {
+    const threadId = project.threadId;
     await fs.rm(project.workspacePath, { recursive: true, force: true }).catch((error) => {
       log("warn", "project.delete_workspace_failed", { threadId, error: serializeError(error) });
     });
     await this.forgejo.deleteRepository(project.repoName).catch((error) => {
       log("warn", "project.delete_repo_failed", { threadId, repoName: project.repoName, error: serializeError(error) });
     });
-    await fs.rm(safeChild(config.publishRoot, project.siteSlug), { recursive: true, force: true }).catch(() => undefined);
+    for (const slug of new Set([project.siteSlug, ...(project.siteAliases ?? []), ...(project.pendingRename ? [project.pendingRename.siteSlug] : [])])) {
+      await fs.rm(safeChild(config.publishRoot, slug), { recursive: true, force: true }).catch(() => undefined);
+    }
 
     await this.store.deleteProject(threadId);
     await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo)).catch(() => undefined);
@@ -968,6 +1399,114 @@ export class ProjectService {
     const project = this.store.getProject(threadId);
     if (!project) return false;
     return this.opencode.isBusy(project.workspacePath, project.sessionId);
+  }
+
+  /** How many turns are in flight right now (agent work through delivery). */
+  activeTurnCount(): number {
+    return this.activeTurns;
+  }
+
+  /**
+   * Load the just-validated site in the preview browser. Hard errors (page
+   * crashes, same-origin request failures, non-network console errors) come
+   * back as BrowserQaResult.hardErrors and the caller throws them into the
+   * repair round-trip; the screenshot rides the turn result for the thread.
+   * An unreachable or misbehaving preview resolves undefined — QA is
+   * best-effort and never blocks a publish.
+   */
+  private async runBrowserQa(project: ProjectRecord, onProgress?: ProgressCallback): Promise<BrowserQaResult | undefined> {
+    if (!config.browserQaEnabled) return undefined;
+    emit(onProgress, "📷 Browser QA — loading the site in a real browser");
+    try {
+      return await driveBrowserQa(project.guildId, project.threadId);
+    } catch (error) {
+      log("warn", "browserqa.failed", { threadId: project.threadId, error: serializeError(error) });
+      return undefined;
+    }
+  }
+
+  /**
+   * Gentle stop for the thread's running turn: abort the agent turn but keep
+   * the session, workspace, git history, and project notes. The aborted turn's
+   * mutate() rethrows as TurnStoppedError; partial edits stay in the tree.
+   *
+   * Three outcomes are reported separately because the caller's message must
+   * not claim "no turn is running" while the thread is visibly stuck:
+   * `stopped` (abort landed), `delivering` (the turn is past the agent and
+   * will finish on its own), and `queueFreed` (the agent service could not be
+   * reached, so the wedged queue was released instead of aborting).
+   */
+  async stopTurn(threadId: string): Promise<StopTurnOutcome> {
+    const project = this.store.getProject(threadId);
+    if (!project) return { stopped: false, delivering: false, queueFreed: false };
+    const busy = await this.opencode.isBusy(project.workspacePath, project.sessionId).catch(() => undefined);
+    if (busy === false) {
+      // No agent turn: either the thread is idle, or the turn already moved on
+      // to build/commit/publish. Only the latter is worth reporting, and it
+      // must not have its queue severed — it releases the queue itself.
+      return { stopped: false, delivering: this.delivering.has(threadId), queueFreed: false };
+    }
+    if (busy === undefined) {
+      // The status call failed. A turn in its delivery tail is finishing on its
+      // own, so leave its queue alone; otherwise a prompt against an
+      // unreachable service may never settle, which is the one case where
+      // leaving the chain intact wedges the thread for good.
+      if (this.delivering.has(threadId)) return { stopped: false, delivering: true, queueFreed: false };
+      this.severQueue(threadId);
+      log("warn", "project.turn_stop_unreachable", { threadId, sessionId: project.sessionId });
+      return { stopped: false, delivering: false, queueFreed: true };
+    }
+    // The agent is working — including a repair prompt inside the delivery
+    // tail, which is abortable exactly like a normal turn.
+    // A turn parked on a question holds itself open — the question must be
+    // rejected before an abort can land (the same dance as the reset sweep).
+    await this.rejectPendingQuestions(project.workspacePath);
+    // Mark BEFORE the abort request: the server rejects the in-flight prompt as
+    // soon as it processes the abort, so the turn's catch can observe the mark
+    // before this function resumes. Marking afterwards let the rejection race
+    // past and misreport the stop as a project failure.
+    this.stopRequested.add(threadId);
+    let aborted: boolean;
+    try {
+      aborted = await this.opencode.abortTurn(project.workspacePath, project.sessionId);
+    } catch (error) {
+      // Nothing consumed the mark, so it must not survive into the next turn.
+      this.stopRequested.delete(threadId);
+      throw error;
+    }
+    if (!aborted) this.stopRequested.delete(threadId);
+    // The turn may have completed between the status check and the abort; if
+    // the marker we saw is gone, nothing will consume the mark and it would
+    // mislabel the next failure as a user stop. (With no marker there is
+    // nothing to compare, so leave it for the turn's own catch/finally.)
+    const after = this.store.getProject(threadId);
+    if (project.pendingTurn && !pendingTurnMatches(after?.pendingTurn, project.pendingTurn)) this.stopRequested.delete(threadId);
+    log("warn", "project.turn_stop_requested", { threadId, sessionId: project.sessionId, aborted });
+    return { stopped: aborted, delivering: false, queueFreed: false };
+  }
+
+  /** Reject the directory's pending agent questions, best-effort; they hold their turns open. */
+  private async rejectPendingQuestions(workspacePath: string): Promise<void> {
+    for (const pending of await this.opencode.listPendingQuestions(workspacePath).catch(() => [] as Array<{ id: string }>)) {
+      await this.opencode.rejectQuestion(workspacePath, pending.id).catch((error) => {
+        log("warn", "opencode.question_reject_failed", { requestID: pending.id, workspacePath, error: serializeError(error) });
+      });
+    }
+  }
+
+  /**
+   * Whether the model the thread's next turn will run on accepts image
+   * attachments: the admin model override when set, else the model the
+   * session last used. Undefined when no model can be determined — callers
+   * treat that as "do not forward images".
+   */
+  async modelAcceptsImages(threadId: string): Promise<boolean | undefined> {
+    const project = this.store.getProject(threadId);
+    if (!project) return undefined;
+    const parsed = parseModel(this.store.getModel())
+      ?? await this.opencode.lastAssistantModel(project.workspacePath, project.sessionId);
+    if (!parsed) return undefined;
+    return this.opencode.modelAcceptsAttachments(parsed.providerID, parsed.modelID);
   }
 
   /** Discard uncommitted working-tree edits from a failed turn (button-initiated rollback). */
@@ -1041,6 +1580,7 @@ export class ProjectService {
         status: "ready",
         lastError: undefined,
         lastCommit: short,
+        lastTurnBaseCommit: undefined,
         lastSeenCommit: commit,
         lastTurnAt: new Date().toISOString(),
       });
@@ -1133,6 +1673,7 @@ export class ProjectService {
         status: "ready",
         lastError: undefined,
         lastCommit: short,
+        lastTurnBaseCommit: undefined,
         lastSeenCommit: commit,
         lastTurnAt: new Date().toISOString(),
       });
@@ -1198,14 +1739,11 @@ export class ProjectService {
     const messageID = await this.opencode.lastUserMessageId(project.workspacePath, project.sessionId);
     if (!messageID) throw new Error("This session has no turns to revert yet.");
 
-    // Fail fast on a git history that cannot be undone before touching OpenCode state.
-    const history = await commitHistory(project.workspacePath);
-    if (!history.previous) {
+    const history = await turnRevertTarget(project.workspacePath, project.lastCommit, project.lastTurnBaseCommit);
+    const headDrifted = history.headDrifted;
+    if (!headDrifted && !history.target) {
       throw new Error("Only the initial workspace commit exists; there is no earlier published version to revert to.");
     }
-    // HEAD no longer matching the last accepted turn means the previous turn failed
-    // after its commit/publish; in that case there is no published commit to undo.
-    const headDrifted = Boolean(project.lastCommit && project.lastCommit !== history.current);
 
     let conversationReverted = true;
     try {
@@ -1219,12 +1757,18 @@ export class ProjectService {
     let undoneCommit: string | undefined;
     let keptCommit: string | undefined;
     if (!headDrifted) {
-      ({ undone: undoneCommit, kept: keptCommit } = await undoLastCommit(project.workspacePath, this.forgejo));
+      ({ undone: undoneCommit, kept: keptCommit } = await undoLastCommit(project.workspacePath, this.forgejo, history.target));
     }
 
     if (keptCommit) {
+      // Reverting content must preserve the current project name and public links.
+      await this.writeReadme(project);
       const siteDir = safeChild(project.workspacePath, "site");
       await this.ensureHarnessBuildInputs(project);
+      await buildSite(project.workspacePath);
+      await validateSite(siteDir);
+      const metadata = await commitAndPush(project.workspacePath, `Rename project to ${project.displayName}`, this.forgejo);
+      if (metadata) keptCommit = metadata.commit;
       await buildSite(project.workspacePath);
       await validateSite(siteDir);
       await publishSite(siteDir, project.siteSlug);
@@ -1233,6 +1777,8 @@ export class ProjectService {
       status: "ready",
       lastError: undefined,
       lastCommit: keptCommit ?? history.current,
+      lastTurnBaseCommit: undefined,
+      lastSeenCommit: await currentHead(project.workspacePath),
     });
     await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
     log("info", "project.reverted", { threadId, undoneCommit, keptCommit, conversationReverted, headDrifted });
@@ -1273,9 +1819,9 @@ function formatWorkingTreeStats(stats: WorkingTreeStats): string {
   return `✏️ this turn · ${stats.files} file${stats.files === 1 ? "" : "s"}${breakdown} · +${stats.additions}/−${stats.deletions} lines`;
 }
 
-function emit(callback: ProgressCallback | undefined, text: string, detail?: string): void {
+function emit(callback: ProgressCallback | undefined, text: string, detail?: string, phase?: ProgressPhase): void {
   if (!callback) return;
-  Promise.resolve(callback({ text, detail })).catch(() => undefined);
+  Promise.resolve(callback({ text, detail, phase })).catch(() => undefined);
 }
 
 /**

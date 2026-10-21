@@ -1,7 +1,8 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, type Message, type MessageEditOptions } from "discord.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
-import { MAX_DISCORD_MESSAGE_CHARS } from "./util.js";
+import { renderProgressCard, renderProgressText, type ProgressSnapshot, type ProgressActivity, type ProgressContext, type ProgressFiles, type ProgressMetrics, type ProgressPhase, type ProgressPlanItem, type ProgressTool } from "./progress-view.js";
+export type { ProgressContext, ProgressFiles, ProgressMetrics, ProgressPhase, ProgressPlanItem, ProgressTool } from "./progress-view.js";
 
 /** One question the agent asked via OpenCode's question tool. */
 export interface AgentQuestion {
@@ -21,25 +22,42 @@ export interface ProgressUpdate {
   text: string;
   detail?: string;
   /**
-   * "activity" (default) lines become the rolling status bullet. "thought",
-   * "stats", and "changes" update dedicated lines streamed from the agent/harness.
-   * "question" carries an agent question to render as buttons.
+   * Activity drives the current action and recent history. Structured updates
+   * populate independent card sections; thought is public assistant narration,
+   * never the model's reasoning stream. Questions also carry answer buttons.
    */
-  kind?: "activity" | "thought" | "stats" | "changes" | "question";
+  kind?: "activity" | "thought" | "stats" | "changes" | "question" | "plan" | "metrics" | "context" | "queue";
   question?: AgentQuestion;
+  phase?: ProgressPhase;
+  context?: ProgressContext;
+  plan?: ProgressPlanItem[];
+  metrics?: ProgressMetrics;
+  files?: ProgressFiles;
+  tool?: ProgressTool;
+  queuedRequests?: number;
 }
 
 export type ProgressCallback = (update: ProgressUpdate) => void | Promise<void>;
 
-const MAX_SUMMARY_CHARS = 180;
-// Recent activity bullets kept under the head; the render drops oldest-first
-// only when the message would exceed Discord's edit budget.
-const HISTORY_LINES = 6;
+const MAX_SUMMARY_CHARS = 280;
+// Keep a small event tail; the card shows the most recent useful activities.
+const HISTORY_LINES = 8;
 
 export class DiscordProgress {
   private readonly started = Date.now();
-  private latest = "🧠 Starting…";
-  private readonly history: string[] = [];
+  private latest: ProgressActivity = { text: "Preparing your update", at: this.started };
+  private readonly history: ProgressActivity[] = [];
+  private phase: ProgressPhase = "preparing";
+  private context: ProgressContext = {};
+  private plan: ProgressPlanItem[] = [];
+  private metrics?: ProgressMetrics;
+  private metricsAt = 0;
+  private files?: ProgressFiles;
+  private queuedRequests = 0;
+  private readonly tools = new Map<string, ProgressTool>();
+  private inFlight?: Promise<void>;
+  private dirty = false;
+  private textOnly = false;
   private thought?: string;
   private stats?: string;
   private changes?: string;
@@ -50,9 +68,13 @@ export class DiscordProgress {
    */
   private questionPin?: { requestID: string; question: string; resolution?: string };
   private lastEdit = 0;
+  /** Last time the agent reported anything at all; drives the stalled watchdog. */
+  private lastActivityAt = this.started;
   private pending?: NodeJS.Timeout;
   private heartbeat?: NodeJS.Timeout;
   private closed = false;
+  /** When set, a persistent Stop button rides under every render of the turn. */
+  private stopCustomId?: string;
 
   constructor(
     private readonly message: Message,
@@ -64,7 +86,24 @@ export class DiscordProgress {
   }
 
   callback: ProgressCallback = (update) => {
-    if (update.kind === "thought") {
+    if (this.closed) return;
+    // A newly queued user message is not agent progress: it must not hide a
+    // provider that has stopped emitting events.
+    if (update.kind !== "queue") this.lastActivityAt = Date.now();
+    if (update.phase) this.phase = update.phase;
+    if (update.context) this.context = { ...this.context, ...update.context };
+    if (update.metrics) { this.metrics = { ...this.metrics, ...update.metrics }; this.metricsAt = Date.now(); }
+    if (update.files) this.files = update.files;
+    if (update.queuedRequests !== undefined) this.queuedRequests = Math.max(0, update.queuedRequests);
+    if (update.plan) this.plan = update.plan;
+    if (update.tool) {
+      const previous = this.tools.get(update.tool.id);
+      this.tools.set(update.tool.id, update.tool);
+      if (previous?.status === update.tool.status) { this.schedule(); return; }
+      this.update(update.text, update.detail, update.tool.id);
+    } else if (["context", "metrics", "plan", "queue"].includes(update.kind ?? "")) {
+      this.schedule();
+    } else if (update.kind === "thought") {
       const summary = summarizeThought(update.text);
       if (summary !== undefined) this.thought = summary;
       this.schedule();
@@ -143,92 +182,112 @@ export class DiscordProgress {
    * carries no responder, so it only fills in a fallback line.
    */
   recordAnswer(requestID: string, responder: string, label: string): void {
-    if (this.questionPin?.requestID !== requestID || this.questionPin.resolution) return;
+    if (this.questionPin?.requestID !== requestID) return;
     this.questionPin.resolution = `✅ ${singleLine(responder)} chose: ${singleLine(label)}`;
     this.schedule();
   }
 
   /** Pin that the pinned question was skipped and by whom. */
   recordSkip(requestID: string, responder: string): void {
-    if (this.questionPin?.requestID !== requestID || this.questionPin.resolution) return;
+    if (this.questionPin?.requestID !== requestID) return;
     this.questionPin.resolution = `⏭️ ${singleLine(responder)} skipped — the agent uses its best judgment`;
     this.schedule();
   }
 
-  update(text: string, detail?: string): void {
+  /** Show a Stop button under the live status while the turn runs; the final outcome edit clears it. */
+  enableStopButton(customId = "threadsite:stop"): void {
+    this.stopCustomId = customId;
+    this.schedule();
+  }
+
+  update(text: string, detail?: string, key?: string): void {
     if (this.closed) return;
-    const line = detail ? `${text} — ${detail}` : text;
-    if (line !== this.latest) {
-      this.history.push(this.latest);
+    this.lastActivityAt = Date.now();
+    if (/waiting for (?:the )?project queue|queued/i.test(text)) this.phase = "queued";
+    // A generic session-busy event must not bury a more useful running tool.
+    if (/model is (?:thinking|working)/i.test(text) && [...this.tools.values()].some((tool) => tool.status === "running")) return;
+    if (text !== this.latest.text || detail !== this.latest.detail) {
+      if (!key || this.latest.key !== key) this.history.push(this.latest);
       while (this.history.length > HISTORY_LINES) this.history.shift();
-      this.latest = line;
+      if (key) {
+        const existing = this.history.findIndex((activity) => activity.key === key);
+        if (existing >= 0) this.history.splice(existing, 1);
+      }
+      this.latest = { text, detail, key, at: key === this.latest.key && text === this.latest.text ? this.latest.at : Date.now() };
     }
     this.schedule();
   }
 
-  close(): void {
+  close(): Promise<void> {
     this.closed = true;
     if (this.pending) clearTimeout(this.pending);
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.pending = undefined;
     this.heartbeat = undefined;
+    return this.inFlight ?? Promise.resolve();
   }
 
   private schedule(): void {
+    if (this.closed) return;
+    this.dirty = true;
+    if (this.inFlight) return;
     const remaining = config.progressUpdateMs - (Date.now() - this.lastEdit);
     if (remaining <= 0) void this.flush();
     else if (!this.pending) this.pending = setTimeout(() => void this.flush(), remaining);
   }
 
   private async flush(): Promise<void> {
-    if (this.closed) return;
+    if (this.closed || this.inFlight) return;
     if (this.pending) clearTimeout(this.pending);
     this.pending = undefined;
     this.lastEdit = Date.now();
-    try {
-      const components = this.questionComponents();
-      const options: MessageEditOptions = components.length
-        ? { ...this.render(), components }
-        // Omitting components in an edit leaves any existing ones attached, so
-        // an answered question's buttons must be explicitly cleared.
-        : { ...this.render(), components: [] };
-      await this.message.edit(options);
-    } catch (error) {
-      log("debug", "discord.progress_edit_failed", { messageId: this.message.id, error: String(error) });
+    this.dirty = false;
+    this.inFlight = (async () => {
+      try {
+        const rows = this.questionComponents();
+        // The stop row yields its slot to questions (Discord caps 5 rows); an
+        // answered question's buttons must always be explicitly cleared.
+        if (this.stopCustomId && rows.length < 5) {
+          rows.push(
+            new ActionRowBuilder<ButtonBuilder>().addComponents(
+              new ButtonBuilder().setCustomId(this.stopCustomId).setLabel("Stop").setStyle(ButtonStyle.Danger),
+            ),
+          );
+        }
+        const snapshot = this.snapshot();
+        const options: MessageEditOptions = { ...(this.textOnly ? renderProgressText(snapshot) : renderProgressCard(snapshot)), components: rows };
+        try { await this.message.edit(options); }
+        catch (error) {
+          if (this.textOnly || (error as { code?: number }).code !== 50013) throw error;
+          this.textOnly = true;
+          await this.message.edit({ ...renderProgressText(snapshot), components: rows });
+        }
+      } catch (error) {
+        log("debug", "discord.progress_edit_failed", { messageId: this.message.id, error: String(error) });
+      }
+    })();
+    try { await this.inFlight; }
+    finally {
+      this.inFlight = undefined;
+      if (this.dirty && !this.closed) this.schedule();
     }
   }
 
-  // Compact rolling view: a short tail of recent activity (newest at the bottom),
-  // a summary line of what the model is narrating, and a context-usage subtext.
-  // The whole message stays inside Discord's 2000-character edit budget; when it
-  // would overflow, the oldest history lines are dropped first.
-  private render(): { content: string } {
-    const elapsed = formatElapsed(Date.now() - this.started);
-    const head = `**${this.title}** · ${elapsed}`;
-    const pinLines = this.questionPin
-      ? this.questionPin.resolution
-        ? [this.questionPin.question, `↳ ${this.questionPin.resolution}`]
-        : [this.questionPin.question]
-      : [];
-    const withHistory = (history: string[]) =>
-      [head, ...pinLines, ...[...history, this.latest].map((line) => `• ${singleLine(line)}`)].join("\n");
-    const extra = (this.questionPin
-      ? pinLines.reduce((sum, line) => sum + line.length + 1, 0)
-      : 0)
-      + (this.thought ? this.thought.length + 8 : 0)
-      + (this.stats ? this.stats.length + 4 : 0)
-      + (this.changes ? this.changes.length + 4 : 0);
-    let history = this.history;
-    let body = withHistory(history);
-    while (body.length + extra > MAX_DISCORD_MESSAGE_CHARS && history.length) {
-      history = history.slice(1);
-      body = withHistory(history);
-    }
-    const lines = [body];
-    if (this.thought) lines.push(`> 💭 ${this.thought}`);
-    if (this.stats) lines.push(`-# ${this.stats}`);
-    if (this.changes) lines.push(`-# ${this.changes}`);
-    return { content: lines.join("\n").slice(0, MAX_DISCORD_MESSAGE_CHARS) };
+  private snapshot(): ProgressSnapshot {
+    const tools = [...this.tools.values()];
+    const idleMs = Date.now() - this.lastActivityAt;
+    return {
+      title: this.title, phase: this.phase, startedAt: this.started, now: Date.now(), latest: this.latest,
+      history: this.history, context: this.context, thought: this.thought, stats: this.stats, changes: this.changes,
+      files: this.files, metrics: this.metrics && Date.now() - this.metricsAt > 5000 ? { ...this.metrics, liveTokensPerSecond: undefined } : this.metrics,
+      plan: this.plan, queuedRequests: this.queuedRequests,
+      actions: tools.length, activeTools: tools.filter((tool) => tool.status === "running").length,
+      toolErrors: tools.filter((tool) => tool.status === "error").length, questionPin: this.questionPin,
+      waiting: (this.latest.key ? this.tools.get(this.latest.key)?.status === "error" : false)
+        || /retry|backoff|unavailable|reconnect|waiting for.*(?:agent|service)|hit an error/i.test(this.latest.text),
+      questions: this.question?.questions,
+      stalledForMs: config.turnStallWarnMs > 0 && idleMs >= config.turnStallWarnMs ? idleMs : undefined,
+    };
   }
 }
 
