@@ -593,6 +593,13 @@ Run `npm --prefix bot test` for production import containment, restart-safe queu
 
 ## Updating pinned versions
 
+To deploy updates on the server, one command pulls from GitHub, safely resets tracked files (`.env`, `secrets/`, and `data/` are untracked and untouched — never run `git clean` in this repo), and rebuilds/recreates only the containers whose code changed:
+
+```bash
+scripts/deploy.sh              # track origin/main
+scripts/deploy.sh release/v2.5 # or a specific branch
+```
+
 The project intentionally pins the agent platform/SDK versions together in `opencode/Dockerfile` and `bot/package.json`. When updating one, update the other and rebuild:
 
 ```bash
