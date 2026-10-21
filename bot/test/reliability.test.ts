@@ -173,7 +173,7 @@ function record(threadId: string, dir: string): ProjectRecord {
 }
 
 test("queue-only projects recover after reopening; atomic claims preserve overflow and new arrivals", async () => {
-  const file = path.join(root, "queue-state.json");
+  const file = path.join(root, "queue-state.db");
   const store = await openStore(file);
   await store.putProject(record("queue", root));
   const image = { mime: "image/png", filename: "reference.png", dataUrl: "data:image/png;base64,eA==" };
@@ -223,15 +223,6 @@ test("turn identity survives database reads and rejects a superseding turn", asy
   await store.patchProject("identity", { pendingTurn: { ...marker, id: "turn-two" } });
   assert.equal(pendingTurnMatches(store.getProject("identity")!.pendingTurn, marker), false);
   assert.equal(pendingTurnMatches(undefined, undefined), false);
-});
-
-test("legacy JSON imports once and never replaces newer recovery work on restart", async () => {
-  const legacy = path.join(root, "legacy-state.json");
-  await fs.writeFile(legacy, JSON.stringify({ version: 1, settings: {}, projects: { legacy: record("legacy", root) } }));
-  const store = await openStore(legacy);
-  await store.appendQueuedRequest("legacy", { prompt: "new work", statusMessageId: "new-status" });
-  const reopened = await openStore(legacy);
-  assert.equal(reopened.getProject("legacy")!.pendingQueue![0].prompt, "new work");
 });
 
 test("Forgejo rename retries verify repository IDs before adopting a target", async () => {
@@ -290,7 +281,7 @@ async function projectFixture(id: string, forgejo = new LocalForgejo()) {
   await commitAndPush(dir, "Accepted agent turn", forgejo);
   const head = await currentHead(dir);
   Object.assign(project, { lastCommit: head.slice(0, 10), lastSeenCommit: head, lastTurnBaseCommit: base });
-  const store = await openStore(path.join(root, `state-${id}.json`));
+  const store = await openStore(path.join(root, `state-${id}.db`));
   await store.putProject(project);
   const opencode = { isBusy: async () => false, lastUserMessageId: async () => "message", revertSession: async () => {} } as unknown as OpenCodeHarness;
   const usage = new UsageLog(path.join(root, `usage-${id}.jsonl`));
@@ -341,7 +332,7 @@ test("a rename interrupted after its remote change resumes using persisted inten
   const f = await projectFixture("retry1");
   f.forgejo.failAfterRename = true;
   await assert.rejects(f.service.renameProject(f.project.threadId, "Fresh Name"), /Simulated disconnect/);
-  const reopened = await openStore(path.join(root, "state-retry1.json"));
+  const reopened = await openStore(path.join(root, "state-retry1.db"));
   assert.ok(reopened.getProject(f.project.threadId)!.pendingRename);
   assert.equal(reopened.listRecoveryProjects()[0].threadId, f.project.threadId);
   const restarted = new ProjectService(reopened, f.opencode, f.forgejo, f.usage);
@@ -371,7 +362,7 @@ test("mutate claims queued work durably before the agent starts", async () => {
   await f.store.appendQueuedRequest(f.project.threadId, { prompt: "next pass", statusMessageId: "overflow-status" });
   let started = false;
   f.opencode.prompt = async (): Promise<PromptResult> => {
-    const restarted = await openStore(path.join(root, "state-claim.json"));
+    const restarted = await openStore(path.join(root, "state-claim.db"));
     const saved = restarted.getProject(f.project.threadId)!;
     assert.equal(saved.pendingTurn!.prompt, "change it");
     assert.equal(saved.pendingTurn!.statusMessageId, "replacement-status");

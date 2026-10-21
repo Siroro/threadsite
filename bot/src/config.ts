@@ -122,10 +122,8 @@ export const config = {
 
   workspaceRoot: path.resolve(env("WORKSPACE_ROOT", "/workspace")),
   publishRoot: path.resolve(env("PUBLISH_ROOT", "/srv/sites")),
-  // Legacy single-file state; imported into the SQLite store on first boot.
-  stateFile: path.resolve(env("STATE_FILE", "/data/state.json")),
-  // SQLite store (projects + settings). Defaults next to STATE_FILE.
-  stateDbFile: path.resolve(env("STATE_DB_FILE", env("STATE_FILE", "/data/state.json").replace(/\.json$/i, "") + ".db")),
+  // SQLite store (projects + settings).
+  stateDbFile: path.resolve(env("STATE_DB_FILE", "/data/state.db")),
   // Append-only JSONL token/cost ledger backing /site-admin usage.
   usageLogFile: path.resolve(env("USAGE_LOG_FILE", "/data/usage-log.jsonl")),
   publicSitesBaseUrl: env("PUBLIC_SITES_BASE_URL", "http://localhost:8080").replace(/\/$/, ""),

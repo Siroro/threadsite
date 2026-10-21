@@ -127,16 +127,3 @@ export interface ProjectRecord {
   pendingQueue?: QueuedRequest[];
 }
 
-export interface PersistedSettings {
-  model?: string;
-  /** Model variant (reasoning effort) sent with every prompt; "auto" is stored as undefined. */
-  effort?: string;
-  /** Stable HMAC secret shared with the Forgejo push webhooks; generated once. */
-  webhookSecret?: string;
-}
-
-export interface PersistedState {
-  version: 1;
-  settings: PersistedSettings;
-  projects: Record<string, ProjectRecord>;
-}

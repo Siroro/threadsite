@@ -680,7 +680,7 @@ client.on(Events.MessageCreate, async (message) => {
   // ride a steering send and a turn in its delivery tail cannot take one;
   // those fall through to the queue as always.
   if (!imageAttachments.length && await projects.steerActiveTurn(message.channel.id, prompt)) {
-    await status.edit("🧭 Sent to the running turn — the agent reads it mid-turn and folds it into the current work.").catch(() => undefined);
+    await status.edit("🧭 Sent to the running turn").catch(() => undefined);
     return;
   }
 
