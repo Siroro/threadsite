@@ -1731,7 +1731,8 @@ function previewProjectRecord(
  */
 async function reconcileProjectCards(): Promise<void> {
   for (const project of store.listProjects()) {
-    if (project.infoMessageId && project.infoCardVersion === PROJECT_CARD_VERSION) continue;
+    const usageChanged = await projects.reconcileProjectUsage(project.threadId);
+    if (!usageChanged && project.infoMessageId && project.infoCardVersion === PROJECT_CARD_VERSION) continue;
     await refreshProjectCard(project.threadId);
   }
 }

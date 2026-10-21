@@ -27,7 +27,7 @@ const KIND_COLORS: Record<string, number> = { site: 0x5865f2, "game-2d": 0x22c55
  * version is stored next to the pinned message id, and the next boot upgrades
  * every card still on an older design (see reconcileProjectCards in index.ts).
  */
-export const PROJECT_CARD_VERSION = 2;
+export const PROJECT_CARD_VERSION = 3;
 
 const PROMPT_CHARS = 900;
 
@@ -104,9 +104,12 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   if (usage && usage.turns > 0) {
     const cached = usage.cacheTokens > 0 ? ` (${formatTokens(usage.cacheTokens)} cached)` : "";
     const failed = usage.failedTurns > 0 ? ` · ${usage.failedTurns} failed` : "";
+    const tokens = usage.inputTokens || usage.outputTokens
+      ? `in ${formatTokens(usage.inputTokens)}${cached} · out ${formatTokens(usage.outputTokens)}`
+      : "token counts unavailable";
     embed.addFields({
       name: "Lifetime usage",
-      value: `${usage.turns} turn${usage.turns === 1 ? "" : "s"}${failed} · in ${formatTokens(usage.inputTokens)}${cached} · out ${formatTokens(usage.outputTokens)}`,
+      value: `${usage.turns} turn${usage.turns === 1 ? "" : "s"}${failed} · ${tokens}`,
       inline: false,
     });
     // Cost is deliberately absent, like the tracking card: token counts are

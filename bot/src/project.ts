@@ -5,7 +5,7 @@ import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
 import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, turnRevertTarget, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
 import { ensureMultiplayerFiles, multiplayerContext, removeMultiplayerFiles } from "./multiplayer.js";
-import { OpenCodeHarness, addUsage, errorUsage, type PromptImage, type PromptResult, type TurnUsage } from "./opencode.js";
+import { OpenCodeHarness, addUsage, errorUsage, reconcileUsage, usageFromMessages, type PromptImage, type PromptResult, type TurnUsage } from "./opencode.js";
 import { PROJECT_CARD_VERSION } from "./project-card.js";
 import { publishIndex, publishSite, publishSiteRedirects, siteUrl, validateSite } from "./publish.js";
 import { buildSite, GENERATED_GITIGNORE } from "./build.js";
@@ -123,6 +123,38 @@ export class ProjectService {
     readonly forgejo: ForgejoClient,
     readonly usageLog: UsageLog,
   ) {}
+
+  /** Backfill missed historical events; safe to retry after every startup. */
+  async reconcileProjectUsage(threadId: string): Promise<boolean> {
+    const project = this.store.getProject(threadId);
+    if (!project?.sessionId || !project.workspacePath) return false;
+    try {
+      return await this.usageLog.reconcileThread(threadId, project.sessionId,
+        await this.opencode.usageMessages(project.workspacePath, project.sessionId));
+    } catch (error) {
+      log("warn", "usage.reconcile_failed", { threadId, error: errorText(error) });
+      return false;
+    }
+  }
+
+  private async recordTurnUsage(project: ProjectRecord, pending: ProjectRecord["pendingTurn"],
+    usage: TurnUsage | undefined, failed: boolean, durationMs: number): Promise<TurnUsage | undefined> {
+    if (pending && typeof this.opencode.usageMessages === "function") {
+      try {
+        usage = reconcileUsage(usage, usageFromMessages(
+          await this.opencode.usageMessages(project.workspacePath, project.sessionId), Date.parse(pending.startedAt)));
+      } catch (error) {
+        log("warn", "usage.turn_history_failed", { threadId: project.threadId, error: errorText(error) });
+      }
+    }
+    await this.usageLog.record({
+      id: pending ? pending.id ?? `${project.threadId}:${pending.startedAt}` : undefined,
+      sessionId: project.sessionId, startedAt: pending?.startedAt,
+      threadId: project.threadId, project: project.displayName, kind: project.projectKind ?? "site",
+      durationMs, usage, fallbackModel: this.store.getModel(), failed,
+    });
+    return usage;
+  }
 
   /** Recreate ignored harness build inputs after a checkout/clean or on a fresh host. */
   private async ensureHarnessBuildInputs(project: ProjectRecord): Promise<void> {
@@ -571,6 +603,8 @@ export class ProjectService {
         beforeCommit: await currentHead(workspacePath), images: turnImages ? [...turnImages] : undefined };
       project = await this.store.startQueuedTurn(threadId, pendingMarker, queuedStatusIds);
       queueClaimed = true;
+      await this.usageLog.record({ id: pendingMarker.id, sessionId: project.sessionId, startedAt: pendingMarker.startedAt,
+        pending: true, threadId, project: project.displayName, kind: projectKind });
       await onProgress?.({ kind: "queue", text: "Saved requests", queuedRequests: project.pendingQueue?.length ?? 0 });
       // A stop that arrived during preparation (before any server-side turn
       // existed to abort) lands here: fail as a user stop instead of starting
@@ -632,31 +666,12 @@ export class ProjectService {
         project, prompt, initial, projectKind, multiplayer, agentSummary, author, onProgress, usage, startedAt: turnStartedAt,
         pendingTurn: pendingMarker,
       });
-      // Ledger every finished turn here — published or not — so a turn records
-      // exactly once; thrown failures record in the catch below.
-      await this.usageLog.record({
-        threadId,
-        project: project.displayName,
-        kind: projectKind,
-        durationMs: Date.now() - turnStartedAt,
-        usage: result.usage,
-        fallbackModel: this.store.getModel(),
-        failed: Boolean(result.validationError || result.deliveryError || (!result.commit && !result.noChanges)),
-      });
       return result;
     } catch (error) {
       // A failed run still spent its tokens: ledger whatever was observed —
       // the hoisted total plus anything the failing prompt attached to the
       // error itself — before marking the project errored.
-      await this.usageLog.record({
-        threadId,
-        project: project.displayName,
-        kind: project.projectKind ?? "site",
-        durationMs: Date.now() - turnStartedAt,
-        usage: addUsage(usage, errorUsage(error)),
-        fallbackModel: this.store.getModel(),
-        failed: true,
-      });
+      await this.recordTurnUsage(project, pendingMarker, addUsage(usage, errorUsage(error)), true, Date.now() - turnStartedAt);
       const stoppedByUser = this.stopRequested.delete(threadId);
       // The turn failed before it could claim the persisted batch: release it
       // now, or the acknowledged messages stay in pendingQueue and replay (or
@@ -866,6 +881,10 @@ export class ProjectService {
     // workspace. That is a normal outcome, not a delivery failure — leave the
     // project's status and lastError exactly as they were.
     const noChanges = !commitStats && !deliveryError;
+    // Flush billing before clearing the durable recovery marker. A crash in
+    // the delivery tail can revise this same turn, never add a second one.
+    usage = await this.recordTurnUsage(project, input.pendingTurn, usage,
+      Boolean(validationError || deliveryError || (!commitStats && !noChanges)), Date.now() - input.startedAt);
     // Clear the in-flight marker only while this turn still owns it: a hard
     // reset can swap in a fresh session and a successor's marker while this
     // (stopped) turn finishes its delivery tail, and wiping the successor's
@@ -980,7 +999,7 @@ export class ProjectService {
       let agentSummary: string;
       if (await this.turnCompletedSince(project.workspacePath, project.sessionId, pending.startedAt)) {
         // The turn finished on the agent side while the bot was down; only the
-        // commit/publish tail was lost. Token usage was not observable then.
+        // commit/publish tail was lost. Saved billing is reconciled below.
         log("info", "project.recovery_already_completed", { threadId });
         emit(onProgress, "✅ The interrupted turn had already finished on the agent side");
         agentSummary = "This turn had already finished on the agent side before the restart; it was committed and published by recovery.";
@@ -1021,27 +1040,10 @@ export class ProjectService {
         startedAt: turnStartedAt,
         pendingTurn: pending,
       });
-      await this.usageLog.record({
-        threadId,
-        project: project.displayName,
-        kind: projectKind,
-        durationMs: Date.now() - turnStartedAt,
-        usage: result.usage,
-        fallbackModel: this.store.getModel(),
-        failed: Boolean(result.validationError || result.deliveryError || (!result.commit && !result.noChanges)),
-      });
       log("info", "project.recovery_completed", { threadId, commit: result.commit, published: !result.validationError && !result.deliveryError });
       return result;
     } catch (error) {
-      await this.usageLog.record({
-        threadId,
-        project: project.displayName,
-        kind: projectKind,
-        durationMs: Date.now() - turnStartedAt,
-        usage: addUsage(usage, errorUsage(error)),
-        fallbackModel: this.store.getModel(),
-        failed: true,
-      });
+      await this.recordTurnUsage(project, pending, addUsage(usage, errorUsage(error)), true, Date.now() - turnStartedAt);
       const stoppedByUser = this.stopRequested.delete(threadId);
       // Same ownership guard as mutate(): a hard reset may have swapped the
       // session and marker while this recovery was in flight, and the

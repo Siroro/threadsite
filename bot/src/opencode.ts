@@ -86,7 +86,7 @@ interface EventStreamHandle {
   done: Promise<void>;
 }
 
-interface SessionMessage {
+export interface SessionMessage {
   info?: {
     id?: string;
     sessionID?: string;
@@ -97,6 +97,8 @@ interface SessionMessage {
     providerID?: string;
     modelID?: string;
     error?: unknown;
+    tokens?: Record<string, any>;
+    cost?: number;
     time?: { created?: number; completed?: number };
   };
   parts?: Array<Record<string, any>>;
@@ -114,6 +116,7 @@ interface PromptSnapshot {
 // progress message can show real model output, not only harness stages.
 interface TurnState {
   assistantMessageIds: Set<string>;
+  finishedParts: Set<string>;
   /** Output+reasoning tokens produced during this turn. */
   outputTokens: number;
   /** Input+cache tokens billed across every model step of this turn. */
@@ -163,6 +166,7 @@ interface TurnState {
 function createTurnState(startedAt: number, compactions: number): TurnState {
   return {
     assistantMessageIds: new Set<string>(),
+    finishedParts: new Set<string>(),
     outputTokens: 0,
     inputTokens: 0,
     cacheTokens: 0,
@@ -607,6 +611,16 @@ export class OpenCodeHarness {
     // One TurnState per prompt, shared by the initial event stream and any reconnect
     // so token/context totals survive a transport recovery.
     const turn = createTurnState(snapshot.startedAt, snapshot.compactions);
+    const finalUsage = async (): Promise<TurnUsage> => {
+      const observed = usageOf(turn);
+      try {
+        const saved = usageFromMessages(await this.usageMessages(directory, sessionId), snapshot.startedAt, Infinity, snapshot.ids);
+        return reconcileUsage(observed, saved) ?? observed;
+      } catch (error) {
+        log("warn", "opencode.usage_history_failed", { sessionId, error: serializeError(error) });
+        return observed;
+      }
+    };
     turn.model = parsed ? { providerID: parsed.providerID, modelID: parsed.modelID } : undefined;
     if (turn.model) void this.applyContextLimit(turn, onProgress);
     let stream = await this.startEventStream(directory, sessionId, onProgress, turn).catch((error) => {
@@ -646,10 +660,10 @@ export class OpenCodeHarness {
           // quota block (the reset landed early or the outage was misread).
           this.clearQuotaBlock(turn.model?.providerID ?? parsed?.providerID);
           log("info", "opencode.prompt_completed", { sessionId, model: model || "default" });
-          return { text: summary, usage: usageOf(turn) };
+          return { text: summary, usage: await finalUsage() };
         } catch (error) {
           if (this.deliberateAborts.delete(sessionId)) {
-            const enriched = enrichProviderError(error, model, usageOf(turn), this.quotaContext(turn, parsed));
+            const enriched = enrichProviderError(error, model, await finalUsage(), this.quotaContext(turn, parsed));
             logError("opencode.prompt_aborted", enriched, {
               sessionId,
               model: model || "default",
@@ -691,9 +705,9 @@ export class OpenCodeHarness {
                 originalTransportError: serializeError(error),
               });
               emit(onProgress, { text: "✅ Recovered the completed agent turn" });
-              return { text: recovered, usage: usageOf(turn) };
+              return { text: recovered, usage: await finalUsage() };
             } catch (recoveryError) {
-              const enriched = enrichProviderError(recoveryError, model, usageOf(turn), this.quotaContext(turn, parsed));
+              const enriched = enrichProviderError(recoveryError, model, await finalUsage(), this.quotaContext(turn, parsed));
               logError("opencode.prompt_recovery_failed", enriched, {
                 sessionId,
                 model: model || "default",
@@ -705,7 +719,7 @@ export class OpenCodeHarness {
             }
           }
 
-          const enriched = enrichProviderError(error, model, usageOf(turn), this.quotaContext(turn, parsed));
+          const enriched = enrichProviderError(error, model, await finalUsage(), this.quotaContext(turn, parsed));
           logError("opencode.prompt_failed", enriched, {
             sessionId,
             model: model || "default",
@@ -751,6 +765,45 @@ export class OpenCodeHarness {
 
   async listMessages(directory: string, sessionId: string, limit = 100): Promise<SessionMessage[]> {
     return this.listSessionMessages(directory, sessionId, limit);
+  }
+
+  /** Saved billing data survives missed SSE events and bot/service restarts. */
+  async usageMessages(directory: string, sessionId: string): Promise<SessionMessage[]> {
+    const messages: SessionMessage[] = [];
+    const visited = new Set<string>();
+    const visit = async (id: string): Promise<void> => {
+      if (visited.has(id)) return;
+      visited.add(id);
+      let before: string | undefined;
+      const seen = new Set<string>();
+      for (;;) {
+        const result = await this.client.session.messages({ sessionID: id, directory, limit: 200, ...(before ? { before } : {}) } as any, { signal: AbortSignal.timeout(10_000) });
+        const page = unwrap<SessionMessage[]>(result, "OpenCode usage history");
+        if (!Array.isArray(page)) throw new Error("OpenCode usage history returned an unexpected payload");
+        const fresh = page.filter((message) => message.info?.id && !seen.has(message.info.id));
+        for (const message of fresh) {
+          seen.add(message.info!.id!);
+          messages.push(message);
+        }
+        if (page.length < 200) break;
+        if (!fresh.length) throw new Error("OpenCode usage history pagination did not advance");
+        before = fresh.sort((a, b) => (a.info?.time?.created ?? 0) - (b.info?.time?.created ?? 0)
+          || a.info!.id!.localeCompare(b.info!.id!))[0].info!.id;
+      }
+      // Older SDK mocks/servers may not expose child sessions; root billing
+      // remains useful. A child lookup failure must not discard root history.
+      if (typeof this.client.session.children === "function") {
+        try {
+          const result = await this.client.session.children({ sessionID: id, directory } as any, { signal: AbortSignal.timeout(10_000) });
+          const children = unwrap<Array<{ id: string }>>(result, "OpenCode usage children");
+          for (const child of children) await visit(child.id);
+        } catch (error) {
+          log("warn", "opencode.child_usage_failed", { sessionId: id, error: serializeError(error) });
+        }
+      }
+    };
+    await visit(sessionId);
+    return messages;
   }
 
   async lastUserMessageId(directory: string, sessionId: string): Promise<string | undefined> {
@@ -1629,6 +1682,8 @@ export class OpenCodeHarness {
     if (!part) return;
 
     if (part.type === "step-finish") {
+      if (part.id && turn.finishedParts.has(part.id)) return;
+      if (part.id) turn.finishedParts.add(part.id);
       const step = stepFigures(part);
       accumulateStep(turn, step, part.messageID);
       turn.liveTokenSamples.length = 0;
@@ -1726,6 +1781,8 @@ export class OpenCodeHarness {
     if (!part) return;
 
     if (part.type === "step-finish") {
+      if (part.id && turn.finishedParts.has(part.id)) return;
+      if (part.id) turn.finishedParts.add(part.id);
       accumulateStep(turn, stepFigures(part), part.messageID);
       turn.liveTokenSamples.length = 0;
       emitPublicMetrics(turn, onProgress);
@@ -1811,7 +1868,47 @@ function stepFigures(part: any): { inputTokens: number; outputTokens: number; ca
   };
 }
 
-/** Fold one model step into the turn's scalar totals and its per-model bucket. */
+/** Recover billing from saved messages, with each model step counted once. */
+export function usageFromMessages(
+  messages: SessionMessage[], since = 0, until = Infinity, excludeIds = new Set<string>(),
+): TurnUsage | undefined {
+  const turn = createTurnState(since, 0);
+  const seen = new Set<string>();
+  for (const message of [...messages].sort((a, b) => (a.info?.time?.created ?? 0) - (b.info?.time?.created ?? 0))) {
+    const info = message.info;
+    if (info?.role !== "assistant" || !info.id || seen.has(info.id) || excludeIds.has(info.id)) continue;
+    const created = info.time?.created;
+    if (created === undefined || created < since || created > until) continue;
+    seen.add(info.id);
+    if (info.providerID && info.modelID) turn.messageModels.set(info.id, `${info.providerID}/${info.modelID}`);
+    const parts = (message.parts ?? []).filter((part) => part.type === "step-finish");
+    // Assistant totals and step-finish parts describe the same spend. Never
+    // add both. Some providers/versions only persist the assistant totals.
+    const billing = parts.length ? parts : info.tokens ? [info] : [];
+    const partIds = new Set<string>();
+    for (const part of billing) {
+      if (part.id && partIds.has(part.id)) continue;
+      if (part.id) partIds.add(part.id);
+      const step = stepFigures(part);
+      accumulateStep(turn, step, info.id);
+      turn.contextTokens = step.inputTokens;
+    }
+  }
+  return turn.steps ? usageOf(turn) : undefined;
+}
+
+/** History and live events overlap: select the fuller snapshot, never add them. */
+export function reconcileUsage(observed: TurnUsage | undefined, saved: TurnUsage | undefined): TurnUsage | undefined {
+  if (!observed) return saved;
+  if (!saved) return observed;
+  const billing = saved.inputTokens + saved.outputTokens >= (observed.inputTokens ?? 0) + (observed.outputTokens ?? 0)
+    ? saved : observed;
+  return { ...observed, ...billing, contextLimit: observed.contextLimit ?? saved.contextLimit,
+    compactions: Math.max(observed.compactions ?? 0, saved.compactions ?? 0),
+    ...(observed.generationMs ? { generationMs: observed.generationMs, timedOutputTokens: observed.timedOutputTokens,
+      outputTokensPerSecond: observed.outputTokensPerSecond } : {}) };
+}
+
 function accumulateStep(
   turn: TurnState,
   step: { inputTokens: number; outputTokens: number; cacheTokens: number; cost: number },
