@@ -35,9 +35,35 @@ export function generatePushCredentials(): { username: string; password: string 
 const GIT_TIMEOUT_MS = 60_000;
 
 async function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
+  // Bind-mounted workspaces can belong to a different host/container UID.
+  // Trust only this canonical workspace for this invocation, including old
+  // projects that never pass through ensureGitRepository again. Do not write
+  // global config or disable ownership checks for every repository with '*'.
+  const workspace = await fs.realpath(cwd);
+  const gitDirectory = path.join(workspace, ".git");
+  const metadata = await fs.lstat(gitDirectory).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+    return undefined;
+  });
+  if (!metadata && args[0] !== "init") {
+    throw new Error(`Project workspace has no Git repository at ${gitDirectory}; refusing to use a parent repository.`);
+  }
+  if (metadata && (!metadata.isDirectory() || metadata.isSymbolicLink())) {
+    throw new Error(`Project Git metadata must be a directory inside ${workspace}.`);
+  }
+  const safeDirectory = workspace.replaceAll("\\", "/");
+  const gitEnv: NodeJS.ProcessEnv = { ...process.env, ...env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX", "GIT_NAMESPACE"]) {
+    delete gitEnv[key];
+  }
+  // Explicit paths prevent Git from discovering the server checkout above a
+  // missing project repo, or following an inherited GIT_DIR/GIT_WORK_TREE.
+  const { stdout } = await execFileAsync("git", [
+    "-c", `safe.directory=${safeDirectory}`,
+    `--git-dir=${gitDirectory}`, `--work-tree=${workspace}`, ...args,
+  ], {
     cwd,
-    env: { ...process.env, ...env },
+    env: gitEnv,
     maxBuffer: 4 * 1024 * 1024,
     timeout: GIT_TIMEOUT_MS,
   });

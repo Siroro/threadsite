@@ -129,6 +129,17 @@ export class ProjectService {
     if (multiplayer) await ensureMultiplayerFiles(project.workspacePath, multiplayer, project.projectKind ?? "site");
   }
 
+  /** Webhooks accelerate push detection; their failure must not block a build or rename. */
+  private async ensureProjectWebhook(repoName: string): Promise<void> {
+    const secret = this.store.getWebhookSecret();
+    if (!config.webhookEnabled || !secret) return;
+    try {
+      await this.forgejo.ensurePushWebhook(repoName, `${config.webhookPublicUrl}/hooks/forgejo`, secret);
+    } catch (error) {
+      log("warn", "webhook.ensure_failed", { repoName, pollingEnabled: config.externalPushPollMs > 0, error: serializeError(error) });
+    }
+  }
+
   enqueue<T>(threadId: string, work: () => Promise<T>): Promise<T> {
     let state = this.queues.get(threadId);
     if (!state) {
@@ -257,13 +268,8 @@ export class ProjectService {
 
     emit(onProgress, "🌱 Creating/checking Forgejo repository");
     await this.forgejo.ensureRepository(repoName, `${projectKindLabel(projectKind)} generated from Discord thread ${input.displayName}`);
-    if (config.webhookEnabled) {
-      const secret = this.store.getWebhookSecret();
-      if (secret) {
-        emit(onProgress, "🔗 Registering the Forgejo push webhook");
-        await this.forgejo.ensurePushWebhook(repoName, `${config.webhookPublicUrl}/hooks/forgejo`, secret);
-      }
-    }
+    if (config.webhookEnabled) emit(onProgress, "🔗 Registering the Forgejo push webhook");
+    await this.ensureProjectWebhook(repoName);
     emit(onProgress, "🧱 Initialising git workspace");
     await ensureGitRepository(workspacePath, repoName, this.forgejo);
     await ensureLocalBaseline(workspacePath);
@@ -404,10 +410,7 @@ export class ProjectService {
     // Persist a successful remote rename immediately, even if later delivery fails.
     project = await this.store.patchProject(threadId, { repoName: intent.repoName });
     await ensureGitRepository(project.workspacePath, intent.repoName, this.forgejo);
-    const secret = this.store.getWebhookSecret();
-    if (config.webhookEnabled && secret) {
-      await this.forgejo.ensurePushWebhook(intent.repoName, `${config.webhookPublicUrl}/hooks/forgejo`, secret);
-    }
+    await this.ensureProjectWebhook(intent.repoName);
     const renamed = { ...project, displayName: intent.displayName, siteSlug: intent.siteSlug };
     await this.writeReadme(renamed);
     await this.ensureHarnessBuildInputs(renamed);
@@ -935,7 +938,7 @@ export class ProjectService {
    * agent service (it may be restarting too) and for a still-running turn to
    * finish, then either commits already-completed work or asks the session to
    * continue the interrupted change, and runs the normal publish tail. The
-   * continue-prompt is bounded by the reconcile window so a wedged agent turn
+   * continue-prompt has an inactivity deadline so a wedged agent turn
    * cannot hold the thread's queue — and every message queued behind it —
    * forever.
    */
@@ -1092,9 +1095,9 @@ export class ProjectService {
   }
 
   /**
-   * One agent prompt during restart recovery, bounded by the reconcile window.
-   * On timeout the orphaned turn is aborted best-effort so the thread's queue
-   * frees up cleanly for the next message.
+   * Allow long recoveries while the agent makes progress. The reconcile window
+   * bounds inactivity, excluding time spent waiting for a user's answer.
+   * Status heartbeats alone must not keep a wedged turn alive forever.
    */
   private async recoveryPrompt(
     workspacePath: string,
@@ -1104,21 +1107,46 @@ export class ProjectService {
     threadId: string,
     images?: readonly PromptImage[],
   ): Promise<PromptResult> {
-    const pending = this.promptWithFailover(workspacePath, sessionId, instruction, onProgress, images, this.store.getModel());
     let timedOut = false;
+    let closed = false;
     let timer: NodeJS.Timeout | undefined;
+    let rejectTimeout!: (error: Error) => void;
+    const questions = new Set<string>();
+    const toolStates = new Map<string, string>();
+    let lastMetrics = "";
+    const inactivity = new Promise<never>((_, reject) => { rejectTimeout = reject; });
+    const armTimeout = (): void => {
+      if (timer) clearTimeout(timer);
+      if (closed || timedOut || questions.size) return;
+      timer = setTimeout(() => {
+        timedOut = true;
+        rejectTimeout(new Error(
+          `Restart recovery timed out after ${Math.round(config.opencodeReconcileTimeoutMs / 60000)} minutes without agent progress; partial edits were preserved.`,
+        ));
+      }, config.opencodeReconcileTimeoutMs);
+    };
+    const progress: ProgressCallback = (update) => {
+      if (closed || timedOut) return;
+      if (update.question) {
+        if (update.question.resolved) questions.delete(update.question.requestID);
+        else questions.add(update.question.requestID);
+        armTimeout();
+      } else if (update.kind !== "heartbeat") {
+        const toolChanged = update.tool && toolStates.get(update.tool.id) !== update.tool.status;
+        if (update.tool) toolStates.set(update.tool.id, update.tool.status);
+        const metrics = update.metrics;
+        const metricKey = metrics && JSON.stringify([metrics.inputTokens, metrics.outputTokens, metrics.steps, metrics.compactions]);
+        const metricsChanged = metricKey !== undefined && metricKey !== lastMetrics;
+        if (metricKey !== undefined) lastMetrics = metricKey;
+        if (toolChanged || metricsChanged || (metrics?.liveTokensPerSecond ?? 0) > 0
+          || update.kind === "thought" || update.kind === "plan" || update.kind === "changes") armTimeout();
+      }
+      return onProgress?.(update);
+    };
+    armTimeout();
+    const pending = this.promptWithFailover(workspacePath, sessionId, instruction, progress, images, this.store.getModel());
     try {
-      return await Promise.race([
-        pending,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            timedOut = true;
-            reject(new Error(
-              `Restart recovery timed out after ${Math.round(config.opencodeReconcileTimeoutMs / 60000)} minutes of agent work; the orphaned turn was abandoned.`,
-            ));
-          }, config.opencodeReconcileTimeoutMs);
-        }),
-      ]);
+      return await Promise.race([pending, inactivity]);
     } catch (error) {
       if (timedOut) {
         emit(onProgress, "🛑 Recovery window exhausted — stopping the orphaned agent turn");
@@ -1128,6 +1156,7 @@ export class ProjectService {
       }
       throw error;
     } finally {
+      closed = true;
       if (timer) clearTimeout(timer);
     }
   }

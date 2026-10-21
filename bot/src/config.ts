@@ -97,8 +97,8 @@ export const config = {
   // accounts that /site pushkey issues. Absent = pushkey is disabled.
   forgejoAdminTokenFile: env("FORGEJO_ADMIN_TOKEN_FILE", "/run/secrets/forgejo-admin-token"),
   // How often to poll each project's Forgejo main branch for commits pushed
-  // from outside the bot (push-key holders). Fallback only: with webhooks
-  // enabled (default) the poller does not start at all. 0 disables polling.
+  // from outside the bot (push-key holders). Runs alongside webhooks as a
+  // safety net for setup/delivery failures. 0 disables polling.
   externalPushPollMs: msEnv("EXTERNAL_PUSH_POLL_MS", 60 * 1000),
 
   // Forgejo push webhooks: the bot listens on WEBHOOK_PORT for HMAC-signed

@@ -189,16 +189,16 @@ client.once(Events.ClientReady, (ready) => {
   void recoverInterruptedTurns();
   void reconcileProjectCards();
   if (pushWebhooksLive) void ensureExistingProjectWebhooks();
-  else startExternalPushPoller();
+  startExternalPushPoller();
 });
 
 // Push-key holders push straight to the repo's main branch. With webhooks on
-// (default), Forgejo tells the bot the moment it happens; the poller stays as
-// a fallback for deployments that disable the webhook listener.
+// (default), Forgejo tells the bot the moment it happens; the poller also runs
+// as a safety net for missing hooks, rejected deliveries and lost events.
 let externalPushTimer: NodeJS.Timeout | undefined;
 
 function startExternalPushPoller(): void {
-  if (config.externalPushPollMs <= 0) return;
+  if (externalPushTimer || config.externalPushPollMs <= 0) return;
   let scanning = false;
   externalPushTimer = setInterval(() => {
     if (scanning) return;

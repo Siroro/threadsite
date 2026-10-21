@@ -206,13 +206,19 @@ export class ForgejoClient {
    * alone, so boot sweeps and rename retries do not pile up duplicates.
    */
   async ensurePushWebhook(repoName: string, url: string, secret: string): Promise<void> {
-    const owner = encodeURIComponent(config.forgejoOwner);
-    const repo = encodeURIComponent(repoName);
-    const existing = await this.api(`/api/v1/repos/${owner}/${repo}/hooks`);
-    if (existing.ok) {
-      const hooks = (await existing.json().catch(() => undefined)) as Array<{ config?: { url?: string } }> | undefined;
-      if (Array.isArray(hooks) && hooks.some((hook) => hook.config?.url === url)) return;
+    const repository = await this.repositoryInfo(repoName);
+    if (!repository) {
+      throw new Error(`Forgejo repository ${config.forgejoOwner}/${repoName} was not found or is not accessible. Check repository access or restore the missing repository.`);
     }
+    const owner = encodeURIComponent(config.forgejoOwner);
+    const repo = encodeURIComponent(repository.name);
+    const existing = await this.api(`/api/v1/repos/${owner}/${repo}/hooks`);
+    if (!existing.ok) {
+      throw new Error(`Forgejo webhook lookup failed (${existing.status}): ${await existing.text()}`);
+    }
+    const hooks = await existing.json() as Array<{ config?: { url?: string } }>;
+    if (!Array.isArray(hooks)) throw new Error("Forgejo webhook lookup returned an unexpected payload.");
+    if (hooks.some((hook) => hook.config?.url === url)) return;
     const created = await this.api(`/api/v1/repos/${owner}/${repo}/hooks`, {
       method: "POST",
       body: JSON.stringify({
