@@ -20,5 +20,5 @@
   "webmcp": false,
   "outputDir": "/tmp/threadsite-browser",
   "outputMaxSize": 67108864,
-  "timeouts": { "action": 10000, "navigation": 30000 }
+  "timeouts": { "action": 30000, "navigation": 45000, "idle": 0 }
 }

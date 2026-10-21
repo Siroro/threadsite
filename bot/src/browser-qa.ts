@@ -140,6 +140,12 @@ export function renderSanityProblem(state: RenderSanity | undefined): string | u
   return `preview rendered a blank page — no visible text or canvas${state.title ? ` (title: "${state.title}")` : ""}`;
 }
 
+// Per-request ceiling for one MCP call. The preview browser's own navigation
+// cap is 45s and its action/screenshot cap 30s, so this only fires when the
+// service stops answering entirely — without it a hung request would burn the
+// whole QA budget and turn a diagnosable failure into a silent "skipped".
+const REQUEST_TIMEOUT_MS = 60_000;
+
 class McpSession {
   private nextId = 1;
   private sessionId: string | undefined;
@@ -155,6 +161,7 @@ class McpSession {
         ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     const header = response.headers.get("mcp-session-id");
     if (header) this.sessionId = header;

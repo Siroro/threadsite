@@ -86,18 +86,63 @@ async function bundle(workspaceRoot, project) {
   };
 }
 
+// Concurrent esbuild builds are bounded because each one is CPU-heavy and this
+// container shares its cores with Chromium's software rasterizer. Requests
+// beyond the limit wait their turn rather than failing: several threads can be
+// previewing at once, and a hard "busy" response used to surface as a blank
+// page whose only content was that error string.
+const MAX_CONCURRENT_BUILDS = Number(process.env.PREVIEW_BUILD_CONCURRENCY || 4);
+const BUILD_QUEUE_TIMEOUT_MS = Number(process.env.PREVIEW_BUILD_QUEUE_TIMEOUT_MS || 30_000);
+// Cached snapshots are what non-HTML requests (js/, css/, assets) are served
+// from. Keep enough for concurrent threads so one thread's reload does not evict
+// another thread's assets mid-load.
+const SNAPSHOT_CACHE_SIZE = Number(process.env.PREVIEW_SNAPSHOT_CACHE || 16);
+
 export function createPreviewServer({ workspaceRoot }) {
   const root = path.resolve(workspaceRoot);
   const snapshots = new Map();
   const pending = new Map();
+  let activeBuilds = 0;
+  const waiting = [];
+  function acquireBuildSlot() {
+    if (activeBuilds < MAX_CONCURRENT_BUILDS) {
+      activeBuilds += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        grant: () => { clearTimeout(timer); resolve(); },
+        reject,
+      };
+      const timer = setTimeout(() => {
+        const index = waiting.indexOf(waiter);
+        if (index >= 0) waiting.splice(index, 1);
+        reject(new Error("Preview is busy; try again shortly."));
+      }, BUILD_QUEUE_TIMEOUT_MS);
+      timer.unref?.();
+      waiting.push(waiter);
+    });
+  }
+  function releaseBuildSlot() {
+    const next = waiting.shift();
+    // Hand the slot straight to the next waiter; only decrement when idle.
+    if (next) next.grant();
+    else activeBuilds -= 1;
+  }
   async function rebuild(project) {
     if (pending.has(project)) return pending.get(project);
-    if (pending.size >= 2) throw new Error("Preview is busy; try again shortly.");
     // Drop the previous snapshot first so a broken edit cannot show stale JS.
     snapshots.delete(project);
-    const task = bundle(root, project).then((snapshot) => {
+    const task = (async () => {
+      await acquireBuildSlot();
+      try {
+        return await bundle(root, project);
+      } finally {
+        releaseBuildSlot();
+      }
+    })().then((snapshot) => {
       snapshots.set(project, snapshot);
-      while (snapshots.size > 4) snapshots.delete(snapshots.keys().next().value);
+      while (snapshots.size > SNAPSHOT_CACHE_SIZE) snapshots.delete(snapshots.keys().next().value);
       return snapshot;
     }).finally(() => pending.delete(project));
     pending.set(project, task);

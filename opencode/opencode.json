@@ -121,18 +121,18 @@
       "url": "http://preview:8931/mcp",
       "oauth": false,
       "enabled": true,
-      "timeout": 30000
+      "timeout": 90000
     }
   },
   "agent": {
     "general": {
       "mode": "subagent",
-      "model": "opencode/mimo-v2.5-free",
+      "model": "opencode/mimo-v2.6-flash-free",
       "description": "General-purpose agent for researching complex questions and executing multi-step site-building tasks in parallel."
     },
     "explore": {
       "mode": "subagent",
-      "model": "opencode/mimo-v2.5-free",
+      "model": "opencode/mimo-v2.6-flash-free",
       "description": "Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions."
     },
     "sitebuilder": {
@@ -145,7 +145,7 @@
       "description": "Generate a concise Discord thread title from a project request.",
       "mode": "primary",
       "maxSteps": 1,
-      "model": "surplus/gpt-5.6-luna",
+      "model": "opencode/mimo-v2.6-flash-free",
       "prompt": "You name Discord threads. The user message contains a website or game request. Reply with ONLY a concise 3-6 word title in Title Case that names the deliverable: no quotes, no emoji, no hashtags, no trailing punctuation, and no explanation. Never call tools."
     }
   },

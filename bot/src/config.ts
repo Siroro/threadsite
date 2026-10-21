@@ -135,8 +135,11 @@ export const config = {
   // Browser QA: after static validation, load the site in the preview
   // service's Playwright browser, collect console/request errors, and capture a
   // screenshot for the thread. Unreachable preview = QA skipped, never blocks.
+  // The budget must stay above the preview browser's own navigation (45s) and
+  // action (30s) timeouts plus a screenshot, or a slow WebGL/software-rendered
+  // page loses the pass to this outer timeout instead of reporting a result.
   browserQaEnabled: boolEnv("BROWSER_QA_ENABLED", true),
-  browserQaTimeoutMs: intEnv("BROWSER_QA_TIMEOUT_MS", 25_000),
+  browserQaTimeoutMs: intEnv("BROWSER_QA_TIMEOUT_MS", 90_000),
   previewMcpUrl: env("PREVIEW_MCP_URL", "http://preview:8931/mcp"),
 
   // 3D games bundling Rapier (~2.5MB minified with inlined WASM) plus real
