@@ -17,6 +17,20 @@ test("builder step budget defaults to 200 and accepts a validated environment ov
   }
 });
 
+test("builder permissions and project prompts explain the isolated scratch browser workflow", async () => {
+  const config = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"));
+  const rules = await fs.readFile(new URL("../../bot/assets/agents/shared.md", import.meta.url), "utf8");
+  assert.equal(config.permission.edit["scratch/**"], "allow");
+  assert.equal(config.permission.edit["*/scratch/**"], "allow");
+  for (const text of [config.agent.sitebuilder.prompt, rules]) {
+    assert.match(text, /scratch\/<name>\/src\/main\.ts/);
+    assert.match(text, /__scratch\/<name>\//);
+    assert.match(text, /__site\/assets\//);
+    assert.match(text, /never published/);
+  }
+  assert.doesNotMatch(config.agent.sitebuilder.prompt, /Work only inside site\/|use edit only for files inside site\/\./);
+});
+
 // A cold Chromium launch plus a software-rendered (SwiftShader) WebGL canvas
 // takes well over the old 10s action / 30s navigation defaults: screenshots
 // failed with "Timeout 10000ms exceeded" and navigations hit the OpenCode MCP

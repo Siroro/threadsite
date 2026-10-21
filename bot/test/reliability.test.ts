@@ -14,7 +14,7 @@ process.env.PUBLISH_ROOT = path.join(root, "published");
 process.env.LOG_FILE = path.join(root, "test.log");
 process.env.BROWSER_QA_ENABLED = "false";
 process.env.PUBLIC_SITES_BASE_URL = "https://sites.example.invalid";
-const { buildSite } = await import("../src/build.js");
+const { buildSite, GENERATED_GITIGNORE } = await import("../src/build.js");
 const { ensureEnginePackages } = await import("../src/engines.js");
 const { ProjectService, TurnStoppedError } = await import("../src/project.js");
 const { PROJECT_CARD_VERSION } = await import("../src/project-card.js");
@@ -73,6 +73,25 @@ test("production accepts local modules and the real seeded engine package graph"
   await ensureEnginePackages(dir, "game-3d");
   await fs.writeFile(path.join(dir, "site/src/main.ts"), 'import * as THREE from "three"; import { MeshBVH } from "three-mesh-bvh"; console.log(new THREE.Vector3(), MeshBVH);');
   assert.ok((await buildSite(dir)).emitted > 0);
+});
+
+test("broken scratch experiments stay outside production builds, validation, Git and publication", async () => {
+  const f = await projectFixture("scratch-boundary");
+  const experiment = path.join(f.dir, "scratch", "car");
+  await fs.mkdir(path.join(experiment, "src"), { recursive: true });
+  await fs.writeFile(path.join(experiment, "index.html"), '<script type="module" src="js/main.js"></script>');
+  await fs.writeFile(path.join(experiment, "src", "main.ts"), 'const broken = ;');
+  await exec("git", ["add", "-f", "scratch"], { cwd: f.dir }); // migrate an accidentally tracked experiment
+  await buildSite(f.dir);
+  await validateSite(path.join(f.dir, "site"));
+  await commitAndPush(f.dir, "Keep scratch local", f.forgejo);
+  assert.equal(await git(f.dir, "ls-files", "scratch"), "");
+  assert.match(await fs.readFile(path.join(f.dir, ".gitignore"), "utf8"), /^scratch\/$/m);
+  assert.match(await fs.readFile(path.join(experiment, "src", "main.ts"), "utf8"), /broken/);
+  await publishSite(path.join(f.dir, "site"), f.project.siteSlug);
+  await assert.rejects(fs.access(path.join(config.publishRoot, f.project.siteSlug, "scratch")), { code: "ENOENT" });
+  await fs.writeFile(path.join(f.dir, "site", "src", "main.ts"), 'import "../../scratch/car/src/main.ts";');
+  await assert.rejects(buildSite(f.dir), /Build imports must stay inside/);
 });
 
 test("browser findings publish without a repair turn and reach the next agent prompt", async () => {
@@ -263,7 +282,7 @@ async function projectFixture(id: string, forgejo = new LocalForgejo()) {
   const dir = await workspace(`project-${id}`);
   const project = record(id, dir);
   await forgejo.ensureRepository(project.repoName);
-  await fs.writeFile(path.join(dir, ".gitignore"), "site/js/\nbuild-manifest.json\nnode_modules/\n.opencode/\n");
+  await fs.writeFile(path.join(dir, ".gitignore"), `${GENERATED_GITIGNORE.join("\n")}\n`);
   await ensureGitRepository(dir, project.repoName, forgejo);
   await ensureLocalBaseline(dir);
   const base = await currentHead(dir);

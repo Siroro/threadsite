@@ -5,8 +5,8 @@ Maintained by the ThreadSite Discord harness. You author **TypeScript under `sit
 ## Boundaries
 
 - Static browser deliverable only: HTML, CSS, bundled JS, JSON/data, fonts, media. No backend, server-side rendering, secrets, or build tooling of your own — **the harness runs the only build**; you never run builds or add build configuration.
-- Edit only inside `site/` — TypeScript in `src/`, styles in `css/`, data in `data/`, media in `assets/`. Harness-owned (import, never edit): `site/net/` (net client + config + `.d.ts`), `node_modules/`, `AGENTS.md`, `README.md`, `ASSET_SOURCES.json`, `build-manifest.json`, `.opencode/`.
-- `site/js/` is regenerated every turn — never hand-edit it; edit the `src/` module instead. TypeScript outside `site/src/` fails validation.
+- Author the deliverable inside `site/` — TypeScript in `src/`, styles in `css/`, data in `data/`, media in `assets/`. You may also edit `scratch/<name>/` for isolated browser views (see below). Harness-owned (import, never edit): `site/net/` (net client + config + `.d.ts`), `node_modules/`, `AGENTS.md`, `README.md`, `ASSET_SOURCES.json`, `build-manifest.json`, `.opencode/`.
+- `site/js/` is regenerated every turn — never hand-edit it; edit the `src/` module instead. Within the deliverable, TypeScript outside `site/src/` fails validation. Scratch TypeScript belongs in `scratch/<name>/src/` and is compiled separately for preview only.
 - Relative URLs only (the site is served under a path prefix). No dotfiles, symlinks, `package.json`/`tsconfig.json`, shell scripts, or git configuration.
 - Git is read-only for you: `status`/`log`/`diff`/`show` and similar are fine for understanding history; writes are blocked and never needed — the harness owns commits, pushes, validation, rollback, and publication.
 
@@ -25,9 +25,9 @@ Maintained by the ThreadSite Discord harness. You author **TypeScript under `sit
 
 ## Verification
 
-Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, unzip/tar (npm, curl, rm, and git writes are blocked). Keep scratch files in `/tmp` — authored workspace files are committed, while the harness selects the runtime-only deployment.
+Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, unzip/tar (npm, curl, rm, and git writes are blocked). Put browser experiments in `scratch/<name>/` using the edit tool; this workspace directory is gitignored and never published.
 
-- While editing: use `js_syntax_check` on files you change, and heed the attached language servers — they surface the same diagnostics the gate will.
+- While editing: use `js_syntax_check` on deliverable files you change under `site/`, and heed the attached language servers — they surface the same diagnostics the gate will. Scratch compilation diagnostics come from its preview page.
 - **Inspect the rendered result before finishing visual work.** Microsoft Playwright MCP is available as `playwright_browser_*` tools. The browser's preview URL is `http://127.0.0.1:8080/<guild-id>/<thread-id>/`, matching your workspace `/workspace/<guild-id>/<thread-id>` (inspect the working directory with `node -p "process.cwd()"` if needed). Navigate there: the preview service bundles the current TypeScript in memory, without writing `site/js/` or publishing anything. Reload/navigate again after every source edit; a build error is displayed on the page and must be fixed.
 - Use the browser screenshot tool to **see** the current viewport, inspect console errors and failed network requests, and correct visible layout/rendering problems. Inspect desktop and mobile sizes for websites. For games, get past the start screen, interact with keyboard/mouse, and inspect the actual canvas/WebGL scene; the vision tools support coordinate clicks. Take another screenshot after fixes. Text-only models can use the accessibility snapshot and diagnostics but must not claim they saw pixels. Screenshots require a model/provider advertising image input; choosing a text-only model does not give it vision.
 - The preview browser is isolated, with fresh in-memory storage per MCP connection, and can reach only the local preview origin. Downloaded local assets work; external APIs, fonts, media and the multiplayer relay are unavailable, so test solo fallback and distinguish blocked external requests from missing local assets. Close the browser when inspection is complete. Screenshots and browser output stay in temporary storage and are never committed or published. Previewing does not replace the final validation gate or verify multiplayer.
@@ -36,6 +36,14 @@ Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, 
       node /usr/local/lib/node_modules/typescript/bin/tsc --noEmit --allowJs --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM,DOM.Iterable --skipLibCheck site/src/*.ts
 
   Fix everything it reports — errors that reach the harness still get only one automatic repair round-trip.
+
+## Scratch browser views
+
+- Use a small isolated view to inspect a vehicle, character, material, lighting setup, sprite, UI component, or deterministic gameplay state without booting or controlling the whole game. Keep reusable factories/components in `site/src/`; import the component you need, not the full game's entry point. A broken unrelated game entry does not prevent scratch compilation.
+- Create `scratch/<name>/index.html` and `scratch/<name>/src/main.ts` with the edit tool. Names are 1–64 letters/digits/hyphens/underscores, starting with a letter or digit. A minimal HTML shell is `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="app"></div><script type="module" src="js/main.js"></script></body></html>`. As in the main project, each top-level `src/*.ts` becomes a `js/*.js` bundle; nested modules are shared imports. Never create generated `js/` files yourself.
+- From `scratch/car/src/main.ts`, import a shared factory with `import { createCar } from "../../../site/src/vehicles/car.js"` (adjust to the real export), and import installed engines by bare name, such as `"three"`. Set up only the required canvas/camera/lights or component mount, with a fixed seed/time and explicit ready flag when useful. Scratch imports can access this view, the project's `site/`, and its installed packages; other views/projects and root files remain outside the boundary.
+- Navigate with `playwright_browser_navigate` to `http://127.0.0.1:8080/<guild-id>/<thread-id>/__scratch/<name>/`. It builds only that view's import graph in memory. Use the existing screenshot, evaluate, resize, keyboard/mouse and console/network tools to inspect it; reload after edits. Shared local assets/styles/data are mounted at `__site/assets/`, `__site/css/`, and `__site/data/` relative to the view URL, even if the full game cannot compile. Example: `new THREE.TextureLoader().load("__site/assets/car.png")`.
+- Keep experiments in `scratch/`; move accepted behavior into `site/src/`. Scratch build errors and browser timeouts are diagnostics for that experiment and do not fail publication. The final site still needs its normal build/type checks and whole-experience browser inspection when available. Scratch files are retained locally for later iterations, excluded from Git and publication, and never required by the shipped game. The same browser isolation, image-model limitations, and close-browser guidance apply.
 
 ## How your work ships
 
