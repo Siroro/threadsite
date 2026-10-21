@@ -593,6 +593,41 @@ This is suitable for a private/friends Discord or a carefully permissioned serve
 
 ## Removing stale project registrations
 
+### Cleanup through start.sh
+
+After updating the checkout and rebuilding the bot image, use the numbered cleanup menu:
+
+```bash
+./start.sh cleanup
+```
+
+Select one or more project numbers, then choose full removal or registration-only cleanup. The menu previews the exact selection and asks you to type `DELETE` before applying it. These commands list registered resources without updating Git or restarting services:
+
+```bash
+./start.sh projects
+./start.sh threads
+./start.sh repos
+./start.sh games
+./start.sh cleanup --kind games
+```
+
+Each entry shows the Discord thread ID, project kind/status, display name and Forgejo repository. Listings cover registered projects; they do not discover unrelated Discord channels or Forgejo repositories. A game selection removes that game's linked project resources.
+
+For direct selection, names match exactly and options can be repeated. Commands preview by default; `--apply` executes the selected action:
+
+```bash
+./start.sh remove --thread 123456789012345678
+./start.sh remove --game "My Game" --apply
+./start.sh remove --repo site-my-game --apply
+./start.sh forget --repo site-deleted-game --apply
+```
+
+Full removal deletes the selected Discord thread, Forgejo repository, workspace, published site/aliases and SQLite registration, then refreshes the site index. It saves a SQLite backup first; that backup contains metadata, not a copy of the deleted source files. Registration-only cleanup keeps the thread, repository and files. Existing agent session history and relay snapshots are retained.
+
+Cleanup refuses queued/interrupted work, active agent turns, shared resources, unexpected workspace locations and paths through symlinks. Stop unfinished work with `/site stop`, clear `/site queue`, or let recovery finish first. During `--apply`, start.sh temporarily stops a running bot and restores its running state afterward, including on failure. Other services stay running. A failed removal retains the registration so the same selection can be retried; resources already deleted during that attempt are treated as absent on retry. Cleanup does not update the checkout, prune Docker volumes or remove unrelated data.
+
+### Standalone stale-registration script
+
 Deleting a repository directly in Forgejo does not remove its Discord project registration from SQLite. A webhook warning for that repository can therefore persist across bot restarts. A 404 can also mean lost access, so confirm the repository was intentionally deleted before removing its registration.
 
 The maintenance script previews exact repository-name matches by default. It runs inside the existing bot image and needs no host Node installation:
@@ -627,6 +662,9 @@ The one server command is the root-level `start.sh`: it pulls the latest code fr
 ./start.sh logs [service]  # follow logs (default: bot)
 ./start.sh restart [svc]   # restart one service or the whole stack
 ./start.sh stop            # stop the stack (containers, data and .env kept)
+./start.sh projects        # list projects with thread IDs and repositories
+./start.sh games           # list registered games
+./start.sh cleanup         # preview and remove selected projects interactively
 ```
 
 This repository is **main-only**: every update force-checks out `origin/main`, sets its upstream (so plain `git pull` also works), and removes stale local branches. The finer-grained `scripts/deploy.sh` does just the update+rebuild part (`--force` to discard local tracked edits). The project intentionally pins the agent platform/SDK versions together in `opencode/Dockerfile` and `bot/package.json`. When updating one, update the other and rebuild:
