@@ -57,7 +57,7 @@ export async function checkOpenCodeImageDelivery({ docker, network, root }) {
         baseURL: `http://host.docker.internal:${provider.address().port}/v1`, apiKey: "fixture-only",
       }, models: { "vision-fixture": { name: "Vision fixture", attachment: true,
         modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 100_000, output: 2048 } } } } },
-      mcp: { playwright: { type: "remote", url: "http://preview:8931/mcp", oauth: false, timeout: 30000 } },
+      mcp: { playwright: { type: "remote", url: "http://preview:8931/mcp", oauth: false, timeout: 90000 } },
     };
     const configFile = path.join(root, "wire-config.json");
     await fs.writeFile(configFile, JSON.stringify(config));

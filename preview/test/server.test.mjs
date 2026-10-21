@@ -118,3 +118,28 @@ test("refuses symlinked assets and project directories", async (t) => {
   await fs.symlink(path.join(root, "100", "200"), path.join(root, "100", "201"), "junction");
   assert.equal((await fetch(`${origin}/100/201/`)).status, 500);
 });
+
+test("concurrent projects queue their builds instead of failing as busy", async (t) => {
+  // Several threads can preview at the same time. The old cap of two in-flight
+  // builds returned "Preview is busy" for the rest, which reached the agent as
+  // a blank page whose entire content was that error string.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-concurrent-"));
+  const projects = Array.from({ length: 6 }, (_, index) => `90${index}/200`);
+  for (const [index, project] of projects.entries()) {
+    const site = path.join(root, ...project.split("/"), "site");
+    await fs.mkdir(path.join(site, "src"), { recursive: true });
+    await fs.writeFile(path.join(site, "index.html"), '<script type="module" src="js/main.js"></script>');
+    await fs.writeFile(path.join(site, "src", "main.ts"), `document.title = "project ${index}";`);
+  }
+  const server = createPreviewServer({ workspaceRoot: root });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const responses = await Promise.all(projects.map((project) => fetch(`${origin}/${project}/`)));
+  assert.deepEqual(responses.map((response) => response.status), projects.map(() => 200));
+  const bodies = await Promise.all(responses.map((response) => response.text()));
+  for (const body of bodies) assert.doesNotMatch(body, /Preview is busy/);
+});

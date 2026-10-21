@@ -68,9 +68,13 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=512m,mode=1777
-    shm_size: 256m
-    mem_limit: 1536m
-    cpus: 2
+    # No GPU: Chromium renders through SwiftShader, which is CPU-bound and
+    # scales with cores, so this is the service's throughput knob. 2 CPUs left
+    # most of an 8-thread host idle while screenshots timed out; 4 keeps
+    # headroom for OpenCode's LSP/tsc work running alongside it.
+    shm_size: ${PREVIEW_SHM_SIZE:-512m}
+    mem_limit: ${PREVIEW_MEMORY:-3g}
+    cpus: ${PREVIEW_CPUS:-4}
     pids_limit: 256
     security_opt:
       - no-new-privileges:true
@@ -80,6 +84,12 @@ services:
       WORKSPACE_ROOT: /workspace
       XDG_CACHE_HOME: /tmp/cache
       XDG_CONFIG_HOME: /tmp/config
+      # Several threads may preview at once. Builds queue above this limit
+      # instead of answering "Preview is busy" (which reached the agent as a
+      # blank page), and the snapshot cache holds one entry per active thread.
+      PREVIEW_BUILD_CONCURRENCY: ${PREVIEW_BUILD_CONCURRENCY:-4}
+      PREVIEW_BUILD_QUEUE_TIMEOUT_MS: ${PREVIEW_BUILD_QUEUE_TIMEOUT_MS:-30000}
+      PREVIEW_SNAPSHOT_CACHE: ${PREVIEW_SNAPSHOT_CACHE:-16}
     volumes:
       - ./data/workspaces:/workspace:ro
     expose:
