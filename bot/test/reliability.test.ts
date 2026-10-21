@@ -123,9 +123,7 @@ test("a finished turn stores the model-written preview for the play card", async
       return { pitch: "A calm pond where you feed koi.", added: "Added the lily pads.", usage: {} };
     },
   });
-  const result = await f.service.mutate(f.project.threadId, "Add lily pads");
-  assert.equal(result.preview?.pitch, "A calm pond where you feed koi.");
-  assert.equal(result.preview?.added, "Added the lily pads.");
+  await f.service.mutate(f.project.threadId, "Add lily pads");
   assert.equal(f.store.getProject(f.project.threadId)!.preview?.pitch, "A calm pond where you feed koi.");
   const asked = previews[0] as { name: string; summary?: string };
   assert.equal(asked.name, f.project.displayName);

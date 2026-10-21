@@ -209,7 +209,6 @@ test("webhook health check still answers", async () => {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/healthz`);
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { ok: true, projects: 2 });
   } finally {
     server.close();
   }

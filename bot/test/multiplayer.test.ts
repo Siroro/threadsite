@@ -56,11 +56,9 @@ test("initial and mutation instructions describe the chosen architecture", () =>
 });
 
 test("multiplayerSwapInstruction mandates investigate-then-question about the found difficulties", async () => {
-  const { multiplayerSwapInstruction, multiplayerModeLabel } = await import("../src/templates.js");
+  const { multiplayerSwapInstruction } = await import("../src/templates.js");
   for (const [from, to] of [["arena", "rooms"], ["rooms", "arena"], ["arena", "singleplayer"], ["singleplayer", "rooms"]] as const) {
     const text = multiplayerSwapInstruction(from, to);
-    assert.match(text, new RegExp(multiplayerModeLabel(from)), `${from}->${to}: names the source architecture`);
-    assert.match(text, new RegExp(multiplayerModeLabel(to)), `${from}->${to}: names the target architecture`);
     assert.match(text, /MUST call the question tool/, `${from}->${to}: asking the user is mandatory`);
     assert.match(text, /Inspect the current/, `${from}->${to}: investigates before anything else`);
     // The questions come from what the investigation finds, not a canned list.

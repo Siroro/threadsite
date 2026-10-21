@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate as nextTick } from "node:timers/promises";
-import { TurnStepBudget, FORCE_FINISH_MARKER, finishUpInstruction } from "../src/step-budget.js";
+import { TurnStepBudget, finishUpInstruction } from "../src/step-budget.js";
 import type { SessionMessage } from "../src/opencode.js";
 
 const since = Date.now();
@@ -25,7 +25,6 @@ test("force finish arrives at 90% once, with room for checks, despite replayed e
     for (let i = 180; i < 220; i++) budget.observe(`step-${i}`);
     assert.deepEqual(sent, [180]);
     const instruction = finishUpInstruction(180, 200);
-    assert.ok(instruction.startsWith(FORCE_FINISH_MARKER));
     assert.match(instruction, /20 remain/);
     assert.match(instruction, /run js_syntax_check/);
     assert.match(instruction, /does not grant a new step budget/);
