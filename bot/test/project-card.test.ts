@@ -44,9 +44,8 @@ test("the creating preview shows the request and settings before any build work"
   assert.equal(card.color, 0xf59e0b);
   // The design version is bookkeeping in the stored record, not card chrome.
   assert.equal(card.footer, undefined);
-  const model = card.fields!.find((field) => field.name === "Model")!.value;
-  assert.match(model, /`the service default model`/);
-  assert.match(model, /effort `auto`/);
+  // Model routing is operational detail: no Model field on the public card.
+  assert.equal(card.fields!.find((field) => field.name === "Model"), undefined);
   // No site or repo exists yet, so no links section to dead ends.
   assert.equal(card.fields!.find((field) => field.name === "Links"), undefined);
   assert.equal(card.fields!.find((field) => field.name === "Lifetime usage"), undefined);
@@ -60,8 +59,6 @@ test("a live project shows version, links, context, lifetime usage and the model
       lastTurnAt: new Date(Date.now() - 3_600_000).toISOString(),
       lastTurnUsage: { contextTokens: 28_400, contextLimit: 100_000 },
     }),
-    model: "surplus/glm",
-    effort: "high",
     usage: usage(),
     siteUrl: "https://sites.example.invalid/koi-pond-arcade/",
     repoUrl: "https://git.example.invalid/site-koi-pond-arcade",
@@ -72,18 +69,15 @@ test("a live project shows version, links, context, lifetime usage and the model
   assert.match(projectField, /2D static web game/);
   assert.match(projectField, /multiplayer via the shared relay/);
   assert.match(projectField, /created <t:\d+:R>/);
-  const model = card.fields!.find((field) => field.name === "Model")!.value;
-  assert.match(model, /`surplus\/glm` · effort `high`/);
-  assert.match(model, /session context 28\.4k of 100\.0k \(28%\)/);
   const lifetime = card.fields!.find((field) => field.name === "Lifetime usage")!.value;
   assert.match(lifetime, /4 turns · 1 failed/);
   assert.match(lifetime, /in 82\.3k \(65\.8k cached\) · out 6\.2k/);
-  assert.match(lifetime, /models: `surplus\/glm`, `opencode\/qwen-free`/);
   const links = card.fields!.find((field) => field.name === "Links")!.value;
   assert.ok(links.includes("[Open the game](https://sites.example.invalid/koi-pond-arcade/)"), `links missing site: ${links}`);
   assert.ok(links.includes("[Source](https://git.example.invalid/site-koi-pond-arcade)"), `links missing repo: ${links}`);
-  // Spend stays admin-only: the pinned card is public.
+  // Spend and model routing stay admin-only: the pinned card is public.
   assert.doesNotMatch(JSON.stringify(card), /\$|1\.25|"cost"/);
+  assert.doesNotMatch(JSON.stringify(card), /opencode\/|surplus\/|glm|qwen/i);
 });
 
 test("an errored project says so and keeps the card useful", () => {

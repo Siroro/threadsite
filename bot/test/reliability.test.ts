@@ -600,3 +600,15 @@ test("a message during a running turn steers the live session instead of queuein
   // Once the turn settles there is nothing running to steer.
   assert.equal(await service.steerActiveTurn(f.project.threadId, "late"), false);
 });
+
+test("modelBreakdown rolls up per-model usage globally and per thread", async () => {
+  const usage = new UsageLog(path.join(root, "models-breakdown-usage.jsonl"));
+  await usage.record({ threadId: "t1", project: "Koi Pond", kind: "game-2d", usage: { models: [{ model: "surplus/glm-5.3-flash", inputTokens: 100, outputTokens: 10, cacheTokens: 0, cost: 0 }] } as never });
+  await usage.record({ threadId: "t1", project: "Koi Pond", kind: "game-2d", usage: { models: [{ model: "opencode/muse-spark-1.3-contributor-free", inputTokens: 50, outputTokens: 5, cacheTokens: 0, cost: 0 }] } as never });
+  await usage.record({ threadId: "t2", project: "Sumo Shove", kind: "game-2d", failed: true, usage: { models: [{ model: "surplus/glm-5.3-flash", inputTokens: 20, outputTokens: 2, cacheTokens: 0, cost: 0 }] } as never });
+  const breakdown = await usage.modelBreakdown();
+  assert.deepEqual(breakdown.models.map((model) => model.model), ["surplus/glm-5.3-flash", "opencode/muse-spark-1.3-contributor-free"]);
+  assert.equal(breakdown.models[0].turns, 2);
+  assert.deepEqual(breakdown.threads.map((thread) => thread.project), ["Koi Pond", "Sumo Shove"]);
+  assert.deepEqual(breakdown.threads[0].models.map((model) => model.model), ["surplus/glm-5.3-flash", "opencode/muse-spark-1.3-contributor-free"]);
+});

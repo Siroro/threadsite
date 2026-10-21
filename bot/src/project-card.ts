@@ -12,10 +12,6 @@ import { formatTokens, truncate } from "./util.js";
  */
 export interface ProjectCardState {
   project: ProjectRecord;
-  /** Store-wide model override at render time; undefined means the agent service default. */
-  model?: string;
-  /** Store-wide reasoning-effort override; undefined means the model default ("auto"). */
-  effort?: string;
   /** Lifetime model usage for the thread, from the usage ledger. */
   usage?: UsageTotal & { lastTs?: string };
   siteUrl?: string;
@@ -93,29 +89,16 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   ].filter(Boolean);
   embed.addFields({ name: "Project", value: projectBits.join(" · "), inline: false });
 
-  const modelBits = [
-    `\`${state.model || "the service default model"}\``,
-    `effort \`${state.effort || "auto"}\``,
-  ];
-  const context = project.lastTurnUsage;
-  if (context?.contextTokens) {
-    const limit = context.contextLimit ? ` of ${formatTokens(context.contextLimit)}` : "";
-    const percent = context.contextLimit ? ` (${Math.round((context.contextTokens / context.contextLimit) * 100)}%)` : "";
-    modelBits.push(`session context ${formatTokens(context.contextTokens)}${limit}${percent}`);
-  }
-  embed.addFields({ name: "Model", value: modelBits.join(" · "), inline: false });
+  // Model, effort, and which models served the thread are deliberately absent:
+  // model routing is operational detail, kept in the admin-only
+  // /site-admin models view rather than on a public pinned card.
 
   if (usage && usage.turns > 0) {
     const cached = usage.cacheTokens > 0 ? ` (${formatTokens(usage.cacheTokens)} cached)` : "";
     const failed = usage.failedTurns > 0 ? ` · ${usage.failedTurns} failed` : "";
-    const models = [...usage.models.entries()]
-      .sort((a, b) => (b[1].inputTokens + b[1].outputTokens) - (a[1].inputTokens + a[1].outputTokens))
-      .slice(0, 3)
-      .map(([model, total]) => `\`${model}\``);
     embed.addFields({
       name: "Lifetime usage",
-      value: `${usage.turns} turn${usage.turns === 1 ? "" : "s"}${failed} · in ${formatTokens(usage.inputTokens)}${cached} · out ${formatTokens(usage.outputTokens)}`
-        + (models.length ? `\nmodels: ${models.join(", ")}` : ""),
+      value: `${usage.turns} turn${usage.turns === 1 ? "" : "s"}${failed} · in ${formatTokens(usage.inputTokens)}${cached} · out ${formatTokens(usage.outputTokens)}`,
       inline: false,
     });
     // Cost is deliberately absent, like the tracking card: token counts are

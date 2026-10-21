@@ -902,12 +902,12 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
 
     const { thread, created } = await resolveOrCreateThread(interaction, requestedName || prompt);
     if (store.getProject(thread.id)) throw new Error("That thread already has a site. Just reply in the thread to mutate it.");
-    const status = await thread.send("🛠️ Preparing this thread's persistent site…");
-    // The pinned project card goes up immediately, before any build work, so
-    // the thread's front page exists from the first second.
+    // The pinned project card goes up FIRST — before the turn's status
+    // message — so the thread opens with its front page on top.
     const card = await postProjectCard(thread, previewProjectRecord(
       thread.id, interaction.guildId!, thread.parentId || interaction.channelId, requestedName || thread.name, prompt, "site",
     ));
+    const status = await thread.send("🛠️ Preparing this thread's persistent site…");
     const progress = new DiscordProgress(status, `🛠️ Building ${requestedName || thread.name}`);
     registerQuestionButtons(status, progress);
     progress.enableStopButton();
@@ -1029,12 +1029,17 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
 
   if (sub === "info") {
     const usage = await usageLog.threadTotal(project.threadId);
+    const context = project.lastTurnUsage;
+    const contextLine = context?.contextTokens
+      ? `\nSession context: ${formatTokens(context.contextTokens)}${context.contextLimit ? ` of ${formatTokens(context.contextLimit)} (${Math.round((context.contextTokens / context.contextLimit) * 100)}%)` : ""}`
+      : "";
     await interaction.reply({
       content:
         `**${project.displayName}** — ${project.status}\n` +
         `[open site](${projects.siteLink(project)}) · [source](${projects.repoLink(project)})\n` +
         `Type: ${projectKindLabel(project.projectKind)}${project.multiplayerMode && project.projectKind !== "site" ? ` (${project.multiplayerMode === "arena" ? "arena multiplayer" : project.multiplayerMode === "rooms" ? "invite-code rooms" : "singleplayer"})` : ""}\n` +
-        `Model: \`${store.getModel() || "the model default"}\` · Effort: \`${store.getEffort() || "auto"}\`\n` +
+        `Model: \`${store.getModel() || "the model default"}\` · Effort: \`${store.getEffort() || "auto"}\`` +
+        contextLine + "\n" +
         threadUsageText(usage, isAdmin(interaction)) +
         (project.lastError && config.errorReportUserIds.has(interaction.user.id) ? `\nLast private error summary: ${truncate(project.lastError, 900)}` : ""),
       flags: MessageFlags.Ephemeral,
@@ -1258,12 +1263,13 @@ async function handleMakeGameCommand(interaction: ChatInputCommandInteraction): 
 
   const { thread, created } = await resolveOrCreateThread(interaction, requestedName || prompt, "game");
   if (store.getProject(thread.id)) throw new Error("That thread already has a project. Use a fresh thread for /makegam, then reply normally to mutate the game.");
-  const modeLabel = multiplayerMode === "singleplayer" ? "singleplayer" : multiplayerMode === "rooms" ? "invite-code rooms" : "shared-arena multiplayer";
-  const status = await thread.send(`🎮 Preparing a persistent **${dimension.toUpperCase()} static web game** (${modeLabel})…`);
-  // The pinned project card goes up immediately, before any build work.
+  // The pinned project card goes up FIRST — before the turn's status
+  // message — so the thread opens with its front page on top.
   const card = await postProjectCard(thread, previewProjectRecord(
     thread.id, interaction.guildId!, thread.parentId || interaction.channelId, requestedName || thread.name, prompt, projectKind, multiplayerMode,
   ));
+  const modeLabel = multiplayerMode === "singleplayer" ? "singleplayer" : multiplayerMode === "rooms" ? "invite-code rooms" : "shared-arena multiplayer";
+  const status = await thread.send(`🎮 Preparing a persistent **${dimension.toUpperCase()} static web game** (${modeLabel})…`);
   const progress = new DiscordProgress(status, `🎮 Building ${requestedName || thread.name}`);
   registerQuestionButtons(status, progress);
   progress.enableStopButton();
@@ -1377,6 +1383,31 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
   if (sub === "usage") {
     const days = interaction.options.getInteger("days") ?? 7;
     await interaction.editReply(await usageLog.renderReport(days));
+    return;
+  }
+
+  if (sub === "models") {
+    // The admin-only counterpart of the model detail removed from the public
+    // pinned card: active routing plus which models actually served which
+    // projects, with token/cost figures.
+    const breakdown = await usageLog.modelBreakdown();
+    const header = `🎛️ Active model: \`${store.getModel() || "the model default"}\` · effort \`${store.getEffort() || "auto"}\``
+      + (config.opencodeLightModel ? ` · light turns \`${config.opencodeLightModel}\`` : "");
+    const modelLines = breakdown.models.map((model) =>
+      `\`${model.model}\` — ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)} · ${formatCost(model.cost)}`,
+    );
+    const projectLines = breakdown.threads.map(({ threadId, project, turns, models }) => {
+      const context = store.getProject(threadId)?.lastTurnUsage;
+      const contextBit = context?.contextTokens && context.contextLimit
+        ? ` · ctx ${Math.round((context.contextTokens / context.contextLimit) * 100)}%`
+        : "";
+      const used = models.slice(0, 3).map((model) => `\`${model.model}\` (${model.turns})`).join(", ");
+      return `**${truncate(project, 40)}** — ${turns} turn${turns === 1 ? "" : "s"}${contextBit}${used ? `\n· ${used}` : ""}`;
+    });
+    const body = modelLines.length
+      ? `**Models (lifetime, all projects)**\n${modelLines.join("\n")}${projectLines.length ? `\n\n**Per project**\n${projectLines.join("\n")}` : ""}`
+      : "No model usage recorded yet.";
+    await interaction.editReply(truncate(`${header}\n\n${body}`, 1950));
     return;
   }
 
@@ -1607,13 +1638,14 @@ function threadUsageText(total: UsageTotal, includeCost: boolean): string {
   const cached = total.cacheTokens > 0 ? ` (${formatTokens(total.cacheTokens)} cached)` : "";
   const cost = includeCost ? ` · ${formatCost(total.cost)}` : "";
   const failed = total.failedTurns > 0 ? ` · ${total.failedTurns} failed` : "";
+  // Per-model figures for this thread (the card keeps only the totals).
   const models = [...total.models.values()]
     .sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens))
-    .slice(0, 3)
-    .map((model) => `\`${model.model}\` (${model.turns})`);
-  const more = total.models.size - models.length;
+    .slice(0, 8)
+    .map((model) => `\`${model.model}\` — ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)}${includeCost ? ` · ${formatCost(model.cost)}` : ""}`);
+  const more = total.models.size - 8;
   return `Usage: ${total.turns} model turns${failed} · in ${formatTokens(total.inputTokens)}${cached} · out ${formatTokens(total.outputTokens)} tok${cost}\n`
-    + `Models: ${models.join(" · ")}${more > 0 ? ` · +${more} more` : ""}`;
+    + `Models:\n${models.join("\n")}${more > 0 ? `\n+${more} more model${more === 1 ? "" : "s"}` : ""}`;
 }
 
 // --- The pinned project card -------------------------------------------------
@@ -1624,8 +1656,6 @@ function threadUsageText(total: UsageTotal, includeCost: boolean): string {
 async function projectCardState(project: ProjectRecord): Promise<ProjectCardState> {
   return {
     project,
-    model: store.getModel(),
-    effort: store.getEffort(),
     usage: await usageLog.threadTotal(project.threadId),
     siteUrl: project.status !== "creating" ? projects.siteLink(project) : undefined,
     repoUrl: project.repoName ? projects.repoLink(project) : undefined,
