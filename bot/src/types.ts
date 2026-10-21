@@ -1,11 +1,15 @@
 export type ProjectStatus = "creating" | "ready" | "error";
 export type ProjectKind = "site" | "game-2d" | "game-3d";
+/** Multiplayer architecture chosen at /makegam: shared arena, invite-code rooms, or none. */
+export type MultiplayerMode = "arena" | "rooms" | "singleplayer";
 
 /** Per-project multiplayer wiring handed to game agents (game id + relay URL). */
 export interface MultiplayerContext {
   gameId: string;
   wsUrl: string;
   protocolVersion: number;
+  /** Connectivity shape the agent should build: one game-wide arena, or invite-code rooms. */
+  mode: Exclude<MultiplayerMode, "singleplayer">;
 }
 
 /** Git author identity derived from the Discord user who requested the change. */
@@ -18,6 +22,8 @@ export interface QueuedRequest {
   prompt: string;
   statusMessageId: string;
   author?: CommitAuthor;
+  /** Discord user who sent the request, so a pending agent question can ping them. */
+  requesterId?: string;
   images?: Array<{ mime: string; filename?: string; dataUrl: string }>;
 }
 
@@ -34,6 +40,12 @@ export interface ProjectRecord {
   status: ProjectStatus;
   createdAt: string;
   updatedAt: string;
+  /** The request that created the project, shown on the pinned project card. */
+  initialPrompt?: string;
+  /** The pinned project-card message; edited in place after every turn outcome. */
+  infoMessageId?: string;
+  /** Design version the pinned card last rendered; the next boot upgrades older designs. */
+  infoCardVersion?: number;
   lastError?: string;
   /** Short hash of the commit belonging to the last accepted turn; used by /site revert. */
   lastCommit?: string;
@@ -41,6 +53,8 @@ export interface ProjectRecord {
   lastTurnBaseCommit?: string;
   /** Stable relay tenant: renaming public URLs must not reset a game's world. */
   multiplayerGameId?: string;
+  /** Multiplayer architecture chosen at /makegam; undefined means arena (the pre-option default). */
+  multiplayerMode?: MultiplayerMode;
   siteAliases?: string[];
   pendingThreadName?: string;
   /** Durable rename intent, resumed before further work if delivery is interrupted. */
@@ -91,6 +105,8 @@ export interface ProjectRecord {
     initial: boolean;
     startedAt: string;
     author?: CommitAuthor;
+    /** Discord user who requested the turn, so a pending agent question can ping them. */
+    requesterId?: string;
     /** The live status message the turn was streaming into, so recovery can resume editing it. */
     statusMessageId?: string;
     beforeCommit?: string;

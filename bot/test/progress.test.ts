@@ -540,3 +540,68 @@ test("reconcile fails fast when the saved session no longer exists", async () =>
   await assert.rejects(harness.prompt("/w", "session", "build"), /unknown session/i);
   assert.ok(Date.now() - startedAt < 5_000, "failed fast instead of polling the full reconcile window");
 });
+
+test("a mid-turn message steers the running session without aborting it", async () => {
+  const harness = new OpenCodeHarness();
+  const stub = harness as unknown as {
+    startEventStream: () => Promise<never>;
+    client: {
+      session: {
+        prompt: (options: unknown) => Promise<unknown>;
+        promptAsync: (options: unknown) => Promise<unknown>;
+        messages: () => Promise<unknown[]>;
+      };
+    };
+  };
+  stub.startEventStream = async () => { throw new Error("no stream in test"); };
+  stub.client.session.messages = async () => [];
+  // Steering must be impossible before any prompt request is in flight.
+  assert.equal(await harness.steer("/w", "session", "make it harder"), false);
+
+  let releasePrompt!: (value: unknown) => void;
+  stub.client.session.prompt = () => new Promise((resolve) => { releasePrompt = resolve; });
+  const asyncCalls: unknown[] = [];
+  stub.client.session.promptAsync = async (options: unknown) => { asyncCalls.push(options); return {}; };
+  const prompting = harness.prompt("/w", "session", "build the arena");
+  await new Promise((resolve) => setImmediate(resolve));
+  // Mid-turn: the steer is submitted to the busy session and accepted.
+  assert.equal(await harness.steer("/w", "session", "make the ice slipperier"), true);
+  assert.equal(asyncCalls.length, 1);
+  const sent = asyncCalls[0] as { sessionID: string; agent: string; parts: Array<{ type: string; text: string }> };
+  assert.equal(sent.sessionID, "session");
+  assert.equal(sent.agent, "sitebuilder");
+  assert.match(sent.parts[0].text, /steering update for the CURRENT task/);
+  assert.match(sent.parts[0].text, /make the ice slipperier/);
+  // The original turn request was never disturbed: it completes normally.
+  releasePrompt({ parts: [{ type: "text", text: "arena built" }] });
+  const result = await prompting;
+  assert.equal(result.text, "arena built");
+
+  // After the turn settles, there is nothing running to steer.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await harness.steer("/w", "session", "again"), false);
+});
+
+test("a steering submission the server rejects reports failure, not success", async () => {
+  const harness = new OpenCodeHarness();
+  const stub = harness as unknown as {
+    startEventStream: () => Promise<never>;
+    client: {
+      session: {
+        prompt: (options: unknown) => Promise<unknown>;
+        promptAsync: (options: unknown) => Promise<never>;
+        messages: () => Promise<unknown[]>;
+      };
+    };
+  };
+  stub.startEventStream = async () => { throw new Error("no stream in test"); };
+  stub.client.session.messages = async () => [];
+  let releasePrompt!: (value: unknown) => void;
+  stub.client.session.prompt = () => new Promise((resolve) => { releasePrompt = resolve; });
+  stub.client.session.promptAsync = async () => { throw new Error("session busy"); };
+  const prompting = harness.prompt("/w", "session", "build");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await harness.steer("/w", "session", "steer this"), false);
+  releasePrompt({ parts: [{ type: "text", text: "done" }] });
+  await prompting;
+});
