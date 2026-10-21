@@ -168,6 +168,9 @@ export const adminCommand = new SlashCommandBuilder()
       .setRequired(true)
       .setMaxLength(80)))
   .addSubcommand((sub) => sub
+    .setName("models")
+    .setDescription("Show the active model/effort and lifetime per-model usage across every project"))
+  .addSubcommand((sub) => sub
     .setName("errors")
     .setDescription("Privately show recent ThreadSite failure incidents")
     .addIntegerOption((option) => option

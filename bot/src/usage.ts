@@ -161,6 +161,36 @@ export class UsageLog {
     return { ...total, lastTs };
   }
 
+  /**
+   * Lifetime per-model rollups for the admin models view: one pass over the
+   * ledger producing the deployment-wide per-model table and each thread's own
+   * model breakdown (with its display name for rendering).
+   */
+  async modelBreakdown(): Promise<{
+    models: Array<ModelUsage & { turns: number }>;
+    threads: Array<{ threadId: string; project: string; turns: number; models: Array<ModelUsage & { turns: number }> }>;
+  }> {
+    const global = emptyTotal();
+    const byThread = new Map<string, { project: string; total: UsageTotal }>();
+    for (const entry of await this.readEntries()) {
+      addToTotal(global, entry);
+      let thread = byThread.get(entry.threadId);
+      if (!thread) {
+        thread = { project: entry.project, total: emptyTotal() };
+        byThread.set(entry.threadId, thread);
+      }
+      addToTotal(thread.total, entry);
+    }
+    const byVolume = (a: ModelUsage & { turns: number }, b: ModelUsage & { turns: number }) =>
+      (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens);
+    return {
+      models: [...global.models.values()].sort(byVolume),
+      threads: [...byThread.entries()]
+        .map(([threadId, { project, total }]) => ({ threadId, project, turns: total.turns, models: [...total.models.values()].sort(byVolume) }))
+        .sort((a, b) => b.turns - a.turns),
+    };
+  }
+
   /** Render the `/site-admin usage` report covering the last `days` local days (today included). */
   async renderReport(days: number): Promise<string> {
     const dayTotals = await this.summarize(days);
