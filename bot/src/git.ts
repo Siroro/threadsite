@@ -189,6 +189,14 @@ export async function workingTreeClean(workspace: string): Promise<boolean> {
   return !status.trim();
 }
 
+/** Commit only harness metadata: never stage, stash or reset a failed agent's partial edits. */
+export async function pushRenameMetadata(workspace: string, name: string, forgejo: ForgejoClient): Promise<void> {
+  const changed = await git(workspace, ["status", "--porcelain=v1", "--", "README.md"]);
+  if (changed.trim()) await git(workspace, ["add", "--", "README.md"]);
+  if (changed.trim()) await git(workspace, ["commit", "--only", "-m", `Rename project to ${name}`, "--", "README.md"]);
+  await git(workspace, ["push", "-u", "origin", "main"], await pushAuthEnv(forgejo));
+}
+
 export interface RemoteSyncOutcome {
   /** Full hash of HEAD after the sync. */
   commit: string;

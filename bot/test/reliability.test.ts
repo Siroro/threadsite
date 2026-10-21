@@ -169,7 +169,7 @@ test("production refuses nested output links before writing generated chunks", a
 function record(threadId: string, dir: string): ProjectRecord {
   const now = new Date().toISOString();
   return { threadId, guildId: "100", parentChannelId: "200", displayName: "Old Name", siteSlug: `old-${threadId}`,
-    repoName: `site-old-${threadId}`, sessionId: "fake", workspacePath: dir, projectKind: "site", status: "ready", createdAt: now, updatedAt: now };
+    repoName: `old-${threadId}`, sessionId: "fake", workspacePath: dir, projectKind: "site", status: "ready", createdAt: now, updatedAt: now };
 }
 
 test("queue-only projects recover after reopening; atomic claims preserve overflow and new arrivals", async () => {
@@ -299,7 +299,7 @@ test("renames refresh both URLs, preserve old subpage links, and revert the whol
   await fs.writeFile(path.join(config.publishRoot, old, "about/index.html"), "old subpage");
   const renamed = await f.service.renameProject(f.project.threadId, "Sumo Shove");
   assert.equal(renamed.siteSlug, "sumo-shove");
-  assert.equal(renamed.repoName, "site-sumo-shove");
+  assert.equal(renamed.repoName, "sumo-shove");
   assert.equal(renamed.lastTurnBaseCommit, f.base);
   assert.equal(renamed.lastCommit, (await currentHead(f.dir)).slice(0, 10));
   assert.equal(renamed.multiplayerGameId, old);
@@ -400,16 +400,128 @@ test("the first successful build adopts the AI name in the returned site and rep
   assert.deepEqual(titles, ["Fresh Garden"]);
   assert.equal(result.project.displayName, "Fresh Garden");
   assert.equal(result.project.siteSlug, "fresh-garden");
-  assert.equal(result.project.repoName, "site-fresh-garden");
+  assert.equal(result.project.repoName, "fresh-garden");
   assert.equal(result.commit, (await currentHead(workspacePath)).slice(0, 10));
   assert.match(service.siteLink(result.project), /\/fresh-garden\/$/);
-  assert.match(service.repoLink(result.project), /\/site-fresh-garden$/);
+  assert.match(service.repoLink(result.project), /\/fresh-garden$/);
   // The pinned project card posted at thread creation is linked to the record,
   // stamped with the design version it rendered at, alongside its prompt.
   const saved = store.getProject("123456789012345678")!;
   assert.equal(saved.infoMessageId, "card-message");
   assert.equal(saved.infoCardVersion, PROJECT_CARD_VERSION);
   assert.equal(saved.initialPrompt, "Make a garden");
+});
+
+test("a resumed initial build falls back to a different title model and updates all identities", async () => {
+  const f = await projectFixture("resumed-title");
+  await f.store.setModel("test/primary");
+  const startedAt = new Date(Date.now() - 5_000).toISOString();
+  await f.store.patchProject(f.project.threadId, {
+    displayName: "game-temporary-request", initialPrompt: "Build a neon drifting game",
+    pendingNaming: { request: "Build a neon drifting game" },
+    pendingTurn: { id: "resumed-initial", prompt: "Build a neon drifting game", initial: true, startedAt },
+  });
+  await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("finished while bot was down");');
+  const attempts: Array<string | undefined> = [];
+  Object.assign(f.opencode, {
+    health: async () => "ok (200)", watchExistingTurn: async () => async () => {}, listPendingQuestions: async () => [],
+    listMessages: async () => [{ info: { id: "finished", role: "assistant", finish: "stop", time: { created: Date.now(), completed: Date.now() } } }],
+    listSelectableModels: async () => ["test/primary", "test/backup"],
+    generateTitle: async (_directory: string, _request: string, model?: string) => {
+      attempts.push(model);
+      if (model === "test/primary") throw new Error("primary model unavailable");
+      return { title: "Neon Drift", usage: {} };
+    },
+  });
+  const reopened = await openStore(path.join(root, "state-resumed-title.db"));
+  const titles: string[] = [];
+  const restarted = new ProjectService(reopened, f.opencode, f.forgejo, f.usage, async (project, title) => {
+    assert.equal(project.repoName, "neon-drift");
+    assert.equal(project.siteSlug, "neon-drift");
+    titles.push(title);
+  });
+  const result = await restarted.recoverTurn(f.project.threadId);
+  assert.equal(result.deliveryError, undefined);
+  assert.deepEqual(attempts, ["test/primary", "test/backup"]);
+  assert.deepEqual(titles, ["Neon Drift"]);
+  assert.equal(result.project.displayName, "Neon Drift");
+  assert.equal(result.project.repoName, "neon-drift");
+  assert.equal(result.project.pendingNaming, undefined);
+  assert.equal(result.project.pendingThreadName, undefined);
+  assert.match(await git(f.dir, "remote", "get-url", "origin"), /neon-drift\.git$/);
+  assert.match(await fs.readFile(path.join(config.publishRoot, "neon-drift/index.html"), "utf8"), /script/);
+  assert.match(await fs.readFile(path.join(config.publishRoot, f.project.siteSlug, "index.html"), "utf8"), /neon-drift/);
+});
+
+test("a failed Discord rename blocks the next prompt and retries after restart without losing partial edits", async () => {
+  const f = await projectFixture("rename-barrier");
+  const partial = 'console.log("keep my partial changes");';
+  await fs.writeFile(path.join(f.dir, "site/src/main.ts"), partial);
+  await git(f.dir, "add", "site/src/main.ts");
+  await fs.writeFile(path.join(f.dir, "site/src/unfinished.ts"), "export const incomplete = ;");
+  await f.store.patchProject(f.project.threadId, { status: "error", displayName: "site-placeholder",
+    pendingNaming: { request: "Build a garden", name: "Persistent Garden" } });
+  let prompts = 0;
+  f.opencode.prompt = async () => { prompts++; throw new Error("must not prompt yet"); };
+  const unavailable = new ProjectService(f.store, f.opencode, f.forgejo, f.usage, async () => { throw new Error("Discord unavailable"); });
+  await assert.rejects(unavailable.mutate(f.project.threadId, "finish it"), /Discord unavailable/);
+  assert.equal(prompts, 0);
+  assert.equal(await fs.readFile(path.join(f.dir, "site/src/main.ts"), "utf8"), partial);
+  assert.equal(await git(f.dir, "show", ":site/src/main.ts"), partial);
+  assert.equal(await git(f.dir, "show", "HEAD:site/src/main.ts"), 'console.log("accepted turn");');
+  assert.match(await fs.readFile(path.join(config.publishRoot, "persistent-garden/js/main.js"), "utf8"), /accepted turn/);
+  const reopened = await openStore(path.join(root, "state-rename-barrier.db"));
+  assert.equal(reopened.listRecoveryProjects()[0].pendingThreadName, "Persistent Garden");
+  let discordUpdated = false;
+  const restarted = new ProjectService(reopened, f.opencode, f.forgejo, f.usage, async () => { discordUpdated = true; });
+  f.opencode.prompt = async () => {
+    prompts++;
+    assert.ok(discordUpdated);
+    assert.equal(reopened.getProject(f.project.threadId)!.pendingNaming, undefined);
+    assert.equal(reopened.getProject(f.project.threadId)!.pendingThreadName, undefined);
+    assert.equal(await fs.readFile(path.join(f.dir, "site/src/main.ts"), "utf8"), partial);
+    await fs.writeFile(path.join(f.dir, "site/src/unfinished.ts"), "export const complete = true;");
+    return { text: "Finished", usage: {} } as PromptResult;
+  };
+  const result = await restarted.mutate(f.project.threadId, "finish it");
+  assert.equal(prompts, 1);
+  assert.equal(result.project.repoName, "persistent-garden");
+  assert.equal(result.deliveryError, undefined);
+});
+
+test("legacy prefixed repositories migrate without changing the chosen human name", async () => {
+  const f = await projectFixture("legacy-repo-name");
+  const oldRepo = `site-${f.project.siteSlug}`;
+  const repo = await f.forgejo.repositoryInfo(f.project.repoName);
+  await f.forgejo.renameRepository(f.project.repoName, oldRepo, undefined, repo!.id);
+  await ensureGitRepository(f.dir, oldRepo, f.forgejo);
+  await f.store.patchProject(f.project.threadId, { repoName: oldRepo });
+  f.opencode.generateTitle = async () => { assert.fail("the existing human name must be kept"); };
+  const named = await f.service.ensureProjectName(f.project.threadId);
+  assert.equal(named.displayName, "Old Name");
+  assert.equal(named.repoName, "old-name");
+  assert.equal(named.siteSlug, "old-name");
+  assert.match(await git(f.dir, "remote", "get-url", "origin"), /old-name\.git$/);
+  assert.match(await fs.readFile(path.join(f.dir, "README.md"), "utf8"), /old-name/);
+});
+
+test("all title models failing still produces a durable readable name", async () => {
+  const f = await projectFixture("fallback-title");
+  await f.store.setModel("test/primary");
+  await f.store.patchProject(f.project.threadId, { displayName: "game-placeholder",
+    initialPrompt: "Build a midnight drift racing game" });
+  assert.equal(f.store.listRecoveryProjects()[0].threadId, f.project.threadId, "legacy placeholders must be discovered without a naming marker");
+  const models: Array<string | undefined> = [];
+  Object.assign(f.opencode, {
+    listSelectableModels: async () => ["test/primary", "test/backup"],
+    generateTitle: async (_dir: string, _request: string, model?: string) => { models.push(model); throw new Error("model unavailable"); },
+  });
+  const named = await f.service.ensureProjectName(f.project.threadId);
+  assert.deepEqual(models, ["test/primary", "test/backup"]);
+  assert.equal(named.displayName, "Midnight Drift Racing Game");
+  assert.equal(named.repoName, "midnight-drift-racing-game");
+  await f.service.ensureProjectName(f.project.threadId);
+  assert.equal(models.length, 2, "a retry must retain the chosen name");
 });
 
 test("webhook outages do not block project creation or leave renames pending", async () => {
@@ -439,7 +551,7 @@ test("webhook outages do not block project creation or leave renames pending", a
   assert.ok(result.commit);
   const renamed = await service.renameProject(result.project.threadId, "Renamed During Hook Outage");
   assert.equal(renamed.pendingRename, undefined);
-  assert.equal(renamed.repoName, "site-renamed-during-hook-outage");
+  assert.equal(renamed.repoName, "renamed-during-hook-outage");
   assert.ok(hookAttempts >= 2);
   await fs.access(path.join(config.publishRoot, renamed.siteSlug, "index.html"));
 });

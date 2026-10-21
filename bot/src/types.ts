@@ -61,6 +61,8 @@ export interface ProjectRecord {
   multiplayerMode?: MultiplayerMode;
   siteAliases?: string[];
   pendingThreadName?: string;
+  /** Naming survives initial-build failures, bot restarts and Discord/Forgejo outages. */
+  pendingNaming?: { request: string; name?: string };
   /** Durable rename intent, resumed before further work if delivery is interrupted. */
   pendingRename?: {
     displayName: string;
@@ -69,6 +71,8 @@ export interface ProjectRecord {
     fromSiteSlug: string;
     fromRepoName: string;
     repoId: number;
+    /** Rename metadata/public URLs while retaining failed-turn source edits. */
+    preserveWorktree?: boolean;
   };
   /**
    * Full hash of the commit the bot last saw on the repo's main branch, set on

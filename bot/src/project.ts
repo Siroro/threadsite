@@ -23,6 +23,8 @@ import { errorText, formatShortDuration, formatTokens, parseModel, safeChild, sl
 import { browserQaFeedback, runBrowserQa as driveBrowserQa, type BrowserQaResult } from "./browser-qa.js";
 import { assertExclusiveResources, projectAccounts, projectRepos, removalPaths } from "./project-removal.js";
 import { deleteRelayGame } from "./relay-cleanup.js";
+import { pushRenameMetadata } from "./git.js";
+import { fallbackProjectName, needsProjectNaming, projectName } from "./naming.js";
 
 export interface MutationResult {
   project: ProjectRecord;
@@ -120,13 +122,81 @@ export class ProjectService {
   private identityTail: Promise<unknown> = Promise.resolve();
   private readonly deletions = new Map<string, Promise<void>>();
   private readonly runningOperations = new Map<string, number>();
+  private readonly titleCallbacks = new Map<string, (title: string) => Promise<void>>();
 
   constructor(
     readonly store: Store,
     readonly opencode: OpenCodeHarness,
     readonly forgejo: ForgejoClient,
     readonly usageLog: UsageLog,
+    private readonly renameThread?: (project: ProjectRecord, title: string) => Promise<void>,
   ) {}
+
+  /** Required queue barrier: the project identity and Discord acknowledgement must finish before another prompt. */
+  async ensureProjectName(threadId: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {
+    let project = this.store.getProject(threadId);
+    if (!project || project.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
+    if (!needsProjectNaming(project) && !project.pendingRename && !project.pendingThreadName) return project;
+    if (project.pendingTurn || await this.agentBusy(threadId)) throw new Error("Recover or finish the current turn before completing the project name.");
+    if (project.pendingRename) project = await this.resumeRename(threadId, onProgress);
+    if (needsProjectNaming(project)) {
+      const automatic = /^(?:site|game)-/i.test(project.displayName);
+      let naming = project.pendingNaming ?? {
+        request: project.initialPrompt || project.displayName,
+        ...(automatic ? {} : { name: project.displayName }),
+      };
+      project = await this.store.patchProject(threadId, { pendingNaming: naming });
+      let name = naming.name && projectName(naming.name);
+      if (!name) {
+        emit(onProgress, "🏷️ Choosing a permanent project name");
+        const primary = this.store.getModel() || (typeof this.opencode.listSelectableModels === "function"
+          ? (await this.opencode.listSelectableModels().catch(() => []))[0] : undefined);
+        const models: Array<string | undefined> = [primary];
+        for (let attempt = 0; attempt < models.length && attempt < 3; attempt++) {
+          if (this.store.getProject(threadId)?.pendingDeletion) throw new TurnStoppedError("Project deleted while choosing its name.");
+          const model = models[attempt];
+          try {
+            const generated = await this.opencode.generateTitle(project.workspacePath, naming.request, model);
+            name = generated.title && projectName(generated.title);
+            await this.usageLog.record({ label: "title", threadId, project: project.displayName,
+              kind: project.projectKind ?? "site", usage: generated.usage, fallbackModel: model, failed: !name });
+            if (name) break;
+            throw new Error("The title model did not return a usable name.");
+          } catch (error) {
+            const usage = errorUsage(error);
+            if (usage) await this.usageLog.record({ label: "title", threadId, project: project.displayName,
+              kind: project.projectKind ?? "site", usage, fallbackModel: model, failed: true });
+            log("warn", "project.title_generation_failed", { threadId, model, error: serializeError(error) });
+            if (attempt === 0) {
+              const available = typeof this.opencode.listSelectableModels === "function"
+                ? await this.opencode.listSelectableModels().catch(() => []) : [];
+              const provider = parseModel(primary)?.providerID;
+              available.sort((a, b) => Number(parseModel(a)?.providerID === provider) - Number(parseModel(b)?.providerID === provider));
+              for (const alternative of [...config.opencodeFailoverModels, ...available]) {
+                if (alternative && !models.includes(alternative)) models.push(alternative);
+              }
+            }
+          }
+        }
+        name ||= fallbackProjectName(naming.request, project.projectKind);
+        // Save the chosen name before any remote operation, so restarts never regenerate it.
+        naming = { ...naming, name };
+        project = await this.store.patchProject(threadId, { pendingNaming: naming });
+      }
+      if (project.displayName !== name || project.repoName !== project.siteSlug || /^(?:site|game)-/.test(project.siteSlug)) {
+        project = await this.renameProject(threadId, name, onProgress, true);
+      }
+    }
+    if (project.pendingNaming || project.pendingThreadName) await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
+    if (project.pendingThreadName) {
+      const callback = this.titleCallbacks.get(threadId);
+      if (this.renameThread) await this.renameThread(project, project.pendingThreadName);
+      else if (callback) await callback(project.pendingThreadName);
+      if (callback || this.renameThread) project = await this.store.patchProject(threadId, { pendingThreadName: undefined });
+    }
+    if (project.pendingNaming) project = await this.store.patchProject(threadId, { pendingNaming: undefined });
+    return project;
+  }
 
   /** Backfill missed historical events; safe to retry after every startup. */
   async reconcileProjectUsage(threadId: string): Promise<boolean> {
@@ -256,11 +326,12 @@ export class ProjectService {
     initiatorUserId?: string;
   }, onProgress?: ProgressCallback, onTitle?: (title: string) => Promise<void>): Promise<MutationResult> {
     this.runningOperations.set(input.threadId, (this.runningOperations.get(input.threadId) ?? 0) + 1);
+    if (onTitle) this.titleCallbacks.set(input.threadId, onTitle);
     try {
     if (this.store.getProject(input.threadId)) throw new Error("This Discord thread already has a site.");
     // Bot-created threads carry a "site-"/"game-" prefix in their name; keep it
-    // out of the slug so the initial repo isn't double-prefixed (site-site-…)
-    // when the AI title never lands.
+    // out of the temporary slug so the initial repo isn't double-prefixed.
+    // The durable naming request replaces this identity after delivery.
     const displaySource = input.renameable ? input.displayName.replace(/^(?:site|game)-/, "") : input.displayName;
     const baseSlug = slugify(displaySource);
     // Temporary identity uses the complete snowflake; short suffixes can collide.
@@ -288,6 +359,7 @@ export class ProjectService {
       // card id arrives from the already-posted message, so it is stamped with
       // the design version it was rendered at.
       initialPrompt: truncate(input.initialPrompt, 2_000),
+      pendingNaming: { request: input.initialPrompt, ...(input.renameable ? {} : { name: input.displayName }) },
       ...(projectKind !== "site" ? { multiplayerMode } : {}),
       infoMessageId: input.infoMessageId,
       infoCardVersion: input.infoMessageId ? PROJECT_CARD_VERSION : undefined,
@@ -348,87 +420,39 @@ export class ProjectService {
     project.sessionId = sessionId;
     log("info", "project.created", { threadId: input.threadId, projectKind, repoName, siteSlug });
 
-    // Generate the AI thread title in parallel with the first build; it is applied
-    // only after the build succeeds so failed projects keep their slug name.
-    const titlePromise = input.renameable && onTitle
-      ? this.opencode.generateTitle(workspacePath, input.initialPrompt, this.store.getModel())
-          .catch((error) => {
-            log("warn", "project.title_generation_failed", { threadId: input.threadId, error: serializeError(error) });
-            return undefined;
-          })
-      : undefined;
+    const result = await this.mutate(input.threadId, input.initialPrompt, true, onProgress, input.initiator, input.statusMessageId, undefined, [], undefined, input.initiatorUserId);
 
-    let result = await this.mutate(input.threadId, input.initialPrompt, true, onProgress, input.initiator, input.statusMessageId, undefined, [], undefined, input.initiatorUserId);
-
-    if (titlePromise && onTitle) {
-      const generated = await withTimeout(titlePromise, 90_000);
-      if (generated) {
-        // The titler prompt is real model usage; ledger it separately from the build turn.
-        await this.usageLog.record({
-          label: "title",
-          threadId: input.threadId,
-          project: input.displayName,
-          kind: projectKind,
-          usage: generated.usage,
-          fallbackModel: this.store.getModel(),
-        });
-      }
-      const title = generated?.title;
-      // Applied only after the build actually ships: a turn that failed
-      // validation or delivery keeps its slug name (see titlePromise above).
-      if (title && !result.validationError && !result.deliveryError && result.commit) {
-        try {
-          const renamed = await this.renameProject(input.threadId, title, onProgress);
-          await onTitle(renamed.displayName).catch((error) => {
-            log("warn", "project.thread_rename_failed", { threadId: input.threadId, error: serializeError(error) });
-          });
-          result = { ...result, project: renamed, commit: renamed.lastCommit ?? result.commit };
-        } catch (error) {
-          log("warn", "project.title_rename_failed", { threadId: input.threadId, error: serializeError(error) });
-          emit(onProgress, "⚠️ The site is live; its rename will be retried on the next update or restart");
-          result = { ...result, project: this.store.getProject(input.threadId) ?? result.project };
-        }
-      }
-    }
-    if (!titlePromise && !result.validationError && !result.deliveryError && result.commit) {
-      try {
-        const renamed = await this.renameProject(input.threadId, input.displayName, onProgress);
-        if (onTitle) await onTitle(renamed.displayName).catch((error) => {
-          log("warn", "project.thread_rename_failed", { threadId: input.threadId, error: serializeError(error) });
-        });
-        result = { ...result, project: renamed, commit: renamed.lastCommit ?? result.commit };
-      } catch (error) {
-        log("warn", "project.initial_rename_failed", { threadId: input.threadId, error: serializeError(error) });
-        result = { ...result, project: this.store.getProject(input.threadId) ?? result.project };
-      }
-    }
     return result;
     } catch (error) {
       if (this.store.getProject(input.threadId)?.pendingDeletion) throw new TurnStoppedError("Project deleted during setup.", { cause: error });
       throw error;
-    } finally { this.runningOperations.set(input.threadId, (this.runningOperations.get(input.threadId) ?? 1) - 1); }
+    } finally {
+      this.titleCallbacks.delete(input.threadId);
+      this.runningOperations.set(input.threadId, (this.runningOperations.get(input.threadId) ?? 1) - 1);
+    }
   }
 
   /** Reserve names before remote changes so concurrent projects cannot choose the same URL. */
-  async renameProject(threadId: string, name: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {
+  async renameProject(threadId: string, name: string, onProgress?: ProgressCallback, allowUnfinished = false): Promise<ProjectRecord> {
     this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 0) + 1);
     try {
-    const displayName = name.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80);
+    const displayName = projectName(name);
     if (!displayName) throw new Error("Choose a non-empty project name.");
     if (this.store.getProject(threadId)?.pendingRename) await this.resumeRename(threadId, onProgress);
     const reserve = this.identityTail.catch(() => undefined).then(async () => {
       const project = this.store.getProject(threadId);
       if (!project) throw new Error("This thread is not attached to a site.");
-      if (project.status !== "ready" || project.pendingTurn || await this.agentBusy(threadId)) {
+      if ((!allowUnfinished && project.status !== "ready") || project.pendingTurn || await this.agentBusy(threadId)) {
         throw new Error("Finish or recover the current update before renaming this project.");
       }
-      if (!await workingTreeClean(project.workspacePath)) throw new Error("Finish or roll back the workspace edits before renaming.");
+      const clean = await workingTreeClean(project.workspacePath);
+      if (!clean && !allowUnfinished) throw new Error("Finish or roll back the workspace edits before renaming.");
       const source = await this.forgejo.repositoryInfo(project.repoName);
       if (!source) throw new Error("The source repository could not be found.");
-      const base = slugify(displayName);
+      const base = slugify(displayName, "untitled-project").replace(/^(?:(?:site|game)-)+/, "") || "untitled-project";
       const candidates = [base, `${base}-${threadId.slice(-6)}`, `${base.slice(0, 62 - threadId.length)}-${threadId}`];
       for (const siteSlug of candidates) {
-        const repoName = `site-${siteSlug}`;
+        const repoName = siteSlug;
         const occupied = this.store.listProjects().some((other) => other.threadId !== threadId &&
           [other.siteSlug, ...(other.siteAliases ?? []), other.pendingRename?.siteSlug].includes(siteSlug));
         if (occupied) continue;
@@ -440,7 +464,9 @@ export class ProjectService {
           multiplayerGameId: project.multiplayerMode === "singleplayer"
             ? project.multiplayerGameId
             : project.multiplayerGameId ?? project.siteSlug,
-          pendingRename: { displayName, siteSlug, repoName, fromSiteSlug: project.siteSlug, fromRepoName: project.repoName, repoId: source.id },
+          ...(project.pendingNaming ? { pendingNaming: { ...project.pendingNaming, name: displayName } } : {}),
+          pendingRename: { displayName, siteSlug, repoName, fromSiteSlug: project.siteSlug, fromRepoName: project.repoName, repoId: source.id,
+            ...(!clean || project.status !== "ready" ? { preserveWorktree: true } : {}) },
         });
         return;
       }
@@ -469,6 +495,23 @@ export class ProjectService {
     await this.ensureProjectWebhook(intent.repoName);
     const renamed = { ...project, displayName: intent.displayName, siteSlug: intent.siteSlug };
     await this.writeReadme(renamed);
+    if (intent.preserveWorktree) {
+      await pushRenameMetadata(project.workspacePath, intent.displayName, this.forgejo);
+      const previousLive = safeChild(config.publishRoot, intent.fromSiteSlug);
+      const nextLive = safeChild(config.publishRoot, intent.siteSlug);
+      const hasNext = await fs.stat(nextLive).then((stat) => stat.isDirectory(), () => false);
+      const hasPrevious = await fs.stat(previousLive).then((stat) => stat.isDirectory(), () => false);
+      if (!hasNext && hasPrevious) await publishSite(previousLive, intent.siteSlug);
+      const aliases = [...new Set([...(project.siteAliases ?? []), intent.fromSiteSlug])].filter((slug) => slug !== intent.siteSlug);
+      if (hasPrevious || hasNext) await publishSiteRedirects(aliases, intent.siteSlug);
+      const head = await currentHead(project.workspacePath);
+      project = await this.store.patchProject(threadId, {
+        displayName: intent.displayName, siteSlug: intent.siteSlug, repoName: intent.repoName,
+        siteAliases: aliases, lastSeenCommit: head, pendingRename: undefined, pendingThreadName: intent.displayName,
+      });
+      await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
+      return project;
+    }
     await this.ensureHarnessBuildInputs(renamed);
     const siteDir = safeChild(project.workspacePath, "site");
     await buildSite(project.workspacePath);
@@ -499,7 +542,7 @@ export class ProjectService {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site. Use /site start first.");
     if (project.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
-    if (project.pendingRename) project = await this.resumeRename(threadId, onProgress);
+    if (!initial) project = await this.ensureProjectName(threadId, onProgress);
     if (!prompt.trim() && !images?.length) throw new Error("Prompt is empty.");
     if (prompt.length > config.maxPromptChars) throw new Error(`Prompt exceeds MAX_PROMPT_CHARS (${config.maxPromptChars}).`);
 
@@ -963,6 +1006,17 @@ export class ProjectService {
       log("info", "project.no_changes", { threadId });
     } else {
       log("warn", "project.delivery_failed", { threadId, commit: commitStats?.commit, error: truncate(deliveryError || "unknown", 400) });
+    }
+
+    if (ownsTurn && !validationError && !deliveryError && (needsProjectNaming(project) || project.pendingThreadName)) {
+      try {
+        project = await this.ensureProjectName(threadId, input.onProgress);
+        if (commitStats && project.lastCommit) commitStats = { ...commitStats, commit: project.lastCommit };
+      } catch (error) {
+        project = this.store.getProject(threadId) ?? project;
+        deliveryError = `Project name synchronization is pending: ${errorText(error)}. The next turn waits until the rename succeeds.`;
+        log("warn", "project.naming_pending", { threadId, error: serializeError(error) });
+      }
     }
 
     return {

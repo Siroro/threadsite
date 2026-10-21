@@ -7,6 +7,7 @@ ThreadSite is a small Discord harness for an AI coding agent. One Discord thread
 - Every normal message in a registered thread becomes the next mutation of the same site. **Reply while a turn runs to steer it live.** When the agent asks a question mid-turn, the requester gets pinged with answer buttons.
 - The harness validates the result, commits and **pushes git first**, and only then publishes to Apache. A failed push or validation does not replace the previously published site. Each publish stamps a content-derived deploy id into the site; pages reload themselves when a newer deploy goes live.
 - Each project thread gets a **pinned project card** — type, engine, multiplayer setting, original request, browser-QA status, lifetime usage, and links — that updates itself after every turn.
+- Naming survives restarts: a failed title model is replaced by another available model, with a readable fallback if models are unavailable. The Discord title, Forgejo repo and links must synchronize before the next builder turn. Final repo names use the project slug without temporary `site-`/`game-` prefixes; old links redirect.
 
 The result is a public gallery (`index.html` at the publish root) listing every ready site and its source repository.
 

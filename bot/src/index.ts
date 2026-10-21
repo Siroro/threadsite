@@ -66,7 +66,12 @@ await recoverPublishRoot();
 const opencode = new OpenCodeHarness();
 const forgejo = new ForgejoClient();
 const usageLog = new UsageLog(config.usageLogFile);
-const projects = new ProjectService(store, opencode, forgejo, usageLog);
+const projects = new ProjectService(store, opencode, forgejo, usageLog, async (project, title) => {
+  const channel = await client.channels.fetch(project.threadId, { force: true });
+  if (!channel?.isThread()) throw new Error("The project Discord thread is unavailable; name synchronization must be retried.");
+  await applyAiThreadTitle(channel, title);
+  await refreshProjectCard(project.threadId);
+});
 
 await registerCommands();
 
@@ -367,10 +372,9 @@ async function recoverInterruptedTurns(): Promise<void> {
   for (const project of interrupted) {
     const channel = await client.channels.fetch(project.threadId).catch(() => undefined);
     const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
-    if (project.pendingRename || project.pendingThreadName) {
+    if (!project.pendingTurn && (project.pendingRename || project.pendingThreadName || project.pendingNaming || project.repoName === `site-${project.siteSlug}` || /^(?:site|game)-/i.test(project.displayName))) {
       projects.enqueue(project.threadId, async () => {
-        const renamed = await projects.resumeRename(project.threadId);
-        if (channel?.isThread()) await applyAiThreadTitle(channel, renamed.displayName);
+        await projects.ensureProjectName(project.threadId);
       }).catch((error) => logError("project.rename_recovery_failed", error, { threadId: project.threadId }));
     }
     if (project.pendingTurn) {
@@ -1820,10 +1824,10 @@ async function resolveOrCreateThread(
   return { thread, created: true };
 }
 
-// Thread titles Discord displays come from the AI after the first successful build,
-// but only when ThreadSite itself created the thread from a prompt slug.
+// Discord acknowledgement is separate from repository delivery; retain its
+// pending marker until setName succeeds, including resumed builds.
 async function applyAiThreadTitle(thread: ThreadChannel, title: string): Promise<void> {
-  await thread.setName(truncate(title, 100));
+  if (thread.name !== truncate(title, 100)) await thread.setName(truncate(title, 100));
   if (store.getProject(thread.id)?.pendingThreadName === title) {
     await store.patchProject(thread.id, { pendingThreadName: undefined });
   }

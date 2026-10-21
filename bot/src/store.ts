@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { ProjectRecord, QueuedRequest } from "./types.js";
+import { needsProjectNaming } from "./naming.js";
 
 /** Database reads need durable identity; legacy markers predate explicit IDs. */
 export function pendingTurnMatches(current: ProjectRecord["pendingTurn"], expected: ProjectRecord["pendingTurn"]): boolean {
@@ -110,7 +111,7 @@ export class Store {
   }
 
   listRecoveryProjects(): ProjectRecord[] {
-    return this.listProjects().filter((project) => !project.pendingDeletion && (project.pendingTurn || project.pendingQueue?.length || project.pendingRename || project.pendingThreadName));
+    return this.listProjects().filter((project) => !project.pendingDeletion && (project.pendingTurn || project.pendingQueue?.length || project.pendingRename || project.pendingThreadName || needsProjectNaming(project)));
   }
 
   async putProject(project: ProjectRecord): Promise<void> {
