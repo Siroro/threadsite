@@ -100,6 +100,15 @@ export function truncate(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
 }
 
+/**
+ * The user's own words for the status card. A merged prompt also carries
+ * harness instructions addressed to the model ("While updates were queued…"),
+ * and those must never appear in the "Your request" box.
+ */
+export function requestDisplayText(prompts: readonly string[]): string {
+  return prompts.map((prompt) => prompt.trim()).filter(Boolean).join(" · ");
+}
+
 /** Compact token counts for Discord: 1234 -> "1.2k", 1250000 -> "1.3M". */
 export function formatTokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`.replace(/\.0$/, "");

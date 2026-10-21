@@ -35,7 +35,7 @@ import { projectKindLabel } from "./templates.js";
 import type { CommitAuthor, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog, type UsageTotal } from "./usage.js";
 import { startWebhookServer } from "./webhook.js";
-import { commitAuthorIdentity, errorText, formatCost, formatShortDuration, formatTokens, formatUtcClock, MAX_DISCORD_MESSAGE_CHARS, slugify, stripSummaryPreamble, truncate, withTimeout } from "./util.js";
+import { commitAuthorIdentity, errorText, formatCost, formatShortDuration, formatTokens, formatUtcClock, MAX_DISCORD_MESSAGE_CHARS, requestDisplayText, slugify, stripSummaryPreamble, truncate, withTimeout } from "./util.js";
 
 // Stray async failures must log instead of killing the process: an unhandled
 // rejection is process-fatal on Node 22 and would take every in-flight thread
@@ -712,25 +712,30 @@ function takeUpdateBatch(threadId: string): QueuedUpdate[] | undefined {
  * that no longer fit under the prompt cap overflow back into the accumulator
  * and become their own follow-up turn.
  */
-function mergeUpdateBatch(batch: QueuedUpdate[]): { prompt: string; images: PromptImage[]; overflow: QueuedUpdate[] } {
+function mergeUpdateBatch(batch: QueuedUpdate[]): { prompt: string; display: string; images: PromptImage[]; overflow: QueuedUpdate[] } {
   const head = batch[0].prompt;
   const images = [...batch[0].images];
   const rest: string[] = [];
+  // The card shows the user's own messages, not the merged prompt's harness
+  // preamble — that text is addressed to the model.
+  const requests = [head];
   let used = head.length;
   for (let index = 1; index < batch.length; index += 1) {
     const entry = batch[index];
     if (used + entry.prompt.length + 8 > config.maxPromptChars - 160) {
       return {
         prompt: composeMergedPrompt(head, rest),
+        display: requestDisplayText(requests),
         images,
         overflow: batch.slice(index),
       };
     }
     rest.push(`${rest.length + 2}. ${entry.prompt}`);
+    requests.push(entry.prompt);
     images.push(...entry.images);
     used += entry.prompt.length + 8;
   }
-  return { prompt: composeMergedPrompt(head, rest), images, overflow: [] };
+  return { prompt: composeMergedPrompt(head, rest), display: requestDisplayText(requests), images, overflow: [] };
 }
 
 function composeMergedPrompt(head: string, rest: string[]): string {
@@ -760,7 +765,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
   }
   progress.enableStopButton();
   try {
-    const result = await projects.mutate(threadId, merged.prompt, false, progress.callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id));
+    const result = await projects.mutate(threadId, merged.prompt, false, progress.callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id), merged.display);
     await progress.close();
     if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
       await setStatusMessage(first.status, finishedWithErrorsMessageText(result));

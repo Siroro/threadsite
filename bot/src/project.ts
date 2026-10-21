@@ -408,7 +408,7 @@ export class ProjectService {
     return project;
   }
 
-  async mutate(threadId: string, prompt: string, initial = false, onProgress?: ProgressCallback, author?: CommitAuthor, statusMessageId?: string, images?: readonly PromptImage[], queuedStatusIds: readonly string[] = []): Promise<MutationResult> {
+  async mutate(threadId: string, prompt: string, initial = false, onProgress?: ProgressCallback, author?: CommitAuthor, statusMessageId?: string, images?: readonly PromptImage[], queuedStatusIds: readonly string[] = [], displayRequest?: string): Promise<MutationResult> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site. Use /site start first.");
     if (project.pendingRename) project = await this.resumeRename(threadId, onProgress);
@@ -432,7 +432,7 @@ export class ProjectService {
     this.activeTurns += 1;
     try {
       await onProgress?.({ text: "📁 Preparing your update", phase: "preparing", context: {
-        request: prompt, repoUrl: this.repoLink(project),
+        request: displayRequest ?? prompt, repoUrl: this.repoLink(project),
         siteUrl: project.status !== "creating" ? this.siteLink(project) : undefined,
       } });
       let agentSummary: string;
