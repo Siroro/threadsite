@@ -597,15 +597,15 @@ The one server command is the root-level `start.sh`: it pulls the latest code fr
 
 ```bash
 ./start.sh                 # update to latest main, rebuild, up, wait healthy
-./start.sh release/v2.5    # same, tracking a branch
 ./start.sh --no-update     # start the current code without touching git
+./start.sh --force         # update, discarding local edits to tracked files
 ./start.sh status          # service health overview
 ./start.sh logs [service]  # follow logs (default: bot)
 ./start.sh restart [svc]   # restart one service or the whole stack
 ./start.sh stop            # stop the stack (containers, data and .env kept)
 ```
 
-The finer-grained `scripts/deploy.sh [branch]` does just the update+rebuild part. The project intentionally pins the agent platform/SDK versions together in `opencode/Dockerfile` and `bot/package.json`. When updating one, update the other and rebuild:
+This repository is **main-only**: every update force-checks out `origin/main`, sets its upstream (so plain `git pull` also works), and removes stale local branches. The finer-grained `scripts/deploy.sh` does just the update+rebuild part (`--force` to discard local tracked edits). The project intentionally pins the agent platform/SDK versions together in `opencode/Dockerfile` and `bot/package.json`. When updating one, update the other and rebuild:
 
 ```bash
 docker compose build --pull opencode bot
