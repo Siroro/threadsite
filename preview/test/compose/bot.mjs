@@ -66,4 +66,18 @@ await assert.rejects(
   "An HTTP 200 carrying a failed assistant must not be reported as a successful bot turn",
 );
 console.log("PASS: terminal provider errors reject the bot turn instead of publishing an empty success.");
+const policySession = await harness.createSession("/workspace/100/200", "Model capability policy check");
+for (const [marker, model] of [["text-first", "compose-text"], ["vision-after", "compose-vision"], ["text-again", "compose-text"]]) {
+  const result = await harness.prompt("/workspace/100/200", policySession, `THREADSITE_POLICY:${marker}`, `surplus/${model}`);
+  assert.match(result.text, new RegExp(`Policy checked: ${marker}`));
+}
+console.log("PASS: real provider requests contain no browser MCP tools for text models, and vision access returns on a model switch.");
+const budgetSession = await harness.createSession("/workspace/100/200", "Force finish budget check");
+const budgetResult = await harness.prompt("/workspace/100/200", budgetSession, "THREADSITE_POLICY:budget", "surplus/compose-text");
+assert.match(budgetResult.text, /Force finish received/);
+const policyReport = (await (await fetch("http://fixture:7070/report")).json()).policy;
+assert.deepEqual(policyReport.checked, ["text-first", "vision-after", "text-again"]);
+assert.equal(policyReport.steers, 1);
+assert.ok(policyReport.budgetSteps >= 45 && policyReport.budgetSteps <= 50, JSON.stringify(policyReport));
+console.log("PASS: a real running agent receives one force finish steer near its configured step limit and completes its original request.");
 console.log("PASS: Docker Compose integration completed with production bot, OpenCode, preview and Apache images.");

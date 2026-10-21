@@ -89,11 +89,12 @@ function multiplayerPhrase(mode: MultiplayerMode): string {
 export function initialProjectInstruction(kind: ProjectKind, userPrompt: string, notes?: string, mode: MultiplayerMode = "arena"): string {
   const common = `Read the project-root AGENTS.md first — it is the authoritative brief for engine usage and multiplayer architecture. Inspect the starter files, ${planningInstruction} Research the web when it will materially improve the result, and implement the deliverable rather than only describing it. Browser code is authored in TypeScript under site/src/; the harness compiles and bundles it after your reply. Prefer a clear multi-file structure over one giant index.html.`;
   const sectionWord = mode === "singleplayer" ? "singleplayer" : "multiplayer";
+  const gameDesign = "Follow AGENTS.md's game-design rules: identify the core action, challenge and player decisions in your plan, then implement a complete, enjoyable round before optional polish. Match the requested genre; do not substitute a generic collect-N-pickups loop unless the user explicitly asks for a collection game.";
   if (kind === "game-2d") {
-    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below, following AGENTS.md's 2D and ${sectionWord} sections exactly (installed engine, ${multiplayerPhrase(mode)}). Use asset_download for suitable reusable media.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below, following AGENTS.md's 2D and ${sectionWord} sections exactly (installed engine, ${multiplayerPhrase(mode)}). ${gameDesign} Use asset_download for suitable reusable media.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
   if (kind === "game-3d") {
-    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below, following AGENTS.md's 3D and ${sectionWord} sections exactly (installed engine, ${multiplayerPhrase(mode)}). Use asset_download for suitable media/models/textures/audio.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below, following AGENTS.md's 3D and ${sectionWord} sections exactly (installed engine, ${multiplayerPhrase(mode)}). ${gameDesign} Use asset_download for suitable media/models/textures/audio.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
   return `${common}\n\nCreate the static website described below. Make it feel intentionally designed and interactive where appropriate. Use real researched/reusable media when it improves the result, otherwise tasteful local CSS/SVG/Canvas visuals.${notesSection(notes)}\n\nSITE REQUEST:\n${userPrompt}`;
 }

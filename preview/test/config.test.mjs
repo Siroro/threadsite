@@ -31,6 +31,13 @@ test("builder permissions and project prompts explain the isolated scratch brows
   assert.doesNotMatch(config.agent.sitebuilder.prompt, /Work only inside site\/|use edit only for files inside site\/\./);
 });
 
+test("delegated agents cannot expose browser MCP through a separate model setting", async () => {
+  const config = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"));
+  for (const name of ["general", "explore"]) assert.equal(config.agent[name].permission["playwright_*"], "deny");
+  assert.equal(config.agent.titler.permission["*"], "deny");
+  assert.match(config.agent.sitebuilder.prompt, /Text-only models receive no browser MCP tools at all/);
+});
+
 // A cold Chromium launch plus a software-rendered (SwiftShader) WebGL canvas
 // takes well over the old 10s action / 30s navigation defaults: screenshots
 // failed with "Timeout 10000ms exceeded" and navigations hit the OpenCode MCP

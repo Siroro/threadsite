@@ -3,12 +3,16 @@ import assert from "node:assert/strict";
 import { cases, planFor } from "./cases.mjs";
 
 const reports = Object.fromEntries(cases.map(item => [item.id, { step: 0, screenshots: 0, hashes: [], errors: [] }]));
+reports.policy = { checked: [], budgetSteps: 0, steers: 0 };
 const json = (res, body, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
 http.createServer(async (req, res) => {
   if (req.url === "/report") return json(res, reports);
   if (req.url === "/v1/models") return json(res, { data: [{
     id: "compose-vision", name: "Docker vision fixture", context_length: 200000, max_completion_tokens: 4096,
     architecture: { input_modalities: ["text", "image"] }, supported_parameters: ["tools"],
+  }, {
+    id: "compose-text", name: "Docker text-only fixture", context_length: 200000, max_completion_tokens: 4096,
+    architecture: { input_modalities: ["text"] }, supported_parameters: ["tools"],
   }] });
   let report;
   try {
@@ -21,7 +25,28 @@ http.createServer(async (req, res) => {
     const names = (body.tools || []).map(tool => tool.function?.name);
     let delta = { role: "assistant", content: "Docker browser check" };
     let finish = "stop";
-    if (names.includes("playwright_browser_navigate")) {
+    const policy = [...JSON.stringify(body.messages).matchAll(/THREADSITE_POLICY:(text-first|text-again|vision-after|budget)/g)].at(-1)?.[1];
+    if (policy && names.includes("read")) {
+      const browserTools = names.filter(name => name.startsWith("playwright_"));
+      if (body.model === "compose-text") assert.deepEqual(browserTools, [], "Text model was offered browser MCP tools");
+      else assert.ok(browserTools.includes("playwright_browser_navigate"), "Vision model lost browser access after a model switch");
+      if (policy === "budget") {
+        reports.policy.budgetSteps++;
+        // Slow the fixture slightly so a real async steering request can land mid-turn.
+        await new Promise(resolve => setTimeout(resolve, 100));
+        const steers = body.messages.filter(message => message.role === "user" && JSON.stringify(message.content).includes("[THREADSITE_FORCE_FINISH]"));
+        reports.policy.steers = steers.length;
+        assert.ok(reports.policy.budgetSteps <= 50, "Agent never received the finish-up steer within its budget");
+        if (!steers.length) {
+          delta = { role: "assistant", tool_calls: [{ index: 0, id: `budget_${reports.policy.budgetSteps}`, type: "function",
+            function: { name: "read", arguments: JSON.stringify({ filePath: "site/index.html" }) } }] };
+          finish = "tool_calls";
+        } else delta = { role: "assistant", content: "Force finish received; current task finished." };
+      } else {
+        reports.policy.checked.push(policy);
+        delta = { role: "assistant", content: `Policy checked: ${policy}` };
+      }
+    } else if (names.includes("playwright_browser_navigate")) {
       const match = JSON.stringify(body.messages).match(/THREADSITE_COMPOSE:(20[012])/);
       assert.ok(match, "Missing fixture marker");
       const item = cases.find(item => item.id === match[1]);

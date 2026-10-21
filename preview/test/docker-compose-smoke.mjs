@@ -19,7 +19,8 @@ const state = path.join(root, "state");
 for (const dir of [workspace, sites, state]) await fs.mkdir(dir);
 const opencodeEnv = {
   XDG_DATA_HOME: "/opencode-data", OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: "fixture-only",
-  SURPLUS_API_KEY: "fixture-only", SURPLUS_BASE_URL: "http://fixture:7070/v1", SURPLUS_MODELS: "compose-vision",
+  SURPLUS_API_KEY: "fixture-only", SURPLUS_BASE_URL: "http://fixture:7070/v1", SURPLUS_MODELS: "compose-vision,compose-text",
+  OPENCODE_MAX_STEPS: "50",
   OPENCODE_LOG_LEVEL: "INFO", OPENCODE_ENABLE_EXA: "0",
 };
 const botEnv = {
@@ -27,6 +28,7 @@ const botEnv = {
   OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: "fixture-only", WORKSPACE_ROOT: "/workspace",
   PUBLISH_ROOT: "/srv/sites", STATE_FILE: "/data/state.json", LOG_FILE: "/data/smoke.jsonl",
   PUBLIC_SITES_BASE_URL: "http://static-web", MULTIPLAYER_ENABLED: "false",
+  OPENCODE_MAX_STEPS: "50",
 };
 await fs.writeFile(override, `services:
   fixture:
