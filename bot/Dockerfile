@@ -6,7 +6,7 @@ COPY tsconfig*.json ./
 COPY src ./src
 COPY networking ./networking
 COPY assets ./assets
-RUN npm run build
+RUN npm run build && npm run stage:engines
 
 FROM node:24-bookworm-slim
 RUN apt-get update \
@@ -14,22 +14,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
-# three/phaser/@types/three/@dimforge/rapier3d-compat/three-mesh-bvh are the
-# seed sources for workspace engine packages (see src/engines.ts) — pruned
-# here to just the files the seeder reads, so the image carries the engines
-# without their full trees.
-RUN npm ci --omit=dev --no-audit --no-fund \
-    && rm -rf node_modules/three/examples node_modules/three/src \
-    && find node_modules/three/build -type f ! -name 'three.module.min.js' ! -name 'three.core.min.js' -delete \
-    && find node_modules/@types/three -mindepth 1 -maxdepth 1 ! -name 'index.d.ts' ! -name 'src' ! -name 'package.json' -exec rm -rf {} + \
-    && find node_modules/phaser -mindepth 1 -maxdepth 1 ! -name 'dist' ! -name 'types' ! -name 'package.json' ! -name 'LICENSE.md' -exec rm -rf {} + \
-    && find node_modules/phaser/dist -type f ! -name 'phaser.esm.min.js' -delete \
-    && find node_modules/phaser/types -type f ! -name 'phaser.d.ts' ! -name 'matter.d.ts' -delete \
-    && find node_modules/@dimforge/rapier3d-compat -mindepth 1 -maxdepth 1 ! -name 'rapier.es.js' ! -name 'package.json' ! -name 'LICENSE' ! -name '*.d.ts' ! -name 'control' ! -name 'dynamics' ! -name 'geometry' ! -name 'pipeline' -exec rm -rf {} + \
-    && rm -rf node_modules/three-mesh-bvh/build \
-    && find node_modules/three-mesh-bvh -mindepth 1 -maxdepth 1 ! -name 'src' ! -name 'package.json' ! -name 'LICENSE' -exec rm -rf {} +
+# The engine packages (three, phaser, @dimforge/rapier3d-compat,
+# three-mesh-bvh, @types/three) are devDependencies — build-time seed
+# sources only, never imported by the running bot. dist/stage-engines.js
+# staged the exact payload the seeder reads (per the spec in src/engines.ts)
+# into engine-seed/ during the build stage; the runtime installs production
+# dependencies only and reads engines from the staged tree.
+RUN npm ci --omit=dev --no-audit --no-fund
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/assets ./assets
+COPY --from=build /app/engine-seed ./engine-seed
 COPY git-askpass.sh /usr/local/bin/threadsite-git-askpass
 RUN chmod 0755 /usr/local/bin/threadsite-git-askpass
 ENV NODE_ENV=production
