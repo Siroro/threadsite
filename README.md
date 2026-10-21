@@ -2,10 +2,10 @@
 
 ThreadSite is a small Discord harness for an AI coding agent. One Discord thread maps to one persistent static website **or static web game** and one public Forgejo repository.
 
-- `/site start prompt:"..."` in a text channel creates a Discord thread, a workspace, an agent session, a public Forgejo repository, the first git commit, and a live static site.
-- `/makegam dimension:<2d|3d> prompt:"..."` does the same for a **static browser game** and writes a mode-specific `AGENTS.md` before the agent session starts.
-- Every game is built **multiplayer-first**: the harness provides one shared multi-tenant WebSocket relay, ThreadSite Multiplayer Protocol v4, and a TypeScript-authored browser client, so games get rooms, authoritative host migration, buffered transforms, shared clocks and reconnect safety with zero game server code (see below).
-- Every normal message in that registered thread becomes the next mutation of the same site.
+- `/site start prompt:"..."` in a text channel creates a Discord thread, a workspace, an agent session, a public Forgejo repository, the first git commit, and a live static site. Every project thread also gets a **pinned project card** — original request, model and effort, session context, lifetime usage, and links — that updates itself after every turn.
+- `/makegam dimension:<2d|3d> multiplayer:<arena|rooms|singleplayer> prompt:"..."` does the same for a **static browser game** and writes a mode-specific `AGENTS.md` before the agent session starts. Games default to a **shared-arena** architecture; `rooms` builds invite-code rooms, and `singleplayer` provisions no networking at all. `/site multiplayer` switches an existing game between the three live — the agent investigates the netcode, asks the user about the difficulties it finds, then rewrites.
+- Networked games are built **multiplayer-first**: the harness provides one shared multi-tenant WebSocket relay, ThreadSite Multiplayer Protocol v4, and a TypeScript-authored browser client, so games get authoritative host migration, buffered transforms, shared clocks and reconnect safety with zero game server code (see below).
+- Every normal message in that registered thread becomes the next mutation of the same site. **Reply while a turn runs to steer it live** — the message is submitted straight into the running agent turn and folded into the current work instead of waiting for the next pass. When the agent asks a question mid-turn, the requester gets pinged with answer buttons.
 - The harness validates the result, commits and **pushes git first**, and only then publishes it to Apache. A failed push does not replace the previously published site. Each publish also stamps a content-derived deploy id into the site and pages reload themselves when a newer deploy goes live.
 - `/site-admin model` changes the model globally for the next turn in every thread.
 - `/site-admin token` stores/replaces a provider API token in the agent platform's own persistent auth storage. The bot does not write the LLM token to its state file.
@@ -244,7 +244,7 @@ Or create a static web game:
 /makegam dimension:3d prompt: make a tiny low-poly hovercraft obstacle course with checkpoints name: Hover Yard
 ```
 
-`dimension` is the first `/makegam` option and is restricted to `2d` or `3d`. The harness stores that project type, creates a matching `AGENTS.md`, and wraps the first model request in a matching game-generation prompt. The game must still publish as ordinary static web files under `site/`; subsequent normal thread messages keep the same 2D/3D rules.
+`dimension` is the first `/makegam` option and is restricted to `2d` or `3d`; the optional `multiplayer` option picks the architecture — **Arena** (the default: one game-wide shared world), **Rooms** (invite-code rooms with a join lobby), or **Singleplayer only** (no net client, no relay wiring, an explicit no-netcode rulebook). The harness stores the project type and architecture, creates a matching `AGENTS.md`, and wraps the first model request in a matching generation prompt. `/site multiplayer mode:<...>` switches the architecture later; an optional `prompt:` note rides the switch. The game must still publish as ordinary static web files under `site/`; subsequent normal thread messages keep the same 2D/3D rules.
 
 The bot creates a new public thread. Inside the created thread, just talk to the site or game:
 
@@ -275,7 +275,13 @@ Questions switch to a shorter amber card with the question, option descriptions 
 
 Because HTTP request timeouts to the agent service are disabled by design, a provider that stops emitting events would otherwise leave the card heartbeating forever. The card therefore tracks real agent activity (not its own heartbeat) and, after `TURN_STALL_WARN_MS` without any event, switches to an amber **No progress for Nm** state that points at `/site stop`. The warning is suppressed while the thread is queued or waiting for an answer, where idleness is expected. It is a visible watchdog, not an automatic abort.
 
-`/site stop` (and the Stop button) aborts only the running agent turn: the session, workspace, partial edits, and git history are kept. It is deliberately not queued, so it still works when the turn is wedged on an unreachable agent or when the live status message was deleted before the button could be pressed. `/site queue` lists the backlog with its authors and offers **Cancel N** buttons; cancelling withdraws one waiting request from both the in-memory batch and SQLite and marks its acknowledgement message cancelled. Requests already being prepared by a drain are reported as in-flight instead of being silently removed.
+`/site stop` (and the Stop button) aborts only the running agent turn: the session, workspace, partial edits, and git history are kept. It is deliberately not queued, so it still works when the turn is wedged on an unreachable agent or when the live status message was deleted before the button could be pressed. A stop lands in every phase: while the turn prepares, while it runs, while recovery waits, and even mid-reconcile — none of them resurrect the stopped turn. `/site queue` lists the backlog with its authors and offers **Cancel N** buttons; cancelling withdraws one waiting request from both the in-memory batch and SQLite and marks its acknowledgement message cancelled. Requests already being prepared by a drain are reported as in-flight instead of being silently removed.
+
+### Steering a running turn
+
+A reply sent while a turn is running is not queued — it **steers the live turn**. The message is submitted straight into the busy agent session (the same delivery path the agent platform's own TUI uses), where the model reads it mid-turn as an amendment to the current task and folds it into the work in progress. Nothing is aborted and nothing restarts; the acknowledgement says so and the status card shows the steering line. Steers that cannot land — no live turn, a turn in its build/commit/publish tail, messages carrying images, or the agent service rejecting the submission — fall back to the normal queue untouched, so a steering attempt can never lose a message.
+
+When the agent asks a question mid-turn, the person who requested the turn gets a Discord ping pointing at the answer buttons on the status card, so a parked question (which holds the turn and the thread's queue open) cannot sit unseen.
 
 Edits respect `PROGRESS_UPDATE_MS`, coalesce rapid events and serialize Discord requests. Quiet turns retain a heartbeat, and stale live throughput estimates disappear. Closing a feed waits for its last edit before posting the final result so a late update cannot overwrite it. Servers without **Embed Links** permission automatically get a compact text version with the same controls. Final messages clear the live card and retain the agent's outcome summary; successful browser-QA screenshots are still posted normally.
 
@@ -325,7 +331,7 @@ The git commit is deliberately performed by the harness rather than by the model
 
 ### `/makegam` game profiles
 
-Both profiles are deliberately **static-web only** and go through the same validation, git-push-first, and Apache publication boundary as normal sites. Both are also built **multiplayer-first** through the shared relay (see the next section): the agent gets the vendored net client, this game's tenant config, and the full sync guide in its `AGENTS.md`.
+Both profiles are deliberately **static-web only** and go through the same validation, git-push-first, and Apache publication boundary as normal sites. Their default architecture is **shared-arena multiplayer** through the relay (see the next section): the agent gets the vendored net client, this game's tenant config, and the full sync guide in its `AGENTS.md`. `multiplayer:rooms` swaps the AGENTS.md guidance for invite-code rooms with a join lobby, and `multiplayer:singleplayer` provisions no networking at all — the net files are never written, or removed when switching — and the rulebook forbids adding any. `/site multiplayer` rewrites the architecture on an existing game whenever the design should change.
 
 - **2D**: builds on the installed Phaser 4.2.1 engine package by default for action/arcade/sprite-heavy games, using its Scenes/input/cameras/Arcade Physics before hand-rolling engine infrastructure, with Canvas 2D or DOM/SVG also allowed for board/puzzle/UI-heavy games. Its `AGENTS.md` asks for responsive controls, game states, scoring/progression, collision discipline, frame-rate-independent animation, and lightweight game feel.
 - **3D**: requires a genuine 3D play space using WebGL, built on the installed three.js engine package, with Rapier (`@dimforge/rapier3d-compat`) for anything needing rigid bodies or robust character collision and `three-mesh-bvh` for fast raycasts/spatial queries on complex static meshes. It forbids npm/Vite/webpack/build pipelines of the agent's own and vendoring second physics engines, asks for conservative geometry/effects, camera and input guidance, fixed-timestep physics with interpolated rendering, and a visible fallback when WebGL cannot initialize.
@@ -334,7 +340,7 @@ The generated `AGENTS.md` is committed to the public project repository but is o
 
 ## Multiplayer games — one shared multi-tenant relay
 
-Every game ThreadSite generates is built **multiplayer-first**. The harness runs a single `gameserver` container for the whole deployment; there is no per-game instance, process, or provisioning step. Multi-tenancy is addressed by two ids the harness controls:
+Games default to **shared-arena multiplayer** (or invite-code **rooms**, or none at all — chosen at `/makegam` and switchable with `/site multiplayer`). Networked games share one `gameserver` container for the whole deployment; there is no per-game instance, process, or provisioning step. Multi-tenancy is addressed by two ids the harness controls:
 
 - **game id** — the published site slug, injected into each game as its tenant key;
 - **room code** — a short code (for example `AB3CK`) namespaced *per game*, so the same code in two games is two different rooms.
@@ -389,7 +395,7 @@ GAMESERVER_PERSIST_INTERVAL_MS=1000
 
 ### Relay behind Virtualmin / Apache
 
-Same drill as the Forgejo vhost, for a new hostname such as `games.siroro.co.uk`:
+Same drill as the Forgejo vhost, for a new hostname such as `games.example.com`:
 
 1. Point DNS for the hostname at the host box and create a matching Virtualmin virtual server with a Let's Encrypt certificate. The relay container is published on `127.0.0.1:8090` only, so browsers can only reach it through this proxy.
 2. Enable the modules once: `sudo a2enmod proxy proxy_http proxy_wstunnel headers && sudo systemctl reload apache2`.
@@ -413,8 +419,8 @@ Same drill as the Forgejo vhost, for a new hostname such as `games.siroro.co.uk`
 4. Set in `.env` and recreate the relay:
 
    ```dotenv
-   GAMESERVER_PUBLIC_URL=wss://games.siroro.co.uk/ws
-   GAMESERVER_ALLOWED_ORIGINS=https://sites.siroro.co.uk
+   GAMESERVER_PUBLIC_URL=wss://games.example.com/ws
+   GAMESERVER_ALLOWED_ORIGINS=https://sites.example.com
    ```
 
    `GAMESERVER_ALLOWED_ORIGINS` is a comma-separated list of browser origins (scheme + host, no path) — normally just your `PUBLIC_SITES_BASE_URL` origin. Leave it blank to allow any origin.
@@ -486,11 +492,11 @@ FORGEJO_PORT=3000
 
 The bundled Compose file deliberately publishes Forgejo as `127.0.0.1:3000`, not on every host interface. Host Apache/Virtualmin should therefore proxy `https://git.example.com/` to `http://127.0.0.1:3000/`, while containers continue to use `http://forgejo:3000`. Forgejo receives an explicit HTTPS `ROOT_URL` and an internal HTTP `LOCAL_ROOT_URL`.
 
-For the current `git.siroro.co.uk` deployment, use:
+For a deployment behind such a proxy, use:
 
 ```dotenv
-FORGEJO_PUBLIC_URL=https://git.siroro.co.uk
-FORGEJO_DOMAIN=git.siroro.co.uk
+FORGEJO_PUBLIC_URL=https://git.example.com
+FORGEJO_DOMAIN=git.example.com
 FORGEJO_INTERNAL_URL=http://forgejo:3000
 FORGEJO_PORT=3000
 ```

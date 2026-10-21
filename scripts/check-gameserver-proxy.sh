@@ -52,7 +52,7 @@ elif [[ -z "$STATUS" ]]; then
   echo
   echo "No HTTP response at all — the request failed at the DNS, TCP, or TLS layer, before any server replied."
   echo "- 'Could not resolve host': the DNS record for this hostname does not exist in the authoritative zone"
-  echo "  (if siroro.co.uk uses Cloudflare DNS, add the A record in Cloudflare; Virtualmin's local zone is not"
+  echo "  (if the hostname uses Cloudflare DNS, add the A record in Cloudflare; Virtualmin's local zone is not"
   echo "  authoritative)."
   echo "- Connection timed out: the record resolves to an IP that is not reachable from where you ran this."
   echo "  Running ON the host box with the record pointing at its own public IP is a classic hairpin-NAT case —"
