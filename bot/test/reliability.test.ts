@@ -16,7 +16,7 @@ process.env.BROWSER_QA_ENABLED = "false";
 process.env.PUBLIC_SITES_BASE_URL = "https://sites.example.invalid";
 const { buildSite } = await import("../src/build.js");
 const { ensureEnginePackages } = await import("../src/engines.js");
-const { ProjectService } = await import("../src/project.js");
+const { ProjectService, TurnStoppedError } = await import("../src/project.js");
 const { ForgejoClient } = await import("../src/forgejo.js");
 const { Store, pendingTurnMatches } = await import("../src/store.js");
 const { UsageLog } = await import("../src/usage.js");
@@ -35,7 +35,9 @@ async function openStore(file: string) {
 }
 after(async () => {
   for (const store of stores) store.close();
-  await fs.rm(root, { recursive: true, force: true });
+  // Windows transiently reports ENOTEMPTY/EBUSY while git/index handles close;
+  // without retries the cleanup itself fails the suite.
+  await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 async function workspace(name: string): Promise<string> {
@@ -357,4 +359,153 @@ test("renaming a game keeps its multiplayer tenant through future builds", async
   assert.ok(netConfig.includes(JSON.stringify(f.project.siteSlug)));
   await f.service.republish(f.project.threadId);
   assert.equal(await fs.readFile(path.join(f.dir, "site/net/net-config.js"), "utf8"), netConfig);
+});
+
+test("stopping mid-recovery fails the turn instead of resurrecting it with a fresh prompt", async () => {
+  const f = await projectFixture("stop-recovery");
+  await f.store.patchProject(f.project.threadId, {
+    pendingTurn: { prompt: "Paint the arena", initial: false, startedAt: new Date(Date.now() - 60_000).toISOString(), statusMessageId: "status" },
+  });
+  let busy = true;
+  let prompted = false;
+  let aborted = false;
+  Object.assign(f.opencode, {
+    health: async () => "ok (200)",
+    watchExistingTurn: async () => async () => {},
+    isBusy: async () => busy,
+    listPendingQuestions: async () => [],
+    abortTurn: async () => { aborted = true; return true; },
+    listMessages: async () => [],
+    prompt: async () => { prompted = true; throw new Error("recovery must not prompt after a stop"); },
+  });
+  // The user presses Stop while the server-side turn is still running.
+  const outcome = await f.service.stopTurn(f.project.threadId);
+  assert.equal(outcome.stopped, true);
+  assert.ok(aborted);
+  // The abort makes the session idle; recovery must notice the stop marker at
+  // its checkpoint instead of sending a continue prompt for the stopped work.
+  busy = false;
+  await assert.rejects(f.service.recoverTurn(f.project.threadId), (error: Error) => error instanceof TurnStoppedError);
+  assert.equal(prompted, false);
+  assert.equal(f.store.getProject(f.project.threadId)!.pendingTurn, undefined);
+});
+
+test("the stop button honors a turn that is still preparing", async () => {
+  const f = await projectFixture("stop-prep");
+  let parked = false;
+  let releaseModel!: () => void;
+  const modelKnown = new Promise<{ providerID: string; modelID: string }>((resolve) => {
+    releaseModel = () => resolve({ providerID: "surplus", modelID: "test-model" });
+  });
+  let prompted = false;
+  Object.assign(f.opencode, {
+    isBusy: async () => false, // nothing server-side yet — the turn is preparing
+    lastAssistantModel: async () => { parked = true; return modelKnown; },
+    modelAcceptsAttachments: async () => true,
+    prompt: async () => { prompted = true; throw new Error("a stopped preparing turn must never prompt"); },
+  });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const turning = f.service.mutate(
+    f.project.threadId, "Add a settings screen", false, undefined, undefined, "status",
+    [{ mime: "image/png", dataUrl: "data:image/png;base64,eA==" }],
+  ).then(
+    () => { throw new Error("mutate must reject when stopped"); },
+    (error: unknown) => error,
+  );
+  while (!parked) await settle();
+  // Nothing is busy server-side, but the turn is active: the stop must be
+  // accepted and consumed at the turn's pre-prompt checkpoint.
+  const outcome = await f.service.stopTurn(f.project.threadId);
+  assert.equal(outcome.stopped, true);
+  releaseModel();
+  const error = await turning;
+  assert.ok(error instanceof TurnStoppedError, `expected a user stop, got: ${error}`);
+  assert.equal(prompted, false);
+  const saved = f.store.getProject(f.project.threadId)!;
+  assert.equal(saved.pendingTurn, undefined);
+  assert.notEqual(saved.status, "error", "a user stop is not a project failure");
+});
+
+test("a recovery wait that outlives the window aborts the orphaned agent turn", async () => {
+  const f = await projectFixture("stop-timeout");
+  const originalTimeout = config.opencodeReconcileTimeoutMs;
+  const originalPoll = config.opencodeReconcilePollMs;
+  (config as { opencodeReconcileTimeoutMs: number }).opencodeReconcileTimeoutMs = 250;
+  (config as { opencodeReconcilePollMs: number }).opencodeReconcilePollMs = 50;
+  let aborted = false;
+  Object.assign(f.opencode, {
+    health: async () => "ok (200)",
+    watchExistingTurn: async () => async () => {},
+    isBusy: async () => true, // the orphaned turn never goes idle on its own
+    abortTurn: async () => { aborted = true; return true; },
+  });
+  await f.store.patchProject(f.project.threadId, {
+    pendingTurn: { prompt: "Stuck turn", initial: false, startedAt: new Date().toISOString(), statusMessageId: "status" },
+  });
+  try {
+    await assert.rejects(f.service.recoverTurn(f.project.threadId), /kept running past the recovery window/i);
+    assert.ok(aborted, "the orphaned server-side turn was aborted, not left burning tokens");
+  } finally {
+    (config as { opencodeReconcileTimeoutMs: number }).opencodeReconcileTimeoutMs = originalTimeout;
+    (config as { opencodeReconcilePollMs: number }).opencodeReconcilePollMs = originalPoll;
+  }
+});
+
+test("an aborted agent finish is continued by recovery, not committed as complete", async () => {
+  const f = await projectFixture("aborted-finish");
+  await f.store.patchProject(f.project.threadId, {
+    pendingTurn: {
+      prompt: "Add fog of war", initial: false, beforeCommit: f.base,
+      startedAt: new Date(Date.now() - 30_000).toISOString(), statusMessageId: "status",
+    },
+  });
+  let prompted = false;
+  Object.assign(f.opencode, {
+    health: async () => "ok (200)",
+    watchExistingTurn: async () => async () => {},
+    isBusy: async () => false,
+    // The session's newest message is the killed turn's partial output: an
+    // aborted finish that still carries a completed timestamp.
+    listMessages: async () => [{
+      info: { id: "msg-1", role: "assistant", agent: "sitebuilder", finish: "aborted", time: { created: Date.now() - 20_000, completed: Date.now() - 10_000 } },
+      parts: [{ type: "text", text: "partial work" }],
+    }],
+    prompt: async () => {
+      prompted = true;
+      await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("continued after abort");');
+      return { text: "Continued the aborted turn", usage: {} } as PromptResult;
+    },
+  });
+  const result = await f.service.recoverTurn(f.project.threadId);
+  assert.ok(prompted, "recovery continued the aborted work instead of accepting the partials as the result");
+  assert.ok(result.commit, "the continued work was committed");
+});
+
+test("resetting a thread reports its aborted turn as a user stop, not a failure", async () => {
+  const f = await projectFixture("reset-stop");
+  let prompted = false;
+  let rejectParked!: (error: Error) => void;
+  const parked = new Promise<never>((_, reject) => { rejectParked = reject; });
+  Object.assign(f.opencode, {
+    isBusy: async () => true,
+    createSession: async () => "fresh-session",
+    stopSessionsInDirectory: async () => ({ sessions: 1, aborted: 1 }),
+    prompt: async () => { prompted = true; return parked; },
+  });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const turning = f.service.mutate(f.project.threadId, "Add fog of war", false, undefined, undefined, "status").then(
+    () => { throw new Error("mutate must reject when reset"); },
+    (error: unknown) => error,
+  );
+  while (!prompted) await settle();
+  const reset = await f.service.resetSession(f.project.threadId);
+  assert.equal(reset.project.sessionId, "fresh-session");
+  assert.equal(reset.stoppedTurn, true);
+  // The sweep killed the turn on purpose: it must land as a user stop, not as
+  // a project failure with an incident.
+  rejectParked(new Error("the session was swept by the reset"));
+  const error = await turning;
+  assert.ok(error instanceof TurnStoppedError, `expected a user stop, got: ${error}`);
+  const saved = f.store.getProject(f.project.threadId)!;
+  assert.notEqual(saved.status, "error", "a reset-aborted turn is not a project failure");
 });

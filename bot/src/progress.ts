@@ -26,7 +26,7 @@ export interface ProgressUpdate {
    * populate independent card sections; thought is public assistant narration,
    * never the model's reasoning stream. Questions also carry answer buttons.
    */
-  kind?: "activity" | "thought" | "stats" | "changes" | "question" | "plan" | "metrics" | "context" | "queue";
+  kind?: "activity" | "thought" | "stats" | "changes" | "question" | "plan" | "metrics" | "context" | "queue" | "heartbeat";
   question?: AgentQuestion;
   phase?: ProgressPhase;
   context?: ProgressContext;
@@ -35,6 +35,8 @@ export interface ProgressUpdate {
   files?: ProgressFiles;
   tool?: ProgressTool;
   queuedRequests?: number;
+  /** OpenCode status only; this confirms a running session without resetting the no-event timer. */
+  active?: boolean;
 }
 
 export type ProgressCallback = (update: ProgressUpdate) => void | Promise<void>;
@@ -44,8 +46,8 @@ const MAX_SUMMARY_CHARS = 280;
 const HISTORY_LINES = 8;
 
 export class DiscordProgress {
-  private readonly started = Date.now();
-  private latest: ProgressActivity = { text: "Preparing your update", at: this.started };
+  private readonly started: number;
+  private latest: ProgressActivity;
   private readonly history: ProgressActivity[] = [];
   private phase: ProgressPhase = "preparing";
   private context: ProgressContext = {};
@@ -54,6 +56,7 @@ export class DiscordProgress {
   private metricsAt = 0;
   private files?: ProgressFiles;
   private queuedRequests = 0;
+  private agentReportedActive = false;
   private readonly tools = new Map<string, ProgressTool>();
   private inFlight?: Promise<void>;
   private dirty = false;
@@ -68,8 +71,13 @@ export class DiscordProgress {
    */
   private questionPin?: { requestID: string; question: string; resolution?: string };
   private lastEdit = 0;
-  /** Last time the agent reported anything at all; drives the stalled watchdog. */
-  private lastActivityAt = this.started;
+  /**
+   * Last time the agent reported anything at all; drives the stalled watchdog.
+   * Anchored to when this progress instance attached, not the resumed turn's
+   * original start: a recovery card must not open with "no progress for 40m"
+   * for the minutes the bot itself was down.
+   */
+  private lastActivityAt: number;
   private pending?: NodeJS.Timeout;
   private heartbeat?: NodeJS.Timeout;
   private closed = false;
@@ -79,7 +87,13 @@ export class DiscordProgress {
   constructor(
     private readonly message: Message,
     private readonly title: string,
+    startedAt = Date.now(),
   ) {
+    this.started = Number.isFinite(startedAt) && startedAt > 0 ? startedAt : Date.now();
+    // The elapsed display keeps the turn's real start; the stall clock starts
+    // fresh at attach (see the field comment above).
+    this.lastActivityAt = Date.now();
+    this.latest = { text: "Preparing your update", at: this.started };
     this.heartbeat = setInterval(() => {
       if (Date.now() - this.lastEdit > 12_000) void this.flush();
     }, 8_000);
@@ -89,7 +103,7 @@ export class DiscordProgress {
     if (this.closed) return;
     // A newly queued user message is not agent progress: it must not hide a
     // provider that has stopped emitting events.
-    if (update.kind !== "queue") this.lastActivityAt = Date.now();
+    if (update.kind !== "queue" && update.kind !== "heartbeat") this.lastActivityAt = Date.now();
     if (update.phase) this.phase = update.phase;
     if (update.context) this.context = { ...this.context, ...update.context };
     if (update.metrics) { this.metrics = { ...this.metrics, ...update.metrics }; this.metricsAt = Date.now(); }
@@ -101,6 +115,9 @@ export class DiscordProgress {
       this.tools.set(update.tool.id, update.tool);
       if (previous?.status === update.tool.status) { this.schedule(); return; }
       this.update(update.text, update.detail, update.tool.id);
+    } else if (update.kind === "heartbeat") {
+      this.agentReportedActive = update.active ?? this.agentReportedActive;
+      this.update(update.text, update.detail, "recovery-status", false);
     } else if (["context", "metrics", "plan", "queue"].includes(update.kind ?? "")) {
       this.schedule();
     } else if (update.kind === "thought") {
@@ -200,9 +217,9 @@ export class DiscordProgress {
     this.schedule();
   }
 
-  update(text: string, detail?: string, key?: string): void {
+  update(text: string, detail?: string, key?: string, countsAsActivity = true): void {
     if (this.closed) return;
-    this.lastActivityAt = Date.now();
+    if (countsAsActivity) this.lastActivityAt = Date.now();
     if (/waiting for (?:the )?project queue|queued/i.test(text)) this.phase = "queued";
     // A generic session-busy event must not bury a more useful running tool.
     if (/model is (?:thinking|working)/i.test(text) && [...this.tools.values()].some((tool) => tool.status === "running")) return;
@@ -279,7 +296,7 @@ export class DiscordProgress {
     // A failed tool and a provider retry both turn the card amber, so name the
     // cause: an alarm without a label tells the reader nothing.
     const latestToolFailed = this.latest.key ? this.tools.get(this.latest.key)?.status === "error" : false;
-    const serviceWaiting = /retry|backoff|unavailable|reconnect|waiting for.*(?:agent|service)|hit an error/i.test(this.latest.text);
+    const serviceWaiting = /retry|backoff|unavailable|reconnect|waiting for.*(?:agent|service)|status is taking longer|hit an error/i.test(this.latest.text);
     return {
       title: this.title, phase: this.phase, startedAt: this.started, now: Date.now(), latest: this.latest,
       history: this.history, context: this.context, thought: this.thought, stats: this.stats, changes: this.changes,
@@ -288,6 +305,7 @@ export class DiscordProgress {
       actions: tools.length, activeTools: tools.filter((tool) => tool.status === "running").length,
       toolErrors: tools.filter((tool) => tool.status === "error").length, questionPin: this.questionPin,
       waiting: latestToolFailed || serviceWaiting,
+      agentReportedActive: this.agentReportedActive,
       waitingReason: latestToolFailed
         ? "A tool reported an error — the agent is retrying"
         : serviceWaiting ? "Waiting on the agent service — it will retry automatically" : undefined,

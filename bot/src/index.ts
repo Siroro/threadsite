@@ -359,10 +359,18 @@ async function recoverInterruptedTurns(): Promise<void> {
       if (!status && thread) {
         status = await thread.send("♻️ Resuming the turn that was in flight when the bot restarted…").catch(() => undefined);
       }
-      const progress = status ? new DiscordProgress(status, `♻️ Recovering ${project.displayName}`) : undefined;
+      const progress = status
+        ? new DiscordProgress(status, `♻️ Recovering ${project.displayName}`, Date.parse(project.pendingTurn.startedAt))
+        : undefined;
       if (status && progress) registerQuestionButtons(status, progress);
       progress?.enableStopButton();
-      progress?.update("♻️ Resuming the interrupted turn");
+      progress?.callback({
+        kind: "heartbeat",
+        text: "♻️ Resuming the interrupted turn",
+        detail: "Checking the saved OpenCode session",
+        phase: "preparing",
+        active: false,
+      });
       const deliver: (content: string) => Promise<unknown> = status
         ? (content) => setStatusMessage(status, content).catch(() => undefined)
         : thread
@@ -712,12 +720,13 @@ function takeUpdateBatch(threadId: string): QueuedUpdate[] | undefined {
  * that no longer fit under the prompt cap overflow back into the accumulator
  * and become their own follow-up turn.
  */
-function mergeUpdateBatch(batch: QueuedUpdate[]): { prompt: string; display: string; images: PromptImage[]; overflow: QueuedUpdate[] } {
+function mergeUpdateBatch(batch: QueuedUpdate[]): { prompt: string; display: string | undefined; images: PromptImage[]; overflow: QueuedUpdate[] } {
   const head = batch[0].prompt;
   const images = [...batch[0].images];
   const rest: string[] = [];
-  // The card shows the user's own messages, not the merged prompt's harness
-  // preamble — that text is addressed to the model.
+  // The card repeats the user's own words only when this turn merges several
+  // messages: a single message is still visible in the thread. The merged
+  // prompt's harness preamble is never shown — that text is for the model.
   const requests = [head];
   let used = head.length;
   for (let index = 1; index < batch.length; index += 1) {
@@ -725,7 +734,7 @@ function mergeUpdateBatch(batch: QueuedUpdate[]): { prompt: string; display: str
     if (used + entry.prompt.length + 8 > config.maxPromptChars - 160) {
       return {
         prompt: composeMergedPrompt(head, rest),
-        display: requestDisplayText(requests),
+        display: mergedDisplay(requests),
         images,
         overflow: batch.slice(index),
       };
@@ -735,7 +744,12 @@ function mergeUpdateBatch(batch: QueuedUpdate[]): { prompt: string; display: str
     images.push(...entry.images);
     used += entry.prompt.length + 8;
   }
-  return { prompt: composeMergedPrompt(head, rest), display: requestDisplayText(requests), images, overflow: [] };
+  return { prompt: composeMergedPrompt(head, rest), display: mergedDisplay(requests), images, overflow: [] };
+}
+
+/** Display text for a merged batch, or undefined when only one message ran. */
+function mergedDisplay(requests: readonly string[]): string | undefined {
+  return requests.length > 1 ? requestDisplayText(requests) : undefined;
 }
 
 function composeMergedPrompt(head: string, rest: string[]): string {
@@ -1648,7 +1662,7 @@ function stopOutcomeText(outcome: StopTurnOutcome): string {
     return "⏳ The agent has already finished and the update is now being validated, committed, and published. " +
       "There is nothing left to interrupt; the status message will show the result.";
   }
-  return "No model turn is currently running in this thread.";
+  return "No model turn is currently running in this thread. Waiting messages, if any, can be cancelled with `/site queue`.";
 }
 
 // Stop on a live status message: abort the running agent turn but keep the

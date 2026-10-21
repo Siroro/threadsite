@@ -4,7 +4,8 @@ export function buildingSnapshot(): ProgressSnapshot {
   return {
     title: "🎮 Updating Sumo Shove", phase: "working", startedAt: 1_000_000, now: 1_134_000,
     latest: { text: "✏️ Editing code", detail: "site/src/player.ts", at: 1_129_000, key: "edit-player" },
-    context: { request: "Make the arena feel more alive and add a proper leaderboard.", siteUrl: "https://sites.example.invalid/sumo-shove/", repoUrl: "https://git.example.invalid/site-sumo-shove" },
+    // A single request is not echoed on the card; see mergedSnapshot().
+    context: { siteUrl: "https://sites.example.invalid/sumo-shove/", repoUrl: "https://git.example.invalid/site-sumo-shove" },
     thought: "The arena now has crowd reactions. I’m connecting the leaderboard to the shared match state.",
     files: { files: 6, added: 2, modified: 4, deleted: 0, additions: 184, deletions: 37, paths: ["site/src/player.ts", "site/src/leaderboard.ts", "site/css/main.css", "site/src/arena.ts", "site/index.html", "site/assets/crowd.svg"] },
     metrics: { contextTokens: 28400, contextLimit: 100000, inputTokens: 82300, outputTokens: 6200, cacheTokens: 65840, steps: 12, outputTokensPerSecond: 54 },
@@ -23,4 +24,11 @@ export function buildingSnapshot(): ProgressSnapshot {
     ],
     queuedRequests: 2, actions: 24, activeTools: 1, toolErrors: 0,
   };
+}
+
+/** The same turn, but as a batch that merged several queued user messages. */
+export function mergedSnapshot(): ProgressSnapshot {
+  const snapshot = buildingSnapshot();
+  snapshot.context.request = "Make the arena feel more alive · Add a proper leaderboard · Fix the reset button";
+  return snapshot;
 }

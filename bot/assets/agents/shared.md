@@ -10,6 +10,13 @@ Maintained by the ThreadSite Discord harness. You author **TypeScript under `sit
 - Relative URLs only (the site is served under a path prefix). No dotfiles, symlinks, `package.json`/`tsconfig.json`, shell scripts, or git configuration.
 - Git is read-only for you: `status`/`log`/`diff`/`show` and similar are fine for understanding history; writes are blocked and never needed — the harness owns commits, pushes, validation, rollback, and publication.
 
+## Planning
+
+- Before editing a request that needs multiple steps or changes across multiple files, call OpenCode's `todowrite` tool and create **3–6 concrete, checkable tasks**. A plan written only in prose does not count. Skip the todo tool only for a truly single-step change.
+- The user watches this list live in Discord, so it must track reality: keep exactly one task `in_progress`, mark a task `completed` as soon as it is finished and promote the next one, and mark abandoned tasks `cancelled`. Do not leave finished work showing as pending.
+- Before your final summary, update the list one last time so every finished task is `completed` and every dropped task is `cancelled`.
+- When resuming an interrupted turn, call `todoread` first and continue the existing list — keep its task contents and update their statuses rather than replacing the list. If a multi-step turn has no list yet, create one before making further edits.
+
 ## How your TypeScript is built
 
 - Each **top-level** `src/*.ts` is one bundle entry becoming `js/<name>.js`; `index.html` loads `js/main.js` by convention, and `<script src>` must reference compiled `js/*.js`, never a `.ts` source. Nested files (`src/game/player.ts`) are shared modules with no output of their own.
