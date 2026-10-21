@@ -121,7 +121,6 @@ services:
       GAMESERVER_ADMIN_TOKEN_FILE: /run/threadsite-control/cleanup-token
       WORKSPACE_ROOT: /workspace
       PUBLISH_ROOT: /srv/sites
-      STATE_FILE: /data/state.json
       STATE_DB_FILE: /data/state.db
       # Browser QA drives the preview service's Playwright MCP; the bot joins
       # the internal preview network to reach it (no host exposure).

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { PersistedState, ProjectRecord, QueuedRequest } from "./types.js";
+import type { ProjectRecord, QueuedRequest } from "./types.js";
 
 /** Database reads need durable identity; legacy markers predate explicit IDs. */
 export function pendingTurnMatches(current: ProjectRecord["pendingTurn"], expected: ProjectRecord["pendingTurn"]): boolean {
@@ -13,11 +13,8 @@ export function pendingTurnMatches(current: ProjectRecord["pendingTurn"], expect
 
 /**
  * Project/settings persistence on SQLite (node:sqlite): one JSON record per
- * project plus a key/value settings table. Replaced the original state.json
- * single-file store — same interface, but writes are transactional and there
- * is no process-wide write queue keeping renames ordered. A legacy state.json
- * next to the database is imported once on first open and left in place as a
- * backup; a file that fails to parse (or is itself the database) is ignored.
+ * project plus a key/value settings table. Writes are transactional and there
+ * is no process-wide write queue keeping renames ordered.
  */
 export class Store {
   private readonly db: DatabaseSync;
@@ -27,22 +24,6 @@ export class Store {
   }
 
   static async open(file: string, defaultModel?: string): Promise<Store> {
-    // Preserve installations whose STATE_FILE still names the legacy JSON file.
-    if (/\.json$/i.test(file)) {
-      const handle = await fs.open(file, "r").catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return undefined;
-        throw error;
-      });
-      let sqlite = false;
-      if (handle) {
-        try {
-          const header = Buffer.alloc(16);
-          await handle.read(header, 0, 16, 0);
-          sqlite = header.toString() === "SQLite format 3\0";
-        } finally { await handle.close(); }
-      }
-      if (!sqlite) file = file.replace(/\.json$/i, ".db");
-    }
     await fs.mkdir(path.dirname(file), { recursive: true });
     const db = new DatabaseSync(file);
     db.exec("PRAGMA journal_mode = WAL");
@@ -54,43 +35,8 @@ export class Store {
     db.exec("CREATE TABLE IF NOT EXISTS projects (thread_id TEXT PRIMARY KEY, record TEXT NOT NULL)");
     db.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     const store = new Store(file, db);
-    await store.importLegacyJson(file.replace(/\.db$/i, ".json"));
     if (!store.getModel() && defaultModel) await store.setModel(defaultModel);
     return store;
-  }
-
-  /** One-time import of a legacy state.json; anything unreadable is skipped. */
-  private async importLegacyJson(jsonFile: string): Promise<void> {
-    if (jsonFile === this.file) return;
-    if (this.db.prepare("SELECT 1 FROM settings LIMIT 1").get() || this.db.prepare("SELECT 1 FROM projects LIMIT 1").get()) return;
-    let state: PersistedState;
-    try {
-      state = JSON.parse(await fs.readFile(jsonFile, "utf8")) as PersistedState;
-      if (state.version !== 1 || !state.projects || !state.settings) return;
-    } catch {
-      return; // missing, the database file itself, or corrupt: nothing to import
-    }
-    const insertProject = this.db.prepare(
-      "INSERT INTO projects (thread_id, record) VALUES (?, ?) ON CONFLICT(thread_id) DO UPDATE SET record = excluded.record",
-    );
-    const insertSetting = this.db.prepare(
-      "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    );
-    this.db.exec("BEGIN");
-    try {
-      for (const project of Object.values(state.projects)) {
-        if (project?.threadId) insertProject.run(project.threadId, JSON.stringify(project));
-      }
-      for (const [key, value] of Object.entries(state.settings)) {
-        if (value !== undefined) insertSetting.run(key, JSON.stringify(value));
-      }
-      insertSetting.run("__legacy_imported", "true");
-      this.db.exec("COMMIT");
-      console.warn(`[threadsite] imported ${Object.keys(state.projects).length} project(s) from legacy ${jsonFile} (left in place as backup)`);
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      console.warn("[threadsite] legacy state import failed; continuing with the empty database:", error);
-    }
   }
 
   private getSetting<T>(key: string): T | undefined {

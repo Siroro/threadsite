@@ -7,8 +7,7 @@ import { DatabaseSync, backup } from "node:sqlite";
 
 const repositories = new Set();
 let apply = false;
-let database = process.env.STATE_DB_FILE?.trim()
-  || `${(process.env.STATE_FILE?.trim() || "/data/state.json").replace(/\.json$/i, "")}.db`;
+let database = process.env.STATE_DB_FILE?.trim() || "/data/state.db";
 const args = process.argv.slice(2);
 for (let index = 0; index < args.length; index += 1) {
   const arg = args[index];
