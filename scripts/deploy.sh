@@ -58,6 +58,8 @@ fi
 echo "Updating $old_head -> $new_head ($BRANCH):"
 git log --oneline "HEAD..origin/$BRANCH" | head -15
 git reset --hard "origin/$BRANCH" >/dev/null
+# Keep plain `git pull` working for anyone who prefers it over the scripts.
+git branch --set-upstream-to="origin/$BRANCH" HEAD >/dev/null 2>&1 || true
 
 # Build and recreate only what changed. Assets, agent templates and commands
 # all live inside the bot image; the other services change rarely.
