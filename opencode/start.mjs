@@ -1,11 +1,13 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { buildSurplusProvider } from "./surplus-adapter.mjs";
+import { applyRuntimeConfig } from "./runtime-config.mjs";
 
 const templatePath = "/opt/threadsite/opencode.base.json";
 const outputPath = "/root/.config/opencode/opencode.json";
 
-const config = JSON.parse(await readFile(templatePath, "utf8"));
+const config = applyRuntimeConfig(JSON.parse(await readFile(templatePath, "utf8")));
+console.log(`[threadsite] Builder step limit: ${config.agent.sitebuilder.maxSteps}`);
 const surplus = await buildSurplusProvider({
   env: process.env,
   log: (message) => console.log(message),

@@ -1,6 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import { applyRuntimeConfig } from "../../opencode/runtime-config.mjs";
+
+test("builder step budget defaults to 200 and accepts a validated environment override", () => {
+  for (const value of [undefined, "", "  "]) {
+    const config = applyRuntimeConfig({ agent: { sitebuilder: { maxSteps: 120 }, titler: { maxSteps: 1 } } }, { OPENCODE_MAX_STEPS: value });
+    assert.equal(config.agent.sitebuilder.maxSteps, 200);
+    assert.equal(config.agent.titler.maxSteps, 1);
+  }
+  const config = applyRuntimeConfig({ agent: { sitebuilder: { prompt: "Keep this prompt" } } }, { OPENCODE_MAX_STEPS: " 350 " });
+  assert.equal(config.agent.sitebuilder.maxSteps, 350);
+  assert.equal(config.agent.sitebuilder.prompt, "Keep this prompt");
+  for (const value of ["0", "-1", "1.5", "200junk", "Infinity", "1e3", "9007199254740992"]) {
+    assert.throws(() => applyRuntimeConfig({}, { OPENCODE_MAX_STEPS: value }), /OPENCODE_MAX_STEPS must be a positive integer/);
+  }
+});
 
 // A cold Chromium launch plus a software-rendered (SwiftShader) WebGL canvas
 // takes well over the old 10s action / 30s navigation defaults: screenshots

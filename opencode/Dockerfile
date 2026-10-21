@@ -19,6 +19,7 @@ RUN apt-get update \
 
 COPY opencode.json /opt/threadsite/opencode.base.json
 COPY start.mjs /opt/threadsite/start.mjs
+COPY runtime-config.mjs /opt/threadsite/runtime-config.mjs
 COPY healthcheck.mjs /opt/threadsite/healthcheck.mjs
 COPY surplus-adapter.mjs /opt/threadsite/surplus-adapter.mjs
 COPY tools/asset_download.ts /root/.config/opencode/tools/asset_download.ts
