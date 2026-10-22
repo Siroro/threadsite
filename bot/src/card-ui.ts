@@ -25,8 +25,8 @@ export function cardTitle(value: string): string {
  * leads; the small label line above it names what kind of card this is — omit
  * it (undefined) when the title alone already says everything.
  */
-export function addCardHeader(card: ContainerBuilder, label: string | undefined, title: string, status: string, accessory?: ButtonBuilder | ThumbnailBuilder): void {
-  const text = new TextDisplayBuilder().setContent(`${label ? `-# ${label}\n` : ""}## ${cardTitle(title)}\n${status}`);
+export function addCardHeader(card: ContainerBuilder, label: string | undefined, title: string, status: string | undefined, accessory?: ButtonBuilder | ThumbnailBuilder): void {
+  const text = new TextDisplayBuilder().setContent(`${label ? `-# ${label}\n` : ""}## ${cardTitle(title)}${status ? `\n${status}` : ""}`);
   if (accessory instanceof ButtonBuilder) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setButtonAccessory(accessory));
   else if (accessory) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setThumbnailAccessory(accessory));
   else card.addTextDisplayComponents(text);
