@@ -1823,9 +1823,14 @@ export class OpenCodeHarness {
     }
 
     // Reasoning streams as its own part type and often dominates output tokens;
-    // it feeds the live meter (not the thought line, which stays prose-only).
+    // it feeds the live meter, and the raw text rides the private thinking
+    // trail for the owner-only details panel. It never becomes a public update.
     if (part.type === "reasoning" && !part.synthetic && turn.assistantMessageIds.has(part.messageID)) {
       samplePartGrowth(turn, part, onProgress);
+      if (!isChild) {
+        const text = String(part.text ?? "").trim();
+        if (text) emit(onProgress, { kind: "thinking", text, narrationId: String(part.id ?? part.messageID) });
+      }
       return;
     }
 
