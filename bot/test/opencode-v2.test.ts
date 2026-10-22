@@ -336,7 +336,7 @@ test("tool events carry rich labels, file targets and subagent attribution", asy
     const tools = updates.filter((update) => update.tool);
     assert.deepEqual(tools.map((update) => update.tool.status), ["running", "completed", "running", "error", "running", "completed"]);
     assert.deepEqual(tools.map((update) => update.text), [
-      "✏️ Editing code", "✅ File edit complete",
+      "✏️ Editing", "✅ Edited",
       "⚙️ Running a command", "⚠️ Shell hit an error",
       "🤖 Subagent — 🔎 Searching the web", "🤖 Subagent — 🔎 Web research gathered",
     ]);

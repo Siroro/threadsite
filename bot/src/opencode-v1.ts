@@ -2281,11 +2281,11 @@ export function describeTool(tool: string, input: any, status: string, title?: s
   if (["edit", "write", "apply_patch"].includes(normalized)) {
     const target = input?.filePath ?? input?.file_path ?? input?.path ?? input?.file;
     const detail = typeof target === "string" ? projectFileLabel(target, directory) : undefined;
-    return { text: status === "running" ? "✏️ Editing code" : "✅ File edit complete", detail };
+    return { text: status === "running" ? "✏️ Editing" : "✅ Edited", detail };
   }
   if (["read", "glob", "grep", "list"].includes(normalized)) {
     const target = input?.filePath ?? input?.file_path ?? input?.path;
-    return { text: status === "running" ? "📚 Inspecting the project" : "📚 Project context inspected",
+    return { text: status === "running" ? "📚 Reading" : "📚 Read",
       detail: typeof target === "string" ? projectFileLabel(target, directory) : undefined };
   }
   if (normalized === "bash" || normalized === "shell") {
