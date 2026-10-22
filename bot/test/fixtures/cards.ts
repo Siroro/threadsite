@@ -34,7 +34,9 @@ export function cardView(message: Pick<MessageEditOptions, "components">) {
       const newline = text.indexOf("\n");
       return { name: text.slice(4, newline), value: text.slice(newline + 1) };
     }),
-    footer: { text: texts.filter((text) => text.startsWith("-# ") && !text.includes("THREADSITE")).join("\n") },
+    // Footer notes are small-print texts; headers (eyebrow + ## title + status
+    // in one block) also start with "-# " and are excluded by their heading.
+    footer: { text: texts.filter((text) => text.startsWith("-# ") && !text.includes("\n## ")).join("\n") },
     text: texts.join("\n\n"),
     components,
     buttons: components.filter((component) => component.type === ComponentType.Button),

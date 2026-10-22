@@ -20,8 +20,13 @@ export function cardTitle(value: string): string {
   return escapeMarkdown(truncate(value.replace(/\s+/g, " ").trim(), 180));
 }
 
-export function addCardHeader(card: ContainerBuilder, label: string, title: string, status: string, accessory?: ButtonBuilder | ThumbnailBuilder): void {
-  const text = new TextDisplayBuilder().setContent(`-# THREADSITE · ${label}\n## ${cardTitle(title)}\n${status}`);
+/**
+ * The standard card header. The card's own subject is the brand, so the title
+ * leads; the small label line above it names what kind of card this is — omit
+ * it (undefined) when the title alone already says everything.
+ */
+export function addCardHeader(card: ContainerBuilder, label: string | undefined, title: string, status: string, accessory?: ButtonBuilder | ThumbnailBuilder): void {
+  const text = new TextDisplayBuilder().setContent(`${label ? `-# ${label}\n` : ""}## ${cardTitle(title)}\n${status}`);
   if (accessory instanceof ButtonBuilder) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setButtonAccessory(accessory));
   else if (accessory) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setThumbnailAccessory(accessory));
   else card.addTextDisplayComponents(text);
@@ -29,11 +34,11 @@ export function addCardHeader(card: ContainerBuilder, label: string, title: stri
 
 /**
  * A title-led header for cards whose own name is the brand: the project title
- * (emoji included) leads the card in the small line, with no THREADSITE label
- * and no big heading below it.
+ * (emoji included) leads the card in the small line, with no big heading below
+ * it and no status line unless there is something worth flagging.
  */
-export function addCardTitle(card: ContainerBuilder, title: string, status: string, accessory?: ButtonBuilder | ThumbnailBuilder): void {
-  const text = new TextDisplayBuilder().setContent(`-# ${cardTitle(title)}\n${status}`);
+export function addCardTitle(card: ContainerBuilder, title: string, status: string | undefined, accessory?: ButtonBuilder | ThumbnailBuilder): void {
+  const text = new TextDisplayBuilder().setContent(`-# ${cardTitle(title)}${status ? `\n${status}` : ""}`);
   if (accessory instanceof ButtonBuilder) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setButtonAccessory(accessory));
   else if (accessory) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setThumbnailAccessory(accessory));
   else card.addTextDisplayComponents(text);
@@ -119,7 +124,7 @@ export function disableMessageControls(message: Pick<Message, "components">): Me
 export function renderStatusCard(content: string, rows: ActionRowBuilder<ButtonBuilder>[] = []): CardMessage {
   const color = /❌|🚫|failed/i.test(content) ? 0xef4444 : /⚠️|🛑|stopped/i.test(content) ? 0xf59e0b : 0x64748b;
   const card = new ContainerBuilder().setAccentColor(color);
-  card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# THREADSITE · TURN UPDATE\n${truncate(content || "Turn finished.", 3900)}`));
+  card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# TURN UPDATE\n${truncate(content || "Turn finished.", 3900)}`));
   if (rows.length) { addCardDivider(card); card.addActionRowComponents(...rows); }
   return cardMessage(card);
 }

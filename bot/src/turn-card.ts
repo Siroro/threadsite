@@ -130,7 +130,7 @@ export function renderPlayCard(state: TurnCardState): PlayCardMessage {
   // container's full width, so the opening frame keeps its room instead of
   // squeezing the text beside it.
   addCardTitle(container, `${isGame ? "🎮 Play" : "🛠️ Open"} ${state.name}`,
-    state.published ? `● Live · ${isGame ? "ready to play" : "ready to explore"}` : "⚠️ This turn was not published · opens the previous live version");
+    state.published ? undefined : "⚠️ This turn was not published · opens the previous live version");
   if (files.length) {
     container.addMediaGalleryComponents(
       new MediaGalleryBuilder().addItems(
@@ -172,7 +172,9 @@ export function renderPlayCard(state: TurnCardState): PlayCardMessage {
  */
 function technicalCard(state: TurnCardState): ContainerBuilder {
   const card = new ContainerBuilder().setAccentColor(cardColor(state));
-  addCardHeader(card, "TURN COMPLETE", `${state.published ? "✅" : "⚠️"} ${state.name}`,
+  // The project's name is the card's title; no brand eyebrow above it. The
+  // status line under it still tells the reader what happened.
+  addCardHeader(card, undefined, `${state.published ? "✅" : "⚠️"} ${state.name}`,
     state.published ? "Published · the new version is live" : "Not published · the live version is unchanged");
 
   const turn: string[] = [];
