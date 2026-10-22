@@ -2255,11 +2255,12 @@ function isUnfinished(item: ProgressPlanItem): boolean {
   return item.status === "pending" || item.status === "in_progress";
 }
 
-function describeTool(tool: string, input: any, status: string, title?: string, directory?: string): { text: string; detail?: string } | undefined {
+export function describeTool(tool: string, input: any, status: string, title?: string, directory?: string): { text: string; detail?: string } | undefined {
   const normalized = tool.toLowerCase().replace(/-/g, "_");
-  if (normalized === "task") {
+  if (normalized === "task" || normalized === "subagent") {
     const agent = typeof input?.agent === "string" && input.agent ? input.agent : "subagent";
-    const description = typeof input?.description === "string" ? input.description : undefined;
+    const description = typeof input?.description === "string" ? input.description
+      : typeof input?.prompt === "string" ? input.prompt : undefined;
     return {
       text: status === "running" ? `🤖 Delegating to ${agent}` : `🤖 ${agent} finished`,
       detail: description ? truncate(description, 90) : undefined,
@@ -2278,16 +2279,19 @@ function describeTool(tool: string, input: any, status: string, title?: string, 
     return { text: status === "running" ? "📥 Downloading a media asset" : "📦 Asset saved locally", detail: destination };
   }
   if (["edit", "write", "apply_patch"].includes(normalized)) {
-    const target = input?.filePath ?? input?.path ?? input?.file;
+    const target = input?.filePath ?? input?.file_path ?? input?.path ?? input?.file;
     const detail = typeof target === "string" ? projectFileLabel(target, directory) : undefined;
     return { text: status === "running" ? "✏️ Editing code" : "✅ File edit complete", detail };
   }
   if (["read", "glob", "grep", "list"].includes(normalized)) {
-    const target = input?.filePath ?? input?.path;
+    const target = input?.filePath ?? input?.file_path ?? input?.path;
     return { text: status === "running" ? "📚 Inspecting the project" : "📚 Project context inspected",
       detail: typeof target === "string" ? projectFileLabel(target, directory) : undefined };
   }
-  if (normalized === "bash") return { text: status === "running" ? "⚙️ Running a command" : "✓ Command finished" };
+  if (normalized === "bash" || normalized === "shell") {
+    const command = typeof input?.command === "string" ? input.command : undefined;
+    return { text: status === "running" ? "⚙️ Running a command" : "✓ Command finished", detail: command ? truncate(command, 90) : undefined };
+  }
   if (["todowrite", "todoread"].includes(normalized)) return { text: status === "running" ? "🗺️ Organising the build" : "🗺️ Plan updated" };
   if (title) return { text: status === "running" ? `⚙️ ${toolLabel(tool)}` : `✅ ${truncate(String(title), 90)}` };
   return { text: status === "running" ? `⚙️ ${toolLabel(tool)}` : `✓ ${toolLabel(tool)} finished` };
@@ -2298,7 +2302,7 @@ function projectFileLabel(file: string, directory?: string): string {
   return truncate(!relative || relative.startsWith("..") || path.isAbsolute(relative) ? path.basename(file) : relative.replaceAll(path.sep, "/"), 140);
 }
 
-function toolLabel(tool: string): string {
+export function toolLabel(tool: string): string {
   return tool.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 

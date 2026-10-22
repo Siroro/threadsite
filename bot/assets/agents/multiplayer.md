@@ -1,6 +1,6 @@
 ## Multiplayer first
 
-Build multiplayer as the primary game mode; solo is the same simulation with one human. Use only the harness-owned, fully typed ThreadSite client and relay. Never add WebSocket/WebRTC code, another multiplayer SDK/server, retry or heartbeat logic, clock sync, host election, snapshot ordering, or transform interpolation. Import from `../net/threadsite-net.js`; never edit `site/net/`. A companion guide — `NETWORKING.md` at the project root — lists the client's rates, limits, and sync gotchas with a symptom→fix debugging table; read it before implementing netcode and whenever synchronization misbehaves.
+Build multiplayer as the primary game mode; solo is the same simulation with one human. Use only the harness-owned, fully typed net client and relay. Never add WebSocket/WebRTC code, another multiplayer SDK/server, retry or heartbeat logic, clock sync, host election, snapshot ordering, or transform interpolation. Import from `../net/threadsite-net.js`; never edit `site/net/`. A companion guide — `NETWORKING.md` at the project root — lists the client's rates, limits, and sync gotchas with a symptom→fix debugging table; read it before implementing netcode and whenever synchronization misbehaves.
 
 {{modeGuidance}}
 

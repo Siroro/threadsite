@@ -6,13 +6,13 @@ import { OpenCode, type OpenCodeClient, type ModelInfo, type ModelRef, type Sess
 import { config } from "./config.js";
 import { log, serializeError } from "./logger.js";
 import { applicationMessage, formQuestion } from "./opencode-v2-messages.js";
-import { usageFromMessages, reconcileUsage, type SessionMessage, type PromptImage,
+import { usageFromMessages, reconcileUsage, describeTool, toolLabel, type SessionMessage, type PromptImage,
   type PromptResult, type TurnUsage, type QuotaBlock } from "./opencode-v1.js";
 import type { OpenCodeHarness } from "./opencode.js";
 import type { ProgressCallback, ProgressUpdate, ProgressPlanItem } from "./progress.js";
 import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
 import { steeringInstruction } from "./templates.js";
-import { cleanThreadTitle, errorText, parseModel, sleep } from "./util.js";
+import { cleanThreadTitle, errorText, parseModel, sleep, truncate } from "./util.js";
 
 const requestOptions = () => ({ signal: AbortSignal.timeout(10_000) });
 const emptyUsage = (): TurnUsage => ({ inputTokens: 0, outputTokens: 0, cacheTokens: 0,
@@ -650,7 +650,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         if (part.type !== "tool") continue;
         watch.tools.set(part.id, { name: part.name, input: "input" in part.state && typeof part.state.input === "object" ? part.state.input : undefined });
         if (current && ["running", "completed", "error"].includes(part.state.status)) {
-          this.toolProgress(watch, sessionID, part.id, part.name, part.state.status as "running" | "completed" | "error", callback);
+          this.toolProgress(watch, sessionID, part.id, part.state.status as "running" | "completed" | "error", directory, false, callback);
         }
         if (part.name === "todowrite" && "input" in part.state && typeof part.state.input === "object") {
           latestPlan = part.state.input; planIsCurrent = current;
@@ -672,9 +672,18 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     this.publish(watch, "plan", { kind: "plan", text: "Updated plan", plan }, callback);
   }
 
-  private toolProgress(watch: Watch, sessionID: string, id: string, name: string, status: "running" | "completed" | "error", callback?: ProgressCallback): void {
-    this.publish(watch, `tool:${id}`, { text: `${status === "running" ? "⚙️" : status === "error" ? "⚠️" : "✓"} ${name.replaceAll("_", " ")}`,
-      tool: { id: `${sessionID}:${id}`, name, status } }, callback);
+  private toolProgress(watch: Watch, sessionID: string, id: string, status: "running" | "completed" | "error",
+    directory: string, child: boolean, callback?: ProgressCallback): void {
+    const tool = watch.tools.get(id);
+    if (!tool) return;
+    // Same vocabulary as v1: a named action with its target, not a bare tool id.
+    const described = status === "error" ? undefined : describeTool(tool.name, tool.input, status, undefined, directory);
+    const label = child ? "🤖 Subagent — " : "";
+    const text = described ? `${label}${described.text}`
+      : status === "error" ? `${label}⚠️ ${toolLabel(tool.name)} hit an error`
+      : `${label}${status === "running" ? "⚙️" : "✓"} ${toolLabel(tool.name)}`;
+    this.publish(watch, `tool:${id}`, { text, detail: described?.detail,
+      tool: { id: `${sessionID}:${id}`, name: tool.name, status } }, callback);
   }
 
   private event(event: V2Event, directory: string, sessionID: string, watch: Watch, callback?: ProgressCallback): void {
@@ -723,13 +732,20 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
       case "session.reasoning.delta":
       case "session.text.ended":
       case "session.reasoning.ended": {
-        if (child) break;
         const part = event.data;
         // Ordinals are local to the content channel: reasoning and public text
         // can both be ordinal 0 in one message. Never reuse their buffers/IDs.
         const reasoning = event.type.startsWith("session.reasoning");
         const key = `${part.assistantMessageID}:${reasoning ? "reasoning" : "text"}:${part.ordinal}`;
         const text = "text" in part ? part.text : (watch.text.get(key) ?? "") + part.delta;
+        if (child) {
+          // One public line per finished subagent message, as v1 showed: child
+          // streams stay off the card, the completed summary is the activity.
+          if (event.type === "session.text.ended" && text.trim()) {
+            this.publish(watch, key, { text: `🤖 Subagent: ${truncate(text.replace(/\s+/g, " ").trim(), 100)}` }, callback);
+          }
+          break;
+        }
         watch.text.set(key, text);
         const now = Date.now();
         const growth = "delta" in part ? part.delta : "";
@@ -748,7 +764,8 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         watch.tools.set(event.data.id, { name: event.data.name }); break;
       case "session.tool.called": {
         const tool = watch.tools.get(event.data.id);
-        if (tool) { tool.input = event.data.input; this.toolProgress(watch, event.data.sessionID, event.data.id, tool.name, "running", callback);
+        if (tool) { tool.input = event.data.input;
+          this.toolProgress(watch, event.data.sessionID, event.data.id, "running", directory, child, callback);
           if (!child && tool.name === "todowrite") this.plan(watch, event.data.input, callback); }
         break;
       }
@@ -758,7 +775,8 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         if (event.type === "session.tool.failed") log("warn", "opencode.v2_tool_failed", {
           sessionID: event.data.sessionID, tool: tool?.name, error: event.data.error,
         });
-        if (tool) this.toolProgress(watch, event.data.sessionID, event.data.id, tool.name, event.type === "session.tool.success" ? "completed" : "error", callback);
+        if (tool) this.toolProgress(watch, event.data.sessionID, event.data.id,
+          event.type === "session.tool.success" ? "completed" : "error", directory, child, callback);
         break;
       }
       case "session.compaction.ended":

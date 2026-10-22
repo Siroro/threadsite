@@ -303,6 +303,47 @@ test("a queued compaction is successful only when its persisted result succeeds"
   await assert.rejects(f.harness.compactSession("/w", "ses_root", "test", "text"), /compaction failed.*required template/);
 });
 
+test("tool events carry rich labels, file targets and subagent attribution", async () => {
+  const f = fixture();
+  f.setActive(true);
+  const updates: any[] = [];
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); });
+  try {
+    const internal = f.harness as any;
+    const watch = internal.watches.get("ses_root");
+    const send = (type: string, data: object) => internal.event({ type, created: Date.now(), data: {
+      sessionID: "ses_root", ...data } }, "/w", "ses_root", watch, (update: any) => { updates.push(update); });
+    send("session.tool.input.started", { id: "tool_edit", name: "edit" });
+    send("session.tool.called", { id: "tool_edit", input: { filePath: "/w/site/src/main.ts" } });
+    send("session.tool.success", { id: "tool_edit" });
+    send("session.tool.input.started", { id: "tool_shell", name: "shell" });
+    send("session.tool.called", { id: "tool_shell", input: { command: "node scripts/build.js" } });
+    send("session.tool.failed", { id: "tool_shell", error: "exit 1" });
+    // A subagent child session attributes its tools and finishes with one public summary line.
+    internal.event({ type: "session.created", created: Date.now(), data: { sessionID: "ses_child", parentID: "ses_root" } },
+      "/w", "ses_root", watch, (update: any) => { updates.push(update); });
+    const childSend = (type: string, data: object) => internal.event({ type, created: Date.now(), data: {
+      sessionID: "ses_child", ...data } }, "/w", "ses_root", watch, (update: any) => { updates.push(update); });
+    childSend("session.tool.input.started", { id: "tool_web", name: "websearch" });
+    childSend("session.tool.called", { id: "tool_web", input: {} });
+    childSend("session.tool.success", { id: "tool_web" });
+    childSend("session.text.ended", { assistantMessageID: "msg_child", ordinal: 0, text: "Researched arena layouts." });
+    childSend("session.text.delta", { assistantMessageID: "msg_child2", ordinal: 0, delta: "still streaming" });
+    const tools = updates.filter((update) => update.tool);
+    assert.deepEqual(tools.map((update) => update.tool.status), ["running", "completed", "running", "error", "running", "completed"]);
+    assert.deepEqual(tools.map((update) => update.text), [
+      "✏️ Editing code", "✅ File edit complete",
+      "⚙️ Running a command", "⚠️ Shell hit an error",
+      "🤖 Subagent — 🔎 Searching the web", "🤖 Subagent — 🔎 Web research gathered",
+    ]);
+    assert.match(tools[0].detail ?? "", /site\/src\/main\.ts$/);
+    assert.equal(tools[2].detail, "node scripts/build.js");
+    // Only the finished child message goes public; streamed child deltas never render.
+    assert.deepEqual(updates.filter((update) => !update.tool && update.text?.startsWith("🤖 Subagent:")).map((update) => update.text),
+      ["🤖 Subagent: Researched arena layouts."]);
+  } finally { await stop(); }
+});
+
 test("native text and reasoning with the same ordinal never share streamed buffers or public narration", async () => {
   const f = fixture();
   f.setActive(true);
