@@ -28,7 +28,7 @@ export function renderDetailPanel(title: string, resource: string, scope: PanelS
   const pages = textPages(section.text);
   page = Math.min(pages.length - 1, Math.max(0, Number.isSafeInteger(page) ? page : 0));
   const card = new ContainerBuilder().setAccentColor(0x5865f2);
-  addCardHeader(card, "DETAILS · ONLY YOU CAN SEE THIS", title, `${section.label} · page ${page + 1}/${pages.length}`);
+  addCardHeader(card, "DETAILS", title, `${section.label} · page ${page + 1}/${pages.length}`);
   card.addActionRowComponents(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
     new StringSelectMenuBuilder().setCustomId(cardId("tab", resource, scope)).setPlaceholder("Choose what to inspect")
       .addOptions(sections.map((entry) => ({ label: entry.label, value: entry.key, default: entry.key === section.key }))),
@@ -60,7 +60,7 @@ export function renderQueuePanel(resource: string, queue: QueuedRequest[], prepa
   const pageCount = Math.max(1, Math.ceil(queue.length / 5));
   page = Math.max(0, Math.min(pageCount - 1, Number.isSafeInteger(page) ? page : 0));
   const card = new ContainerBuilder().setAccentColor(0x64748b);
-  addCardHeader(card, "QUEUE · ONLY YOU CAN SEE THIS", "Next update pass", `${queue.length} saved request${queue.length === 1 ? "" : "s"} · ${preparing} already being prepared`);
+  addCardHeader(card, "QUEUE", "Next update pass", `${queue.length} saved request${queue.length === 1 ? "" : "s"} · ${preparing} already being prepared`);
   const listed = queue.slice(page * 5, page * 5 + 5);
   if (!listed.length) card.addTextDisplayComponents(new TextDisplayBuilder().setContent("Nothing else is queued. Requests already being prepared can be interrupted with Stop."));
   for (const [index, request] of listed.entries()) {

@@ -107,7 +107,7 @@ export function renderQuestionReview(resource: string, request: AgentQuestion, d
   const question = request.questions[index];
   const complete = draft.answers.filter((answer, i) => answer?.length && !draft.custom?.includes(i)).length;
   const card = new ContainerBuilder().setAccentColor(delivery?.status === "retry" ? 0xef4444 : 0xf59e0b);
-  addCardHeader(card, "ANSWERS · ONLY YOU CAN SEE THIS", question.header || "Your answers", `${complete}/${request.questions.length} answered · question ${index + 1}/${request.questions.length}`);
+  addCardHeader(card, "ANSWERS", question.header || "Your answers", `${complete}/${request.questions.length} answered · question ${index + 1}/${request.questions.length}`);
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(truncate(question.question, 1600)));
   const selected = draft.answers[index]?.length ? draft.answers[index].join(" · ") : "Not answered yet";
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`**Your draft**\n${truncate(selected, 700)}${draft.custom?.includes(index) ? "\nWrite your custom answer before submitting." : ""}`));
