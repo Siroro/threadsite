@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/cadd
 
 That installs Docker on request, clones this repository, writes `.env` (prompting for the Discord token/application ID when run interactively), creates the Caddy vhosts, brings the stack up behind Caddy with automatic HTTPS, and bootstraps Forgejo. Re-running is safe. All flags: [docs/deployment.md](docs/deployment.md#caddy-quickstart).
 
-Running operations go through the root `start.sh` (update/rebuild/health/logs), which also exposes the project cleanup menu. Proxying recipes for host Apache/Virtualmin and Cloudflare (sites vhost, cache headers, Forgejo, relay) are in [docs/deployment.md](docs/deployment.md) and [docs/multiplayer.md](docs/multiplayer.md).
+Running operations go through the root `start.sh` (update/rebuild/health/logs), which also exposes the project cleanup menu. Startup rebuilds only when image inputs changed since the last successful build (code, compose file, or `.env`) and prunes the dangling images a rebuild strands; `--no-update` always re-checks builds through Docker's layer cache. Proxying recipes for host Apache/Virtualmin and Cloudflare (sites vhost, cache headers, Forgejo, relay) are in [docs/deployment.md](docs/deployment.md) and [docs/multiplayer.md](docs/multiplayer.md).
 
 ## Configuration
 
