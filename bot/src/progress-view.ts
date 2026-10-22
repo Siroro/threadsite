@@ -198,13 +198,10 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   const stalled = state.phase !== "queued" && !state.questions?.length ? state.stalledForMs : undefined;
   const waiting = Boolean(state.questions?.length || state.waiting || stalled);
   const card = new ContainerBuilder().setAccentColor(waiting ? 0xf59e0b : COLORS[state.phase]);
-  const stop = controls.stopCustomId ? new ButtonBuilder().setCustomId(resource ? cardId("stop", resource) : controls.stopCustomId).setLabel("Stop turn").setStyle(ButtonStyle.Secondary) : undefined;
-  // Turn details keeps Stop company at the top, in the primary colour: the two
-  // controls sit side by side, so they must never look alike.
+  // Turn details owns the header corner; Stop rides the bottom action row in
+  // the danger colour, far enough from the primary action to avoid misclicks.
   const details = resource ? new ButtonBuilder().setCustomId(cardId("details", resource)).setLabel("Turn details").setStyle(ButtonStyle.Primary) : undefined;
-  addCardHeader(card, "LIVE TURN", state.title, state.questions?.length ? "❓ Waiting for your answer" : state.phase === "queued" ? "Waiting for a build slot" : "● Turn in progress");
-  const headRow = [details, stop].filter((button) => button !== undefined);
-  if (headRow.length) card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(headRow));
+  addCardHeader(card, "LIVE TURN", state.title, state.questions?.length ? "❓ Waiting for your answer" : state.phase === "queued" ? "Waiting for a build slot" : "● Turn in progress", details);
   const current = PHASES.indexOf(state.phase);
   const rail = [...(state.phase === "queued" ? ["**● Queued**"] : []), ...PHASES.map((phase, index) => index < current ? `✓ ${LABELS[phase]}` : index === current ? `**● ${LABELS[phase]}**` : `○ ${LABELS[phase]}`)].join("  ›  ");
   const lines = [rail, "", activity(state.latest, 260)];
@@ -239,12 +236,14 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
     addCardField(card, "Agent updates", updates.map((update) => `\`${elapsed(update.at - state.startedAt)}\` ${plain(update.text, 320)}`).join("\n\n"));
   }
   if (state.queuedRequests) card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`**${state.queuedRequests}** saved request${state.queuedRequests === 1 ? "" : "s"} waiting for the next pass`));
+  const stop = controls.stopCustomId ? new ButtonBuilder().setCustomId(resource ? cardId("stop", resource) : controls.stopCustomId).setLabel("Stop turn").setStyle(ButtonStyle.Danger) : undefined;
   if (resource) {
     const buttons: ButtonBuilder[] = [];
     if (!state.questions?.length) buttons.push(new ButtonBuilder().setCustomId(cardId("steer", resource)).setLabel("Add instruction").setStyle(ButtonStyle.Primary));
     buttons.push(new ButtonBuilder().setCustomId(cardId("queue", resource)).setLabel(`Queue${state.queuedRequests ? ` · ${state.queuedRequests}` : ""}`).setStyle(ButtonStyle.Secondary));
+    if (stop) buttons.push(stop);
     addCardLinks(card, [...buttons, cardLink("Live site", state.context.siteUrl), cardLink("Source", state.context.repoUrl)]);
-  } else addCardLinks(card, [cardLink("Live site", state.context.siteUrl), cardLink("Source", state.context.repoUrl)]);
+  } else if (stop) addCardLinks(card, [stop, cardLink("Live site", state.context.siteUrl), cardLink("Source", state.context.repoUrl)]);
   const metrics = state.metrics;
   const rate = metrics?.liveTokensPerSecond ?? metrics?.outputTokensPerSecond;
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${[
