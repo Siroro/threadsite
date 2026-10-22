@@ -258,15 +258,50 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   return cardMessage(card);
 }
 
+/**
+ * The private usage tab: every provider figure formatted for reading, with the
+ * same bar/budget visuals as the live card. Missing counts stay "unavailable"
+ * rather than rendering as zeros.
+ */
+export function usageDetailText(metrics: ProgressMetrics): string {
+  const tokens = [
+    metrics.inputTokens ? `Input **${formatTokens(metrics.inputTokens)}**` : "",
+    metrics.outputTokens ? `Output **${formatTokens(metrics.outputTokens)}**` : "",
+    metrics.cacheTokens ? `Cached **${formatTokens(metrics.cacheTokens)}**${metrics.inputTokens ? ` (${Math.round(Math.min(1, metrics.cacheTokens / metrics.inputTokens) * 100)}% of input)` : ""}` : "",
+  ].filter(Boolean).join(" · ");
+  let context = "";
+  if (metrics.contextTokens && metrics.contextLimit) {
+    const filled = Math.min(8, Math.floor(8 * metrics.contextTokens / metrics.contextLimit));
+    context = `Context **${formatTokens(metrics.contextTokens)} / ${formatTokens(metrics.contextLimit)}** (${Math.round(metrics.contextTokens / metrics.contextLimit * 100)}%)\n${"▰".repeat(filled)}${"▱".repeat(8 - filled)}`;
+  } else if (metrics.contextTokens) {
+    context = `Context **${formatTokens(metrics.contextTokens)}**`;
+  }
+  const counts = [
+    metrics.steps ? `${metrics.steps} model step${metrics.steps === 1 ? "" : "s"}` : "",
+    metrics.compactions ? `${metrics.compactions} compaction${metrics.compactions === 1 ? "" : "s"}` : "",
+  ].filter(Boolean).join(" · ");
+  const rates = [
+    metrics.liveTokensPerSecond ? `live ~${formatTokensPerSecond(metrics.liveTokensPerSecond)} tok/s` : "",
+    metrics.outputTokensPerSecond ? `average ~${formatTokensPerSecond(metrics.outputTokensPerSecond)} tok/s` : "",
+  ].filter(Boolean).join(" · ");
+  return [tokens || "Token counts unavailable", context, counts, rates].filter(Boolean).join("\n");
+}
+
+const PLAN_MARKS: Record<ProgressPlanItem["status"], string> = { completed: "✓", in_progress: "●", cancelled: "↷", pending: "○" };
+
 export function progressDetailSections(state: ProgressSnapshot): PanelSection[] {
   const overview = renderProgressOverview(state).components[0].components
     .filter((component): component is TextDisplayBuilder => component instanceof TextDisplayBuilder).map((component) => component.data.content).join("\n\n");
   const metrics = state.metrics;
   return [
     { key: "overview", label: "Overview", text: overview },
-    { key: "plan", label: "Complete plan", text: state.plan.map((item, index) => `${index + 1}. [${item.status}] ${item.content}`).join("\n\n") },
-    { key: "files", label: "Changed files", text: [state.files ? `${state.files.files} files · ${state.files.added} added · ${state.files.modified} modified · ${state.files.deleted} deleted\n+${state.files.additions} / −${state.files.deletions} lines` : "", ...(state.files?.paths ?? []), state.changes ?? ""].filter(Boolean).join("\n") },
-    { key: "usage", label: "Usage & context", text: [metrics ? `Input: ${metrics.inputTokens ?? "unavailable"}\nOutput: ${metrics.outputTokens ?? "unavailable"}\nCached: ${metrics.cacheTokens ?? "unavailable"}\nContext: ${metrics.contextTokens ?? "unavailable"} / ${metrics.contextLimit ?? "unavailable"}\nModel steps: ${metrics.steps ?? "unavailable"}\nCompactions: ${metrics.compactions ?? "unavailable"}\nLive output: ${metrics.liveTokensPerSecond ?? "unavailable"} tok/s\nAverage output: ${metrics.outputTokensPerSecond ?? "unavailable"} tok/s` : "Provider counts unavailable.", state.stats ?? ""].filter(Boolean).join("\n\n") },
+    { key: "plan", label: "Complete plan", text: state.plan.map((item, index) => `${PLAN_MARKS[item.status]} ${index + 1}. ${item.content}`).join("\n\n") },
+    { key: "files", label: "Changed files", text: [
+      state.files ? `**${state.files.files} file${state.files.files === 1 ? "" : "s"}** · ${state.files.added} added · ${state.files.modified} modified · ${state.files.deleted} removed · **+${state.files.additions} / −${state.files.deletions}** lines` : "",
+      ...(state.files?.paths ?? []).map((file) => `- \`${file.replaceAll("`", "")}\``),
+      state.changes ?? "",
+    ].filter(Boolean).join("\n") },
+    { key: "usage", label: "Usage & context", text: [metrics ? usageDetailText(metrics) : "Provider counts unavailable.", state.stats ?? ""].filter(Boolean).join("\n\n") },
     { key: "updates", label: "Agent update history", text: (state.narration?.length ? state.narration : state.thought ? [{ text: state.thought, at: state.now }] : []).map((item) => `**${elapsed(item.at - state.startedAt)}**\n${item.text}`).join("\n\n") },
     ...(state.reasoning?.length ? [{ key: "thinking", label: "Thinking trace", text: state.reasoning.map((item) => `**${elapsed(item.at - state.startedAt)}**\n${item.text}`).join("\n\n") }] : []),
     { key: "activity", label: "Activity history", text: [...state.history, state.latest].map((item) => `${elapsed(item.at - state.startedAt)} · ${item.text}${item.detail ? `\n${item.detail}` : ""}`).join("\n\n") },
@@ -284,7 +319,10 @@ function clean(value: string, max: number): string {
 }
 function plain(value: string, max: number): string { return escapeMarkdown(clean(value, max), { maskedLink: true }); }
 function cleanField(value: string): string { return value.length > 1000 ? `${value.slice(0, 999)}…` : value; }
-function elapsed(ms: number): string {
+export function elapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
