@@ -15,6 +15,19 @@ export type ProgressPhase = "queued" | "preparing" | "working" | "checking" | "p
 export interface ProgressContext { request?: string; siteUrl?: string; repoUrl?: string }
 export interface ProgressPlanItem { content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }
 export interface ProgressTool { id: string; name: string; status: "running" | "completed" | "error" }
+/** One live child session behind the "Active subagents" lines. */
+export interface ProgressSubagent {
+  /** OpenCode session id of the child. */
+  id: string;
+  /** Agent name the child runs as (general, explore, browser-qa…). */
+  agent: string;
+  /** Completed model steps, deduped across retries. */
+  steps: number;
+  /** Newest known tool label, e.g. "📚 Reading · site/src/arena.ts". */
+  activity?: string;
+  /** When that activity was seen; ages the line when the child has gone quiet. */
+  activityAt?: number;
+}
 export interface ProgressMetrics {
   contextTokens?: number;
   contextLimit?: number;
@@ -57,6 +70,8 @@ export interface ProgressSnapshot {
   activeTools: number;
   /** Live child sessions only; omitted by older saved cards. */
   activeSubagents?: number;
+  /** Per-child detail for the active sessions; omitted by older saved cards. */
+  subagents?: ProgressSubagent[];
   toolErrors: number;
   waiting?: boolean;
   /** Last OpenCode session-status poll reported a running or retrying turn. */
@@ -115,7 +130,7 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   if (state.context.request) description.push("", `**Your requests**\n${plain(state.context.request, 220)}`);
   if (state.thought && !attention) description.push("", `**Agent update**\n> ${plain(state.thought, 280)}`);
   const fields: Array<{ name: string; value: string }> = [];
-  if (state.activeSubagents) fields.push({ name: "Active subagents", value: `🤖 ${state.activeSubagents} active` });
+  if (state.activeSubagents) fields.push({ name: "Active subagents", value: subagentLines(state) });
 
   if (state.questions?.length) {
     state.questions.slice(0, 5).forEach((question, index) => fields.push({
@@ -242,7 +257,7 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
     [state.plan.length ? `${completed}/${state.plan.length} tasks complete${skipped ? ` · ${skipped} skipped` : ""}` : "", state.files ? `${state.files.files} files · +${state.files.additions} / −${state.files.deletions} lines` : ""].filter(Boolean).join(" · "),
   ].filter(Boolean).join("\n");
   if (taskLines) card.addTextDisplayComponents(new TextDisplayBuilder().setContent(taskLines));
-  if (state.activeSubagents) addCardField(card, "Active subagents", `🤖 ${state.activeSubagents} active`);
+  if (state.activeSubagents) addCardField(card, "Active subagents", subagentLines(state));
   const updates = state.narration?.length ? state.narration.slice(-4) : state.thought ? [{ text: state.thought, at: state.now }] : [];
   if (updates.length) {
     addCardDivider(card);
@@ -325,6 +340,21 @@ export function progressDetailSections(state: ProgressSnapshot): PanelSection[] 
 
 function activity(item: ProgressActivity, max: number): string {
   return `${plain(item.text, max)}${item.detail ? ` · ${plain(item.detail, Math.max(30, max - clean(item.text, max).length))}` : ""}`;
+}
+/**
+ * One line per live child session: who it is, how much it has done and what
+ * it is on right now. A count alone stays for older saved cards that predate
+ * the per-child detail.
+ */
+function subagentLines(state: ProgressSnapshot): string {
+  const subs = state.subagents ?? [];
+  if (!subs.length) return `🤖 ${state.activeSubagents} active`;
+  return [...subs.slice(0, 4).map((sub) => [
+    `🤖 **${plain(sub.agent, 24)}**`,
+    `${sub.steps} step${sub.steps === 1 ? "" : "s"}`,
+    sub.activity ? plain(sub.activity, 90) : "",
+    sub.activityAt && state.now - sub.activityAt >= 10_000 ? `${elapsed(state.now - sub.activityAt)} ago` : "",
+  ].filter(Boolean).join(" · ")), ...(subs.length > 4 ? [`+${subs.length - 4} more`] : [])].join("\n");
 }
 /**
  * The newest distinct actions, oldest first. Exact repeats — the same command

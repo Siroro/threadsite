@@ -510,7 +510,9 @@ test("the live card counts executing children and removes the section after all 
       assertV2(during);
       const added = cardView(during).fields.filter((field) => !before.fields.some((old) => old.name === field.name));
       assert.equal(added.length, 1);
-      assert.match(added[0].value, /\b2\b/, "the added section shows the live count");
+      const lines = added[0].value.split("\n");
+      assert.equal(lines.length, 2, "the added section shows one line per live child");
+      assert.match(lines[0], /browser-qa/, "the browser-QA child is named on its line");
     }
     send("ses_child", "session.step.ended", { assistantMessageID: "msg_qa", tokens: { input: 1, output: 1, reasoning: 0 }, finish: "tool-calls" });
     assert.equal(progress.readSnapshot().activeSubagents, 2, "a model step ending is not session completion");
@@ -527,6 +529,36 @@ test("the live card counts executing children and removes the section after all 
     assert.equal(progress.readSnapshot().activeSubagents, 0);
     assert.deepEqual(progress.readSnapshot().latest, initial.latest, "child presence never replaces the builder's activity");
     assert.deepEqual(progress.readSnapshot().history, initial.history);
+  } finally { await stop(); await progress.close(); }
+});
+
+test("the subagent lines name each child, its steps and its current tool", async () => {
+  const f = fixture();
+  f.setActive(true);
+  const { DiscordProgress } = await import("../src/progress.js");
+  const { renderProgressCard } = await import("../src/progress-view.js");
+  const { cardView } = await import("./fixtures/cards.js");
+  const progress = new DiscordProgress({ id: "subdetail", edit: async () => {} } as any, "Updating");
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress.callback);
+  try {
+    const internal = f.harness as any;
+    const watch = internal.watches.get("ses_root");
+    const send = (id: string, type: string, data: object = {}) => internal.event({ type, created: Date.now(),
+      data: { sessionID: id, ...data } }, "/w", "ses_root", watch, progress.callback);
+    send("ses_child", "session.created", { parentID: "ses_root", agent: "explore" });
+    send("ses_child", "session.execution.started");
+    send("ses_child", "session.step.ended", { assistantMessageID: "c_m1", tokens: { input: 10, output: 5 }, finish: "tool-calls" });
+    send("ses_child", "session.step.ended", { assistantMessageID: "c_m2", tokens: { input: 10, output: 5 }, finish: "stop" });
+    send("ses_child", "session.step.ended", { assistantMessageID: "c_m2", tokens: { input: 10, output: 5 }, finish: "stop" });
+    send("ses_child", "session.tool.input.started", { id: "c_t1", name: "read" });
+    send("ses_child", "session.tool.called", { id: "c_t1", input: { filePath: "/w/site/src/arena.ts" } });
+    const field = cardView(renderProgressCard(progress.readSnapshot())).fields.find((item) => item.name === "Active subagents")!;
+    assert.match(field.value, /\*\*explore\*\*/, "the child's agent is named");
+    assert.match(field.value, /2 steps/, "a retried or replayed step counts once");
+    assert.match(field.value, /📚 Reading · site\/src\/arena\.ts/, "the child's current tool is shown");
+    send("ses_child", "session.execution.succeeded");
+    assert.equal(cardView(renderProgressCard(progress.readSnapshot())).fields.some((item) => item.name === "Active subagents"), false,
+      "the section leaves when the child finishes");
   } finally { await stop(); await progress.close(); }
 });
 
