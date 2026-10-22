@@ -177,7 +177,7 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   const footer = [`Elapsed ${elapsed(state.now - state.startedAt)}`, state.actions ? `${state.actions} action${state.actions === 1 ? "" : "s"}` : "", state.questions?.length ? "Waiting for your answer" : stalledForMs ? `No progress for ${elapsed(stalledForMs)}` : state.activeTools ? `${state.activeTools} running` : "", state.toolErrors ? `${state.toolErrors} tool error${state.toolErrors === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
   const card = new ContainerBuilder().setAccentColor(attention ? 0xf59e0b : COLORS[state.phase]);
   const stop = controls.stopCustomId ? new ButtonBuilder().setCustomId(controls.stopCustomId).setLabel("Stop turn").setStyle(ButtonStyle.Secondary) : undefined;
-  addCardHeader(card, "LIVE TURN", state.title, state.questions?.length ? "❓ Your answer is needed" : stalledForMs ? "⚠️ Waiting for progress" : state.phase === "queued" ? "Waiting for a build slot" : "● Turn in progress", stop);
+  addCardHeader(card, "LIVE TURN", state.title, state.questions?.length ? "❓ Your answer is needed" : stalledForMs ? "⚠️ Waiting for progress" : state.phase === "queued" ? "Waiting for a build slot" : undefined, stop);
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(description.join("\n")));
   addCardDivider(card);
   let questionIndex = 0;
@@ -205,7 +205,7 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   // Turn details owns the header corner; Stop rides the bottom action row in
   // the danger colour, far enough from the primary action to avoid misclicks.
   const details = resource ? new ButtonBuilder().setCustomId(cardId("details", resource)).setLabel("Turn details").setStyle(ButtonStyle.Primary) : undefined;
-  addCardTitle(card, state.title, state.questions?.length ? "❓ Waiting for your answer" : state.phase === "queued" ? "Waiting for a build slot" : "● Turn in progress", details);
+  addCardTitle(card, state.title, state.questions?.length ? "❓ Waiting for your answer" : state.phase === "queued" ? "Waiting for a build slot" : undefined, details);
   const current = PHASES.indexOf(state.phase);
   const rail = [...(state.phase === "queued" ? ["**● Queued**"] : []), ...PHASES.map((phase, index) => index < current ? `✓ ${LABELS[phase]}` : index === current ? `**● ${LABELS[phase]}**` : `○ ${LABELS[phase]}`)].join("  ›  ");
   const lines = [rail, "", ...activityLines(state, 260)];
