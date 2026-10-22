@@ -3,8 +3,8 @@ import { cardEdit } from "./card-ui.js";
 import { questionControls } from "./question-ui.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
-import { renderProgressCard, type ProgressSnapshot, type ProgressActivity, type ProgressContext, type ProgressFiles, type ProgressMetrics, type ProgressPhase, type ProgressPlanItem, type ProgressTool } from "./progress-view.js";
-export type { ProgressContext, ProgressFiles, ProgressMetrics, ProgressPhase, ProgressPlanItem, ProgressTool } from "./progress-view.js";
+import { renderProgressCard, type ProgressSnapshot, type ProgressActivity, type ProgressContext, type ProgressFiles, type ProgressMetrics, type ProgressPhase, type ProgressPlanItem, type ProgressSubagent, type ProgressTool } from "./progress-view.js";
+export type { ProgressContext, ProgressFiles, ProgressMetrics, ProgressPhase, ProgressPlanItem, ProgressSubagent, ProgressTool } from "./progress-view.js";
 
 /** One question the agent asked via OpenCode's question tool. */
 export interface AgentQuestion {
@@ -46,6 +46,8 @@ export interface ProgressUpdate {
   active?: boolean;
   /** Status only: how many child sessions are currently executing. */
   activeSubagents?: number;
+  /** Detail for those child sessions: agent name, steps used, current tool. Rides the same update as the count. */
+  subagents?: ProgressSubagent[];
   /** Stable public assistant text part; updates replace its streamed draft instead of duplicating it. */
   narrationId?: string;
 }
@@ -82,6 +84,7 @@ export class DiscordProgress {
   private queuedRequests = 0;
   private agentReportedActive = false;
   private activeSubagents = 0;
+  private subagents: ProgressSubagent[] = [];
   private readonly tools = new Map<string, ProgressTool>();
   private inFlight?: Promise<void>;
   private dirty = false;
@@ -141,6 +144,10 @@ export class DiscordProgress {
     if (update.plan) this.plan = update.plan;
     if (update.activeSubagents !== undefined && this.activeSubagents !== update.activeSubagents) {
       this.activeSubagents = Math.max(0, update.activeSubagents);
+      this.schedule();
+    }
+    if (update.subagents !== undefined && update.subagents !== this.subagents) {
+      this.subagents = update.subagents;
       this.schedule();
     }
     if (update.tool) {
@@ -369,6 +376,7 @@ export class DiscordProgress {
       plan: this.plan, queuedRequests: this.queuedRequests,
       actions: tools.length, activeTools: tools.filter((tool) => tool.status === "running").length,
       activeSubagents: this.closed ? 0 : this.activeSubagents,
+      subagents: this.closed || !this.subagents.length ? undefined : this.subagents,
       toolErrors: tools.filter((tool) => tool.status === "error").length, questionPin: this.questionPin,
       waiting: latestToolFailed || serviceWaiting,
       agentReportedActive: this.agentReportedActive,

@@ -9,7 +9,7 @@ import { applicationMessage, formQuestion } from "./opencode-v2-messages.js";
 import { usageFromMessages, reconcileUsage, describeTool, toolLabel, type SessionMessage, type PromptImage,
   type PromptResult, type TurnUsage, type QuotaBlock } from "./opencode-v1.js";
 import type { OpenCodeHarness } from "./opencode.js";
-import type { ProgressCallback, ProgressUpdate, ProgressPlanItem } from "./progress.js";
+import type { ProgressCallback, ProgressUpdate, ProgressPlanItem, ProgressSubagent } from "./progress.js";
 import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
 import { steeringInstruction } from "./templates.js";
 import { cleanThreadTitle, errorText, parseModel, sleep } from "./util.js";
@@ -18,6 +18,8 @@ const requestOptions = () => ({ signal: AbortSignal.timeout(10_000) });
 const emptyUsage = (): TurnUsage => ({ inputTokens: 0, outputTokens: 0, cacheTokens: 0,
   contextTokens: 0, cost: 0, steps: 0, compactions: 0, models: [] });
 const sameDirectory = (a: string, b: string) => path.resolve(a) === path.resolve(b);
+/** A tool label with its target folded into one line, e.g. "📚 Reading · site/src/arena.ts". */
+const activityLabel = (described: { text: string; detail?: string }): string => described.detail ? `${described.text} · ${described.detail}` : described.text;
 const messageID = () => `msg_${randomUUID().replaceAll("-", "")}`;
 const emit = (callback: ProgressCallback | undefined, update: ProgressUpdate): void => {
   try { void Promise.resolve(callback?.(update)).catch((error) => log("warn", "opencode.v2_progress_failed", { error: serializeError(error) })); }
@@ -91,6 +93,8 @@ interface Watch {
   budget?: TurnStepBudget;
   children: Set<string>;
   activeChildren: Set<string>;
+  /** Per-child detail for the card's subagent lines; keyed by child session id. */
+  subagents: Map<string, { agent: string; steps: Set<string>; activity?: { text: string; at: number } }>;
   callback?: ProgressCallback;
   browserQaChildren: Set<string>;
   lastProgress: number;
@@ -696,7 +700,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
   }
 
   private watch(directory: string, sessionID: string, callback: ProgressCallback | undefined, since: number, baseline: Set<string>, budgeted: boolean): Watch {
-    const watch: Watch = { since, baseline, controller: new AbortController(), done: Promise.resolve(), children: new Set(), activeChildren: new Set(), callback, browserQaChildren: new Set(),
+    const watch: Watch = { since, baseline, controller: new AbortController(), done: Promise.resolve(), children: new Set(), activeChildren: new Set(), subagents: new Map(), callback, browserQaChildren: new Set(),
       lastProgress: Date.now(), questionIds: new Set(), progressKeys: new Map(), steps: new Map(), models: new Map(),
       tools: new Map(), text: new Map(), started: new Map(), streamed: new Map(), timings: new Map(), compactions: 0,
       liveSamples: [], lastMeterAt: 0 };
@@ -726,9 +730,16 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
               && !watch.children.has(child.id) && sameDirectory(child.location.directory, directory)) {
               watch.children.add(child.id); changed = true;
               if (child.agent === "browser-qa") watch.browserQaChildren.add(child.id);
+              const info = watch.subagents.get(child.id);
+              if (!info) watch.subagents.set(child.id, { agent: child.agent || "subagent", steps: new Set() });
+              else if (child.agent) info.agent = child.agent;
             }
           } while (changed);
-          for (const child of watch.children) this.restoreUsage(watch, child, await this.rawMessages(child));
+          for (const child of watch.children) {
+            const childHistory = await this.rawMessages(child);
+            this.restoreUsage(watch, child, childHistory);
+            this.rehydrateSubagent(watch, child, directory, childHistory);
+          }
           await this.restore(directory, sessionID, watch, callback, await this.rawMessages(sessionID));
           this.restoreSubagents(watch, await this.client.session.active(requestOptions()));
           for await (const event of this.client.event.subscribe({ signal: watch.controller.signal })) {
@@ -762,7 +773,11 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
   }
 
   private publishSubagents(watch: Watch): void {
-    this.publish(watch, "subagents", { kind: "heartbeat", text: "", activeSubagents: watch.activeChildren.size }, watch.callback);
+    this.publish(watch, "subagents", { kind: "heartbeat", text: "", activeSubagents: watch.activeChildren.size,
+      subagents: [...watch.activeChildren].map((id): ProgressSubagent => {
+        const info = watch.subagents.get(id);
+        return { id, agent: info?.agent ?? "subagent", steps: info?.steps.size ?? 0, activity: info?.activity?.text, activityAt: info?.activity?.at };
+      }) }, watch.callback);
   }
 
   private restoreSubagents(watch: Watch, active: Record<string, unknown>): void {
@@ -838,15 +853,51 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
   private toolProgress(watch: Watch, sessionID: string, id: string, status: "running" | "completed" | "error",
     directory: string, child: boolean, callback?: ProgressCallback): void {
     const tool = watch.tools.get(id);
-    if (!tool) return;
+    const described = this.describeToolState(watch, id, status, directory);
     // Same vocabulary as v1: a named action with its target, not a bare tool id.
-    const described = status === "error" ? undefined : describeTool(tool.name, tool.input, status, undefined, directory);
+    if (!tool || !described) return;
     const label = child ? "🤖 Subagent — " : "";
-    const text = described ? `${label}${described.text}`
-      : status === "error" ? `${label}⚠️ ${toolLabel(tool.name)} hit an error`
-      : `${label}${status === "running" ? "⚙️" : "✓"} ${toolLabel(tool.name)}`;
-    this.publish(watch, `tool:${id}`, { text, detail: described?.detail, command: described?.command,
+    this.publish(watch, `tool:${id}`, { text: `${label}${described.text}`, detail: described.detail, command: described.command,
       tool: { id: `${sessionID}:${id}`, name: tool.name, status } }, callback);
+  }
+
+  /** The human label for a tool call in any state, shared by the activity feed and the per-subagent lines. */
+  private describeToolState(watch: Watch, id: string, status: "running" | "completed" | "error", directory: string): { text: string; detail?: string; command?: boolean } | undefined {
+    const tool = watch.tools.get(id);
+    if (!tool) return undefined;
+    const described = status === "error" ? undefined : describeTool(tool.name, tool.input, status, undefined, directory);
+    return described ?? { text: status === "error" ? `⚠️ ${toolLabel(tool.name)} hit an error` : `${status === "running" ? "⚙️" : "✓"} ${toolLabel(tool.name)}` };
+  }
+
+  /** Child tools stay out of the public feed; they drive the subagent's own line instead. */
+  private noteChildTool(watch: Watch, sessionID: string, toolID: string, status: "running" | "completed" | "error", directory: string): void {
+    watch.lastProgress = Date.now();
+    const info = watch.subagents.get(sessionID);
+    const described = this.describeToolState(watch, toolID, status, directory);
+    if (info && described) info.activity = { text: activityLabel(described), at: Date.now() };
+    this.publishSubagents(watch);
+  }
+
+  /** Rebuild a child's steps and last-known activity from history — the stream may have missed everything before attach. */
+  private rehydrateSubagent(watch: Watch, sessionID: string, directory: string, history: SessionMessageInfo[]): void {
+    const info = watch.subagents.get(sessionID) ?? { agent: "subagent", steps: new Set<string>() };
+    watch.subagents.set(sessionID, info);
+    for (const message of history) {
+      if (message.type !== "assistant") continue;
+      if (message.time.completed !== undefined) info.steps.add(message.id);
+      for (const part of message.content) if (part.type === "tool") {
+        watch.tools.set(part.id, { name: part.name, input: "input" in part.state && typeof part.state.input === "object" ? part.state.input : undefined });
+      }
+    }
+    for (const message of [...history].reverse()) {
+      if (message.type !== "assistant") continue;
+      for (const part of [...message.content].reverse()) {
+        if (part.type !== "tool" || !["running", "completed", "error"].includes(part.state.status)) continue;
+        const described = this.describeToolState(watch, part.id, part.state.status as "running" | "completed" | "error", directory);
+        if (described) info.activity = { text: activityLabel(described), at: message.time.completed ?? message.time.created };
+        return;
+      }
+    }
   }
 
   private event(event: V2Event, directory: string, sessionID: string, watch: Watch, callback?: ProgressCallback): void {
@@ -858,6 +909,9 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     }
     if (event.type === "session.created" && (event.data.parentID === sessionID || watch.children.has(event.data.parentID ?? ""))) {
       watch.children.add(event.data.sessionID);
+      const info = watch.subagents.get(event.data.sessionID);
+      if (!info) watch.subagents.set(event.data.sessionID, { agent: event.data.agent || "subagent", steps: new Set() });
+      else if (event.data.agent) info.agent = event.data.agent;
       if (event.data.agent === "browser-qa") watch.browserQaChildren.add(event.data.sessionID);
       return;
     }
@@ -898,7 +952,13 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         const timed = stepTiming(watch.started.get(step.assistantMessageID), watch.streamed.get(step.assistantMessageID), step.tokens);
         if (timed) watch.timings.set(step.assistantMessageID, timed);
         else watch.timings.delete(step.assistantMessageID);
-        if (!child) watch.budget?.observe(step.assistantMessageID);
+        if (child) {
+          const info = watch.subagents.get(data.sessionID);
+          if (info && !info.steps.has(step.assistantMessageID)) {
+            info.steps.add(step.assistantMessageID);
+            this.publishSubagents(watch);
+          }
+        } else watch.budget?.observe(step.assistantMessageID);
         watch.liveSamples = [];
         this.metrics(watch, callback);
         break;
@@ -936,7 +996,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
       case "session.tool.called": {
         const tool = watch.tools.get(event.data.id);
         if (tool) { tool.input = event.data.input;
-          if (child) watch.lastProgress = Date.now();
+          if (child) this.noteChildTool(watch, event.data.sessionID, event.data.id, "running", directory);
           else this.toolProgress(watch, event.data.sessionID, event.data.id, "running", directory, false, callback);
           if (!child && tool.name === "todowrite") this.plan(watch, event.data.input, callback); }
         break;
@@ -947,7 +1007,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         if (event.type === "session.tool.failed") log("warn", "opencode.v2_tool_failed", {
           sessionID: event.data.sessionID, tool: tool?.name, error: event.data.error,
         });
-        if (child) watch.lastProgress = Date.now();
+        if (child) this.noteChildTool(watch, event.data.sessionID, event.data.id, event.type === "session.tool.success" ? "completed" : "error", directory);
         else if (tool) this.toolProgress(watch, event.data.sessionID, event.data.id,
           event.type === "session.tool.success" ? "completed" : "error", directory, false, callback);
         break;
