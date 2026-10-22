@@ -83,9 +83,14 @@ Edits respect `PROGRESS_UPDATE_MS`, coalesce rapid events and serialize Discord 
 When a turn finishes, it is presented in two messages:
 
 - the turn's **own message** becomes the technical card — the agent's full report of what it did, kept as the model wrote it, plus the commit, the files and lines changed, how long it took, and the token usage of the turn;
-- a **new message** under it carries the playable card — the browser-QA screenshot when one was captured, a plain-language preview of what the project is, what this turn added and how to play it, and the play link next to the source link.
+- a **new message** under it carries the playable card — the browser-QA screenshot when one was captured, what the project is and how to play it, what this turn changed, and the play link next to the source link.
 
-The preview is written by a bounded, tools-free `presenter` prompt (the same shape as the thread-title prompt): it sees the original request, the previous preview and the turn's report, and answers with a pitch line, a line about the change and a line on how to play. The report is technical, so the prompt insists on the visitor's view of it — no file names, no code, no engine internals, only what someone sees and can do. It runs after publication, is capped at 20 seconds, and is stored with the project so the next turn can keep the pitch stable. A preview that cannot be written costs the card its blurb and nothing else — the turn still finishes, still publishes, and both messages still render. Servers without **Embed Links** permission get the same information as text.
+Both come from two documents the agent maintains in the project root, so nothing has to be generated after the fact:
+
+- **`DESCRIPTION.md`** — what the project is, in a visitor's words, plus a `## How to play` section. The project rules ask for one or two plain sentences, no file names, no code, no jargon, and for it to be updated whenever the project's shape changes.
+- **`CHANGELOG.md`** — one section per turn, newest at the top, saying what a visitor will notice. The agent adds its section before its final summary.
+
+The harness reads both after every turn and shows them on the playable card. A project that has neither document yet still renders the card: the original request stands in for the description, and a turn without a screenshot still shows the card. Servers without **Embed Links** permission get the same information as text.
 
 ### AI-generated thread titles
 

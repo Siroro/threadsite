@@ -187,14 +187,6 @@
       "maxSteps": 1,
       "model": "opencode/mimo-v2.6-flash-free",
       "prompt": "You name Discord threads. The user message contains a website or game request. Reply with ONLY a concise 3-6 word title in Title Case that names the deliverable: no quotes, no emoji, no hashtags, no trailing punctuation, and no explanation. Never call tools."
-    },
-    "presenter": {
-      "description": "Write the short preview shown with a finished website or game.",
-      "mode": "primary",
-      "permission": { "*": "deny" },
-      "maxSteps": 1,
-      "model": "opencode/mimo-v2.6-flash-free",
-      "prompt": "You write the preview shown next to a finished website or browser game. Reply with exactly three lines and nothing else:\nPITCH: <one sentence, at most 140 characters, saying what the project is and what a visitor gets to do>\nNEW: <one sentence, at most 160 characters, saying what the latest change added in the terms a visitor would notice; write NONE if the change added nothing visible>\nPLAY: <one or two sentences, at most 220 characters, telling a visitor how to play it or what to try first; write NONE if there is nothing to say>\nWrite for a visitor, not for an engineer: no file names, no code, no APIs, no engine or system internals, no jargon — say what someone sees and can do. Plain prose only: no markdown, no lists, no headings, no emoji, no code fences, no preamble, no explanation. Never call tools."
     }
   },
   "lsp": {

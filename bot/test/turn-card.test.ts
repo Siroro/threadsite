@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { TurnCardState } from "../src/turn-card.js";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { renderTechnicalCard, renderPlayCard, renderTechnicalText, renderPlayText } = await import("../src/turn-card.js");
-const { parsePreview, previewInstruction } = await import("../src/opencode.js");
+const { changelogTemplate, descriptionTemplate, readProjectChangelog, readProjectDescription } = await import("../src/project-docs.js");
 
 function state(overrides: Partial<TurnCardState> = {}): TurnCardState {
   return {
@@ -20,12 +23,12 @@ function state(overrides: Partial<TurnCardState> = {}): TurnCardState {
     usage: { inputTokens: 12_000, outputTokens: 4_000, cacheTokens: 0, contextTokens: 16_000, contextLimit: 200_000, compactions: 0, steps: 18, cost: 0, models: [] },
     summary: "Added a persistent leaderboard that keeps the top ten scores between sessions.",
     findings: [],
-    preview: {
+    description: {
       pitch: "A calm pond where you feed koi and race them across lily pads.",
-      added: "Added a leaderboard for the top ten koi.",
       play: "Click the water to drop food, then steer your koi with the arrow keys.",
     },
-    meta: "2D web game · Phaser · shared arena multiplayer",
+    changelog: { title: "Leaderboard", body: "Added a leaderboard for the top ten koi." },
+    meta: "2D · shared arena multiplayer",
     siteUrl: "https://games.example.co.uk/koi-pond-arcade/",
     repoUrl: "https://git.example.co.uk/shane/site-koi-pond-arcade",
     screenshot: Buffer.from("89504e470d0a1a0a", "hex"),
@@ -65,12 +68,12 @@ test("the new message carries the playable card, the screenshot and the play lin
   assert.match(card.fields!.find((field) => field.name === "What's new")!.value, /top ten koi/);
   assert.match(card.fields!.find((field) => field.name === "How to play")!.value, /steer your koi/);
   assert.match(card.fields!.find((field) => field.name === "Links")!.value, /PLAY GAME/);
-  assert.match(card.footer!.text, /Phaser/);
+  assert.match(card.footer!.text, /shared arena multiplayer/);
   assert.equal(card.image?.url, "attachment://preview.png");
 });
 
-test("the playable card still renders without a screenshot or a preview", () => {
-  const message = renderPlayCard(state({ screenshot: undefined, preview: undefined }));
+test("the playable card still renders without a screenshot, a description or a changelog", () => {
+  const message = renderPlayCard(state({ screenshot: undefined, description: undefined, changelog: undefined }));
   assert.equal(message.files.length, 0);
   const card = message.embeds[0].toJSON();
   assert.equal(card.image, undefined);
@@ -79,6 +82,11 @@ test("the playable card still renders without a screenshot or a preview", () => 
   assert.equal(card.fields!.find((field) => field.name === "How to play"), undefined);
   // The play link is the one thing the card must never lose.
   assert.match(card.fields!.find((field) => field.name === "Links")!.value, /PLAY GAME/);
+});
+
+test("a project without a description still shows the original brief", () => {
+  const card = renderPlayCard(state({ description: undefined, request: "Build a koi pond arcade game" })).embeds[0].toJSON();
+  assert.match(card.description!, /Build a koi pond arcade game/);
 });
 
 test("a turn that did not publish is marked and its findings are shown", () => {
@@ -111,33 +119,25 @@ test("the text fallback keeps the same facts for servers without embed links", (
   assert.ok(play.length <= 1990);
 });
 
-test("the preview prompt asks for a pitch, a delta and how to play", () => {
-  const instruction = previewInstruction({
-    name: "Koi Pond Arcade",
-    kind: "2D web game",
-    request: "Build a koi pond arcade game",
-    summary: "Added a leaderboard",
-    previous: "A calm pond where you feed koi.",
-  });
-  assert.match(instruction, /PITCH: one sentence/);
-  assert.match(instruction, /NEW: one sentence/);
-  assert.match(instruction, /PLAY: one or two sentences/);
-  assert.match(instruction, /Build a koi pond arcade game/);
-  assert.match(instruction, /Added a leaderboard/);
-  assert.match(instruction, /A calm pond where you feed koi\./);
-  // The play card is for visitors: the prompt must push the technical report
-  // into plain language.
-  assert.match(instruction, /Write for a visitor, not for an engineer/);
-});
+test("the project's own documents are read back as the card's blurb and its newest entry", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-docs-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  // A fresh project starts with the harness templates, placeholders and all.
+  await fs.writeFile(path.join(root, "DESCRIPTION.md"), descriptionTemplate("Koi Pond Arcade"), "utf8");
+  await fs.writeFile(path.join(root, "CHANGELOG.md"), changelogTemplate(), "utf8");
+  assert.equal(await readProjectDescription(root), undefined, "an untouched template says nothing");
+  assert.equal(await readProjectChangelog(root), undefined);
 
-test("the preview parser reads all three lines and treats NONE as nothing to say", () => {
-  assert.deepEqual(parsePreview("PITCH: A calm pond where you feed koi.\nNEW: Added a leaderboard.\nPLAY: Click the water to drop food."), {
-    pitch: "A calm pond where you feed koi.",
-    added: "Added a leaderboard.",
-    play: "Click the water to drop food.",
+  await fs.writeFile(path.join(root, "DESCRIPTION.md"),
+    "# Koi Pond Arcade\n\nA calm pond where you feed koi and race them across lily pads.\n\n## How to play\n\nClick the water to drop food, then steer with the arrow keys.\n", "utf8");
+  await fs.writeFile(path.join(root, "CHANGELOG.md"),
+    "# Changelog\n\n## Leaderboard\n\nAdded a leaderboard for the top ten koi.\n\n## First build\n\nThe pond opens.\n", "utf8");
+  assert.deepEqual(await readProjectDescription(root), {
+    pitch: "A calm pond where you feed koi and race them across lily pads.",
+    play: "Click the water to drop food, then steer with the arrow keys.",
   });
-  assert.deepEqual(parsePreview("PITCH: A calm pond.\nNEW: NONE\nPLAY: NONE"), { pitch: "A calm pond.", added: undefined, play: undefined });
-  // A model that ignored the format still said something usable.
-  assert.deepEqual(parsePreview("A calm pond where you feed koi."), { pitch: "A calm pond where you feed koi.", added: undefined, play: undefined });
-  assert.deepEqual(parsePreview(""), { pitch: undefined, added: undefined, play: undefined });
+  assert.deepEqual(await readProjectChangelog(root), {
+    title: "Leaderboard",
+    body: "Added a leaderboard for the top ten koi.",
+  });
 });

@@ -14,6 +14,7 @@ import { ensureSkillFiles, skillNames } from "./skills.js";
 import { Store, pendingTurnMatches } from "./store.js";
 import { initialProjectInstruction, multiplayerModeLabel, multiplayerSwapInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, repairInstruction } from "./templates.js";
 import { starterHtml, starterSource } from "./starter.js";
+import { ensureProjectDocuments, readProjectChangelog, readProjectDescription, type ProjectChangelog, type ProjectDescription } from "./project-docs.js";
 import type { CommitAuthor, MultiplayerContext, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog } from "./usage.js";
 import type { ProgressCallback, ProgressPhase } from "./progress.js";
@@ -25,20 +26,6 @@ import { assertExclusiveResources, projectAccounts, projectRepos, removalPaths }
 import { deleteRelayGame } from "./relay-cleanup.js";
 import { pushRenameMetadata } from "./git.js";
 import { fallbackProjectName, needsProjectNaming, projectName } from "./naming.js";
-
-/**
- * The model-written preview of a project: one line on what it is, one line on
- * what the last change added, one line on how to play it. Shown on the play
- * card beside the screenshot.
- */
-export interface ProjectPreview {
-  /** What the project is and what a visitor gets to do. */
-  pitch: string;
-  /** What the latest turn added, when it added something a visitor can see. */
-  added?: string;
-  /** How to play it, or what to try first. */
-  play?: string;
-}
 
 export interface MutationResult {
   project: ProjectRecord;
@@ -60,8 +47,10 @@ export interface MutationResult {
   usage?: TurnUsage;
   /** PNG screenshot of the finished result from browser QA, when captured. */
   screenshot?: Uint8Array;
-  /** Model-written preview of the project as it stands, for the play card. */
-  preview?: ProjectPreview;
+  /** The project's own description (DESCRIPTION.md), shown on the play card. */
+  description?: ProjectDescription;
+  /** The newest changelog entry (CHANGELOG.md), shown on the play card. */
+  changelog?: ProjectChangelog;
   /** Confirmed browser-QA findings; browser QA never blocks an otherwise valid build. */
   browserQaFindings?: string[];
   /** Validation errors that kept the turn unpublished; the work is committed. */
@@ -388,6 +377,9 @@ export class ProjectService {
     await fs.mkdir(srcDir, { recursive: true });
     await fs.writeFile(path.join(siteDir, "index.html"), starterHtml(input.displayName), "utf8");
     await fs.writeFile(path.join(srcDir, "main.ts"), starterSource(projectKind), "utf8");
+    // The two author-maintained documents: what the project is (for the play
+    // card) and what changed each turn. The agent keeps them current.
+    await ensureProjectDocuments(workspacePath, input.displayName);
     // Authored source plus the vendored net client (site/net/) is the Git
     // record. Harness build inputs and generated bundles are recreated locally
     // and never enter Forgejo.
@@ -620,6 +612,11 @@ export class ProjectService {
       // present, current, and committed in game repos.
       if (await ensureSkillFiles(workspacePath, projectKind)) {
         emit(onProgress, "🎓 Restored the curated game skills (.opencode/skills)");
+      }
+      // The two project documents the play card shows: a project created
+      // before they existed gets them now, so the agent can fill them in.
+      if (await ensureProjectDocuments(workspacePath, project.displayName)) {
+        emit(onProgress, "📝 Added the project description and changelog");
       }
       // Authoritative image gate, re-checked inside the queue: the model the
       // pre-check in index.ts verified may have changed (admin override, fresh
@@ -921,14 +918,11 @@ export class ProjectService {
     // workspace. That is a normal outcome, not a delivery failure — leave the
     // project's status and lastError exactly as they were.
     const noChanges = !commitStats && !deliveryError;
-    // The play card shows what the project is now: a short, model-written
-    // preview of the project and what this turn added. It is advisory — a
-    // preview that cannot be written costs the card its blurb, nothing else.
-    let preview: ProjectPreview | undefined;
-    if (published) {
-      emit(input.onProgress, "📝 Writing the preview for the finished project");
-      preview = await this.describeProject(project, agentSummary, input.projectKind);
-    }
+    // The play card shows what the project is now: the agent's own description
+    // of it and the newest changelog entry. Both are documents the agent
+    // maintains in the repository, so there is nothing to ask a model for.
+    const description = await readProjectDescription(workspacePath);
+    const changelog = await readProjectChangelog(workspacePath);
     // Flush billing before clearing the durable recovery marker. A crash in
     // the delivery tail can revise this same turn, never add a second one.
     usage = await this.recordTurnUsage(project, input.pendingTurn, usage,
@@ -953,7 +947,6 @@ export class ProjectService {
         // origin/main's tip is exactly this turn's commit.
         ...(commitStats ? { lastSeenCommit: await currentHead(workspacePath) } : {}),
         ...(qaFindings ? { browserQaFindings: qaFindings } : {}),
-        ...(preview ? { preview } : {}),
         pendingTurn: undefined,
         // Record when the session was last used and how full its context window
         // ended; the next turn's lifecycle check reads both.
@@ -1008,8 +1001,8 @@ export class ProjectService {
       durationMs: Date.now() - input.startedAt,
       ...(qaScreenshot ? { screenshot: qaScreenshot } : {}),
       ...(qaFindingsList.length ? { browserQaFindings: qaFindingsList } : {}),
-      // A turn that changed nothing keeps the preview the last change wrote.
-      ...(preview ?? project.preview ? { preview: preview ?? project.preview } : {}),
+      ...(description ? { description } : {}),
+      ...(changelog ? { changelog } : {}),
       ...(commitStats
         ? { commit: commitStats.commit, commitFiles: commitStats.files, additions: commitStats.additions, deletions: commitStats.deletions }
         : { commitFiles: 0, additions: 0, deletions: 0 }),
@@ -1662,34 +1655,6 @@ export class ProjectService {
   /** How many turns are in flight right now (agent work through delivery). */
   activeTurnCount(): number {
     return this.activeTurns;
-  }
-
-  /**
-   * Ask the model for a short preview of the project as it stands: the pitch
-   * for the play card and what this turn added. Bounded and fail-open — a
-   * preview that cannot be written costs the card its blurb, never the turn.
-   */
-  private async describeProject(project: ProjectRecord, summary: string, kind: ProjectKind): Promise<ProjectPreview | undefined> {
-    const model = this.store.getModel();
-    try {
-      const generated = await this.opencode.generatePreview(project.workspacePath, {
-        name: project.displayName,
-        kind: projectKindLabel(kind),
-        request: project.initialPrompt,
-        summary,
-        previous: project.preview?.pitch,
-      }, model);
-      await this.usageLog.record({ label: "preview", threadId: project.threadId, project: project.displayName,
-        kind, usage: generated.usage, fallbackModel: model, failed: !generated.pitch });
-      if (!generated.pitch) return undefined;
-      return { pitch: generated.pitch, added: generated.added, play: generated.play };
-    } catch (error) {
-      const usage = errorUsage(error);
-      if (usage) await this.usageLog.record({ label: "preview", threadId: project.threadId, project: project.displayName,
-        kind, usage, fallbackModel: model, failed: true });
-      log("warn", "project.preview_generation_failed", { threadId: project.threadId, model, error: serializeError(error) });
-      return undefined;
-    }
   }
 
   /**

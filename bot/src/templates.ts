@@ -77,6 +77,13 @@ export function notesSection(notes: string | undefined): string {
   return `\n\nPROJECT NOTES (long-term memory from earlier turns — respect these):\n${trimmed}`;
 }
 
+/**
+ * The two project documents the harness shows to the thread: what the project
+ * is, and what each turn changed. Both are agent-maintained, so the prompt
+ * has to ask for them by name.
+ */
+const documentsInstruction = "Two documents in the project root are shown to everyone who opens the thread, so keep them true: DESCRIPTION.md says what the project is and how to play it, in a visitor's words (no file names, no code, no jargon), and CHANGELOG.md gets one new section per turn, newest at the top, saying what a visitor will notice. Write DESCRIPTION.md when the project first exists and whenever its shape changes, and add the CHANGELOG.md section before your final summary.";
+
 const planningInstruction = "For any request that needs multiple steps or changes across multiple files, call the todowrite tool before the first edit: create 3–6 concrete, checkable steps. Keep exactly one step in_progress, and mark a step completed as soon as it is finished while promoting the next one — the user watches this list live in Discord, so a list left behind misreports your progress. Before your final summary, mark every finished step completed and every dropped step cancelled. A prose plan does not replace the todo list. Skip todowrite only for a truly single-step change.";
 
 /** How the game connects, phrased for the initial-build instruction. */
@@ -91,12 +98,12 @@ export function initialProjectInstruction(kind: ProjectKind, userPrompt: string,
   const sectionWord = mode === "singleplayer" ? "singleplayer" : "multiplayer";
   const gameDesign = "Follow AGENTS.md's game-design rules: identify the core action, challenge and player decisions in your plan, then implement a complete, enjoyable round before optional polish. Match the requested genre; do not substitute a generic collect-N-pickups loop unless the user explicitly asks for a collection game.";
   if (kind === "game-2d") {
-    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below, following AGENTS.md's 2D and ${sectionWord} sections exactly (installed engine, ${multiplayerPhrase(mode)}). ${gameDesign} Use asset_download for suitable reusable media.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below, following AGENTS.md's 2D and ${sectionWord} sections exactly (installed engine, ${multiplayerPhrase(mode)}). ${gameDesign} Use asset_download for suitable reusable media. ${documentsInstruction}${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
   if (kind === "game-3d") {
-    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below, following AGENTS.md's 3D and ${sectionWord} sections exactly (installed engine, ${multiplayerPhrase(mode)}). ${gameDesign} Use asset_download for suitable media/models/textures/audio.${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below, following AGENTS.md's 3D and ${sectionWord} sections exactly (installed engine, ${multiplayerPhrase(mode)}). ${gameDesign} Use asset_download for suitable media/models/textures/audio. ${documentsInstruction}${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
-  return `${common}\n\nCreate the static website described below. Make it feel intentionally designed and interactive where appropriate. Use real researched/reusable media when it improves the result, otherwise tasteful local CSS/SVG/Canvas visuals.${notesSection(notes)}\n\nSITE REQUEST:\n${userPrompt}`;
+  return `${common}\n\nCreate the static website described below. Make it feel intentionally designed and interactive where appropriate. Use real researched/reusable media when it improves the result, otherwise tasteful local CSS/SVG/Canvas visuals. ${documentsInstruction}${notesSection(notes)}\n\nSITE REQUEST:\n${userPrompt}`;
 }
 
 export function mutationInstruction(kind: ProjectKind, userPrompt: string, notes?: string, mode: MultiplayerMode = "arena"): string {
@@ -108,7 +115,7 @@ export function mutationInstruction(kind: ProjectKind, userPrompt: string, notes
       : mode === "rooms"
         ? " Preserve working room-based multiplayer (invite-code rooms, room isolation, sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client."
         : " Preserve working multiplayer (arena sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client.";
-  return `Read AGENTS.md and inspect the current project before editing. ${planningInstruction} Revise the existing ${noun} according to the Discord request below. Preserve working features/mechanics unless the request changes them.${multiplayerClause} Keep browser code in TypeScript under site/src/ (never hand-edit the generated, gitignored bundles under site/js/ — if authored .js is still there, migrate it to src/ as .ts), use websearch and asset_download when they would materially improve the result, and leave a complete buildable deliverable.${notesSection(notes)}\n\nDISCORD REQUEST:\n${userPrompt}`;
+  return `Read AGENTS.md and inspect the current project before editing. ${planningInstruction} Revise the existing ${noun} according to the Discord request below. Preserve working features/mechanics unless the request changes them.${multiplayerClause} Keep browser code in TypeScript under site/src/ (never hand-edit the generated, gitignored bundles under site/js/ — if authored .js is still there, migrate it to src/ as .ts), use websearch and asset_download when they would materially improve the result, and leave a complete buildable deliverable. ${documentsInstruction}${notesSection(notes)}\n\nDISCORD REQUEST:\n${userPrompt}`;
 }
 
 /** Short human label for a multiplayer mode, used in prompts and replies. */

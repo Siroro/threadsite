@@ -23,7 +23,7 @@ Discord thread message
 
 Git commits are made by the harness, not the model: the subject is the Discord request, the author is the Discord user who sent it, and the bot is the committer with a `Co-authored-by:` trailer (`COMMIT_BOT_NAME`/`COMMIT_BOT_EMAIL`).
 
-A finished turn is presented in two messages: the turn's own message becomes the technical card (the agent's full report, the commit, the usage) and a new message under it carries the playable card (the browser-QA screenshot, a plain-language model-written preview of the project and how to play it, and the play link). The preview comes from a bounded, tools-free `presenter` prompt after publication; it is advisory, and a turn without one still renders both messages. See [commands.md](commands.md).
+A finished turn is presented in two messages: the turn's own message becomes the technical card (the agent's full report, the commit, the usage) and a new message under it carries the playable card (the browser-QA screenshot, what the project is and how to play it, what this turn changed, and the play link). Both come from two documents the agent maintains in the project root — `DESCRIPTION.md` and `CHANGELOG.md` — which the harness reads after every turn, so nothing has to be generated after the fact. See [commands.md](commands.md).
 
 ## Why static-only
 
