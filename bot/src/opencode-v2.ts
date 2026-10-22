@@ -32,6 +32,30 @@ export class V2TurnError extends Error {
   constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "OpenCodeV2TurnError"; }
 }
 
+/** The turn's average tok/s, ported from opencode's own turnTokensPerSecond:
+ * each assistant step's output+reasoning tokens over its provider-active window
+ * (time.created to time.streamed, both server clock), aggregated before dividing
+ * so steps weight by their duration. A step without a streamed window withholds
+ * the rate rather than letting the remaining steps overstate it. */
+function turnTiming(messages: Array<{ sessionID: string; message: SessionMessageInfo }>, since: number, baseline: ReadonlySet<string>):
+{ generationMs: number; timedOutputTokens: number; outputTokensPerSecond: number } | undefined {
+  let generationMs = 0;
+  let timedOutputTokens = 0;
+  let steps = 0;
+  const seen = new Set<string>();
+  for (const { message } of messages) {
+    if (message.type !== "assistant" || seen.has(message.id) || baseline.has(message.id)) continue;
+    if (message.time.created < since) continue;
+    seen.add(message.id);
+    steps += 1;
+    if (message.time.streamed === undefined) return undefined;
+    generationMs += Math.max(0, message.time.streamed - message.time.created);
+    timedOutputTokens += (message.tokens?.output ?? 0) + (message.tokens?.reasoning ?? 0);
+  }
+  if (!steps || generationMs <= 0 || timedOutputTokens <= 0) return undefined;
+  return { generationMs, timedOutputTokens, outputTokensPerSecond: timedOutputTokens * 1000 / generationMs };
+}
+
 interface Watch {
   since: number;
   baseline: ReadonlySet<string>;
@@ -47,8 +71,10 @@ interface Watch {
   tools: Map<string, { name: string; input?: Record<string, unknown> }>;
   text: Map<string, string>;
   started: Map<string, number>;
+  streamed: Map<string, number>;
   generationMs: number;
   timedOutputTokens: number;
+  timedSteps: number;
   compactions: number;
   contextLimit?: number;
   quota?: QuotaBlock;
@@ -292,7 +318,9 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
           idleSince = undefined;
           watch.lastProgress = Date.now();
         }
-        emit(callback, { kind: "heartbeat", text: busy ? "OpenCode is working" : "Checking saved agent progress", active: busy });
+        // The busy poll is status only: identical text on every poll would bury
+        // the real activity line. Only recovery reconciliation speaks.
+        emit(callback, { kind: "heartbeat", text: busy ? "" : "Checking saved agent progress", active: busy });
       } catch (error) {
         if (error instanceof V2TurnError) throw error;
         if (this.notFound(error)) throw new V2TurnError("The saved OpenCode session is gone (unknown session)", { cause: error });
@@ -577,7 +605,8 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
   private watch(directory: string, sessionID: string, callback: ProgressCallback | undefined, since: number, baseline: Set<string>, budgeted: boolean): Watch {
     const watch: Watch = { since, baseline, controller: new AbortController(), done: Promise.resolve(), children: new Set(),
       lastProgress: Date.now(), questionIds: new Set(), progressKeys: new Map(), steps: new Map(), models: new Map(),
-      tools: new Map(), text: new Map(), started: new Map(), generationMs: 0, timedOutputTokens: 0, compactions: 0,
+      tools: new Map(), text: new Map(), started: new Map(), streamed: new Map(), generationMs: 0, timedOutputTokens: 0,
+      timedSteps: 0, compactions: 0,
       liveSamples: [], lastMeterAt: 0 };
     this.watches.set(sessionID, watch);
     if (budgeted) {

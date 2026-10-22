@@ -224,9 +224,17 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   }
   const completed = state.plan.filter((item) => item.status === "completed").length;
   const skipped = state.plan.filter((item) => item.status === "cancelled").length;
-  const task = state.plan.find((item) => item.status === "in_progress") ?? state.plan.find((item) => item.status === "pending");
+  // A three-line plan window: the newest completion struck through, the task in
+  // hand bolded, the one after it plain. The count line below carries the rest.
+  const recentDone = state.plan.filter((item) => item.status === "completed").at(-1);
+  let currentTaskIndex = state.plan.findIndex((item) => item.status === "in_progress");
+  if (currentTaskIndex < 0) currentTaskIndex = state.plan.findIndex((item) => item.status === "pending");
+  const currentTask = currentTaskIndex >= 0 ? state.plan[currentTaskIndex] : undefined;
+  const nextTask = currentTaskIndex >= 0 ? state.plan.slice(currentTaskIndex + 1).find((item) => item.status === "pending") : undefined;
   const taskLines = [
-    task ? `**Current task** · ${plain(task.content, 180)}` : "",
+    recentDone ? `✓ ~~${plain(recentDone.content, 125)}~~` : "",
+    currentTask ? `${currentTask.status === "in_progress" ? "●" : "○"} **${plain(currentTask.content, 125)}**` : "",
+    nextTask ? `○ ${plain(nextTask.content, 125)}` : "",
     [state.plan.length ? `${completed}/${state.plan.length} tasks complete${skipped ? ` · ${skipped} skipped` : ""}` : "", state.files ? `${state.files.files} files · +${state.files.additions} / −${state.files.deletions} lines` : ""].filter(Boolean).join(" · "),
   ].filter(Boolean).join("\n");
   if (taskLines) card.addTextDisplayComponents(new TextDisplayBuilder().setContent(taskLines));

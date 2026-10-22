@@ -39,7 +39,8 @@ export interface ProgressUpdate {
   files?: ProgressFiles;
   tool?: ProgressTool;
   queuedRequests?: number;
-  /** OpenCode status only; this confirms a running session without resetting the no-event timer. */
+  /** OpenCode status only; this confirms a running session without resetting the no-event timer.
+   * A heartbeat with empty text reports this flag without touching the visible feed. */
   active?: boolean;
   /** Stable public assistant text part; updates replace its streamed draft instead of duplicating it. */
   narrationId?: string;
@@ -135,8 +136,12 @@ export class DiscordProgress {
       if (previous?.status === update.tool.status) { this.schedule(); return; }
       this.update(update.text, update.detail, update.tool.id);
     } else if (update.kind === "heartbeat") {
+      const previous = this.agentReportedActive;
       this.agentReportedActive = update.active ?? this.agentReportedActive;
-      this.update(update.text, update.detail, "recovery-status", false);
+      // A textless heartbeat is pure status: the flag feeds the stalled
+      // wording and must never become the visible activity line.
+      if (update.text) this.update(update.text, update.detail, "recovery-status", false);
+      else if (this.agentReportedActive !== previous) this.schedule();
     } else if (["context", "metrics", "plan", "queue"].includes(update.kind ?? "")) {
       this.schedule();
     } else if (update.kind === "thought") {
@@ -268,9 +273,9 @@ export class DiscordProgress {
     if (countsAsActivity) this.lastActivityAt = Date.now();
     if (/waiting for (?:the )?project queue|queued/i.test(text)) this.phase = "queued";
     // A generic session-busy event must not bury a more useful running tool.
-    // The v2 reconcile loop and status events repeat their busy text on every
-    // poll, so without this guard the card would only ever say "OpenCode is
-    // working" while a tool runs.
+    // The v1 busy status and the v2 status stream repeat their busy text on
+    // every event, so without this guard the card would only ever say
+    // "Model is thinking" while a tool runs.
     if (/(?:model|opencode) is (?:thinking|working)|status updated/i.test(text)
       && [...this.tools.values()].some((tool) => tool.status === "running")) return;
     if (text !== this.latest.text || detail !== this.latest.detail) {

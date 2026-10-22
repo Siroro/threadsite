@@ -208,11 +208,15 @@ test("status heartbeats cannot extend a stalled turn, and failed interruption pr
   try {
     const f = fixture();
     let submissions = 0;
+    const updates: any[] = [];
     f.client.session.prompt = async () => { submissions++; f.setActive(true); return {}; };
     f.client.session.interrupt = async () => { throw new TypeError("fetch failed"); };
-    await assert.rejects(f.harness.prompt("/w", "ses_root", "Work", "test/text"), (error: any) =>
+    await assert.rejects(f.harness.prompt("/w", "ses_root", "Work", "test/text", (update) => { updates.push(update); }), (error: any) =>
       /timed out without progress/.test(error.message) && error.mayStillBeRunning === true);
     assert.equal(submissions, 1);
+    const busyBeats = updates.filter((update) => update.kind === "heartbeat" && update.active);
+    assert.ok(busyBeats.length > 0, "the reconcile poll still reports the busy flag");
+    assert.ok(busyBeats.every((update) => !update.text), "a busy poll heartbeat carries no display text that could bury the activity line");
   } finally { config.opencodeReconcilePollMs = original.poll; config.opencodeReconcileTimeoutMs = original.timeout; }
 });
 
