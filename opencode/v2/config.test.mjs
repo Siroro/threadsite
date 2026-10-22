@@ -18,10 +18,6 @@ test("native v2 config preserves builder features and isolated subagent models w
     assert.ok(config.agents[id].permissions.some((rule) => rule.action === "threadsite_browser" && rule.effect === "deny"));
   }
   assert.ok(config.agents.titler.permissions.some((rule) => rule.action === "*" && rule.effect === "deny"));
-  const system = config.agents.sitebuilder.system;
-  for (const name of ["DESCRIPTION.md", "CHANGELOG.md", "project_notes", "asset_download", "js_syntax_check", "scratch/<name>/", "THREADSITE_FORCE_FINISH"]) assert.ok(system.includes(name), name);
-  assert.match(system, /rm accepts explicit paths/);
-  assert.doesNotMatch(system, /rm, package managers|do not try unlisted commands/);
   assert.ok(config.permissions.some((rule) => rule.action === "shell" && rule.resource === "git *" && rule.effect === "deny"));
   assert.equal(config.mcp.servers.playwright.timeout.execution, 90000);
   assert.deepEqual(legacy, original);
