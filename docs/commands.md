@@ -36,7 +36,7 @@ now make the visual design look like a financial terminal without losing the jok
 
 Every normal message in a registered thread becomes the next mutation of the same site. Reply while a turn runs to steer it live — the message is submitted straight into the running agent turn and folded into the current work instead of waiting for the next pass. When the agent asks a question mid-turn, the requester gets pinged with answer buttons.
 
-Each project thread also gets a **pinned project card** — type (site/2D/3D), game engine, multiplayer setting, original request, advisory Browser QA status, lifetime usage, and links — that updates itself after every turn. Settings appear above the request; pinned cards refresh at startup. Model routing and spend details stay in admin views.
+Each project thread also gets a **pinned project card** — type (site/2D/3D), game engine, multiplayer setting, original request, advisory Browser QA status, lifetime usage, and Play/Open and Source buttons — that updates itself after every turn. All project cards use Discord Components V2, with matching accent colors, headings and separated sections. Settings appear above the request; pinned cards refresh at startup, upgrading existing pinned embeds in place. Model routing and spend details stay in admin views.
 
 ## Project thread commands
 
@@ -62,7 +62,7 @@ While a turn runs, its Discord message updates in place as a live status card:
 - input/output tokens, cache share, context-window usage, model steps and generation speed when available (the model name itself is never shown);
 - a timestamped recent-activity trail, action counts, saved requests waiting for the next pass, and project links.
 
-Questions switch to a shorter amber card with the question, option descriptions and answer/skip buttons close at hand, including on mobile. The selected answer and responder remain visible afterward. The Stop button remains available while work runs. A full context window is shown as context usage, not a percentage estimate of how close the whole job is to completion. Provider spend, the model name and private reasoning are never included in the public card.
+Questions switch to a shorter amber card with each question and its option descriptions directly above its answer/skip buttons, including on mobile. The selected answer and responder remain visible afterward. Stop stays beside the Turn heading, including when five questions are shown. Live site and Source buttons appear below the normal progress view. A full context window is shown as context usage, not a percentage estimate of how close the whole job is to completion. Provider spend, the model name and private reasoning are never included in the public card.
 
 Lifetime token usage is stored in `data/bot/usage-log.jsonl` (`USAGE_LOG_FILE` inside the bot container). Turns have stable IDs, so restart recovery updates the same entry rather than counting it twice. Billing is reconciled from OpenCode's persisted message history, including subagents, and flushed before clearing the recovery marker. Startup reconciles saved turn IDs, session IDs and time boundaries against persisted history, then refreshes the pinned cards. Keep both the bot data and OpenCode data volumes when rebuilding services. If the provider never reported counts, or the original session was deleted, missing historical tokens cannot be reconstructed; the card shows "token counts unavailable" when no counts are known.
 
@@ -76,7 +76,7 @@ A reply sent while a turn is running is not queued — it **steers the live turn
 
 When the agent asks a question mid-turn, the person who requested the turn gets a Discord ping pointing at the answer buttons on the status card, so a parked question (which holds the turn and the thread's queue open) cannot sit unseen.
 
-Edits respect `PROGRESS_UPDATE_MS`, coalesce rapid events and serialize Discord requests. Quiet turns retain a heartbeat, and stale live throughput estimates disappear. Closing a feed waits for its last edit before posting the final result so a late update cannot overwrite it. Servers without **Embed Links** permission automatically get a compact text version with the same controls.
+Edits respect `PROGRESS_UPDATE_MS`, coalesce rapid events and serialize Discord requests. Quiet turns retain a heartbeat, and stale live throughput estimates disappear. Closing a feed waits for its last edit before posting the final result so a late update cannot overwrite it. The text and controls are native V2 components and do not require legacy embeds. Completion, failures, cancellation and reset replace the panel in V2 as well; answering a question or choosing what to do with partial edits keeps the message visible.
 
 ## The final post of a turn
 
@@ -90,7 +90,7 @@ Both come from two documents the agent maintains in the project root, so nothing
 - **`DESCRIPTION.md`** — what the project is, in a visitor's words, plus a `## How to play` section. The project rules ask for one or two plain sentences, no file names, no code, no jargon, and for it to be updated whenever the project's shape changes.
 - **`CHANGELOG.md`** — one section per turn, newest at the top, saying what a visitor will notice. The agent adds its section before its final summary.
 
-The harness reads both after every turn and shows them on the playable card. A project that has neither document yet still renders the card: the original request stands in for the description, and a turn without a screenshot still shows the card. Servers without **Embed Links** permission get the same information as text.
+The harness reads both after every turn and shows them on the playable card. A project that has neither document yet still renders the card: the original request stands in for the description, and a turn without a screenshot still shows the card. The technical card includes Play/Open, Source and View commit buttons. Reports that exceed the combined V2 text limit include a readable excerpt and the complete report as an attached `turn-report.md` file. If screenshot delivery is denied, the Play card retries without the image, keeping its text and buttons.
 
 ### AI-generated thread titles
 

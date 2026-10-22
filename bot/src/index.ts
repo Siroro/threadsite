@@ -20,6 +20,7 @@ import {
   type TextBasedChannel,
   type ThreadChannel,
 } from "discord.js";
+import { cardEdit, disableMessageControls, renderStatusCard } from "./card-ui.js";
 import { AdminReporter } from "./admin-reporter.js";
 import { commandJson } from "./commands.js";
 import { config } from "./config.js";
@@ -36,7 +37,7 @@ import { multiplayerModeLabel, projectKindLabel } from "./templates.js";
 import type { CommitAuthor, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog, type UsageTotal } from "./usage.js";
 import { startWebhookServer } from "./webhook.js";
-import { renderPlayCard, renderPlayText, renderTechnicalCard, renderTechnicalText, type TurnCardState } from "./turn-card.js";
+import { renderPlayCard, renderTechnicalCard, type TurnCardState } from "./turn-card.js";
 import { reconcileProjectThreads } from "./thread-cleanup.js";
 import { commitAuthorIdentity, errorText, formatCost, formatShortDuration, formatTokens, formatUtcClock, MAX_DISCORD_MESSAGE_CHARS, requestDisplayText, slugify, stripSummaryPreamble, truncate, withTimeout } from "./util.js";
 
@@ -147,9 +148,9 @@ async function handleQuestionButton(interaction: ButtonInteraction): Promise<voi
     await interaction.reply({ content: "You need permission to post in this thread to answer the agent.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
     return;
   }
-  // One answer per request: strip the buttons immediately so a double click
+  // One answer per request: disable the buttons immediately so a double click
   // cannot double-answer, then ack before the awaited OpenCode call.
-  await interaction.update({ components: [] }).catch(() => undefined);
+  await interaction.update(disableMessageControls(interaction.message)).catch(() => undefined);
   const responder = interaction.user.globalName ?? interaction.user.username;
   try {
     if (kind === "qskip") {
@@ -293,12 +294,11 @@ async function deliverExternalPushPrompt(project: ProjectRecord, sha: string, so
     return;
   }
   try {
-    await thread.send({
-      content:
-        `📥 **External push detected** on \`${project.repoName}\` · commit \`${sha.slice(0, 10)}\` — pushed with a repo push key.\n` +
-        "Publish it to the live site, or dismiss it (the commit stays in git history either way).",
-      components: [externalPushRow()],
-    });
+    await thread.send(renderStatusCard(
+      `📥 **External push detected** on \`${project.repoName}\` · commit \`${sha.slice(0, 10)}\` — pushed with a repo push key.\n` +
+      "Publish it to the live site, or dismiss it (the commit stays in git history either way).",
+      [externalPushRow()],
+    ));
   } catch (error) {
     logError("project.external_push_notify_failed", error, { source, threadId: project.threadId, commit: sha.slice(0, 10) });
     return;
@@ -407,7 +407,7 @@ async function recoverInterruptedTurns(): Promise<void> {
       const deliver: (content: string) => Promise<unknown> = status
         ? (content) => setStatusMessage(status, content).catch(() => undefined)
         : thread
-          ? (content) => thread.send(content).catch(() => undefined)
+          ? (content) => thread.send(renderStatusCard(content)).catch(() => undefined)
           : async () => undefined;
       // The recovered turn is presented like any other: the report goes to the
       // status message when it survived the restart, and both messages go to
@@ -417,7 +417,7 @@ async function recoverInterruptedTurns(): Promise<void> {
         : (result: MutationResult, note?: string) => {
             if (!thread) return Promise.resolve(undefined);
             const state = turnCardState(result, note);
-            return thread.send({ ...renderTechnicalCard(state), components: [] })
+            return thread.send(renderTechnicalCard(state))
               .then(() => postPlayCard(thread, state))
               .catch(() => undefined);
           };
@@ -820,7 +820,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
   const first = batch[0];
   const project = store.getProject(threadId);
   if (!project) {
-    for (const entry of batch) await entry.status.edit("❌ This thread's project no longer exists.").catch(() => undefined);
+    for (const entry of batch) await setStatusMessage(entry.status, "❌ This thread's project no longer exists.").catch(() => undefined);
     return;
   }
   const progress = first.progress ?? new DiscordProgress(first.status, `${isGame ? "🎮 Updating" : "🛠️ Updating"} ${project.displayName}`);
@@ -831,7 +831,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
   for (const entry of consumed.slice(1)) {
     await entry.progress?.close();
     unregisterQuestionButtons(entry.status.id);
-    await entry.status.edit({ content: "🔗 Merged into the update above", embeds: [], components: [] }).catch(() => undefined);
+    await setStatusMessage(entry.status, "🔗 Merged into the update above").catch(() => undefined);
   }
   if (merged.overflow.length) {
     const pending = pendingUpdates.get(threadId);
@@ -1271,10 +1271,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       unregisterQuestionButtons(stoppedStatusId);
       const stopped = await interaction.channel?.messages.fetch(stoppedStatusId).catch(() => undefined);
       if (stopped && stopped.author.id === client.user?.id) {
-        await stopped.edit({
-          content: "🛑 This turn was stopped by `/site reset` — its agent session was dropped. Send a new message to continue.",
-          embeds: [], components: [],
-        }).catch(() => undefined);
+        await setStatusMessage(stopped, "🛑 This turn was stopped by `/site reset` — its agent session was dropped. Send a new message to continue.").catch(() => undefined);
       }
     }
     await interaction.editReply(
@@ -1679,7 +1676,7 @@ async function refreshProjectCard(threadId: string): Promise<void> {
     if (project.infoMessageId) {
       const card = await thread.messages.fetch(project.infoMessageId).catch(() => undefined);
       if (card && card.author.id === client.user?.id) {
-        await card.edit(renderProjectCard(await projectCardState(project)));
+        await card.edit(cardEdit(renderProjectCard(await projectCardState(project))));
         return;
       }
     }
@@ -1786,8 +1783,7 @@ async function applyAiThreadTitle(thread: ThreadChannel, title: string): Promise
  * Present a finished turn in two messages: the turn's own message becomes the
  * technical card (the agent's report, the commit, the usage), and a new
  * message under it carries the playable card (the screenshot, project text and
- * play link). Servers without Embed Links permission get the same information
- * as text.
+ * play link). All three project surfaces use Components V2.
  */
 async function setTurnCards(status: Message, result: MutationResult, note?: string): Promise<void> {
   // The cards replace the live status: any pending agent-question buttons on
@@ -1796,18 +1792,15 @@ async function setTurnCards(status: Message, result: MutationResult, note?: stri
   unregisterQuestionButtons(status.id);
   const state = turnCardState(result, note);
   try {
-    await status.edit({ ...renderTechnicalCard(state), components: [] });
+    await status.edit(cardEdit(renderTechnicalCard(state)));
   } catch (error) {
     const code = (error as { code?: number }).code;
-    if (code === 50013) {
-      // No Embed Links permission: the same information as plain text.
-      await status.edit({ ...renderTechnicalText(state), components: [] });
-    } else if (code === 10008) {
+    if (code === 10008) {
       // The status message was deleted mid-turn: deliver the report as a fresh
       // thread message instead of failing the whole turn report.
       const { channel } = status;
       if (!("send" in channel)) throw error;
-      await channel.send({ ...renderTechnicalCard(state), components: [] }).catch(() => undefined);
+      await channel.send(renderTechnicalCard(state)).catch(() => undefined);
     } else {
       throw error;
     }
@@ -1825,10 +1818,12 @@ async function postPlayCard(channel: TextBasedChannel, state: TurnCardState): Pr
     // with the screenshot in a media gallery and the links as real buttons.
     await channel.send(card);
   } catch (error) {
-    if ((error as { code?: number }).code === 50013) {
-      // No Embed Links permission: the same information as plain text, with
-      // the screenshot attached as an ordinary file.
-      await channel.send({ ...renderPlayText(state), files: card.files, components: [] }).catch(() => undefined);
+    if ((error as { code?: number }).code === 50013 && state.screenshot?.length) {
+      // Retry without media if Attach Files is unavailable. Text and buttons
+      // remain V2, so the project still has a playable card.
+      await channel.send(renderPlayCard({ ...state, screenshot: undefined })).catch((fallbackError) => {
+        log("warn", "discord.play_card_post_failed", { error: String(fallbackError) });
+      });
       return;
     }
     log("warn", "discord.play_card_post_failed", { error: String(error) });
@@ -1870,7 +1865,7 @@ function turnCardMeta(project: ProjectRecord): string | undefined {
 
 /**
  * The final post of a turn. A failure to build the cards must never swallow
- * the turn's report: fall back to the plain-text outcome.
+ * the turn's report: fall back to a minimal V2 outcome.
  */
 async function publishTurnResult(status: Message, result: MutationResult, isGame: boolean, note?: string): Promise<void> {
   try {
@@ -1904,11 +1899,9 @@ async function setStatusMessage(
   // buttons on it are gone, so stop routing clicks for this message.
   await liveProgress.get(status.id)?.close();
   unregisterQuestionButtons(status.id);
-  // Discord keeps existing components when an edit omits them — an explicit
-  // empty array is what actually strips leftover question buttons.
-  const payload = { content: truncate(content, MAX_DISCORD_MESSAGE_CHARS), embeds: [], components: components ?? [], allowedMentions: { parse: [] as never[] } };
+  const payload = renderStatusCard(truncate(content, MAX_DISCORD_MESSAGE_CHARS), components);
   try {
-    await status.edit(payload);
+    await status.edit(cardEdit(payload));
   } catch (error) {
     if ((error as { code?: number }).code !== 10008) throw error;
     const { channel } = status;
@@ -1945,8 +1938,8 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
   if (await projects.agentBusy(interaction.channel.id)) {
     throw new Error("An agent turn is currently running in this thread. Wait for it to finish before deciding.");
   }
-  // One decision per prompt: strip the buttons before the queued work runs.
-  await interaction.message.edit({ components: [] }).catch(() => undefined);
+  // One decision per prompt: disable the buttons before the queued work runs.
+  await interaction.message.edit(disableMessageControls(interaction.message)).catch(() => undefined);
 
   if (publish) {
     const result = await projects.enqueue(interaction.channel.id, () => projects.publishExternalPush(interaction.channel!.id));
@@ -2081,7 +2074,7 @@ async function handleQueueCancelButton(interaction: ButtonInteraction): Promise<
   const original = memory?.status
     ?? await interaction.channel.messages.fetch(statusId).catch(() => undefined);
   if (original && original.author.id === client.user?.id) {
-    await original.edit({ content: "🚫 **Cancelled**", embeds: [], components: [] }).catch(() => undefined);
+    await setStatusMessage(original, "🚫 **Cancelled**").catch(() => undefined);
   }
   if (memory) {
     await memory.progress?.close();
@@ -2109,8 +2102,8 @@ async function handleFailureButton(interaction: ButtonInteraction): Promise<void
     throw new Error("An agent turn is currently running in this thread. Wait for it to finish before deciding.");
   }
 
-  // Remove the buttons from the failure message so the choice can't be repeated.
-  await interaction.message.edit({ components: [] }).catch(() => undefined);
+  // Disable the buttons while keeping the failure card visible.
+  await interaction.message.edit(disableMessageControls(interaction.message)).catch(() => undefined);
 
   if (action === "keep") {
     await interaction.editReply("🗂️ Keeping the partial edits — the next message will build on them.");

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate as nextTick } from "node:timers/promises";
-import { EmbedBuilder, type Message, type MessageEditOptions } from "discord.js";
-import { renderProgressCard, renderProgressText } from "../src/progress-view.js";
+import { ComponentType, type Message, type MessageEditOptions } from "discord.js";
+import { renderProgressCard } from "../src/progress-view.js";
+import { assertV2, cardView } from "./fixtures/cards.js";
 import { requestDisplayText } from "../src/util.js";
 import { buildingSnapshot, mergedSnapshot } from "./fixtures/progress.js";
 
@@ -11,15 +12,11 @@ process.env.DISCORD_APPLICATION_ID ||= "test";
 const { DiscordProgress } = await import("../src/progress.js");
 const { OpenCodeHarness } = await import("../src/opencode.js");
 
-function embed(options: MessageEditOptions) {
-  return (options.embeds![0] as EmbedBuilder).toJSON();
-}
-
 test("the card shows the real stage, plan, changes, usage, saved requests and links", () => {
   const state = buildingSnapshot();
   const options = renderProgressCard(state);
-  const card = embed(options);
-  assert.equal(options.content, "");
+  const card = cardView(options);
+  assertV2(options);
   assert.equal(card.color, 0x5865f2);
   assert.match(card.description!, /\*\*● Build\*\*/);
   // A single request stays off the card: it is already visible in the thread.
@@ -30,7 +27,7 @@ test("the card shows the real stage, plan, changes, usage, saved requests and li
   assert.match(card.fields!.find((field) => field.name === "Usage")!.value, /28\.4k \/ 100\.0k · 28%/);
   assert.doesNotMatch(JSON.stringify(card), /claude|gpt|surplus|provider\//i);
   assert.match(card.fields!.find((field) => field.name === "Next pass")!.value, /\*\*2\*\*/);
-  assert.match(card.fields!.find((field) => field.name === "Project")!.value, /sumo-shove/);
+  assert.match(card.buttons[0].url!, /sumo-shove/);
   assert.match(card.footer!.text, /2m 14s.*24 actions.*1 running/);
   // The card already updates in place; saying so only spends footer characters.
   assert.doesNotMatch(card.footer!.text, /Updates in place/);
@@ -40,22 +37,21 @@ test("the card shows the real stage, plan, changes, usage, saved requests and li
 
 test("the card carries no label that only repeats the line beneath it", () => {
   const state = buildingSnapshot();
-  const description = embed(renderProgressCard(state)).description!;
+  const description = cardView(renderProgressCard(state)).description!;
   // The rail already names the phase, and the activity line describes itself.
   assert.doesNotMatch(description, /Right now|In the project queue/);
-  assert.equal(embed(renderProgressCard(state)).author, undefined, "the embed needs no author chrome");
 
   // The queued variant must not say "Queued" twice.
   state.phase = "queued";
-  const queued = embed(renderProgressCard(state)).description!;
-  assert.equal((queued.match(/Queued/g) ?? []).length, 1);
+  const queued = cardView(renderProgressCard(state)).description!;
+  assert.equal((queued.match(/\*\*● Queued\*\*/g) ?? []).length, 1);
   assert.doesNotMatch(queued, /In the project queue/);
 });
 
 test("questions take priority, show option descriptions, then retain the named decision", () => {
   const state = buildingSnapshot();
   state.questions = [{ question: "How should matches end?", options: [{ label: "First to five", description: "Short, competitive rounds" }] }];
-  let card = embed(renderProgressCard(state));
+  let card = cardView(renderProgressCard(state));
   assert.equal(card.color, 0xf59e0b);
   assert.match(card.description!, /Waiting for your answer/);
   assert.doesNotMatch(card.description!, /Agent update/);
@@ -63,11 +59,11 @@ test("questions take priority, show option descriptions, then retain the named d
   assert.equal(card.fields!.some((field) => field.name === "Recent activity" || field.name === "Usage"), false);
   state.questions = undefined;
   state.questionPin = { question: "How should matches end?", resolution: "Shane chose First to five" };
-  card = embed(renderProgressCard(state));
+  card = cardView(renderProgressCard(state));
   assert.match(card.fields!.find((field) => field.name === "Decision")!.value, /Shane chose/);
 });
 
-test("long streamed text and adversarial markdown stay within Discord embed and text budgets", () => {
+test("long streamed text and adversarial markdown stay within Discord V2 text and component budgets", () => {
   const state = buildingSnapshot();
   const long = "[@everyone](https://example.invalid) *** ".repeat(1000);
   state.title = long;
@@ -77,19 +73,14 @@ test("long streamed text and adversarial markdown stay within Discord embed and 
   state.questions = Array.from({ length: 5 }, () => ({ question: long, options: Array.from({ length: 4 }, () => ({ label: long, description: long })) }));
   state.history = Array.from({ length: 10 }, () => ({ text: long, detail: long, at: state.startedAt }));
   const options = renderProgressCard(state);
-  const builder = options.embeds![0] as EmbedBuilder;
-  const card = builder.toJSON();
-  assert.ok(builder.length <= 6000);
-  assert.ok(card.title!.length <= 256);
-  assert.ok(card.description!.length <= 4096);
-  assert.ok(card.fields!.every((field) => field.value.length <= 1024));
-  assert.ok(renderProgressText(state).content!.length <= 2000);
+  assertV2(options);
+  assert.ok(cardView(options).text.length > 0);
 });
 
 test("quiet activity shows its age without claiming a failure or estimating completion", () => {
   const state = buildingSnapshot();
   state.now += 60_000;
-  const card = embed(renderProgressCard(state));
+  const card = cardView(renderProgressCard(state));
   assert.match(card.description!, /Running · 1m 5s/);
   assert.doesNotMatch(card.description!, /failed|stalled|ETA|remaining/i);
 });
@@ -98,7 +89,7 @@ test("a turn with no agent activity is flagged with /site stop guidance", () => 
   const state = buildingSnapshot();
   state.now += 6 * 60_000;
   state.stalledForMs = 6 * 60_000;
-  const card = embed(renderProgressCard(state));
+  const card = cardView(renderProgressCard(state));
   assert.equal(card.color, 0xf59e0b);
   assert.match(card.description!, /No progress for 6m 0s/);
   assert.match(card.description!, /\/site stop/);
@@ -110,19 +101,19 @@ test("queued turns and pending questions are idle by design, not stalled", () =>
   const queued = buildingSnapshot();
   queued.phase = "queued";
   queued.stalledForMs = 20 * 60_000;
-  assert.doesNotMatch(embed(renderProgressCard(queued)).description!, /No progress/);
+  assert.doesNotMatch(cardView(renderProgressCard(queued)).description!, /No progress/);
 
   const waiting = buildingSnapshot();
   waiting.stalledForMs = 20 * 60_000;
   waiting.questions = [{ question: "Pick a theme", options: [{ label: "Dark" }] }];
-  assert.doesNotMatch(embed(renderProgressCard(waiting)).description!, /No progress/);
+  assert.doesNotMatch(cardView(renderProgressCard(waiting)).description!, /No progress/);
 });
 
 test("a queued turn leads the rail instead of leaving every stage pending", () => {
   const state = buildingSnapshot();
   state.phase = "queued";
-  const description = embed(renderProgressCard(state)).description!;
-  assert.match(description, /^\*\*● Queued\*\*  ›  ○ Prepare/);
+  const description = cardView(renderProgressCard(state)).description!;
+  assert.match(description, /\*\*● Queued\*\*  ›  ○ Prepare/);
   assert.doesNotMatch(description, /● Build|✓ /);
   // The stage list still renders, so the reader knows what happens next.
   assert.match(description, /○ Publish/);
@@ -132,19 +123,19 @@ test("a non-question amber card explains what it is waiting on", () => {
   const state = buildingSnapshot();
   state.waiting = true;
   state.waitingReason = "A tool reported an error — the agent is retrying";
-  let card = embed(renderProgressCard(state));
+  let card = cardView(renderProgressCard(state));
   assert.equal(card.color, 0xf59e0b);
   assert.match(card.description!, /A tool reported an error/);
   assert.doesNotMatch(card.description!, /Right now/);
 
   // Without a reason the card still says something rather than showing a bare amber frame.
   state.waitingReason = undefined;
-  card = embed(renderProgressCard(state));
+  card = cardView(renderProgressCard(state));
   assert.match(card.description!, /Waiting on the agent/);
 
   // A question owns the amber state and its own heading, so no duplicate warning.
   state.questions = [{ question: "Pick a theme", options: [{ label: "Dark" }] }];
-  card = embed(renderProgressCard(state));
+  card = cardView(renderProgressCard(state));
   assert.match(card.description!, /Waiting for your answer/);
   assert.doesNotMatch(card.description!, /Waiting on the agent|A tool reported/);
 });
@@ -178,10 +169,10 @@ test("a merged prompt shows the user's own words, not the model-facing preamble"
 });
 
 test("only a merged turn echoes the request, so the plan keeps the space", () => {
-  const single = embed(renderProgressCard(buildingSnapshot()));
+  const single = cardView(renderProgressCard(buildingSnapshot()));
   assert.doesNotMatch(single.description!, /Your requests?/);
 
-  const merged = embed(renderProgressCard(mergedSnapshot()));
+  const merged = cardView(renderProgressCard(mergedSnapshot()));
   assert.match(merged.description!, /\*\*Your requests\*\*/);
   assert.match(merged.description!, /Add a proper leaderboard/);
   // The plan field is still present and unfiltered by the request block.
@@ -194,7 +185,7 @@ test("the plan shows up to seven items instead of four", () => {
     content: `Task number ${index + 1}`,
     status: index < 2 ? "completed" as const : index === 2 ? "in_progress" as const : "pending" as const,
   }));
-  const value = embed(renderProgressCard(state)).fields!.find((field) => field.name.startsWith("Plan"))!.value;
+  const value = cardView(renderProgressCard(state)).fields!.find((field) => field.name.startsWith("Plan"))!.value;
   // The most recent completed item for context, then the in-progress and
   // pending work: seven lines total, up from four.
   for (let index = 2; index <= 8; index += 1) assert.match(value, new RegExp(`Task number ${index}\\b`));
@@ -266,20 +257,23 @@ test("running/completed duplicates count as one tool action, and Stop remains av
   } finally { await progress.close(); }
 });
 
-test("servers without embed permission fall back to text and keep working controls", async () => {
+test("progress needs no embed permission and nests Stop inside the V2 card", async () => {
   const edits: MessageEditOptions[] = [];
-  const message = { id: "fallback", edit: async (options: MessageEditOptions) => {
+  const message = { id: "v2", edit: async (options: MessageEditOptions) => {
+    assert.ok(!options.embeds?.length);
     edits.push(options);
-    if (options.embeds?.length) throw Object.assign(new Error("Missing Permissions"), { code: 50013 });
   } } as unknown as Message;
   const progress = new DiscordProgress(message, "Updating without embeds");
   progress.enableStopButton();
   await nextTick();
   await progress.close();
-  assert.equal(edits.length, 2);
-  assert.match(edits[1].content!, /Updating without embeds/);
-  assert.equal(edits[1].embeds!.length, 0);
-  assert.equal(edits[1].components!.length, 1);
+  assert.equal(edits.length, 1);
+  assertV2(edits[0]);
+  assert.equal(edits[0].content, null, "clear the original acknowledgement when upgrading it");
+  const card = cardView(edits[0]);
+  assert.match(card.text, /Updating without embeds/);
+  assert.ok(card.components.some((component) => component.type === ComponentType.Section));
+  assert.equal(card.buttons.find((button) => button.custom_id === "threadsite:stop")?.label, "Stop turn");
 });
 
 test("OpenCode feeds structured plan, public usage and tool events without exposing reasoning or spend", () => {

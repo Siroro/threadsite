@@ -1,4 +1,5 @@
-import { EmbedBuilder } from "discord.js";
+import { ContainerBuilder, TextDisplayBuilder } from "discord.js";
+import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, KIND_COLORS, type CardMessage } from "./card-ui.js";
 import { projectKindLabel } from "./templates.js";
 import type { ProjectRecord } from "./types.js";
 import type { UsageTotal } from "./usage.js";
@@ -18,10 +19,6 @@ export interface ProjectCardState {
   repoUrl?: string;
 }
 
-// Matches the tracking card's per-phase palette: blurple for sites, green for
-// 2D games, violet for 3D games; amber while the first build runs, red on error.
-const KIND_COLORS: Record<string, number> = { site: 0x5865f2, "game-2d": 0x22c55e, "game-3d": 0x8b5cf6 };
-
 const PROMPT_CHARS = 900;
 
 function relative(iso: string | undefined): string | undefined {
@@ -30,7 +27,7 @@ function relative(iso: string | undefined): string | undefined {
   return Number.isFinite(epoch) ? `<t:${Math.floor(epoch / 1000)}:R>` : undefined;
 }
 
-/** Collapse the request into one quote block line set; embeds render markdown, so keep it prose-only. */
+/** Collapse the request into one quote block line set. */
 function quoted(text: string | undefined, max: number): string {
   const flat = (text ?? "").replace(/\r?\n+/g, " ").replace(/\s+/g, " ").trim();
   if (!flat) return "*(not recorded)*";
@@ -38,11 +35,7 @@ function quoted(text: string | undefined, max: number): string {
 }
 
 /** Message payload shape shared by channel send and message edit. */
-export interface ProjectCardMessage {
-  content: string;
-  embeds: [EmbedBuilder];
-  allowedMentions: { parse: [] };
-}
+export type ProjectCardMessage = CardMessage;
 
 /** The configured multiplayer architecture. */
 function multiplayerLine(project: ProjectRecord): string | undefined {
@@ -69,25 +62,24 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
       ? "⚠️ The last turn failed — reply here to retry; the previously published version is unchanged."
       : `✅ Live${project.lastCommit ? ` · version \`${project.lastCommit}\`` : ""}${relative(project.lastTurnAt) ? ` · updated ${relative(project.lastTurnAt)}` : ""}`;
 
-  const embed = new EmbedBuilder()
-    .setTitle(project.displayName)
-    .setColor(color)
-    .setDescription([statusLine, relative(project.createdAt) ? `Created ${relative(project.createdAt)}` : undefined].filter(Boolean).join("\n"));
+  const card = new ContainerBuilder().setAccentColor(color);
+  addCardHeader(card, "PROJECT", project.displayName, statusLine);
+  addCardLinks(card, [cardLink(kind === "site" ? "Open site" : "Play game", state.siteUrl), cardLink("Source", state.repoUrl)]);
+  addCardDivider(card);
 
   // Settings come before the long request so they are visible immediately.
-  embed.addFields({ name: "Type", value: projectKindLabel(project.projectKind), inline: true });
+  const settings = [`**Type** · ${projectKindLabel(project.projectKind)}`];
   if (kind !== "site") {
-    embed.addFields(
-      { name: "Engine", value: kind === "game-3d" ? "Three.js" : "Excalibur", inline: true },
-      { name: "Multiplayer", value: multiplayerLine(project)!, inline: true },
-    );
+    settings.push(`**Engine** · ${kind === "game-3d" ? "Three.js" : "Excalibur"}`, `**Multiplayer** · ${multiplayerLine(project)}`);
   }
-  embed.addFields({ name: "Original request", value: `> ${quoted(project.initialPrompt, PROMPT_CHARS)}`, inline: false });
+  addCardField(card, "Project details", settings.join("\n"));
+  addCardDivider(card);
+  addCardField(card, "Original request", `> ${quoted(project.initialPrompt, PROMPT_CHARS)}`);
 
   if (project.browserQaFindings) {
     const findings = project.browserQaFindings.findings.length;
     const checked = relative(project.browserQaFindings.checkedAt);
-    embed.addFields({ name: "Browser QA", value: `Advisory · ${findings ? `${findings} finding${findings === 1 ? "" : "s"}` : "no findings"}${checked ? ` · checked ${checked}` : ""}`, inline: false });
+    addCardField(card, "Browser QA", `Advisory · ${findings ? `${findings} finding${findings === 1 ? "" : "s"}` : "no findings"}${checked ? ` · checked ${checked}` : ""}`);
   }
 
   // Model, effort, and which models served the thread are deliberately absent:
@@ -100,20 +92,15 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
     const tokens = usage.inputTokens || usage.outputTokens
       ? `in ${formatTokens(usage.inputTokens)}${cached} · out ${formatTokens(usage.outputTokens)}`
       : "token counts unavailable";
-    embed.addFields({
-      name: "Lifetime usage",
-      value: `${usage.turns} turn${usage.turns === 1 ? "" : "s"}${failed} · ${tokens}`,
-      inline: false,
-    });
+    addCardField(card, "Lifetime usage", `${usage.turns} turn${usage.turns === 1 ? "" : "s"}${failed} · ${tokens}`);
     // Cost is deliberately absent, like the tracking card: token counts are
     // public, spend data is admin-only (/site info, /site-admin usage).
   }
 
-  const links = [
-    state.siteUrl ? `[Open the ${kind === "site" ? "site" : "game"}](${state.siteUrl})` : undefined,
-    state.repoUrl ? `[Source](${state.repoUrl})` : undefined,
-  ].filter(Boolean);
-  if (links.length) embed.addFields({ name: "Links", value: links.join(" · "), inline: false });
-
-  return { content: "", embeds: [embed], allowedMentions: { parse: [] } };
+  addCardDivider(card);
+  card.addTextDisplayComponents(new TextDisplayBuilder().setContent([
+    "-# Reply in this thread to shape the next version.",
+    relative(project.createdAt) ? `-# Created ${relative(project.createdAt)}` : undefined,
+  ].filter(Boolean).join("\n")));
+  return cardMessage(card);
 }
