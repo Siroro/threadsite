@@ -171,6 +171,13 @@ export const adminCommand = new SlashCommandBuilder()
     .setName("models")
     .setDescription("Show the active model/effort and lifetime per-model usage across every project"))
   .addSubcommand((sub) => sub
+    .setName("failover")
+    .setDescription("Show or change the backup models used when a turn hits quota blocks or persistent upstream errors")
+    .addStringOption((option) => option
+      .setName("models")
+      .setDescription("Comma-separated provider/model backups; 'default' follows the environment; 'none' disables")
+      .setMaxLength(500)))
+  .addSubcommand((sub) => sub
     .setName("errors")
     .setDescription("Privately show recent ThreadSite failure incidents")
     .addIntegerOption((option) => option

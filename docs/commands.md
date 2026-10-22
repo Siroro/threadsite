@@ -128,6 +128,8 @@ Forgejo has no per-repository HTTP tokens, so a ThreadSite push key is a dedicat
 
 `/site-admin model model:provider/model-id` changes the model for all future turns, including existing site threads. Use `default` to go back to the platform's default selection.
 
+`/site-admin failover` shows the backup models used when a turn hits a provider quota block or a persistent upstream error. `/site-admin failover models:provider/a,provider/b` sets the list (quota-blocked or repeatedly failing turns retry the same prompt once on the first entry that is not the model just attempted); `default` follows `OPENCODE_FAILOVER_MODELS`, and `none` disables failover entirely.
+
 `/site-admin token provider:anthropic token:...` replaces the persisted provider credential. `/site-admin token-clear` removes it.
 
 The command is registered with Discord's **Manage Server** default permission and is also runtime-checked. `DISCORD_ADMIN_USER_IDS` can add explicit user IDs. Detailed failure DMs go only to `DISCORD_ERROR_REPORT_USER_IDS` (or the explicit admin-ID list when the error list is left blank). `/site-admin errors` is additionally restricted to those configured private error recipients, so other server managers do not get provider diagnostics.

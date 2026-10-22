@@ -69,6 +69,15 @@ export class Store {
     await this.setSetting("effort", effort || null);
   }
 
+  /** Runtime backup-model list; undefined follows OPENCODE_FAILOVER_MODELS. */
+  getFailoverModels(): string[] | undefined {
+    return this.getSetting<string[]>("failoverModels");
+  }
+
+  async setFailoverModels(models: string[] | null): Promise<void> {
+    await this.setSetting("failoverModels", models);
+  }
+
   getWebhookSecret(): string | undefined {
     return this.getSetting<string>("webhookSecret");
   }
