@@ -9,7 +9,7 @@ ThreadSite is a small Discord harness for an AI coding agent. One Discord thread
 - All project cards use **Discord Components V2**: a pinned project front page with a screenshot thumbnail and request forms, a compact live Turn panel whose full plan, files, usage, history and the model's raw thinking open in private paginated detail panels, and a separate Play/Open card with a full-width screenshot. Buttons, selects and modals keep project links, Stop, answers and commit details at hand, and stay working on old turns. Pinned cards refresh after turns and at startup.
 - Naming survives restarts: a failed title model is replaced by another available model, with a readable fallback if models are unavailable. The Discord title, Forgejo repo and links must synchronize before the next builder turn. Final repo names use the project slug without temporary `site-`/`game-` prefixes; old links redirect.
 
-The result is a public gallery (`index.html` at the publish root) listing every ready site and its source repository.
+The result is a public gallery (`index.html` at the publish root): a card grid of every ready project showing its newest preview screenshot, description headline, kind and multiplayer badges, updated date, and Play/Source links. Screenshots are saved per project at publish time and follow renames and deletions.
 
 ## How it works
 
