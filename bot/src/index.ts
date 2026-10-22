@@ -1437,7 +1437,6 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
       `Agent service: ${await opencode.health()}\n` +
       `Provider quota: ${opencode.quotaStatus()}\n` +
       `Failover: ${(store.getFailoverModels() ?? config.opencodeFailoverModels).join(", ") || "disabled"}${store.getFailoverModels() ? " (set via command)" : ""}\n` +
-      `Light turns: ${config.opencodeLightModel ? `${config.opencodeLightModel} (≤ ${config.opencodeLightPromptChars} chars, no images)` : "disabled"}\n` +
       `Browser QA: ${config.browserQaEnabled ? `enabled (${config.previewMcpUrl})` : "disabled"}\n` +
       `Web search: enabled for agent research\n` +
       `Asset tool: guarded downloads to site/assets\n` +
@@ -1462,8 +1461,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     // pinned card: active routing plus which models actually served which
     // projects, with token/cost figures.
     const breakdown = await usageLog.modelBreakdown();
-    const header = `🎛️ Active model: \`${store.getModel() || "the model default"}\` · effort \`${store.getEffort() || "auto"}\``
-      + (config.opencodeLightModel ? ` · light turns \`${config.opencodeLightModel}\`` : "");
+    const header = `🎛️ Active model: \`${store.getModel() || "the model default"}\` · effort \`${store.getEffort() || "auto"}\``;
     const modelLines = breakdown.models.map((model) =>
       `\`${model.model}\` — ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)} · ${formatCost(model.cost)}`,
     );

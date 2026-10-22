@@ -668,16 +668,7 @@ export class ProjectService {
         if (lifecycle) project = lifecycle;
       }
 
-      // Autopilot economy: short follow-up mutations without images run on the
-      // configured light model; initial builds, image turns, long briefs, and
-      // any explicit /site-admin override keep the default routing.
-      const requestedModel = this.store.getModel()
-        ?? (config.opencodeLightModel && !initial && prompt.length <= config.opencodeLightPromptChars && !turnImages?.length
-          ? config.opencodeLightModel
-          : undefined);
-      if (requestedModel && requestedModel === config.opencodeLightModel) {
-        emit(onProgress, `🪶 Short change — using the light model \`${requestedModel}\``);
-      }
+      const requestedModel = this.store.getModel();
 
       const turnBaseline = await captureWorkingTreeSnapshot(workspacePath);
       let stopChangesTimer = () => {};
@@ -783,7 +774,7 @@ export class ProjectService {
       // A stop that raced an already-completing turn must not poison the next
       // one; a mark set for a different, still-running turn stays for it.
       const stopMark = this.stopRequested.get(threadId);
-      if (stopMark === null || stopMark === pendingMarker.id) this.stopRequested.delete(threadId);
+      if (stopMark === null || stopMark === pendingMarker?.id) this.stopRequested.delete(threadId);
     }
   }
 
@@ -1969,7 +1960,7 @@ export class ProjectService {
     queueClaimed: boolean, queuedStatusIds: readonly string[], supersededTag: string,
   ): Promise<boolean> {
     await this.recordTurnUsage(project, pending, addUsage(usage, errorUsage(error)), true, Date.now() - turnStartedAt);
-    const stoppedByUser = this.stopMarkApplies(this.stopRequested.get(threadId), pending.id);
+    const stoppedByUser = this.stopMarkApplies(this.stopRequested.get(threadId), pending?.id);
     if (stoppedByUser) this.stopRequested.delete(threadId);
     if (!queueClaimed && queuedStatusIds.length) {
       // The turn failed before it could claim the persisted batch: release it

@@ -295,6 +295,28 @@ async function projectFixture(id: string, forgejo = new LocalForgejo()) {
   return { dir, project, store, service, forgejo, opencode, usage, base };
 }
 
+
+test("a preparation failure without a turn marker preserves its error and releases active bookkeeping", async () => {
+  const f = await projectFixture("early-preparation-failure");
+  const failure = new Error("Preparing the progress card failed");
+  await assert.rejects(f.service.mutate(f.project.threadId, "Add a button", false, () => { throw failure; }),
+    (error) => error === failure);
+  assert.equal(f.store.getProject(f.project.threadId)!.pendingTurn, undefined);
+  assert.equal((await f.service.stopTurn(f.project.threadId)).stopped, false);
+});
+
+test("a stop during failed preparation is settled without requiring a turn marker", async () => {
+  const f = await projectFixture("early-preparation-stop");
+  await assert.rejects(f.service.mutate(f.project.threadId, "Add a button", false, async () => {
+    assert.equal((await f.service.stopTurn(f.project.threadId)).stopped, true);
+    throw new Error("Preparation interrupted");
+  }), (error) => error instanceof TurnStoppedError);
+  const project = f.store.getProject(f.project.threadId)!;
+  assert.equal(project.pendingTurn, undefined);
+  assert.equal(project.status, "ready");
+  assert.equal((await f.service.stopTurn(f.project.threadId)).stopped, false);
+});
+
 test("renames refresh both URLs, preserve old subpage links, and revert the whole agent turn", async () => {
   const f = await projectFixture("rename1");
   const old = f.project.siteSlug;
