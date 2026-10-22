@@ -89,10 +89,10 @@ Both cards keep working after the turn: the technical card adds **Turn details**
 
 Both come from two documents the agent maintains in the project root, so nothing has to be generated after the fact:
 
-- **`DESCRIPTION.md`** — what the project is, in a visitor's words, plus a `## How to play` section. The project rules ask for one or two plain sentences, no file names, no code, no jargon, and for it to be updated whenever the project's shape changes.
+- **`DESCRIPTION.md`** — what the project is, in a visitor's words, in two parts: a one-sentence headline of at most 25 words, plus a `## How to play` section the rules cap at four short paragraphs (~120 words) — goal first, then controls, then a tip or two; still no file names, no code, no jargon, updated whenever the project's shape changes.
 - **`CHANGELOG.md`** — one section per turn, newest at the top, saying what a visitor will notice. The agent adds its section before its final summary.
 
-The harness reads both after every turn and shows them on the playable card, and the pinned card shows the newest description pitch. A project that has neither document yet still renders the card: the original request stands in for the description, and a turn without a screenshot still shows the card. The technical card includes Play/Open, Source and View commit buttons. Reports that exceed the combined V2 text limit include a readable excerpt and the complete report as an attached `turn-report.md` file. If screenshot delivery is denied, the Play card retries without the image, keeping its text and buttons.
+The harness reads both after every turn: the playable card shows the description headline and the newest changelog entry, the pinned card shows the headline, and the full how-to-play opens from the card's **How to play** button. A project that has neither document yet still renders the card: the original request stands in for the description, and a turn without a screenshot still shows the card. The technical card includes Play/Open, Source and View commit buttons. Reports that exceed the combined V2 text limit include a readable excerpt and the complete report as an attached `turn-report.md` file. If screenshot delivery is denied, the Play card retries without the image, keeping its text and buttons.
 
 ### AI-generated thread titles
 
