@@ -4,24 +4,10 @@ ThreadSite is a small Discord harness for an AI coding agent. One Discord thread
 
 - `/site start prompt:"..."` creates a Discord thread, a workspace, an agent session, a public Forgejo repository, the first git commit, and a live static site.
 - `/makegam dimension:<2d|3d> multiplayer:<arena|rooms|singleplayer> prompt:"..."` does the same for a **static browser game**. Games default to a shared-arena architecture; `rooms` builds invite-code rooms; `singleplayer` provisions no networking. `/site multiplayer` switches an existing game between the three live.
-- Every normal message in a registered thread becomes the next mutation of the same site. **Reply while a turn runs to steer it live.** When the agent asks a question mid-turn, the requester gets pinged: quick buttons for simple choices, select menus for longer lists, and a multi-question answer form with drafts, custom answers and retry-safe delivery.
-- The harness validates the result, commits and **pushes git first**, and only then publishes to Apache. A failed push or validation does not replace the previously published site. Each publish stamps a content-derived deploy id into the site; pages reload themselves when a newer deploy goes live.
-- All project cards use **Discord Components V2**: a pinned project front page with a screenshot thumbnail and request forms, a compact live Turn panel whose full plan, files, usage, history and the model's raw thinking open in private paginated detail panels, and a separate Play/Open card with a full-width screenshot. Buttons, selects and modals keep project links, Stop, answers and commit details at hand, and stay working on old turns. Pinned cards refresh after turns and at startup.
-- Naming survives restarts: a failed title model is replaced by another available model, with a readable fallback if models are unavailable. The Discord title, Forgejo repo and links must synchronize before the next builder turn. Final repo names use the project slug without temporary `site-`/`game-` prefixes; old links redirect.
-
-The result is a public gallery (`index.html` at the publish root): a card grid of every ready project showing its newest preview screenshot, description headline, kind and multiplayer badges, updated date, and Play/Source links. Screenshots are saved per project at publish time and follow renames and deletions.
 
 ## How it works
 
-The model uses permitted shell commands for verification and read-only Git inspection; the harness owns builds and Git writes. Projects are authored in **TypeScript under `site/src/`**; the harness runs the only esbuild bundle before every publish, validates the static tree, and enforces publication boundaries (no symlinks, dotfiles, or server-executable files; size caps). Game engines (three.js + Rapier for 3D, Excalibur for 2D) are installed by the harness like dependencies and type-checked against their real declarations.
-
-2D games default to native-size rendering with HiDPI support, adapting the camera and layout on resize instead of stretching a low-resolution canvas. Pixel-art assets use nearest-neighbor filtering and integer zoom for crisp pixels.
-
 The one deliberate runtime exception is the **harness-owned multiplayer relay**: the model never writes server code, it only uses a vendored browser client pointed at a shared multi-tenant WebSocket relay. Games stay fully playable solo when the relay is unreachable.
-
-A `preview` service gives vision models Playwright MCP browser access — screenshots, clicks, console/network diagnostics — against an in-memory build of the current source. Text-only models receive no browser MCP tools; the harness still runs its advisory browser QA pass after each build and supplies diagnostics to subsequent turns.
-
-At 90% of `OPENCODE_MAX_STEPS` (normally 180/200), the bot sends a mandatory finish-up steer to the running task. It asks the agent to complete current edits, run required checks, update todos and summarize. See [docs/agent-turns.md](docs/agent-turns.md) for step tracking, browser permissions and game-design guidance.
 
 See [docs/architecture.md](docs/architecture.md) for the full pipeline, agent sandboxing, transport recovery, and persistence model.
 
@@ -34,11 +20,8 @@ See [docs/architecture.md](docs/architecture.md) for the full pipeline, agent sa
 - Your existing Apache static directory (the default), an optional bundled `httpd:2.4-alpine` profile, or an optional Caddy edge with automatic HTTPS
 - Playwright MCP preview service (CPU-rendered Chromium, no GPU required)
 
-## Deployment
 
-Two paths. **Your own Apache stays the default** for servers that already run it (Virtualmin etc.); the optional **Caddy** profile is the one-command path for a fresh server.
-
-### Fresh server — one command (Caddy)
+### Fresh server
 
 Point DNS for your hostnames at the server, then:
 
@@ -52,23 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/cadd
 
 That installs Docker on request, clones this repository, writes `.env` (prompting for the Discord token/application ID when run interactively), creates the Caddy vhosts, brings the stack up behind Caddy with automatic HTTPS, and bootstraps Forgejo. Re-running is safe. All flags: [docs/deployment.md](docs/deployment.md#caddy-quickstart).
 
-### Your own Apache (default path)
-
-```bash
-./scripts/setup.sh
-$EDITOR .env                     # Discord token/ID; point SITES_HOST_PATH at your document root
-
-# Discord app: create the bot, invite it (permissions in docs/deployment.md),
-# enable Message Content Intent, put the token/ID in .env.
-
-docker compose up -d forgejo opencode gameserver
-./scripts/bootstrap-forgejo.sh   # creates the Forgejo admin + service account/token
-docker compose up -d bot
-# or the whole stack with a bundled static server on :8080:
-docker compose --profile bundled-static up -d
-```
-
-Day-2 operations go through the root `start.sh` (update/rebuild/health/logs), which also exposes the project cleanup menu. Proxying recipes for host Apache/Virtualmin and Cloudflare (sites vhost, cache headers, Forgejo, relay) are in [docs/deployment.md](docs/deployment.md) and [docs/multiplayer.md](docs/multiplayer.md).
+Running operations go through the root `start.sh` (update/rebuild/health/logs), which also exposes the project cleanup menu. Proxying recipes for host Apache/Virtualmin and Cloudflare (sites vhost, cache headers, Forgejo, relay) are in [docs/deployment.md](docs/deployment.md) and [docs/multiplayer.md](docs/multiplayer.md).
 
 ## Configuration
 

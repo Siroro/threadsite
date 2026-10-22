@@ -1,4 +1,4 @@
-# ThreadSite networking: gotchas, budgets, and debugging
+# Networking: gotchas, budgets, and debugging
 
 Harness-owned reference, regenerated every turn — never edit. Read it before writing netcode and whenever sync, authority, or snapshots misbehave.
 

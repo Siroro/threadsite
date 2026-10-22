@@ -158,6 +158,27 @@ test("a failed tool or provider retry reaches the card with a stated reason", as
   } finally { await progress.close(); }
 });
 
+test("a repeating v2 session heartbeat cannot bury the running tool line", async () => {
+  const progress = new DiscordProgress({ id: "beat", edit: async () => {} } as unknown as Message, "Updating");
+  const snapshot = () => (progress as unknown as { snapshot: () => ReturnType<typeof buildingSnapshot> }).snapshot();
+  try {
+    progress.callback({ text: "✏️ Editing code", detail: "site/src/main.ts", tool: { id: "t1", name: "edit", status: "running" } });
+    // The v2 reconcile loop and status stream repeat their busy text on every poll.
+    progress.callback({ kind: "heartbeat", text: "OpenCode is working", active: true });
+    progress.callback({ kind: "heartbeat", text: "OpenCode status updated", active: true });
+    progress.callback({ text: "🧠 Model is thinking" });
+    assert.equal(snapshot().latest.text, "✏️ Editing code");
+    assert.equal(snapshot().latest.detail, "site/src/main.ts");
+    assert.equal(snapshot().agentReportedActive, true, "the busy flag still lands even when the text is suppressed");
+
+    // With no tool running, the generic heartbeat is the live status again.
+    progress.callback({ text: "✅ File edit complete", detail: "site/src/main.ts", tool: { id: "t1", name: "edit", status: "completed" } });
+    progress.callback({ kind: "heartbeat", text: "OpenCode is working", active: true });
+    assert.equal(snapshot().latest.text, "OpenCode is working");
+    assert.ok(snapshot().history.some((item) => item.text === "✅ File edit complete"), "the completed line moves into history");
+  } finally { await progress.close(); }
+});
+
 test("a merged prompt shows the user's own words, not the model-facing preamble", () => {
   const display = requestDisplayText(["Add a leaderboard", "Make the arena louder", "Fix the reset button"]);
   assert.doesNotMatch(display, /While updates were queued|apply all of them/);

@@ -268,7 +268,11 @@ export class DiscordProgress {
     if (countsAsActivity) this.lastActivityAt = Date.now();
     if (/waiting for (?:the )?project queue|queued/i.test(text)) this.phase = "queued";
     // A generic session-busy event must not bury a more useful running tool.
-    if (/model is (?:thinking|working)/i.test(text) && [...this.tools.values()].some((tool) => tool.status === "running")) return;
+    // The v2 reconcile loop and status events repeat their busy text on every
+    // poll, so without this guard the card would only ever say "OpenCode is
+    // working" while a tool runs.
+    if (/(?:model|opencode) is (?:thinking|working)|status updated/i.test(text)
+      && [...this.tools.values()].some((tool) => tool.status === "running")) return;
     if (text !== this.latest.text || detail !== this.latest.detail) {
       if (!key || this.latest.key !== key) this.history.push(this.latest);
       while (this.history.length > HISTORY_LINES) this.history.shift();
