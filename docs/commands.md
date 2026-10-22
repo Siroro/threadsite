@@ -83,7 +83,7 @@ Edits respect `PROGRESS_UPDATE_MS`, coalesce rapid events and serialize Discord 
 When a turn finishes, it is presented in two messages:
 
 - the turn's **own message** becomes the technical card — the agent's full report of what it did, kept as the model wrote it, plus the commit, the files and lines changed, how long it took, and the token usage of the turn;
-- a **new message** under it carries the playable card — the browser-QA screenshot when one was captured, what the project is and how to play it, what this turn changed, and the play link next to the source link.
+- a **reply** to it carries the playable card — the browser-QA screenshot when one was captured, what the project is and how to play it, what this turn changed, and the play link next to the source link.
 
 Both cards keep working after the turn: the technical card adds **Turn details**, **Changed files**, **Browser findings** and a **Follow up** request form, and the playable card adds **How to play**, **Changelog** and **Request a change**. Each opens that turn's saved data in a private panel, so details stay available on old turns and after restarts.
 

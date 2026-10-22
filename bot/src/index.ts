@@ -1912,9 +1912,9 @@ async function applyAiThreadTitle(thread: ThreadChannel, title: string): Promise
 
 /**
  * Present a finished turn in two messages: the turn's own message becomes the
- * technical card (the agent's report, the commit, the usage), and a new
- * message under it carries the playable card (the screenshot, project text and
- * play link). All three project surfaces use Components V2.
+ * technical card (the agent's report, the commit, the usage), and a reply to
+ * it carries the playable card (the screenshot, project text and play link).
+ * All three project surfaces use Components V2.
  */
 async function setTurnCards(status: Message, result: MutationResult, note?: string): Promise<void> {
   // The cards replace the live status: any pending agent-question buttons on
@@ -1932,6 +1932,9 @@ async function setTurnCards(status: Message, result: MutationResult, note?: stri
     store.patchCardState<StoredTurnCard>(result.project.threadId, status.id, { result: savedResult, documents: { description, changelog }, closed: true });
     if (state.published) await store.patchProject(result.project.threadId, { lastCardMessageId: status.id });
   }
+  // The playable card replies to the technical card, so the pair reads as one
+  // presentation even in a busy thread.
+  let technicalCardId: string | undefined = status.id;
   try {
     await status.edit(cardEdit(renderTechnicalCard(state)));
   } catch (error) {
@@ -1941,23 +1944,27 @@ async function setTurnCards(status: Message, result: MutationResult, note?: stri
       // thread message instead of failing the whole turn report.
       const { channel } = status;
       if (!("send" in channel)) throw error;
-      await channel.send(renderTechnicalCard(state)).catch(() => undefined);
+      const report = await channel.send(renderTechnicalCard(state)).catch(() => undefined);
+      technicalCardId = report?.id;
     } else {
       throw error;
     }
   }
-  // The playable card is a message of its own, under the turn's report.
-  await postPlayCard(status.channel, state, result.project.threadId);
+  // The playable card is a message of its own, a reply under the turn's report.
+  await postPlayCard(status.channel, state, result.project.threadId, technicalCardId);
 }
 
 /** Post the playable card with the screenshot, project documents and play link. */
-async function postPlayCard(channel: TextBasedChannel, state: TurnCardState, threadId?: string): Promise<void> {
+async function postPlayCard(channel: TextBasedChannel, state: TurnCardState, threadId?: string, replyTo?: string): Promise<void> {
   if (!("send" in channel)) return;
   const card = renderPlayCard(state);
+  // A vanished reference (the report deleted in the same moment) must not lose
+  // the card, so the reply is best-effort.
+  const reply = replyTo ? { messageReference: replyTo, failIfNotExists: false } : undefined;
   try {
     // The playable card is a Components V2 container: full message width,
     // with the screenshot in a media gallery and the links as real buttons.
-    const message = await channel.send(card);
+    const message = await channel.send({ ...card, reply });
     if (threadId && state.screenshot?.length && store.getProject(threadId) && !store.getProject(threadId)?.pendingDeletion) {
       await store.patchProject(threadId, { previewMessageId: message.id });
     }
@@ -1965,7 +1972,7 @@ async function postPlayCard(channel: TextBasedChannel, state: TurnCardState, thr
     if ((error as { code?: number }).code === 50013 && state.screenshot?.length) {
       // Retry without media if Attach Files is unavailable. Text and buttons
       // remain V2, so the project still has a playable card.
-      await channel.send(renderPlayCard({ ...state, screenshot: undefined })).catch((fallbackError) => {
+      await channel.send({ ...renderPlayCard({ ...state, screenshot: undefined }), reply }).catch((fallbackError) => {
         log("warn", "discord.play_card_post_failed", { error: String(fallbackError) });
       });
       return;
