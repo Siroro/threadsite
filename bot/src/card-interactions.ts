@@ -136,7 +136,7 @@ export class CardInteractions {
       if (action === "keep") { await this.respond(interaction, renderStatusCard("🗂️ Keeping the partial edits — the next message will build on them.")); return; }
       if (action === "rollback") {
         const card = new ContainerBuilder().setAccentColor(0xef4444);
-        addCardHeader(card, "CONFIRM · ONLY YOU CAN SEE THIS", "Discard partial edits?", "This restores the workspace to the last published commit. The partial edits will be discarded.");
+        addCardHeader(card, "CONFIRM", "Discard partial edits?", "This restores the workspace to the last published commit. The partial edits will be discarded.");
         card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder().setCustomId(cardId("confirm", resource, "rollback")).setLabel("Discard partial edits").setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId(cardId("keep", resource)).setLabel("Keep edits").setStyle(ButtonStyle.Secondary),
