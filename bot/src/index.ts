@@ -1844,23 +1844,39 @@ async function reconcileProjectCards(): Promise<void> {
  * Wrap a turn's progress callback so the first appearance of each agent
  * question pings the requester in the thread: the buttons live on the status
  * card and are easy to miss, while a parked question holds the whole turn
- * (and the thread's queue) open.
+ * (and the thread's queue) open. The ping is a doorbell, not a record — the
+ * answer lands on the card — so it is deleted again when the question
+ * resolves (answered or skipped).
  */
 function withQuestionPings(callback: ProgressCallback, threadId: string, requesterId?: string): ProgressCallback {
   if (!requesterId) return callback;
   const pinged = new Set<string>();
+  const pings = new Map<string, Promise<Message | undefined>>();
+  const deletePing = (requestID: string): void => {
+    const sent = pings.get(requestID);
+    if (!sent) return;
+    pings.delete(requestID);
+    void sent.then(async (message) => {
+      if (message) await message.delete().catch(() => undefined);
+    });
+  };
   return (update) => {
-    if (update.kind === "question" && update.question && !update.question.resolved
-      && update.question.requestID && !pinged.has(update.question.requestID)) {
-      pinged.add(update.question.requestID);
-      void client.channels.fetch(threadId).then(async (channel) => {
-        if (channel?.isTextBased() && "send" in channel) {
-          await channel.send({
-            content: `<@${requesterId}> ❓ The agent needs your answer to continue`,
-            allowedMentions: { users: [requesterId] },
-          }).catch(() => undefined);
-        }
-      }).catch(() => undefined);
+    if (update.kind === "question" && update.question?.requestID) {
+      const { requestID } = update.question;
+      if (!update.question.resolved && !pinged.has(requestID)) {
+        pinged.add(requestID);
+        pings.set(requestID, client.channels.fetch(threadId).then(async (channel) => {
+          if (channel?.isTextBased() && "send" in channel) {
+            return await channel.send({
+              content: `<@${requesterId}> ❓ The agent needs your answer to continue`,
+              allowedMentions: { users: [requesterId] },
+            }).catch(() => undefined);
+          }
+          return undefined;
+        }).catch(() => undefined));
+      } else if (update.question.resolved) {
+        deletePing(requestID);
+      }
     }
     return callback(update);
   };
