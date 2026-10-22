@@ -1858,7 +1858,9 @@ function turnCardState(result: MutationResult, note?: string): TurnCardState {
     summary: result.agentSummary,
     note,
     findings: result.browserQaFindings,
-    preview: result.preview,
+    description: result.description,
+    changelog: result.changelog,
+    request: result.project.initialPrompt,
     meta: turnCardMeta(result.project),
     siteUrl: projects.siteLink(result.project),
     repoUrl: projects.repoLink(result.project),
@@ -1866,12 +1868,12 @@ function turnCardState(result: MutationResult, note?: string): TurnCardState {
   };
 }
 
-/** The playable card's footer: what kind of project this is, and how it plays. */
+/** The playable card's footer: the dimension and how the game is played. */
 function turnCardMeta(project: ProjectRecord): string | undefined {
   const kind = project.projectKind ?? "site";
-  if (kind === "site") return "Static website";
-  const engine = kind === "game-3d" ? "Three.js" : "Phaser";
-  return `${projectKindLabel(kind)} · ${engine} · ${multiplayerModeLabel(project.multiplayerMode ?? "arena")}`;
+  if (kind === "site") return undefined;
+  const dimension = kind === "game-3d" ? "3D" : "2D";
+  return `${dimension} · ${multiplayerModeLabel(project.multiplayerMode ?? "arena")}`;
 }
 
 /**

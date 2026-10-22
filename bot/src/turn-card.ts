@@ -39,8 +39,12 @@ export interface TurnCardState {
   note?: string;
   /** Confirmed browser-QA findings; advisory, never blocking. */
   findings?: string[];
-  /** Model-written preview of the project: pitch, change and how to play. */
-  preview?: { pitch: string; added?: string; play?: string };
+  /** The project's own description (DESCRIPTION.md): the pitch and how to play. */
+  description?: { pitch?: string; play?: string };
+  /** The newest changelog entry (CHANGELOG.md): what this turn added. */
+  changelog?: { title?: string; body?: string };
+  /** The project's own brief, used when no description could be read. */
+  request?: string;
   /** Project meta for the playable card's footer: type, engine, multiplayer. */
   meta?: string;
   /** Public URL of the published project. */
@@ -138,12 +142,17 @@ export function playableCard(state: TurnCardState, hasScreenshot: boolean): Embe
     .setTitle(`${isGame ? "🎮" : "🛠️"} ${isGame ? "Play" : "Open"} ${truncate(state.name, 180)}`)
     .setColor(cardColor(state));
   if (hasScreenshot) embed.setImage(`attachment://${SCREENSHOT_NAME}`);
-  if (state.preview?.pitch) embed.setDescription(truncate(state.preview.pitch, 1500));
-  if (state.preview?.added) {
-    embed.addFields({ name: "What's new", value: truncate(state.preview.added, 1000), inline: false });
+  // The project's own description is the card's blurb; without one the
+  // original brief still says what this is, so the card is never a bare link.
+  const pitch = state.description?.pitch;
+  const blurb = pitch ? truncate(pitch, 1500) : state.request ? truncate(state.request, 400) : undefined;
+  if (blurb) embed.setDescription(blurb);
+  if (state.changelog?.title || state.changelog?.body) {
+    const entry = [state.changelog.title, state.changelog.body].filter(Boolean).join("\n");
+    embed.addFields({ name: "What's new", value: truncate(entry, 1000), inline: false });
   }
-  if (state.preview?.play) {
-    embed.addFields({ name: isGame ? "How to play" : "What to look at", value: truncate(state.preview.play, 1000), inline: false });
+  if (state.description?.play) {
+    embed.addFields({ name: isGame ? "How to play" : "What to look at", value: truncate(state.description.play, 1000), inline: false });
   }
   const links = [isGame ? link("▶ **PLAY GAME**", state.siteUrl) : link("▶ **OPEN SITE**", state.siteUrl), link("Source", state.repoUrl)]
     .filter(Boolean)
@@ -176,11 +185,14 @@ export function renderTechnicalText(state: TurnCardState): { content: string; em
 
 export function renderPlayText(state: TurnCardState): { content: string; embeds: []; allowedMentions: { parse: [] } } {
   const isGame = state.kind !== "site";
+  const pitch = state.description?.pitch;
+  const blurb = pitch ? truncate(pitch, 600) : state.request ? truncate(state.request, 300) : undefined;
+  const entry = [state.changelog?.title, state.changelog?.body].filter(Boolean).join("\n");
   const content = [
     `**${isGame ? "🎮" : "🛠️"} ${isGame ? "Play" : "Open"} ${state.name}**`,
-    state.preview?.pitch ? truncate(state.preview.pitch, 600) : "",
-    state.preview?.added ? `**What's new** — ${truncate(state.preview.added, 400)}` : "",
-    state.preview?.play ? `**${isGame ? "How to play" : "What to look at"}** — ${truncate(state.preview.play, 500)}` : "",
+    blurb ?? "",
+    entry ? `**What's new** — ${truncate(entry, 400)}` : "",
+    state.description?.play ? `**${isGame ? "How to play" : "What to look at"}** — ${truncate(state.description.play, 500)}` : "",
     state.meta ? truncate(state.meta, 120) : "",
     [isGame ? link("▶ **PLAY GAME**", state.siteUrl) : link("▶ **OPEN SITE**", state.siteUrl), link("Source", state.repoUrl)]
       .filter(Boolean).join(" · "),

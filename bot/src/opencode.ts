@@ -248,91 +248,6 @@ export interface PromptResult {
   usage: TurnUsage;
 }
 
-/** Everything the preview model needs to describe the project as it stands. */
-export interface PreviewInput {
-  /** Display name of the project. */
-  name: string;
-  /** Human kind: "website", "2D game" or "3D game". */
-  kind: string;
-  /** The user's original request for the project. */
-  request?: string;
-  /** What the agent just did in this turn. */
-  summary?: string;
-  /** The preview from the previous turn, so the pitch stays stable. */
-  previous?: string;
-}
-
-/** The parsed preview: a pitch for the project, what changed, and how to play. */
-export interface Preview {
-  pitch?: string;
-  added?: string;
-  play?: string;
-}
-
-/**
- * The preview request. The model sees the original brief, the previous
- * preview and what the turn just did, and answers with three labelled lines:
- * the project as it is, what changed, and how to play it. The source material
- * is a technical report, so the instructions insist on the visitor's view.
- */
-export function previewInstruction(input: PreviewInput): string {
-  return [
-    `Write the preview shown next to a finished ${input.kind} called "${input.name}".`,
-    "",
-    "PITCH: one sentence, at most 140 characters, saying what the project is and what a visitor gets to do.",
-    "NEW: one sentence, at most 160 characters, saying what the latest change added in the terms a visitor would notice; write NONE if it added nothing visible.",
-    "PLAY: one or two sentences, at most 220 characters, telling a visitor how to play it or what to try first; write NONE if there is nothing to say.",
-    "",
-    "Write for a visitor, not for an engineer: no file names, no code, no APIs, no engine or system internals, no jargon. Say what someone sees and can do.",
-    "Reply with exactly those three lines and nothing else.",
-    "",
-    "ORIGINAL REQUEST:",
-    truncate(input.request ?? "", 1200),
-    "",
-    "PREVIOUS PREVIEW:",
-    truncate(input.previous ?? "", 400),
-    "",
-    "LATEST CHANGE (technical notes — describe the visitor-visible effect, not the implementation):",
-    truncate(input.summary ?? "", 1600),
-  ].join("\n");
-}
-
-/** Parse the labelled lines; an unlabelled answer is treated as the pitch. */
-export function parsePreview(text: string): Preview {
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  let pitch: string | undefined;
-  let added: string | undefined;
-  let play: string | undefined;
-  for (const line of lines) {
-    const pitchMatch = /^pitch\s*:\s*(.+)$/i.exec(line);
-    if (pitchMatch) { pitch = cleanPreviewLine(pitchMatch[1]); continue; }
-    const addedMatch = /^new\s*:\s*(.+)$/i.exec(line);
-    if (addedMatch) {
-      const value = cleanPreviewLine(addedMatch[1]);
-      added = value && !/^none\b/i.test(value) ? value : undefined;
-      continue;
-    }
-    const playMatch = /^play\s*:\s*(.+)$/i.exec(line);
-    if (playMatch) {
-      const value = cleanPreviewLine(playMatch[1]);
-      play = value && !/^none\b/i.test(value) ? value : undefined;
-    }
-  }
-  if (!pitch) {
-    // A model that ignored the format still said something useful: keep the
-    // first line as the pitch rather than showing no preview at all.
-    const fallback = cleanPreviewLine(lines[0] ?? "");
-    pitch = fallback && !/^pitch\s*:/i.test(fallback) ? fallback : undefined;
-  }
-  return { pitch, added, play };
-}
-
-function cleanPreviewLine(value: string): string | undefined {
-  const text = value.replace(/^[*_`\s]+/, "").replace(/[*_`\s]+$/, "").replace(/\s+/g, " ").trim();
-  if (!text) return undefined;
-  return text.length > 200 ? `${text.slice(0, 199)}…` : text;
-}
-
 /**
  * A provider quota exhausted until a known reset time — typically OpenCode's
  * free-tier daily limit, whose retry action schedules the next attempt at the
@@ -1145,45 +1060,6 @@ export class OpenCodeHarness {
       if (!completed) await this.client.session.abort({ sessionID: sessionId, directory } as any, cleanup).catch(() => undefined);
       await this.client.session.delete({ sessionID: sessionId, directory } as any, { signal: AbortSignal.timeout(5_000) })
         .catch((error: unknown) => log("debug", "opencode.title_session_delete_failed", { sessionId, error: String(error) }));
-    }
-  }
-
-  /**
-   * One short, tools-free description of the project as it now stands: a
-   * pitch for the play card and a line about what this turn added. Bounded
-   * like the title call — a preview must never hold up a finished turn, and
-   * a failed preview is simply not shown.
-   */
-  async generatePreview(directory: string, input: PreviewInput, model?: string): Promise<{ pitch?: string; added?: string; play?: string; usage: TurnUsage }> {
-    const deadline = AbortSignal.timeout(20_000);
-    const sessionId = await this.createSession(directory, "ThreadSite project preview", deadline);
-    let usage: TurnUsage | undefined;
-    let completed = false;
-    try {
-      // A preview is a bounded, tools-free request. Do not enter the builder's
-      // long transport reconciliation or quota retry loop for a blurb.
-      const raw = unwrap<SessionMessage>(await this.client.session.prompt({
-        sessionID: sessionId, directory, agent: "presenter", model: parseModel(model), tools: { "*": false },
-        parts: [{ type: "text", text: previewInstruction(input) }],
-      } as any, { signal: deadline }), "OpenCode project preview");
-      usage = usageFromMessages([raw]);
-      if (raw.info?.error) throw new Error(`Preview model failed: ${safeJson(raw.info.error)}`);
-      completed = true;
-      return { ...parsePreview(extractText(raw.parts)), usage: usage ?? usageOf(createTurnState(Date.now(), 0)) };
-    } catch (error) {
-      if (!usage) {
-        try {
-          const saved = unwrap<SessionMessage[]>(await this.client.session.messages({ sessionID: sessionId, directory, limit: 20 } as any,
-            { signal: AbortSignal.timeout(5_000) }), "OpenCode preview usage");
-          usage = usageFromMessages(saved);
-        } catch { /* A failed provider may still have saved billable steps; unavailable history must not block fallback. */ }
-      }
-      throw enrichProviderError(error, model, usage);
-    } finally {
-      const cleanup = { signal: AbortSignal.timeout(5_000) };
-      if (!completed) await this.client.session.abort({ sessionID: sessionId, directory } as any, cleanup).catch(() => undefined);
-      await this.client.session.delete({ sessionID: sessionId, directory } as any, { signal: AbortSignal.timeout(5_000) })
-        .catch((error: unknown) => log("debug", "opencode.preview_session_delete_failed", { sessionId, error: String(error) }));
     }
   }
 

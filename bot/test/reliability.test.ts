@@ -110,39 +110,22 @@ test("browser findings publish without a repair turn and reach the next agent pr
   assert.equal(next.browserQaFindings, undefined);
 });
 
-test("a finished turn stores the model-written preview for the play card", async () => {
+test("the play card shows the project's own description and newest changelog entry", async () => {
   const f = await projectFixture("705234567890123456");
-  const previews: unknown[] = [];
   Object.assign(f.opencode, {
     prompt: async () => {
-      await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("preview turn");');
+      await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("documents turn");');
+      await fs.writeFile(path.join(f.dir, "DESCRIPTION.md"),
+        "# Koi Pond Arcade\n\nA calm pond where you feed koi.\n\n## How to play\n\nClick the water to drop food.\n", "utf8");
+      await fs.writeFile(path.join(f.dir, "CHANGELOG.md"),
+        "# Changelog\n\n## Lily pads\n\nAdded lily pads across the pond.\n", "utf8");
       return { text: "Updated", usage: {} };
     },
-    generatePreview: async (_dir: string, input: { name: string; summary?: string; previous?: string }) => {
-      previews.push(input);
-      return { pitch: "A calm pond where you feed koi.", added: "Added the lily pads.", usage: {} };
-    },
-  });
-  await f.service.mutate(f.project.threadId, "Add lily pads");
-  assert.equal(f.store.getProject(f.project.threadId)!.preview?.pitch, "A calm pond where you feed koi.");
-  const asked = previews[0] as { name: string; summary?: string };
-  assert.equal(asked.name, f.project.displayName);
-  assert.match(asked.summary ?? "", /Updated/);
-});
-
-test("a preview that cannot be written costs the card its blurb, not the turn", async () => {
-  const f = await projectFixture("715234567890123456");
-  Object.assign(f.opencode, {
-    prompt: async () => {
-      await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("preview turn");');
-      return { text: "Updated", usage: {} };
-    },
-    generatePreview: async () => { throw new Error("provider unavailable"); },
   });
   const result = await f.service.mutate(f.project.threadId, "Add lily pads");
-  assert.equal(result.validationError, undefined);
-  assert.equal(result.preview, undefined);
-  assert.equal(result.project.status, "ready");
+  assert.match(result.description?.pitch ?? "", /calm pond/);
+  assert.match(result.description?.play ?? "", /drop food/);
+  assert.match(result.changelog?.body ?? "", /lily pads/);
 });
 
 test("fail-open browser QA does not bypass compiler failures or replace the previous live site", async () => {
