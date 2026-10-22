@@ -141,3 +141,14 @@ test("registered resources created after the preview are retained during apply",
   assert.ok(store.getProject(orphan.threadId));
   assert.ok(calls.includes("game:orphan-game"), "other orphans still complete");
 });
+
+test("gallery card images are never treated as orphaned sites", async () => {
+  const live = record("7001");
+  const store = await storeWith("gallery", [live]);
+  await fs.mkdir(path.join(config.publishRoot, "__gallery"), { recursive: true });
+  await fs.writeFile(path.join(config.publishRoot, "__gallery", `${live.siteSlug}.png`), "png");
+  await fs.mkdir(path.join(config.publishRoot, "orphan-slug"), { recursive: true });
+  const plan = await planPurge(store, services().services);
+  assert.ok(plan.published.every((target) => !target.includes("__gallery")), "gallery assets are harness-owned");
+  assert.ok(plan.published.some((target) => target.endsWith("orphan-slug")), "real orphan directories are still caught");
+});

@@ -6,7 +6,7 @@ import { ForgejoClient } from "./forgejo.js";
 import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, turnRevertTarget, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
 import { ensureMultiplayerFiles, multiplayerContext, removeMultiplayerFiles } from "./multiplayer.js";
 import { OpenCodeHarness, addUsage, errorUsage, isTerminalAssistant, reconcileUsage, usageFromMessages, type PromptImage, type PromptResult, type TurnUsage } from "./opencode.js";
-import { publishIndex, publishSite, publishSiteRedirects, siteUrl, validateSite } from "./publish.js";
+import { moveGalleryPreview, publishIndex, publishSite, publishSiteRedirects, saveGalleryPreview, siteUrl, validateSite } from "./publish.js";
 import { buildSite, GENERATED_GITIGNORE } from "./build.js";
 import { enginePackages, ensureEnginePackages } from "./engines.js";
 import { ensureSkillFiles, skillNames } from "./skills.js";
@@ -498,6 +498,9 @@ export class ProjectService {
     await this.ensureProjectWebhook(intent.repoName);
     const renamed = { ...project, displayName: intent.displayName, siteSlug: intent.siteSlug };
     await this.writeReadme(renamed);
+    // The gallery card image follows the project to its new slug.
+    await moveGalleryPreview(intent.fromSiteSlug, intent.siteSlug)
+      .catch((error) => log("warn", "project.gallery_preview_move_failed", { threadId, error: errorText(error) }));
     if (intent.preserveWorktree) {
       await pushRenameMetadata(project.workspacePath, intent.displayName, this.forgejo);
       const previousLive = safeChild(config.publishRoot, intent.fromSiteSlug);
@@ -954,6 +957,12 @@ export class ProjectService {
     }
 
     if (published) {
+      // The screenshot the thread sees is also the public gallery's card
+      // image; a stale one must never fail the turn.
+      if (qaScreenshot) {
+        await saveGalleryPreview(project.siteSlug, qaScreenshot)
+          .catch((error) => log("warn", "project.gallery_preview_failed", { threadId, error: errorText(error) }));
+      }
       emit(input.onProgress, "🗂️ Refreshing the public gallery");
       // The site is live at this point; a stale gallery index must not fail
       // the turn — the next successful publish refreshes it again.

@@ -33,6 +33,8 @@ export async function removalPaths(project: ProjectRecord): Promise<string[]> {
   for (const slug of slugs) {
     if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug)) throw new Error(`Invalid site slug: ${slug}`);
     paths.push(await checkedRemovalPath(config.publishRoot, path.join(config.publishRoot, slug)));
+    // The project's gallery card image lives beside the sites, not inside one.
+    paths.push(await checkedRemovalPath(config.publishRoot, path.join(config.publishRoot, "__gallery", `${slug}.png`)));
   }
   // Include only this project's atomic-publish leftovers, never a prefix
   // match that could consume another project's longer slug.

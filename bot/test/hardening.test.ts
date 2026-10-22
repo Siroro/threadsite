@@ -241,3 +241,30 @@ test("repository ownership markers recognize both generations of managed repos",
   (forgejo as unknown as { api: unknown }).api = respond("# Unrelated project\n");
   assert.equal(await forgejo.isManagedRepository({ name: "foreign", description: "" }), false);
 });
+
+test("the public gallery saves turn screenshots and renders escaped project cards", async () => {
+  const { publishIndex, saveGalleryPreview, moveGalleryPreview } = await import("../src/publish.js");
+  const gameDir = path.join(root, "gallery-game");
+  const siteDir = path.join(root, "gallery-site");
+  for (const dir of [gameDir, siteDir]) await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(gameDir, "DESCRIPTION.md"), "# Game\n\nShove your rival out of a neon ring <b>before</b> the timer ends.\n\n## How to play\n\nMove with WASD.", "utf8");
+  const game = record("7001", gameDir, { displayName: "Evil <b>Name</b>", siteSlug: "evil-game", projectKind: "game-2d", multiplayerMode: "arena" });
+  const site = record("7002", siteDir, { displayName: "Plain Site", siteSlug: "plain-site" });
+  await saveGalleryPreview("evil-game", new Uint8Array([137, 80, 78, 71]));
+  await publishIndex([game, site], () => "https://git.example.invalid/repo");
+  const html = await fs.readFile(path.join(config.publishRoot, "index.html"), "utf8");
+  assert.match(html, /__gallery\/evil-game\.png/, "the saved screenshot becomes the card image");
+  assert.match(html, /2D game/);
+  assert.match(html, /Shared arena/);
+  assert.match(html, /Evil &lt;b&gt;Name&lt;\/b&gt;/, "project names are escaped");
+  assert.match(html, /neon ring &lt;b&gt;before&lt;\/b&gt;/, "pitches are escaped");
+  assert.doesNotMatch(html, /How to play/, "only the pitch reaches the card, not the how-to-play");
+  assert.doesNotMatch(html, /__gallery\/plain-site\.png/, "a project without a saved image keeps its styled placeholder");
+  // Renames carry the image to the new slug.
+  await moveGalleryPreview("evil-game", "evil-game-2");
+  assert.equal(await fs.access(path.join(config.publishRoot, "__gallery", "evil-game-2.png")).then(() => true, () => false), true);
+  assert.equal(await fs.access(path.join(config.publishRoot, "__gallery", "evil-game.png")).then(() => true, () => false), false);
+  await publishIndex([game, site], () => "https://git.example.invalid/repo");
+  const refreshed = await fs.readFile(path.join(config.publishRoot, "index.html"), "utf8");
+  assert.doesNotMatch(refreshed, /__gallery\/evil-game\.png/);
+});
