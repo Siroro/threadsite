@@ -352,6 +352,16 @@ test("the thinking trail stays off the public card and pages into the private de
   } finally { await progress.close(); }
 });
 
+test("the live card plans three lines: newest completion struck through, current bold, next plain", () => {
+  const view = cardView(renderProgressCard(buildingSnapshot(), { resource: "turn" }));
+  assert.match(view.text, /✓ ~~Add crowd movement and impact feedback~~/);
+  assert.match(view.text, /● \*\*Connect the live leaderboard\*\*/);
+  assert.match(view.text, /○ Test keyboard, touch controls and match reset/);
+  assert.match(view.text, /2\/5 tasks complete · 6 files · \+184 \/ −37 lines/);
+  assert.doesNotMatch(view.text, /Current task/, "the labelled single-task line is gone");
+  assert.doesNotMatch(view.text, /Inspect the arena/, "older completions stay in the details panel, not the live window");
+});
+
 test("usage details format every provider figure and keep missing counts unavailable", () => {
   const sections = progressDetailSections(buildingSnapshot());
   const usage = sections.find((section) => section.key === "usage")!.text;

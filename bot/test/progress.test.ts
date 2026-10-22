@@ -163,19 +163,21 @@ test("a repeating v2 session heartbeat cannot bury the running tool line", async
   const snapshot = () => (progress as unknown as { snapshot: () => ReturnType<typeof buildingSnapshot> }).snapshot();
   try {
     progress.callback({ text: "✏️ Editing code", detail: "site/src/main.ts", tool: { id: "t1", name: "edit", status: "running" } });
-    // The v2 reconcile loop and status stream repeat their busy text on every poll.
-    progress.callback({ kind: "heartbeat", text: "OpenCode is working", active: true });
+    // The v2 status stream repeats its busy text on every event.
     progress.callback({ kind: "heartbeat", text: "OpenCode status updated", active: true });
     progress.callback({ text: "🧠 Model is thinking" });
     assert.equal(snapshot().latest.text, "✏️ Editing code");
     assert.equal(snapshot().latest.detail, "site/src/main.ts");
     assert.equal(snapshot().agentReportedActive, true, "the busy flag still lands even when the text is suppressed");
 
-    // With no tool running, the generic heartbeat is the live status again.
+    // With no tool running, the deterministic poll heartbeat is status only
+    // and never becomes the live activity line.
     progress.callback({ text: "✅ File edit complete", detail: "site/src/main.ts", tool: { id: "t1", name: "edit", status: "completed" } });
-    progress.callback({ kind: "heartbeat", text: "OpenCode is working", active: true });
-    assert.equal(snapshot().latest.text, "OpenCode is working");
-    assert.ok(snapshot().history.some((item) => item.text === "✅ File edit complete"), "the completed line moves into history");
+    progress.callback({ kind: "heartbeat", text: "", active: true });
+    progress.callback({ kind: "heartbeat", text: "", active: true });
+    assert.equal(snapshot().latest.text, "✅ File edit complete");
+    assert.equal(snapshot().agentReportedActive, true);
+    assert.ok(snapshot().history.every((item) => item.text !== ""), "textless heartbeats never enter the feed");
   } finally { await progress.close(); }
 });
 
