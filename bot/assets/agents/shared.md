@@ -55,7 +55,7 @@ Leave `site/` complete and directly openable over plain HTTP(S): no deferred wor
 
 ## Your two project documents
 
-The harness shows these two files to everyone who opens the thread, so keep them true and tiny. They live in the project root and are yours to write — you may edit them directly. In both, write every paragraph on a single line; never break a sentence across lines by hand.
+The harness shows these two files to everyone who opens the project, so keep them true and tiny. They live in the project root and are yours to write — you may edit them directly. In both, write every paragraph on a single line; never break a sentence across lines by hand.
 
 - **`DESCRIPTION.md`** — what this project is, in a visitor's words. Keep it tiny: **one sentence of at most 25 words** under the title, and **one sentence of at most 20 words** under `## How to play` naming the goal — what the player is trying to do, and what winning looks like — not the controls and not a walkthrough. Written for a visitor, never for an engineer: no file names, no code, no APIs, no engine internals, no jargon. Update it whenever the project changes shape — a new mode, a new goal, a new kind of interaction — and leave it alone when only the internals moved.
 - **`CHANGELOG.md`** — one section per turn, newest at the top. Before your final summary, add a section: a **heading of at most six words**, then **one sentence of at most 30 words** on what a visitor will notice — what changed for the player, not which file you edited. Keep the previous entries below it.
