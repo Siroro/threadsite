@@ -13,7 +13,7 @@ The result is a public gallery (`index.html` at the publish root) listing every 
 
 ## How it works
 
-The model never runs builds, shell, or git. Projects are authored in **TypeScript under `site/src/`**; the harness runs the only esbuild bundle before every publish, validates the static tree, and enforces publication boundaries (no symlinks, dotfiles, or server-executable files; size caps). Game engines (three.js + Rapier for 3D, Excalibur for 2D) are installed by the harness like dependencies and type-checked against their real declarations.
+The model uses permitted shell commands for verification and read-only Git inspection; the harness owns builds and Git writes. Projects are authored in **TypeScript under `site/src/`**; the harness runs the only esbuild bundle before every publish, validates the static tree, and enforces publication boundaries (no symlinks, dotfiles, or server-executable files; size caps). Game engines (three.js + Rapier for 3D, Excalibur for 2D) are installed by the harness like dependencies and type-checked against their real declarations.
 
 2D games default to native-size rendering with HiDPI support, adapting the camera and layout on resize instead of stretching a low-resolution canvas. Pixel-art assets use nearest-neighbor filtering and integer zoom for crisp pixels.
 
@@ -28,7 +28,7 @@ See [docs/architecture.md](docs/architecture.md) for the full pipeline, agent sa
 ## Stack
 
 - Node 24 + discord.js bot
-- OpenCode agent server + `@opencode-ai/sdk`
+- OpenCode v1 + `@opencode-ai/sdk` (default), or native OpenCode v2 + `@opencode/client` (opt-in)
 - One shared Node 24 + `ws` multiplayer relay for all games (multi-tenant, in-memory)
 - Forgejo 15 LTS (SQLite, no separate database needed)
 - Your existing Apache static directory, or an optional bundled `httpd:2.4-alpine` profile
@@ -72,9 +72,11 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 
 | Setting | Purpose |
 | --- | --- |
+| `OPENCODE_API_VERSION` | `v1` (default) or `v2`; selects the bot adapter and server image. Rebuild both services. See [the v2 migration guide](docs/opencode-v2.md). |
 | `OPENCODE_URL` / `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` | Internal agent service endpoint and basic auth |
 | `OPENCODE_DEFAULT_MODEL` | Model for new sessions (`provider/model-id`); changeable live via `/site-admin model` |
 | `OPENCODE_MAX_STEPS` | Builder step budget per turn (default 200); mandatory finish-up steer at 90%. Recreate bot and opencode after changes. |
+| `CONTEXT7_ENABLED` / `CONTEXT7_API_KEY` | V2 library documentation MCP: enabled by default (`1`); set `0` to disable. Optional API key raises rate limits. Recreate opencode after changes. |
 | `OPENCODE_RECONCILE_TIMEOUT_MS` / `OPENCODE_RECONCILE_POLL_MS` | Transport-failure recovery window and poll interval |
 | `OPENCODE_QUOTA_BLOCK_MIN_RETRY_MS` | Retry delay that classifies as exhausted quota instead of backoff |
 | `OPENCODE_FAILOVER_MODELS` | Backup models for quota blocks and persistent upstream errors; turns retry once on the first healthy entry. Changeable live via `/site-admin failover` |

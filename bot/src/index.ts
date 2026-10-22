@@ -1737,13 +1737,40 @@ async function projectDetailSections(project: ProjectRecord): Promise<PanelSecti
     last?.documents?.changelog ?? readProjectCardDocument(project.workspacePath, "changelog"),
   ]);
   const usage = state.usage;
+  const stamp = (iso: string | undefined): string | undefined => {
+    const epoch = iso ? Date.parse(iso) : NaN;
+    return Number.isFinite(epoch) ? `<t:${Math.floor(epoch / 1000)}:f>` : undefined;
+  };
+  const status = project.status === "creating"
+    ? "🛠️ Building the first version"
+    : project.status === "error"
+      ? "⚠️ The last turn failed — the published version is unchanged"
+      : "✅ Live";
   return [
-    { key: "overview", label: "Project overview", text: `${project.displayName}\n${projectKindLabel(project.projectKind)}\nStatus: ${project.status}\n${project.projectKind !== "site" ? multiplayerModeLabel(project.multiplayerMode ?? "arena") : ""}\n${state.siteUrl ?? "First version is being built"}\n${state.repoUrl ?? ""}\nCreated: ${project.createdAt}\nLast turn: ${project.lastTurnAt ?? "not recorded"}\nCommit: ${project.lastCommit ?? "not recorded"}` },
-    { key: "request", label: "Original request", text: project.initialPrompt ?? "The original request was not recorded." },
+    { key: "overview", label: "Project overview", text: [
+      `**${project.displayName}**`,
+      projectKindLabel(project.projectKind),
+      project.projectKind !== "site" ? multiplayerModeLabel(project.multiplayerMode ?? "arena") : "",
+      status,
+      state.siteUrl ? `[Live site](${state.siteUrl})` : "",
+      state.repoUrl ? `[Source](${state.repoUrl})` : "",
+      `Created ${stamp(project.createdAt) ?? "not recorded"}`,
+      project.lastTurnAt ? `Last turn ${stamp(project.lastTurnAt)}` : "",
+      project.lastCommit ? `Last commit \`${project.lastCommit}\`` : "",
+    ].filter(Boolean).join("\n") },
+    { key: "request", label: "Original request", text: project.initialPrompt
+      ? project.initialPrompt.trim().split("\n").map((line) => `> ${line}`).join("\n")
+      : "The original request was not recorded." },
     { key: "description", label: "Description & how to play", text: description || "The agent has not written a description yet." },
     { key: "changelog", label: "Changelog", text: changelog || "No changelog entry has been written yet." },
-    { key: "usage", label: "Lifetime usage", text: usage ? `${usage.turns} turns · ${usage.failedTurns} failed\nInput: ${usage.inputTokens || "unavailable"}\nOutput: ${usage.outputTokens || "unavailable"}\nCached: ${usage.cacheTokens}\nLast recorded: ${usage.lastTs ?? "not recorded"}` : "Provider usage counts unavailable." },
-    { key: "qa", label: "Browser findings", text: project.browserQaFindings ? `Advisory · checked ${project.browserQaFindings.checkedAt}\n\n${project.browserQaFindings.findings.join("\n\n") || "No findings"}` : "No browser findings have been recorded." },
+    { key: "usage", label: "Lifetime usage", text: usage ? [
+      `**${usage.turns} turn${usage.turns === 1 ? "" : "s"}**${usage.failedTurns ? ` · ${usage.failedTurns} failed` : ""}`,
+      usage.inputTokens || usage.outputTokens
+        ? `Input **${formatTokens(usage.inputTokens)}** · Output **${formatTokens(usage.outputTokens)}** · Cached **${formatTokens(usage.cacheTokens)}**`
+        : "Token counts unavailable",
+      usage.lastTs ? `Last recorded ${usage.lastTs}` : "",
+    ].filter(Boolean).join("\n") : "Provider usage counts unavailable." },
+    { key: "qa", label: "Browser findings", text: project.browserQaFindings ? `Advisory · checked ${stamp(project.browserQaFindings.checkedAt) ?? project.browserQaFindings.checkedAt}\n\n${project.browserQaFindings.findings.map((finding) => `- ${finding}`).join("\n") || "No findings"}` : "No browser findings have been recorded." },
   ];
 }
 

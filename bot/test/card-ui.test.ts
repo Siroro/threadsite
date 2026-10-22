@@ -7,7 +7,7 @@ import {
 import { cardEdit, disableMessageControls, renderStatusCard, safeCardUrl } from "../src/card-ui.js";
 import { cardId, parseCardId } from "../src/card-actions.js";
 import { renderDetailPanel, renderQueuePanel, requestModal, textPages } from "../src/card-panels.js";
-import { renderProgressCard, progressDetailSections } from "../src/progress-view.js";
+import { renderProgressCard, progressDetailSections, usageDetailText } from "../src/progress-view.js";
 import { answerModal, questionControls, readAnswerForm, renderQuestionReview } from "../src/question-ui.js";
 import type { QuestionDraft } from "../src/card-state.js";
 import { buildingSnapshot } from "./fixtures/progress.js";
@@ -350,6 +350,23 @@ test("the thinking trail stays off the public card and pages into the private de
     assertV2(panel);
     assert.match(cardView(panel).text, /shove physics/, "the private panel pages the full trail");
   } finally { await progress.close(); }
+});
+
+test("usage details format every provider figure and keep missing counts unavailable", () => {
+  const sections = progressDetailSections(buildingSnapshot());
+  const usage = sections.find((section) => section.key === "usage")!.text;
+  assert.match(usage, /Input \*\*82\.3k\*\* · Output \*\*6\.2k\*\* · Cached \*\*65\.8k\*\* \(80% of input\)/);
+  assert.match(usage, /Context \*\*28\.4k \/ 100k\*\* \(28%\)/);
+  assert.match(usage, /▰▰▱▱▱▱▱▱/);
+  assert.match(usage, /12 model steps/);
+  assert.match(usage, /average ~54 tok\/s/);
+  assert.equal(usageDetailText({}), "Token counts unavailable", "absent counts never render as bare zeros");
+  const plan = sections.find((section) => section.key === "plan")!.text;
+  assert.match(plan, /✓ 1\. Inspect the arena/);
+  assert.match(plan, /● 3\. Connect the live leaderboard/);
+  const files = sections.find((section) => section.key === "files")!.text;
+  assert.match(files, /\*\*6 files\*\* · 2 added · 4 modified · 0 removed/);
+  assert.match(files, /- `site\/src\/player\.ts`/);
 });
 
 test("card action ids round-trip and reject hostile or oversized parts", () => {

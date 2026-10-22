@@ -1,0 +1,13 @@
+{
+  "name": "threadsite-opencode-runtime",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node v2/build-tools.mjs",
+    "test": "node --test v2/*.test.mjs"
+  },
+  "dependencies": {
+    "esbuild": "0.28.2",
+    "zod": "4.6.7"
+  }
+}

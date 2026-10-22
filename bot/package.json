@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --import tsx --test test/*.test.ts",
+    "test:opencode-v2": "node --import tsx test/opencode-v2-smoke.ts",
     "build": "npm run build:net && tsc -p tsconfig.json",
     "build:net": "tsc -p tsconfig.net.json",
     "stage:engines": "node dist/stage-engines.js",
@@ -13,6 +14,7 @@
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.18.27",
+    "@opencode/client": "2.1.3",
     "discord.js": "14.27.0",
     "esbuild": "0.28.2",
     "typescript": "5.9.3",

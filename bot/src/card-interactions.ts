@@ -7,7 +7,7 @@ import { cardId, parseCardId, type CardRoute } from "./card-actions.js";
 import { addCardHeader, cardEdit, cardMessage, renderStatusCard, type CardMessage } from "./card-ui.js";
 import { renderDetailPanel, renderQueuePanel, requestModal, type PanelSection, type PanelScope } from "./card-panels.js";
 import type { RequestFormState, StoredTurnCard } from "./card-state.js";
-import { progressDetailSections, type ProgressSnapshot } from "./progress-view.js";
+import { elapsed, progressDetailSections, usageDetailText, type ProgressSnapshot } from "./progress-view.js";
 import { answerModal, customAnswerModal, readAnswerForm, renderQuestionReview } from "./question-ui.js";
 import type { QuestionService } from "./question-service.js";
 import type { Store } from "./store.js";
@@ -227,21 +227,38 @@ export class CardInteractions {
     if (!card && !snapshot) throw new CardUserError("No saved details are available for this older turn.");
     const sections = snapshot ? progressDetailSections(snapshot) : [];
     const result = card?.result;
-    if (result) sections.unshift(
-      { key: "report", label: "Full agent report", text: result.summary ?? "The agent did not provide a report." },
-      { key: "qa", label: "Browser findings", text: result.findings?.length ? `Advisory — publication is not blocked.\n\n${result.findings.join("\n\n")}` : "No browser findings were recorded for this turn." },
-      { key: "description", label: "About & how to play", text: card?.documents?.description || [result.description?.pitch, result.description?.play].filter(Boolean).join("\n\n") || result.request || "No description has been written yet." },
-      { key: "changelog", label: "Changelog", text: card?.documents?.changelog || [result.changelog?.title, result.changelog?.body].filter(Boolean).join("\n\n") || "No changelog entry was written for this turn." },
-      { key: "outcome", label: "Outcome & commit", text: `${result.published ? "Published" : "Not published"}\nCommit: ${result.commit ?? "not recorded"}\n${result.commitFiles} files · +${result.additions} / −${result.deletions} lines\nDuration: ${result.durationMs} ms\n${result.note ?? ""}\n${result.siteUrl}\n${result.repoUrl}` },
-    );
+    if (result) {
+      const links = [
+        result.siteUrl ? `[Live site](${result.siteUrl})` : "",
+        result.repoUrl ? `[Source](${result.repoUrl})` : "",
+        result.commit && result.repoUrl ? `[View commit](${result.repoUrl.replace(/\/$/, "")}/commit/${encodeURIComponent(result.commit)})` : "",
+      ].filter(Boolean).join(" · ");
+      sections.unshift(
+        { key: "report", label: "Full agent report", text: result.summary ?? "The agent did not provide a report." },
+        { key: "qa", label: "Browser findings", text: result.findings?.length ? `Advisory — publication is not blocked.\n\n${result.findings.join("\n\n")}` : "No browser findings were recorded for this turn." },
+        { key: "description", label: "About & how to play", text: card?.documents?.description || [result.description?.pitch, result.description?.play].filter(Boolean).join("\n\n") || result.request || "No description has been written yet." },
+        { key: "changelog", label: "Changelog", text: card?.documents?.changelog || [result.changelog?.title, result.changelog?.body].filter(Boolean).join("\n\n") || "No changelog entry was written for this turn." },
+        { key: "outcome", label: "Outcome & commit", text: [
+          result.published ? "**✅ Published**" : result.commit ? "**⚠️ Committed — not published**" : "**❌ Not published**",
+          result.commit ? `Commit \`${result.commit}\`` : "No commit recorded",
+          `${result.commitFiles} files · **+${result.additions} / −${result.deletions}** lines · ${elapsed(result.durationMs)}`,
+          result.note,
+          links,
+        ].filter(Boolean).join("\n") },
+      );
+    }
     if (result?.usage) {
       const usage = result.usage;
-      const finalUsage = { key: "usage", label: "Usage & context", text: `Final provider counts\nInput: ${usage.inputTokens || "unavailable"}\nOutput: ${usage.outputTokens || "unavailable"}\nCached: ${usage.cacheTokens}\nContext: ${usage.contextTokens}\nContext limit: ${usage.contextLimit ?? "unavailable"}\nSteps: ${usage.steps}\nCompactions: ${usage.compactions}\n\n${sections.find((entry) => entry.key === "usage")?.text ?? ""}` };
+      const live = sections.find((entry) => entry.key === "usage")?.text;
+      const finalUsage = { key: "usage", label: "Usage & context", text: [
+        `**Final provider counts**\n${usageDetailText(usage)}`,
+        live ? `**Last live reading**\n${live}` : "",
+      ].filter(Boolean).join("\n\n") };
       const position = sections.findIndex((entry) => entry.key === "usage");
       if (position >= 0) sections[position] = finalUsage;
       else sections.push(finalUsage);
     }
-    if (result && !sections.some((entry) => entry.key === "files")) sections.push({ key: "files", label: "Changed files", text: `${result.commitFiles} files · +${result.additions} / −${result.deletions} lines\nIndividual paths were not recorded for this turn. View the commit for the full diff.` });
+    if (result && !sections.some((entry) => entry.key === "files")) sections.push({ key: "files", label: "Changed files", text: `**${result.commitFiles} files** · **+${result.additions} / −${result.deletions}** lines\nIndividual paths were not recorded for this turn. View the commit for the full diff.` });
     if (scope === "doc") return sections.filter((entry) => entry.key === "description" || entry.key === "changelog");
     return sections.length ? sections : [{ key: "overview", label: "Overview", text: "No further information was recorded for this turn." }];
   }
