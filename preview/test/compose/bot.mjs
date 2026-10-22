@@ -11,7 +11,7 @@ import { projectAgents } from "./dist/templates.js";
 import { cases, planFor } from "/fixtures/cases.mjs";
 
 const harness = new OpenCodeHarness();
-assert.match(await harness.health(), /^ok \(200\)$/);
+assert.match(await harness.health(), /^ok \(OpenCode 2\.[\w.-]+, v2\)$/);
 for (const item of cases) {
   const workspace = `/workspace/100/${item.id}`;
   const site = path.join(workspace, "site");
