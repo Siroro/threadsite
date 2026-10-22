@@ -21,10 +21,10 @@ function playCardText(message: ReturnType<typeof renderPlayCard>): string {
     .join("\n");
 }
 
-/** The link buttons of the playable card's single action row. */
+/** Every button on the playable card, across its action rows. */
 function playCardButtons(message: ReturnType<typeof renderPlayCard>): Array<{ label?: string; url?: string; style: number }> {
   const card = message.components[0].toJSON() as { components: Array<{ type: number; components?: Array<{ label?: string; url?: string; style: number }> }> };
-  return card.components.find((component) => component.type === ComponentType.ActionRow)?.components ?? [];
+  return card.components.filter((component) => component.type === ComponentType.ActionRow).flatMap((row) => row.components ?? []);
 }
 
 function state(overrides: Partial<TurnCardState> = {}): TurnCardState {
@@ -46,6 +46,7 @@ function state(overrides: Partial<TurnCardState> = {}): TurnCardState {
     },
     changelog: { title: "Leaderboard", body: "Added a leaderboard for the top ten koi." },
     meta: "2D · shared arena multiplayer",
+    resource: "status-1",
     siteUrl: "https://games.example.co.uk/koi-pond-arcade/",
     repoUrl: "https://git.example.co.uk/shane/site-koi-pond-arcade",
     screenshot: Buffer.from("89504e470d0a1a0a", "hex"),
@@ -90,12 +91,15 @@ test("the new message carries the playable card, the screenshot and the play lin
   // The changelog heading labels its own line: it says what changed far
   // better than a generic "What's new".
   assert.match(text, /\*\*Leaderboard\*\* — Added a leaderboard for the top ten koi\./);
-  assert.match(text, /\*\*How to play\*\* — Click the water to drop food, then steer your koi/);
+  assert.doesNotMatch(text, /How to play/, "the how-to-play lives behind the card's button, not inline");
   assert.match(text, /-# 2D · shared arena multiplayer/);
   const gallery = card.components.find((component) => component.type === ComponentType.MediaGallery)!;
   assert.equal(gallery.items![0].media.url, "attachment://preview.png");
-  // Real link buttons, not a links field.
+  // Real link buttons, not a links field. The expanded how-to-play is one
+  // click away on the card itself.
   const buttons = playCardButtons(message);
+  const howTo = buttons.find((button) => button.label === "How to play");
+  assert.equal(howTo?.style, ButtonStyle.Secondary);
   assert.equal(buttons[0].style, ButtonStyle.Link);
   assert.equal(buttons[0].label, "▶ Play game");
   assert.equal(buttons[0].url, "https://games.example.co.uk/koi-pond-arcade/");
@@ -110,7 +114,7 @@ test("authored markdown is rendered as prose, not as the agent's hard-wrapped li
   }));
   const text = playCardText(message);
   assert.match(text, /A calm pond where you feed koi and race them across lily pads\./);
-  assert.match(text, /Drop food with a click\. Steer with the arrow keys\./);
+  assert.doesNotMatch(text, /Drop food with a click/, "the how-to-play section renders only in the expanded view");
   assert.match(text, /Added a leaderboard for the top ten koi\./);
 });
 
@@ -147,7 +151,7 @@ test("a site says open site, and a note is kept as its own field", () => {
   const play = renderPlayCard(state({ kind: "site" }));
   const text = playCardText(play);
   assert.match(text, /## 🛠️ Open Koi Pond Arcade/);
-  assert.match(text, /\*\*What to look at\*\* — Click the water/);
+  assert.doesNotMatch(text, /What to look at/, "sites keep their expanded blurb behind the About button too");
   assert.equal(playCardButtons(play)[0].label, "▶ Open site");
 });
 
@@ -167,7 +171,7 @@ test("cards keep useful source buttons when the play URL is absent or invalid", 
   for (const siteUrl of ["", "javascript:alert(1)", "https://user:password@example.invalid/"]) {
     const message = renderPlayCard(state({ siteUrl }));
     assertV2(message);
-    assert.deepEqual(playCardButtons(message).map((button) => button.label), ["Source"]);
+    assert.deepEqual(playCardButtons(message).map((button) => button.label), ["Source", "How to play", "Changelog", "Request a change"]);
   }
 });
 

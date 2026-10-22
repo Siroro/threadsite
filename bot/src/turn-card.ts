@@ -84,7 +84,6 @@ export type PlayCardMessage = TurnCardMessage;
 const PITCH_CHARS = 240;
 const REQUEST_CHARS = 220;
 const CHANGELOG_CHARS = 240;
-const PLAY_CHARS = 200;
 
 // Matches the project card's palette: blurple for sites, green for 2D games,
 // violet for 3D games. Both cards of a turn share one colour so the final
@@ -145,15 +144,13 @@ export function renderPlayCard(state: TurnCardState): PlayCardMessage {
   const blurb = pitch ? clip(prose(pitch), PITCH_CHARS) : state.request ? clip(prose(state.request), REQUEST_CHARS) : undefined;
   if (blurb) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(blurb));
   // The changelog heading labels its own line: it says what changed far
-  // better than a generic "What's new".
+  // better than a generic "What's new". The how-to-play stays behind the
+  // card's How to play button: the card keeps only the headline.
   const title = state.changelog?.title?.trim();
   const entry = state.changelog?.body ? clip(prose(state.changelog.body), CHANGELOG_CHARS) : undefined;
   const details: string[] = [];
   if (entry) details.push(`**${title ? clip(title, 60) : "What's new"}** — ${entry}`);
   else if (title) details.push(`**What's new** — ${clip(title, 200)}`);
-  if (state.description?.play) {
-    details.push(`**${isGame ? "How to play" : "What to look at"}** — ${clip(prose(state.description.play), PLAY_CHARS)}`);
-  }
   if (details.length) {
     if (blurb) container.addSeparatorComponents(new SeparatorBuilder());
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent(details.join("\n")));
