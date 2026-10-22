@@ -2,9 +2,13 @@ import net from "node:net";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createPreviewServer } from "./server.mjs";
+import { createMcpProxy } from "./mcp-proxy.mjs";
 
-// The only ThreadSite-specific code is the static TypeScript preview server.
-// Microsoft Playwright MCP owns browser sessions, interactions and image results.
+// ThreadSite-specific code: the static TypeScript preview server and the MCP
+// keepalive proxy. Microsoft Playwright MCP owns browser sessions, interactions
+// and image results.
+const MCP_PROXY_PORT = 8931;
+const MCP_UPSTREAM_PORT = 8930;
 const server = createPreviewServer({
   workspaceRoot: process.env.WORKSPACE_ROOT || "/workspace",
 });
@@ -16,9 +20,11 @@ const child = spawn(
     "--config",
     fileURLToPath(new URL("./browser-config.json", import.meta.url)),
     "--port",
-    "8931",
+    String(MCP_UPSTREAM_PORT),
     "--host",
-    "0.0.0.0",
+    "127.0.0.1",
+    // The proxy forwards the caller's Host header, so the public contract is
+    // unchanged: agents reach preview:8931 and local probes 127.0.0.1:8931.
     "--allowed-hosts",
     "preview:8931,localhost:8931,127.0.0.1:8931",
   ],
@@ -37,6 +43,12 @@ child.on("exit", (code) => {
   process.exit(code ?? 1);
 });
 
+// The proxy owns the public port only after the MCP server answers on its
+// private loopback port, so clients never connect into a 502 window.
+await waitForPort(MCP_UPSTREAM_PORT, "127.0.0.1", 60_000);
+const proxy = createMcpProxy({ upstreamPort: MCP_UPSTREAM_PORT });
+await new Promise((resolve) => proxy.listen(MCP_PROXY_PORT, "0.0.0.0", resolve));
+
 // --- Browser warm-up -------------------------------------------------------
 // There is no GPU here, so Chromium runs on SwiftShader and starting it is the
 // most expensive single step of a browser turn. The MCP server launches the
@@ -52,6 +64,7 @@ child.on("exit", (code) => {
 // it again after an hour without tool calls, which would bring the cold start
 // back. The probe page forces a WebGL context and a pixel read, because that is
 // what actually initialises SwiftShader — a browser process alone does not.
+// The warm-up rides the public proxy port, the same path every agent takes.
 const MCP_URL = "http://127.0.0.1:8931/mcp";
 const WARMUP_PAGE =
   "data:text/html," +
@@ -119,7 +132,6 @@ async function rpc(body, sessionId) {
 }
 
 async function warmBrowser() {
-  await waitForPort(8931, "127.0.0.1", 60_000);
   const init = await rpc({
     jsonrpc: "2.0",
     id: 1,
