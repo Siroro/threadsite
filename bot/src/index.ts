@@ -210,6 +210,11 @@ client.once(Events.ClientReady, (ready) => {
         : "bind failed (external-push poller active)",
     errorRecipients: config.errorReportUserIds.size,
   });
+  // Claim every persisted backlog synchronously, before the deletion sweep's
+  // first Discord await can yield to new messages: a message arriving during
+  // the sweep must find its project's accumulator already reserved, or its
+  // drain would prompt against the still-unreconciled crash marker.
+  reserveRecoveryBacklogs();
   void (async () => {
     // Reconcile deleted threads before any interrupted build can resume.
     await sweepDeletedThreads();
@@ -378,13 +383,30 @@ function externalPushRow(): ActionRowBuilder<ButtonBuilder> {
 // status message is resumed when it still exists, so the thread keeps one live
 // message per request instead of a frozen leftover plus a new one; a fresh
 // message is posted only as a fallback (e.g. the original was deleted).
+/**
+ * Synchronously mark every persisted backlog as claimed by boot recovery.
+ * Must run before ClientReady's first await: once the event loop yields,
+ * message handlers can enqueue requests, and an unreserved accumulator would
+ * schedule a drain that prompts before the interrupted turn is reconciled —
+ * or, if the drain has not consumed its batch yet, get clobbered by the
+ * reservation and leave the acknowledged request stranded until the next
+ * restart.
+ */
+function reserveRecoveryBacklogs(): void {
+  for (const project of store.listRecoveryProjects()) {
+    pendingUpdates.set(project.threadId, { entries: [], scheduled: true });
+  }
+}
+
 async function recoverInterruptedTurns(): Promise<void> {
   const interrupted = store.listRecoveryProjects();
   if (!interrupted.length) return;
   log("info", "project.recovery_boot_scan", { interrupted: interrupted.length });
-  // Reserve every persisted backlog before the first Discord fetch can yield to new messages.
+  // The backlogs were reserved synchronously at ready (reserveRecoveryBacklogs);
+  // reserve only where no accumulator exists, so requests that arrived during
+  // the deletion sweep are never clobbered.
   for (const project of interrupted) {
-    pendingUpdates.set(project.threadId, { entries: [], scheduled: true });
+    if (!pendingUpdates.has(project.threadId)) pendingUpdates.set(project.threadId, { entries: [], scheduled: true });
   }
   for (const project of interrupted) {
     const channel = await client.channels.fetch(project.threadId).catch(() => undefined);
@@ -521,7 +543,10 @@ async function recoverInterruptedTurns(): Promise<void> {
           });
         }
         log("info", "project.queued_messages_recovered", { threadId: project.threadId, messages: queued.length });
-        const accumulator = pendingUpdates.get(project.threadId)!;
+        // The accumulator is reserved from ready; recreate one defensively so a
+        // restored batch is never dropped because its reservation vanished.
+        const accumulator = pendingUpdates.get(project.threadId) ?? { entries: [], scheduled: true };
+        pendingUpdates.set(project.threadId, accumulator);
         accumulator.entries.unshift(...entries);
         accumulator.scheduled = false;
         scheduleUpdateDrain(project.threadId, isGame);
@@ -1014,21 +1039,34 @@ async function startProjectThread(
       ? "That thread already has a site. Just reply in the thread to mutate it."
       : "That thread already has a project. Use a fresh thread for /makegam, then reply normally to mutate the game.");
   }
-  // The pinned project card goes up FIRST — before the turn's status
-  // message — so the thread opens with its front page on top.
-  const card = await postProjectCard(thread, previewProjectRecord(
-    thread.id, interaction.guildId, thread.parentId || interaction.channelId, requestedName || thread.name, prompt,
-    options.projectKind, options.multiplayerMode, interaction.user.id,
-  ));
-  const status = await thread.send(options.preparingText);
-  const progress = new DiscordProgress(status, `${options.buildingPrefix} Building ${requestedName || thread.name}`);
-  registerQuestionButtons(status, progress);
-  progress.enableStopButton();
-  progress.update(options.acceptedText);
-  const callback = withQuestionPings(progress.callback, thread.id, interaction.user.id);
-
-  await interaction.editReply(`Created/attached <#${thread.id}>.`);
+  // Register the thread from the moment it exists: a deletion during any of
+  // the awaited setup calls below must find this marker, or the build runs to
+  // completion — a full model turn and a published site — for a thread that
+  // no longer exists. The catch on a setup failure and the enqueued closure's
+  // finally remove it.
   creatingThreads.add(thread.id);
+  const { card, status, progress, callback } = await (async () => {
+    try {
+      // The pinned project card goes up FIRST — before the turn's status
+      // message — so the thread opens with its front page on top.
+      const card = await postProjectCard(thread, previewProjectRecord(
+        thread.id, interaction.guildId, thread.parentId || interaction.channelId, requestedName || thread.name, prompt,
+        options.projectKind, options.multiplayerMode, interaction.user.id,
+      ));
+      const status = await thread.send(options.preparingText);
+      const progress = new DiscordProgress(status, `${options.buildingPrefix} Building ${requestedName || thread.name}`);
+      registerQuestionButtons(status, progress);
+      progress.enableStopButton();
+      progress.update(options.acceptedText);
+      const callback = withQuestionPings(progress.callback, thread.id, interaction.user.id);
+
+      await interaction.editReply(`Created/attached <#${thread.id}>.`);
+      return { card, status, progress, callback };
+    } catch (error) {
+      creatingThreads.delete(thread.id);
+      throw error;
+    }
+  })();
   projects.enqueue(thread.id, async () => {
     try {
       // The thread may have been deleted while this job waited in the queue.
@@ -1050,7 +1088,7 @@ async function startProjectThread(
       await progress.close();
       if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
         await setStatusMessage(status, finishedWithErrorsMessageText(result,
-          options.outcome === "site" ? "Eevery message in this thread edits this same site. Run `/site help` for details." : undefined));
+          options.outcome === "site" ? "Every message in this thread edits this same site. Run `/site help` for details." : undefined));
         await sendOutcomeFollowUp(thread, result, {
           operation: options.operation,
           guildId: interaction.guildId,

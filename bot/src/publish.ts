@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { config } from "./config.js";
 import { engineTypeEntries } from "./engines.js";
+import { currentHead } from "./git.js";
 import { log } from "./logger.js";
 import { readProjectDescription } from "./project-docs.js";
 import type { ProjectRecord } from "./types.js";
@@ -812,13 +813,13 @@ async function stampDeployVersion(stagingRoot: string, sourceCommit: string | nu
 /**
  * HEAD commit of the git repo the site directory lives in (the workspace repo
  * mirrored to Forgejo), or null when there is none — observability only; a
- * missing repo must never block a publish.
+ * missing repo must never block a publish. Routed through bot/src/git.ts like
+ * every generated-workspace Git operation, so a missing project repository is
+ * refused instead of silently resolving a parent repository's HEAD.
  */
 async function workspaceCommit(siteDir: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", siteDir, "rev-parse", "HEAD"], { timeout: 10_000 });
-    const sha = stdout.trim();
-    return /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
+    return await currentHead(path.dirname(siteDir));
   } catch {
     return null;
   }
@@ -838,20 +839,42 @@ async function workspaceCommit(siteDir: string): Promise<string | null> {
  * Multiplayer games simply rejoin their room through the vendored client's
  * normal connect flow, exactly like a manual refresh.
  */
-async function injectUpdateChecker(stagingRoot: string, version: string): Promise<void> {
+/**
+ * Matches any previously injected update-checker script block (the loader's
+ * `var DEPLOYED` assignment is its unique anchor). Republishing a tree that
+ * already carries a loader — e.g. rename recovery publishing the previously
+ * live site — must replace it, not append a second copy: two loaders stamped
+ * with different deploy ids against one version file reload the page forever.
+ * Recreated per use because the regex is global.
+ */
+function deployedSnippetRe(): RegExp {
+  return /<script>(?:(?!<\/script>)[\s\S])*?var DEPLOYED = "[0-9a-f]+";(?:(?!<\/script>)[\s\S])*?<\/script>/gi;
+}
+
+export async function injectUpdateChecker(stagingRoot: string, version: string): Promise<void> {
   for (const html of await listFiles(stagingRoot, /\.html?$/i)) {
     const source = await fs.readFile(html, "utf8");
     // Relative hops from this page's directory up to the site root.
     const up = path.relative(path.dirname(html), stagingRoot).replaceAll(path.sep, "/");
     const versionUrl = `${up ? `${up}/` : "./"}${VERSION_FILE}`;
     const snippet = updateCheckerSnippet(version, versionUrl);
-    // Insert before the LAST </body>: an earlier literal (e.g. inside an
-    // inline script's markup string) must not swallow the injection.
-    let insertAt = -1;
-    for (const match of source.matchAll(/<\/body>/gi)) insertAt = match.index ?? insertAt;
-    const updated = insertAt >= 0
-      ? `${source.slice(0, insertAt)}${snippet}${source.slice(insertAt)}`
-      : `${source}${snippet}`;
+    // Idempotent: every existing loader collapses into one stamped with this
+    // deploy's id (also repairing pages that carry two from an older bug). A
+    // replacer function keeps `$` sequences in the snippet literal.
+    let loaders = 0;
+    const replaced = source.replace(deployedSnippetRe(), () => (loaders++ === 0 ? snippet : ""));
+    let updated: string;
+    if (replaced !== source) {
+      updated = replaced;
+    } else {
+      // Insert before the LAST </body>: an earlier literal (e.g. inside an
+      // inline script's markup string) must not swallow the injection.
+      let insertAt = -1;
+      for (const match of source.matchAll(/<\/body>/gi)) insertAt = match.index ?? insertAt;
+      updated = insertAt >= 0
+        ? `${source.slice(0, insertAt)}${snippet}${source.slice(insertAt)}`
+        : `${source}${snippet}`;
+    }
     if (updated !== source) await fs.writeFile(html, updated, "utf8");
   }
 }
@@ -900,10 +923,13 @@ function updateCheckerSnippet(version: string, versionUrl: string): string {
 /**
  * Relative import/export specifiers that point at cacheable assets:
  * `import "./x.js"`, `import { a } from "./x.js"`, `import("./x.mjs")`,
- * `export * from "./y.js"`. Recreated per pass because the regex is global.
+ * `export * from "./y.js"`. A specifier may already carry a query or fragment
+ * (an authored `?v=`, or a `?v=` written by an earlier versioning pass that
+ * must be updatable for the fixed point to converge). Recreated per pass
+ * because the regex is global.
  */
 function relativeAssetImportRe(): RegExp {
-  return /((?:\bfrom|\bimport)\s*\(?\s*)(["'])(\.{1,2}\/[^"']*\.(?:m?js|css))\2/gi;
+  return /((?:\bfrom|\bimport)\s*\(?\s*)(["'])(\.{1,2}\/[^"'?#]*\.(?:m?js|css)(?:[?#][^"']*)?)\2/gi;
 }
 
 /**
@@ -916,57 +942,79 @@ function relativeAssetImportRe(): RegExp {
  * "./game.js" verbatim, so without this a returning visitor's browser keeps
  * serving its cached game.js (and everything game.js imports) until that
  * URL's Cache-Control expires, never asking for the redeployed files.
- * All version hashes are computed from the original file bytes before any
- * rewriting starts, so a file's version never depends on rewrite order or on
- * its own rewritten content. Runs on the staging copy, so the workspace
- * source and the git history stay clean.
+ *
+ * Hashes are computed from each file's post-rewrite bytes, so a file's version
+ * always describes the exact bytes its URL serves. Because rewriting an
+ * importer (embedding a dependency's new ?v=) changes the importer's own
+ * content, the rewrite runs to a fixed point: one pass settles leaf files and
+ * each further pass settles one more level of import depth. Cyclic import
+ * graphs cannot converge, so the pass count is capped. Runs on the staging
+ * copy, so the workspace source and the git history stay clean.
  */
-async function versionAssetReferences(stagingRoot: string): Promise<void> {
-  const hashes = await hashCacheableAssets(stagingRoot);
-  const version = (rawUrl: string, resolveDir: string): string | undefined => {
-    const [reference, ...rest] = rawUrl.split("#");
-    const hashFragment = rest.length ? `#${rest.join("#")}` : "";
-    const [pathPart, ...queryRest] = reference.split("?");
-    const existingQuery = queryRest.length ? `?${queryRest.join("?")}` : "";
-    if (!CACHEABLE_ASSET_RE.test(pathPart)) return undefined;
-    // Only relative references resolve against this site; absolute paths,
-    // remote URLs, and protocol-relative URLs are left alone.
-    if (/^(?:[a-z]+:)?\/\//i.test(pathPart) || pathPart.startsWith("/") || pathPart.startsWith("data:")) return undefined;
+export async function versionAssetReferences(stagingRoot: string): Promise<void> {
+  const pages = await listFiles(stagingRoot, /\.html?$/i);
+  const scripts = await listFiles(stagingRoot, /\.(?:js|mjs)$/i);
+  const MAX_PASSES = 8;
+  for (let pass = 0; pass < MAX_PASSES; pass += 1) {
+    const hashes = await hashCacheableAssets(stagingRoot);
+    const version = (rawUrl: string, resolveDir: string): string | undefined => {
+      const [reference, ...rest] = rawUrl.split("#");
+      const hashFragment = rest.length ? `#${rest.join("#")}` : "";
+      const [pathPart, ...queryRest] = reference.split("?");
+      if (!CACHEABLE_ASSET_RE.test(pathPart)) return undefined;
+      // Only relative references resolve against this site; absolute paths,
+      // remote URLs, and protocol-relative URLs are left alone.
+      if (/^(?:[a-z]+:)?\/\//i.test(pathPart) || pathPart.startsWith("/") || pathPart.startsWith("data:")) return undefined;
 
-    const resolved = path.resolve(resolveDir, decodeURIComponent(pathPart));
-    if (!resolved.startsWith(`${stagingRoot}${path.sep}`)) return undefined;
-    // A reference the rewriter cannot resolve (dangling href, a "./x.js"
-    // mentioned in a comment) passes through unversioned rather than failing
-    // the publish.
-    const hash = hashes.get(resolved);
-    return hash ? `${pathPart}${existingQuery || `?v=${hash}`}${hashFragment}` : undefined;
-  };
+      const resolved = path.resolve(resolveDir, decodeURIComponent(pathPart));
+      if (!resolved.startsWith(`${stagingRoot}${path.sep}`)) return undefined;
+      // A reference the rewriter cannot resolve (dangling href, a "./x.js"
+      // mentioned in a comment) passes through unversioned rather than failing
+      // the publish.
+      const hash = hashes.get(resolved);
+      if (!hash) return undefined;
+      // Replace (not merely add) the v parameter: a stale v from an earlier
+      // pass or from authored source must never pin the URL to old bytes.
+      const others = queryRest.join("?").split("&").filter((param) => param && !/^v=/i.test(param));
+      return `${pathPart}?${[...others, `v=${hash}`].join("&")}${hashFragment}`;
+    };
 
-  for (const html of await listFiles(stagingRoot, /\.html?$/i)) {
-    const original = await fs.readFile(html, "utf8");
-    let rewritten = original.replace(
-      /(\b(?:src|href)\s*=\s*)(["'])([^"']+)\2/gi,
-      (match, attribute: string, quote: string, url: string) => {
+    let changed = false;
+    for (const html of pages) {
+      const original = await fs.readFile(html, "utf8");
+      let rewritten = original.replace(
+        /(\b(?:src|href)\s*=\s*)(["'])([^"']+)\2/gi,
+        (match, attribute: string, quote: string, url: string) => {
+          const versioned = version(url, path.dirname(html));
+          return versioned ? `${attribute}${quote}${versioned}${quote}` : match;
+        },
+      );
+      // ES module imports inside inline <script type="module"> blocks.
+      rewritten = rewritten.replace(relativeAssetImportRe(), (match, prefix: string, quote: string, url: string) => {
         const versioned = version(url, path.dirname(html));
-        return versioned ? `${attribute}${quote}${versioned}${quote}` : match;
-      },
-    );
-    // ES module imports inside inline <script type="module"> blocks.
-    rewritten = rewritten.replace(relativeAssetImportRe(), (match, prefix: string, quote: string, url: string) => {
-      const versioned = version(url, path.dirname(html));
-      return versioned ? `${prefix}${quote}${versioned}${quote}` : match;
-    });
-    if (rewritten !== original) await fs.writeFile(html, rewritten, "utf8");
-  }
+        return versioned ? `${prefix}${quote}${versioned}${quote}` : match;
+      });
+      if (rewritten !== original) {
+        await fs.writeFile(html, rewritten, "utf8");
+        changed = true;
+      }
+    }
 
-  for (const script of await listFiles(stagingRoot, /\.(?:js|mjs)$/i)) {
-    const original = await fs.readFile(script, "utf8");
-    const rewritten = original.replace(relativeAssetImportRe(), (match, prefix: string, quote: string, url: string) => {
-      const versioned = version(url, path.dirname(script));
-      return versioned ? `${prefix}${quote}${versioned}${quote}` : match;
-    });
-    if (rewritten !== original) await fs.writeFile(script, rewritten, "utf8");
+    for (const script of scripts) {
+      const original = await fs.readFile(script, "utf8");
+      const rewritten = original.replace(relativeAssetImportRe(), (match, prefix: string, quote: string, url: string) => {
+        const versioned = version(url, path.dirname(script));
+        return versioned ? `${prefix}${quote}${versioned}${quote}` : match;
+      });
+      if (rewritten !== original) {
+        await fs.writeFile(script, rewritten, "utf8");
+        changed = true;
+      }
+    }
+
+    if (!changed) return;
   }
+  log("warn", "publish.asset_versioning_unstable", { stagingRoot, passes: MAX_PASSES });
 }
 
 /** Content hash (10 hex chars) for every non-empty cacheable asset, by absolute path. */

@@ -28,7 +28,8 @@ function fixture() {
       get: async () => session,
       active: async () => active ? { ses_root: { type: "running" } } : {},
       list: async () => ({ data: [session], cursor: {} }),
-      update: async (input: any) => { calls.push({ name: "update", input }); session.permissions = input.permissions; },
+      update: async (input: any) => { calls.push({ name: "update", input }); Object.assign(session,
+        input.permissions ? { permissions: input.permissions } : {}, input.metadata ? { metadata: input.metadata } : {}); },
       switchAgent: async (input: any) => { session.agent = input.agent; },
       switchModel: async (input: any) => { calls.push({ name: "model", input }); session.model = input.model; },
       prompt: async (input: any) => {
@@ -125,6 +126,131 @@ test("stopping cancels queued inputs and questions before interrupting without r
   assert.equal(await f.harness.steer("/w", "ses_root", "Do more"), false);
 });
 
+function backgroundQa(): SessionMessageInfo {
+  return { ...assistant("msg_qa_start", 100, ""), content: [{ type: "tool", id: "call_qa", name: "subagent",
+    time: { created: Date.now(), completed: Date.now() }, state: { status: "completed",
+      input: { agent: "browser-qa", background: true }, output: "QA running",
+      metadata: { sessionID: "ses_qa", status: "running" } } }] } as SessionMessageInfo;
+}
+
+function qaReceipt(id = "msg_qa_result"): any {
+  return { id, type: "synthetic", time: { created: Date.now() }, text: "QA found a clipped button",
+    metadata: { source: "subagent", childID: "ses_qa", agent: "browser-qa", state: "completed" } };
+}
+
+test("background QA keeps a finished parent turn open until its result is reviewed", async () => {
+  const f = fixture();
+  const oldPoll = config.opencodeReconcilePollMs;
+  config.opencodeReconcilePollMs = 1;
+  let submitted = false;
+  let polls = 0;
+  f.client.session.prompt = async (input: any) => {
+    f.calls.push({ name: "prompt", input });
+    f.history.push({ id: input.id, type: "user", text: input.text, time: { created: Date.now() } }, backgroundQa(),
+      assistant("msg_independent", 100, "Independent edits finished"),
+      { id: "msg_parent_idle", type: "idle", outcome: "succeeded", time: { created: Date.now() } });
+    submitted = true;
+  };
+  f.client.session.active = async () => {
+    if (submitted) {
+      polls++;
+      if (polls === 2) f.history.push(qaReceipt());
+      if (polls === 4) f.history.push(assistant("msg_review", 100, "QA reviewed"),
+        { id: "msg_review_idle", type: "idle", outcome: "succeeded", time: { created: Date.now() } });
+    }
+    return {};
+  };
+  try {
+    const result = await f.harness.prompt("/w", "ses_root", "Build", "test/text");
+    assert.equal(result.text, "QA reviewed", "an old idle marker cannot finish a turn after a new QA result");
+    assert.ok(polls >= 4);
+    assert.equal(f.calls.filter((call) => call.name === "prompt").length, 1, "waiting must not submit another builder prompt");
+  } finally { config.opencodeReconcilePollMs = oldPoll; }
+});
+
+test("pending QA remains busy across the native completion-notification gap", async () => {
+  const f = fixture();
+  f.history.push(backgroundQa());
+  assert.equal(await f.harness.isBusy("/w", "ses_root"), true, "parent idle and child absent from active is insufficient");
+  f.history.push(qaReceipt());
+  assert.equal(await f.harness.isBusy("/w", "ses_root"), false);
+  f.history.push({ ...backgroundQa(), id: "msg_qa_recheck", time: { created: Date.now() + 10, completed: Date.now() + 11 } });
+  assert.equal(await f.harness.isBusy("/w", "ses_root"), true, "a previous report cannot settle a new inspection in the same child session");
+});
+
+test("stop drains background QA notifications and durably cancels them before the final parent interrupt", async () => {
+  const f = fixture();
+  f.history.push(backgroundQa());
+  f.session.metadata = { other: "preserved" };
+  f.client.session.get = async ({ sessionID }: any) => sessionID === "ses_qa"
+    ? { ...f.session, id: "ses_qa", parentID: "ses_root", agent: "browser-qa" } : f.session;
+  const interrupt = f.client.session.interrupt;
+  f.client.session.interrupt = async (input: any) => {
+    if (input.sessionID === "ses_qa") f.setInbox([{ ...qaReceipt(), payload: qaReceipt(), delivery: "queue" }]);
+    return interrupt(input);
+  };
+  assert.equal(await f.harness.abortTurn("/w", "ses_root"), true);
+  assert.deepEqual(f.calls.map((call) => call.name), ["interrupt", "update", "cancel", "interrupt"]);
+  assert.equal(f.calls[0].input.sessionID, "ses_qa");
+  assert.equal(f.calls.at(-1)?.input.sessionID, "ses_root");
+  assert.ok(f.calls.filter((call) => call.name === "interrupt").every((call) => call.input.resume === false));
+  assert.equal(f.session.metadata.other, "preserved");
+  const restarted = new OpenCodeV2Harness(f.client);
+  assert.equal(await restarted.isBusy("/w", "ses_root"), false, "a cancelled inbox result must not leave stale QA pending after restart");
+  f.history.push({ ...backgroundQa(), id: "msg_qa_after_stop", time: { created: Date.now() + 10, completed: Date.now() + 11 } });
+  assert.equal(await restarted.isBusy("/w", "ses_root"), true, "cancellation receipts apply to the old call, not all future QA in that session");
+  assert.equal(await f.harness.steer("/w", "ses_root", "Continue"), false);
+});
+
+test("stop never interrupts a QA session owned by another parent or workspace", async () => {
+  for (const child of [{ parentID: "other", location: { directory: "/w" } },
+    { parentID: "ses_root", location: { directory: "/other" } }]) {
+    const f = fixture();
+    f.history.push(backgroundQa());
+    f.client.session.get = async ({ sessionID }: any) => sessionID === "ses_qa" ? { ...f.session, ...child } : f.session;
+    await assert.rejects(f.harness.abortTurn("/w", "ses_root"), /different parent|different project/);
+    assert.deepEqual(f.calls, []);
+  }
+});
+
+test("restart recovery wakes the persisted QA receipt only for an attached, unstopped turn", async () => {
+  const f = fixture();
+  const receipt = qaReceipt();
+  f.setInbox([{ id: receipt.id, type: "synthetic", payload: { text: receipt.text, metadata: receipt.metadata }, delivery: "queue" }]);
+  assert.equal(await f.harness.isBusy("/w", "ses_root"), true);
+  assert.deepEqual(f.calls, [], "status checks without a recovery owner cannot wake a session");
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", undefined, 0);
+  try {
+    assert.equal(await f.harness.isBusy("/w", "ses_root"), true);
+    const resumed = f.calls.find((call) => call.name === "steer")?.input;
+    assert.equal(resumed.id, receipt.id, "native admission deduplicates the saved message ID");
+    assert.equal(resumed.text, receipt.text);
+    assert.equal(resumed.resume, true);
+    assert.equal(resumed.model, undefined);
+    await f.harness.abortTurn("/w", "ses_root");
+    const count = f.calls.filter((call) => call.name === "steer").length;
+    assert.equal(await f.harness.isBusy("/w", "ses_root"), false);
+    assert.equal(f.calls.filter((call) => call.name === "steer").length, count);
+  } finally { await stop(); }
+});
+
+test("a long browser QA provider retry cancels only optional inspection and leaves the builder running", async () => {
+  const f = fixture();
+  f.setActive(true);
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", undefined, 0);
+  try {
+    const internal = f.harness as any;
+    const watch = internal.watches.get("ses_root");
+    internal.event({ type: "session.created", data: { sessionID: "ses_qa", parentID: "ses_root", agent: "browser-qa" } }, "/w", "ses_root", watch);
+    internal.event({ type: "session.retry.scheduled", data: { sessionID: "ses_qa",
+      at: Date.now() + config.opencodeQuotaBlockMinRetryMs + 10_000, error: { message: "QA provider quota exhausted" } } }, "/w", "ses_root", watch);
+    assert.equal(watch.quota, undefined, "optional QA does not set the root turn's quota block");
+    assert.equal(internal.quotas.size, 0);
+    assert.deepEqual(f.calls.filter((call) => call.name === "interrupt").map((call) => call.input), [{ sessionID: "ses_qa", resume: false }]);
+    assert.equal(internal.stopped.has("ses_root"), false);
+  } finally { await stop(); }
+});
+
 test("session ownership is verified before a mutation and revert leaves workspace Git to the harness", async () => {
   const f = fixture();
   await assert.rejects(f.harness.revertSession("/other", "ses_root", "msg_user"), /different project/);
@@ -160,6 +286,9 @@ test("every persisted v2 model step is billed once, including child usage", asyn
   const f = fixture();
   const root = [assistant("msg_a", 100, "Step A"), assistant("msg_b", 200, "Step B")];
   const child = [assistant("msg_c", 300, "Child")];
+  root[0].time = { created: 1_000, streamed: 3_000, completed: 9_000 };
+  root[1].time = { created: 20_000, streamed: 22_000, completed: 50_000 };
+  child[0].time = { created: 20_000, streamed: 21_000, completed: 22_000 };
   f.client.session.list = async () => ({ data: [f.session, { ...f.session, id: "ses_child", parentID: "ses_root" }], cursor: {} });
   f.client.message.list = async ({ sessionID }: any) => ({ data: sessionID === "ses_child" ? child : root, cursor: {} });
   const messages = await f.harness.usageMessages("/w", "ses_root");
@@ -167,6 +296,11 @@ test("every persisted v2 model step is billed once, including child usage", asyn
   assert.equal(usage?.steps, 3);
   assert.equal(usage?.inputTokens, 660);
   assert.equal(usage?.outputTokens, 36);
+  const final = await (f.harness as any).finalUsage("/w", "ses_root", 0, new Set(), {
+    steps: new Map(), timings: new Map(), compactions: 0 });
+  assert.equal(final.timedOutputTokens, 36);
+  assert.equal(final.generationMs, 5_000, "overlapping child/provider windows exclude tool execution time");
+  assert.equal(final.outputTokensPerSecond, 7.2);
 });
 
 test("root finish-up budget counts persisted steps and sends a single non-resuming receipt", async () => {
@@ -307,7 +441,7 @@ test("a queued compaction is successful only when its persisted result succeeds"
   await assert.rejects(f.harness.compactSession("/w", "ses_root", "test", "text"), /compaction failed.*required template/);
 });
 
-test("tool events carry rich labels, file targets and subagent attribution", async () => {
+test("root tool events retain their targets while child work stays out of the public activity feed", async () => {
   const f = fixture();
   f.setActive(true);
   const updates: any[] = [];
@@ -323,7 +457,7 @@ test("tool events carry rich labels, file targets and subagent attribution", asy
     send("session.tool.input.started", { id: "tool_shell", name: "shell" });
     send("session.tool.called", { id: "tool_shell", input: { command: "node scripts/build.js" } });
     send("session.tool.failed", { id: "tool_shell", error: "exit 1" });
-    // A subagent child session attributes its tools and finishes with one public summary line.
+    // Child tools and reports belong to the builder, not the public activity feed.
     internal.event({ type: "session.created", created: Date.now(), data: { sessionID: "ses_child", parentID: "ses_root" } },
       "/w", "ses_root", watch, (update: any) => { updates.push(update); });
     const childSend = (type: string, data: object) => internal.event({ type, created: Date.now(), data: {
@@ -334,18 +468,88 @@ test("tool events carry rich labels, file targets and subagent attribution", asy
     childSend("session.text.ended", { assistantMessageID: "msg_child", ordinal: 0, text: "Researched arena layouts." });
     childSend("session.text.delta", { assistantMessageID: "msg_child2", ordinal: 0, delta: "still streaming" });
     const tools = updates.filter((update) => update.tool);
-    assert.deepEqual(tools.map((update) => update.tool.status), ["running", "completed", "running", "error", "running", "completed"]);
-    assert.deepEqual(tools.map((update) => update.text), [
-      "✏️ Editing", "✅ Edited",
-      "⚙️ Running a command", "⚠️ Shell hit an error",
-      "🤖 Subagent — 🔎 Searching the web", "🤖 Subagent — 🔎 Web research gathered",
-    ]);
+    assert.deepEqual(tools.map((update) => update.tool.status), ["running", "completed", "running", "error"]);
     assert.match(tools[0].detail ?? "", /site\/src\/main\.ts$/);
-    assert.equal(tools[2].detail, "node scripts/build.js");
-    // Only the finished child message goes public; streamed child deltas never render.
-    assert.deepEqual(updates.filter((update) => !update.tool && update.text?.startsWith("🤖 Subagent:")).map((update) => update.text),
-      ["🤖 Subagent: Researched arena layouts."]);
+    // Shell activity is the command itself, flagged so the card renders the command tail.
+    assert.equal(tools[2].command, true);
+    assert.equal(tools[2].detail, undefined);
+    assert.ok(!updates.some((update) => /still streaming|Researched arena layouts/.test(update.text)));
   } finally { await stop(); }
+});
+
+test("the live card counts executing children and removes the section after all children stop", async () => {
+  const { DiscordProgress } = await import("../src/progress.js");
+  const { renderProgressCard, renderProgressOverview } = await import("../src/progress-view.js");
+  const { cardView, assertV2 } = await import("./fixtures/cards.js");
+  const f = fixture();
+  f.setActive(true);
+  const progress = new DiscordProgress({ id: "subagents", edit: async () => {} } as any, "Updating");
+  progress.callback({ text: "Editing the main scene" });
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress.callback);
+  try {
+    const internal = f.harness as any;
+    const watch = internal.watches.get("ses_root");
+    const send = (id: string, type: string, data: object = {}) => internal.event({ type, created: Date.now(),
+      data: { sessionID: id, ...data } }, "/w", "ses_root", watch, progress.callback);
+    const initial = progress.readSnapshot();
+    const fields = cardView(renderProgressCard(initial)).fields.length;
+    send("ses_child", "session.created", { parentID: "ses_root", agent: "browser-qa" });
+    assert.equal(progress.readSnapshot().activeSubagents, 0, "an idle saved child is not active");
+    send("ses_child", "session.execution.started");
+    send("ses_child", "session.status", { status: { type: "busy" } });
+    assert.equal(progress.readSnapshot().activeSubagents, 1, "repeat status is not another subagent");
+    send("ses_root", "session.status", { status: { type: "idle" } });
+    assert.equal(progress.readSnapshot().activeSubagents, 1, "background QA remains active while the parent is idle");
+    send("ses_nested", "session.created", { parentID: "ses_child", agent: "explore" });
+    send("ses_nested", "session.execution.started");
+    send("ses_unrelated", "session.execution.started");
+    assert.equal(progress.readSnapshot().activeSubagents, 2, "only descendants count");
+    for (const render of [renderProgressCard, renderProgressOverview]) {
+      const before = cardView(render(initial));
+      const during = render(progress.readSnapshot());
+      assertV2(during);
+      const added = cardView(during).fields.filter((field) => !before.fields.some((old) => old.name === field.name));
+      assert.equal(added.length, 1);
+      assert.match(added[0].value, /\b2\b/, "the added section shows the live count");
+    }
+    send("ses_child", "session.step.ended", { assistantMessageID: "msg_qa", tokens: { input: 1, output: 1, reasoning: 0 }, finish: "tool-calls" });
+    assert.equal(progress.readSnapshot().activeSubagents, 2, "a model step ending is not session completion");
+    send("ses_child", "session.execution.succeeded");
+    assert.equal(progress.readSnapshot().activeSubagents, 1);
+    send("ses_nested", "session.execution.failed");
+    assert.equal(progress.readSnapshot().activeSubagents, 0);
+    assert.equal(cardView(renderProgressCard(progress.readSnapshot())).fields.length, fields);
+    send("ses_child", "session.execution.started");
+    send("ses_child", "session.execution.interrupted");
+    assert.equal(progress.readSnapshot().activeSubagents, 0);
+    send("ses_child", "session.execution.started");
+    send("ses_child", "session.deleted");
+    assert.equal(progress.readSnapshot().activeSubagents, 0);
+    assert.deepEqual(progress.readSnapshot().latest, initial.latest, "child presence never replaces the builder's activity");
+    assert.deepEqual(progress.readSnapshot().history, initial.history);
+  } finally { await stop(); await progress.close(); }
+});
+
+test("reattachment reconciles active descendants and clears stale counts on status polls and detach", async () => {
+  const f = fixture();
+  const child = { ...f.session, id: "ses_child", parentID: "ses_root" };
+  f.client.session.list = async () => ({ data: [f.session, child,
+    { ...child, id: "ses_foreign", location: { directory: "/other" } }], cursor: {} });
+  let active: Record<string, unknown> = { ses_child: {}, ses_foreign: {} };
+  f.client.session.active = async () => active;
+  const updates: any[] = [];
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); });
+  try {
+    for (let i = 0; i < 50 && !updates.some((update) => update.activeSubagents === 1); i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(updates.filter((update) => update.activeSubagents !== undefined).at(-1)?.activeSubagents, 1);
+    active = {};
+    await f.harness.isBusy("/w", "ses_root");
+    assert.equal(updates.at(-1).activeSubagents, 0, "polling repairs a missed terminal event");
+    active = { ses_child: {} };
+    await f.harness.isBusy("/w", "ses_root");
+    assert.equal(updates.at(-1).activeSubagents, 1);
+  } finally { await stop(); }
+  assert.equal(updates.at(-1).activeSubagents, 0, "a detached watcher cannot leave a live indicator behind");
 });
 
 test("native text and reasoning with the same ordinal never share streamed buffers or public narration", async () => {
@@ -372,20 +576,27 @@ test("native text and reasoning with the same ordinal never share streamed buffe
   } finally { await stop(); }
 });
 
-test("average tok/s uses opencode's streamed windows: retries re-anchor and unstreamed steps withhold the rate", async () => {
+test("average tok/s pairs streamed windows and tokens: retries re-anchor and untimed steps stay billed", async () => {
   const f = fixture();
   f.setActive(true);
-  const stop = await f.harness.watchExistingTurn("/w", "ses_root");
+  const updates: any[] = [];
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); });
   try {
     const internal = f.harness as any;
     const watch = internal.watches.get("ses_root");
     const send = (type: string, created: number, content: object) => internal.event({ type, created, data: {
-      sessionID: "ses_root", ...content } }, "/w", "ses_root", watch);
+      sessionID: "ses_root", ...content } }, "/w", "ses_root", watch, (update: any) => { updates.push(update); });
     const model = { id: "text", providerID: "test" };
     const tokens = { input: 100, output: 400, reasoning: 100, cache: { read: 0, write: 0 } };
     send("session.step.started", 1_000, { assistantMessageID: "msg_a", model, started: 1_000 });
     send("session.step.streamed", 5_000, { assistantMessageID: "msg_a" });
     send("session.step.ended", 5_050, { assistantMessageID: "msg_a", finish: "stop", cost: 0.01, tokens });
+    // The live card shows the anchored window only: 500 tokens over the 4s
+    // started→streamed span, never a rate invented from step-end spacing.
+    const liveA = updates.filter((update) => update.kind === "metrics").at(-1)!.metrics;
+    assert.equal(liveA.generationMs, 4_000);
+    assert.equal(liveA.timedOutputTokens, 500);
+    assert.equal(liveA.outputTokensPerSecond, 125);
     send("session.step.started", 10_000, { assistantMessageID: "msg_b", model, started: 10_000 });
     send("session.step.streamed", 14_000, { assistantMessageID: "msg_b" });
     // A retried step re-anchors: the first streamed window is discarded and only
@@ -398,12 +609,26 @@ test("average tok/s uses opencode's streamed windows: retries re-anchor and unst
     assert.equal(usage.generationMs, 5_000);
     assert.equal(usage.timedOutputTokens, 550);
     assert.equal(usage.outputTokensPerSecond, 110);
-    // A step that failed before streaming withholds the average instead of
-    // letting the timed steps overstate the turn's rate.
+    // Steps whose started/streamed anchors never reached the bot (SSE gap,
+    // parallel subagent bursts) must not invent a rate from step-end spacing:
+    // their tokens stay billed while live and final averages describe only
+    // the anchored steps.
+    send("session.step.ended", 21_020, { assistantMessageID: "msg_x", finish: "stop", cost: 0.01,
+      tokens: { ...tokens, output: 10_000, reasoning: 0 } });
+    send("session.step.ended", 21_021, { assistantMessageID: "msg_y", finish: "stop", cost: 0.01,
+      tokens: { ...tokens, output: 10_000, reasoning: 0 } });
+    const liveB = updates.filter((update) => update.kind === "metrics").at(-1)!.metrics;
+    assert.equal(liveB.generationMs, 5_000);
+    assert.equal(liveB.timedOutputTokens, 550);
+    assert.equal(liveB.outputTokensPerSecond, 110);
+    assert.equal(liveB.outputTokens, 20_550, "untimed steps keep their tokens billed");
+    const partial = await internal.finalUsage("/w", "ses_root", 0, new Set(), watch);
+    assert.equal(partial.outputTokensPerSecond, 110);
+    // A failed untimed attempt must not poison the measured samples.
     send("session.step.started", 30_000, { assistantMessageID: "msg_c", model, started: 30_000 });
     send("session.step.failed", 31_000, { assistantMessageID: "msg_c", error: { message: "provider unavailable" } });
-    const withheld = await internal.finalUsage("/w", "ses_root", 0, new Set(), watch);
-    assert.equal(withheld.outputTokensPerSecond, undefined);
+    const failed = await internal.finalUsage("/w", "ses_root", 0, new Set(), watch);
+    assert.equal(failed.outputTokensPerSecond, 110);
   } finally { await stop(); }
 });
 
@@ -418,10 +643,101 @@ test("persisted streamed windows rate the turn even when live events were never 
   f.history.push(step("msg_p2", now + 3_000, now + 4_000, 50));
   const internal = f.harness as any;
   const usage = await internal.finalUsage("/w", "ses_root", now - 1, new Set(), {
-    since: now - 1, baseline: new Set(), steps: new Map(), generationMs: 0, timedOutputTokens: 0, timedSteps: 0, compactions: 0 });
+    since: now - 1, baseline: new Set(), steps: new Map(), timings: new Map(), compactions: 0 });
   assert.equal(usage.generationMs, 3_000);
   assert.equal(usage.timedOutputTokens, 350);
   assert.equal(usage.outputTokensPerSecond, 350 / 3);
+});
+
+test("a 100-step Surplus turn never divides untimed output by another step's duration", async () => {
+  const f = fixture();
+  f.setActive(true);
+  const updates: any[] = [];
+  const progress = (update: any) => { updates.push(update); };
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress, 0);
+  try {
+    const internal = f.harness as any;
+    const watch = internal.watches.get("ses_root");
+    const model = { id: "deepseek", providerID: "surplus" };
+    for (let index = 0; index < 100; index++) {
+      const id = `msg_rate_${index}`;
+      const started = 1_000 + index * 10_000;
+      // One measured step; the others have zero/reversed/missing timestamps.
+      // Every step is billed, but only the measured step belongs in the rate.
+      const streamed = index === 0 ? started + 1_000 : index % 3 === 0 ? undefined : started - index % 2;
+      const tokens = { input: 500, output: index === 0 ? 80 : 121_000, reasoning: index === 0 ? 20 : 0,
+        cache: { read: 0, write: 0 } };
+      const send = (type: string, created: number, data: object) => internal.event({ type, created,
+        data: { sessionID: "ses_root", assistantMessageID: id, ...data } }, "/w", "ses_root", watch, progress);
+      send("session.step.started", started, { model, started });
+      if (streamed !== undefined) send("session.step.streamed", streamed, {});
+      send("session.step.ended", started + 8_000, { finish: "tool-calls", cost: 0.01, tokens });
+      f.history.push({ type: "assistant", id, agent: "sitebuilder", model, content: [], finish: "tool-calls",
+        time: { created: started, streamed, completed: started + 8_000 }, tokens, cost: 0.01 });
+    }
+    const live = updates.filter((update) => update.kind === "metrics").at(-1).metrics;
+    assert.equal(live.steps, 100);
+    assert.equal(live.outputTokens, 100 + 99 * 121_000);
+    assert.equal(live.timedOutputTokens, 100);
+    assert.equal(live.generationMs, 1_000);
+    assert.equal(live.outputTokensPerSecond, 100);
+    const saved = await internal.finalUsage("/w", "ses_root", 0, new Set(), watch);
+    assert.equal(saved.outputTokens, live.outputTokens);
+    assert.equal(saved.timedOutputTokens, 100);
+    assert.equal(saved.generationMs, 1_000);
+    assert.equal(saved.outputTokensPerSecond, 100);
+  } finally { await stop(); }
+});
+
+test("live averages recover all 100 measured steps from history and deduplicate replayed step ends", async () => {
+  const f = fixture();
+  f.setActive(true);
+  const model = { id: "deepseek", providerID: "surplus" };
+  const tokens = { input: 500, output: 200, reasoning: 100, cache: { read: 0, write: 0 } };
+  for (let index = 0; index < 100; index++) f.history.push({ type: "assistant", id: `msg_saved_${index}`,
+    agent: "sitebuilder", model, content: [], finish: "tool-calls", tokens, cost: 0.01,
+    time: { created: index * 10_000 + 1_000, streamed: index * 10_000 + 3_000, completed: index * 10_000 + 9_000 } });
+  const updates: any[] = [];
+  const progress = (update: any) => { updates.push(update); };
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress, 0);
+  try {
+    const internal = f.harness as any;
+    const watch = internal.watches.get("ses_root");
+    const recovered = updates.filter((update) => update.kind === "metrics").at(-1)?.metrics;
+    assert.equal(recovered?.steps, 100);
+    assert.equal(recovered?.outputTokensPerSecond, 150);
+    // SSE can repeat records already reconciled from durable history.
+    internal.event({ type: "session.step.ended", created: 999_000, data: { sessionID: "ses_root",
+      assistantMessageID: "msg_saved_99", finish: "tool-calls", cost: 0.01, tokens } }, "/w", "ses_root", watch, progress);
+    const replayed = updates.filter((update) => update.kind === "metrics").at(-1).metrics;
+    assert.equal(replayed.steps, 100);
+    assert.equal(replayed.outputTokens, 30_000);
+    assert.equal(replayed.generationMs, 200_000);
+    assert.equal(replayed.outputTokensPerSecond, 150);
+  } finally { await stop(); }
+});
+
+test("a completed provider window replaces a burst live estimate on the actual progress card", async () => {
+  const { DiscordProgress } = await import("../src/progress.js");
+  const f = fixture();
+  f.setActive(true);
+  const card = new DiscordProgress({ id: "rate", edit: async () => {} } as any, "Rate test");
+  const progress = (update: any) => card.callback(update);
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress, 0);
+  try {
+    const internal = f.harness as any;
+    const watch = internal.watches.get("ses_root");
+    const send = (type: string, created: number, data: object) => internal.event({ type, created,
+      data: { sessionID: "ses_root", assistantMessageID: "msg_burst", ...data } }, "/w", "ses_root", watch, progress);
+    send("session.step.started", 1_000, { model: { id: "deepseek", providerID: "surplus" }, started: 1_000 });
+    send("session.reasoning.delta", 1_010, { ordinal: 0, delta: "A large buffered reasoning chunk. ".repeat(1_000) });
+    assert.ok(card.readSnapshot().metrics!.liveTokensPerSecond! > 1_000);
+    send("session.step.streamed", 2_000, {});
+    send("session.step.ended", 9_000, { finish: "tool-calls", cost: 0,
+      tokens: { input: 500, output: 80, reasoning: 20, cache: { read: 0, write: 0 } } });
+    assert.equal(card.readSnapshot().metrics!.liveTokensPerSecond, undefined, "completed usage clears the burst estimate immediately");
+    assert.equal(card.readSnapshot().metrics!.outputTokensPerSecond, 100);
+  } finally { await stop(); await card.close(); }
 });
 
 test("session status beats carry the busy flag without claiming the activity line", async () => {

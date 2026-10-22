@@ -4,8 +4,8 @@ import {
 } from "discord.js";
 import { cardId } from "./card-actions.js";
 import { addCardDivider, addCardHeader, cardMessage, type CardMessage } from "./card-ui.js";
+import { plain } from "./progress-view.js";
 import type { QueuedRequest } from "./types.js";
-import { truncate } from "./util.js";
 
 export interface PanelSection { key: string; label: string; text: string }
 export type PanelScope = "turn" | "project" | "doc";
@@ -15,7 +15,19 @@ export function textPages(text: string, limit = 2800): string[] {
   const pages: string[] = [];
   while (text.length > limit) {
     const newline = text.lastIndexOf("\n", limit);
-    const end = newline > limit / 2 ? newline + 1 : limit;
+    let end = newline > limit / 2 ? newline + 1 : limit;
+    const before = text.slice(0, end);
+    if ((before.match(/```/g)?.length ?? 0) % 2 === 1) {
+      // The cut lands inside a fenced code block: an unclosed fence would
+      // swallow the rest of the page into code rendering, so back the cut up
+      // to the opening fence's line and let the block start fresh on the next
+      // page. A fence at the very top (or longer than a page) cannot move and
+      // is cut as before.
+      const opener = before.lastIndexOf("```");
+      const lineStart = before.lastIndexOf("\n", opener) + 1;
+      if (lineStart > 0) end = lineStart;
+    }
+    if (end <= 0) end = limit;
     pages.push(text.slice(0, end));
     text = text.slice(end);
   }
@@ -65,7 +77,7 @@ export function renderQueuePanel(resource: string, queue: QueuedRequest[], prepa
   if (!listed.length) card.addTextDisplayComponents(new TextDisplayBuilder().setContent("Nothing else is queued. Requests already being prepared can be interrupted with Stop."));
   for (const [index, request] of listed.entries()) {
     addCardDivider(card);
-    card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`**${page * 5 + index + 1}. ${truncate(request.author?.name ?? "Saved request", 60)}**${request.images?.length ? ` · ${request.images.length} image(s)` : ""}\n${truncate(request.prompt, 420)}`));
+    card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`**${page * 5 + index + 1}. ${plain(request.author?.name ?? "Saved request", 60)}**${request.images?.length ? ` · ${request.images.length} image(s)` : ""}\n${plain(request.prompt, 420)}`));
     card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(cardId("cancel", resource, request.statusMessageId)).setLabel(`Cancel request ${page * 5 + index + 1}`).setStyle(ButtonStyle.Secondary),
     ));

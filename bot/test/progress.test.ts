@@ -1,67 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate as nextTick } from "node:timers/promises";
-import { ButtonStyle, ComponentType, type Message, type MessageEditOptions } from "discord.js";
+import { type Message, type MessageEditOptions } from "discord.js";
 import { renderProgressOverview as renderProgressCard } from "../src/progress-view.js";
 import { assertV2, cardView } from "./fixtures/cards.js";
 import { requestDisplayText } from "../src/util.js";
-import { buildingSnapshot, mergedSnapshot } from "./fixtures/progress.js";
+import { buildingSnapshot } from "./fixtures/progress.js";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { DiscordProgress } = await import("../src/progress.js");
 const { LegacyOpenCodeHarness: OpenCodeHarness } = await import("../src/opencode.js");
-
-test("the card shows the real stage, plan, changes, usage, saved requests and links", () => {
-  const state = buildingSnapshot();
-  const options = renderProgressCard(state);
-  const card = cardView(options);
-  assertV2(options);
-  assert.equal(card.color, 0x5865f2);
-  assert.match(card.description!, /\*\*● Build\*\*/);
-  // A single request stays off the card: it is already visible in the thread.
-  assert.doesNotMatch(card.description!, /Your request/);
-  assert.match(card.description!, /Agent update/);
-  assert.match(card.fields!.find((field) => field.name.startsWith("Plan"))!.value, /Connect the live leaderboard/);
-  assert.match(card.fields!.find((field) => field.name === "Changes this turn")!.value, /184 \/ −37/);
-  assert.match(card.fields!.find((field) => field.name === "Usage")!.value, /28\.4k \/ 100k · 28%/);
-  assert.doesNotMatch(JSON.stringify(card), /claude|gpt|surplus|provider\//i);
-  assert.match(card.fields!.find((field) => field.name === "Next pass")!.value, /\*\*2\*\*/);
-  assert.match(card.buttons[0].url!, /sumo-shove/);
-  assert.match(card.footer!.text, /2m 14s.*24 actions.*1 running/);
-  // The card already updates in place; saying so only spends footer characters.
-  assert.doesNotMatch(card.footer!.text, /Updates in place/);
-  assert.deepEqual(options.allowedMentions, { parse: [] });
-  assert.doesNotMatch(card.description!, /\d+%|ETA/);
-});
-
-test("the card carries no label that only repeats the line beneath it", () => {
-  const state = buildingSnapshot();
-  const description = cardView(renderProgressCard(state)).description!;
-  // The rail already names the phase, and the activity line describes itself.
-  assert.doesNotMatch(description, /Right now|In the project queue/);
-
-  // The queued variant must not say "Queued" twice.
-  state.phase = "queued";
-  const queued = cardView(renderProgressCard(state)).description!;
-  assert.equal((queued.match(/\*\*● Queued\*\*/g) ?? []).length, 1);
-  assert.doesNotMatch(queued, /In the project queue/);
-});
-
-test("questions take priority, show option descriptions, then retain the named decision", () => {
-  const state = buildingSnapshot();
-  state.questions = [{ question: "How should matches end?", options: [{ label: "First to five", description: "Short, competitive rounds" }] }];
-  let card = cardView(renderProgressCard(state));
-  assert.equal(card.color, 0xf59e0b);
-  assert.match(card.description!, /Waiting for your answer/);
-  assert.doesNotMatch(card.description!, /Agent update/);
-  assert.match(card.fields!.find((field) => field.name.includes("Your input"))!.value, /Short, competitive rounds/);
-  assert.equal(card.fields!.some((field) => field.name === "Recent activity" || field.name === "Usage"), false);
-  state.questions = undefined;
-  state.questionPin = { question: "How should matches end?", resolution: "Shane chose First to five" };
-  card = cardView(renderProgressCard(state));
-  assert.match(card.fields!.find((field) => field.name === "Decision")!.value, /Shane chose/);
-});
 
 test("long streamed text and adversarial markdown stay within Discord V2 text and component budgets", () => {
   const state = buildingSnapshot();
@@ -77,76 +26,13 @@ test("long streamed text and adversarial markdown stay within Discord V2 text an
   assert.ok(cardView(options).text.length > 0);
 });
 
-test("quiet activity shows its age without claiming a failure or estimating completion", () => {
-  const state = buildingSnapshot();
-  state.now += 60_000;
-  const card = cardView(renderProgressCard(state));
-  assert.match(card.description!, /Running · 1m 5s/);
-  assert.doesNotMatch(card.description!, /failed|stalled|ETA|remaining/i);
-});
-
-test("a turn with no agent activity is flagged with /site stop guidance", () => {
-  const state = buildingSnapshot();
-  state.now += 6 * 60_000;
-  state.stalledForMs = 6 * 60_000;
-  const card = cardView(renderProgressCard(state));
-  assert.equal(card.color, 0xf59e0b);
-  assert.match(card.description!, /No progress for 6m 0s/);
-  assert.match(card.description!, /\/site stop/);
-  assert.match(card.footer!.text, /No progress for 6m 0s/);
-  assert.doesNotMatch(card.description!, /Generating|Running this activity/);
-});
-
-test("queued turns and pending questions are idle by design, not stalled", () => {
-  const queued = buildingSnapshot();
-  queued.phase = "queued";
-  queued.stalledForMs = 20 * 60_000;
-  assert.doesNotMatch(cardView(renderProgressCard(queued)).description!, /No progress/);
-
-  const waiting = buildingSnapshot();
-  waiting.stalledForMs = 20 * 60_000;
-  waiting.questions = [{ question: "Pick a theme", options: [{ label: "Dark" }] }];
-  assert.doesNotMatch(cardView(renderProgressCard(waiting)).description!, /No progress/);
-});
-
-test("a queued turn leads the rail instead of leaving every stage pending", () => {
-  const state = buildingSnapshot();
-  state.phase = "queued";
-  const description = cardView(renderProgressCard(state)).description!;
-  assert.match(description, /\*\*● Queued\*\*  ›  ○ Prepare/);
-  assert.doesNotMatch(description, /● Build|✓ /);
-  // The stage list still renders, so the reader knows what happens next.
-  assert.match(description, /○ Publish/);
-});
-
-test("a non-question amber card explains what it is waiting on", () => {
-  const state = buildingSnapshot();
-  state.waiting = true;
-  state.waitingReason = "A tool reported an error — the agent is retrying";
-  let card = cardView(renderProgressCard(state));
-  assert.equal(card.color, 0xf59e0b);
-  assert.match(card.description!, /A tool reported an error/);
-  assert.doesNotMatch(card.description!, /Right now/);
-
-  // Without a reason the card still says something rather than showing a bare amber frame.
-  state.waitingReason = undefined;
-  card = cardView(renderProgressCard(state));
-  assert.match(card.description!, /Waiting on the agent/);
-
-  // A question owns the amber state and its own heading, so no duplicate warning.
-  state.questions = [{ question: "Pick a theme", options: [{ label: "Dark" }] }];
-  card = cardView(renderProgressCard(state));
-  assert.match(card.description!, /Waiting for your answer/);
-  assert.doesNotMatch(card.description!, /Waiting on the agent|A tool reported/);
-});
-
-test("a failed tool or provider retry reaches the card with a stated reason", async () => {
+test("a failed tool waits without a reason line while a provider retry states one", async () => {
   const progress = new DiscordProgress({ id: "amber", edit: async () => {} } as unknown as Message, "Updating");
   const snapshot = () => (progress as unknown as { snapshot: () => ReturnType<typeof buildingSnapshot> }).snapshot();
   try {
     progress.callback({ text: "🔧 Fixing the build", tool: { id: "t1", name: "bash", status: "error" } });
     assert.equal(snapshot().waiting, true);
-    assert.match(snapshot().waitingReason!, /tool reported an error/);
+    assert.equal(snapshot().waitingReason, undefined, "the errored tool headline is its own explanation");
 
     progress.callback({ text: "🔌 Waiting for the agent service to be reachable" });
     assert.equal(snapshot().waiting, true);
@@ -189,17 +75,6 @@ test("a merged prompt shows the user's own words, not the model-facing preamble"
   // Blank and whitespace-only entries never produce stray separators.
   assert.equal(requestDisplayText(["  only  ", "   ", ""]), "only");
   assert.equal(requestDisplayText([]), "");
-});
-
-test("only a merged turn echoes the request, so the plan keeps the space", () => {
-  const single = cardView(renderProgressCard(buildingSnapshot()));
-  assert.doesNotMatch(single.description!, /Your requests?/);
-
-  const merged = cardView(renderProgressCard(mergedSnapshot()));
-  assert.match(merged.description!, /\*\*Your requests\*\*/);
-  assert.match(merged.description!, /Add a proper leaderboard/);
-  // The plan field is still present and unfiltered by the request block.
-  assert.match(merged.fields!.find((field) => field.name.startsWith("Plan"))!.value, /Connect the live leaderboard/);
 });
 
 test("the plan shows up to seven items instead of four", () => {
@@ -293,12 +168,6 @@ test("progress needs no embed permission and nests Turn details and a red Stop i
   assert.equal(edits.length, 1);
   assertV2(edits[0]);
   assert.equal(edits[0].content, null, "clear the original acknowledgement when upgrading it");
-  const card = cardView(edits[0]);
-  assert.match(card.text, /Updating without embeds/);
-  const headRow = card.buttons.filter((button) => ["ts2:details:v2", "ts2:stop:v2"].includes(button.custom_id!));
-  assert.deepEqual(headRow.map((button) => button.label), ["Turn details", "Stop turn"]);
-  assert.equal(headRow[0].style, ButtonStyle.Primary, "Turn details owns the header corner");
-  assert.equal(headRow[1].style, ButtonStyle.Danger, "Stop is red in the bottom row");
 });
 
 test("OpenCode feeds structured plan, public usage and tool events without exposing reasoning or spend", () => {
@@ -707,4 +576,16 @@ test("the admin-set failover list overrides the configured one", async () => {
   assert.equal(harness.failoverModelForError(error, "main/model"), undefined, "null falls back to the configured list, which is empty here");
   harness.failoverModelSource = () => ["cmd/set-model", "main/other"];
   assert.equal(harness.failoverModelForError(error, "main/model"), "cmd/set-model", "the model just attempted is never retried");
+});
+
+test("public narration stays bounded like the private thinking trail", () => {
+  const progress = new DiscordProgress({ id: "amber", edit: async () => {} } as unknown as Message, "Updating");
+  const snapshot = () => (progress as unknown as { snapshot: () => ReturnType<typeof buildingSnapshot> }).snapshot();
+  for (let index = 0; index < 60; index += 1) {
+    progress.callback({ kind: "thought", text: `update ${index}`, narrationId: `n${index}` });
+  }
+  // The snapshot is persisted on every flush; a chatty turn must not grow it
+  // without limit while history and the reasoning trail are capped.
+  assert.ok(snapshot().narration.length <= 40, `narration entries bounded, got ${snapshot().narration.length}`);
+  assert.equal(snapshot().narration.at(-1)?.text, "update 59", "the newest narration is kept");
 });

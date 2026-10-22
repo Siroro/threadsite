@@ -32,6 +32,18 @@ test("saved billing counts each message/step once, includes cache/reasoning, and
   assert.equal(reconcileUsage(saved, saved)!.inputTokens, 270, "replayed history does not add spend");
 });
 
+test("saved history never contributes a tok/s rate: without live anchors the windows are meaningless", () => {
+  // Steps recovered from saved messages have no first-sighting anchors, and the
+  // gaps between their step-finishes say nothing about generation time —
+  // parallel subagent steps land in bursts that would rate a turn at 100k+ tok/s.
+  const recovered = usageFromMessages([message("a", Date.now() - 60_000), message("b", Date.now()), message("c", Date.now())])!;
+  assert.equal(recovered.steps, 3);
+  assert.equal(recovered.outputTokens, 66);
+  assert.equal(recovered.outputTokensPerSecond, undefined);
+  assert.equal(recovered.generationMs, undefined);
+  assert.equal(recovered.timedOutputTokens, undefined);
+});
+
 test("turn revisions survive reopening the ledger, concurrent appends and a torn final line", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

@@ -30,11 +30,33 @@ To roll back, drain turns, set `OPENCODE_API_VERSION=v1`, rebuild both services 
 
 ## V2 runtime and commands
 
-`opencode/v2/config.mjs` produces native v2 configuration from the existing builder settings, preserving the independent general/explore models, step limit, project brief, MCP timeouts, compaction limits and Surplus catalog. `snapshots` are disabled: the harness owns Git and rollback. The native plugin supplies the three guarded tools (`asset_download`, `js_syntax_check`, `project_notes`) and `todoread`; v2's experimental `todowrite` is explicitly enabled. Unknown built-in tools, including worktree and terminal management, are removed. Shell commands and subagents run in the foreground so publication waits for their work to finish, matching the original turn lifecycle.
+`opencode/v2/config.mjs` produces native v2 configuration from the existing builder settings, preserving the independent general/explore models, step limit, project brief, MCP timeouts, compaction limits and Surplus catalog. `snapshots` are disabled: the harness owns Git and rollback. The native plugin supplies the three guarded tools (`asset_download`, `js_syntax_check`, `project_notes`) and `todoread`; v2's experimental `todowrite` is explicitly enabled. Unknown built-in tools, including worktree and terminal management, are removed. Shell commands and general/explore subagents run in the foreground. The inspection-only `browser-qa` subagent also supports `background: true`.
 
 V2 adds `rg`, scoped `find` and `rm` for explicit editable paths inside `site/` or `scratch/`. The plugin rejects destructive find actions, traversal, rm shell operators/globs, symlinks, and removal of harness inputs such as `site/net/` or generated `site/js/`. Dependencies, Git writes, build ownership, publication exclusions, symlink checks and static-site limits are unchanged. These command permissions are application policy, not an operating-system sandbox.
 
 Browser tools are absent for text-only or unknown models, checked both through session permissions and at each native model request. General/explore agents always have browser access disabled. Harness browser QA is independent and remains advisory.
+
+Set `OPENCODE_BROWSER_QA_MODEL=provider/model-id` to enable a dedicated `browser-qa`
+subagent. Blank disables it. The selected model must advertise image input and
+cannot be overridden by the builder's tool call. This agent receives only browser
+tools, including when its parent is text-only; it cannot edit files, delegate or
+ask the user questions. Generated `AGENTS.md` instructs builders to delegate
+bounded UI/gameplay inspections with the URL, viewports, controls and expected
+behavior, then review the findings. Unavailable models and QA failures remain
+advisory; static validation still applies.
+
+With `background: true`, the builder can continue independent work while QA
+inspects. Native results return automatically. The bot holds the original turn
+open until QA finishes and the parent handles its report, so publication and
+billing include the result. Recovery resumes a parked result using its original
+message ID. Stop interrupts the child and drains its notification before the final
+parent interrupt, preventing a late result from restarting the stopped turn.
+
+Set `OPENCODE_SUBAGENT_MODEL=provider/model-id` in `.env` to select the model for
+both `general` and `explore` subagents independently of the builder and titler.
+An unset or blank value keeps their configured default (`opencode/mimo-v2.6-flash-free`).
+The selected provider must be available and have any required credentials.
+Malformed model references fail service startup.
 
 ### Language servers and documentation
 
@@ -109,7 +131,15 @@ $env:OPENCODE_V2_BINARY = 'C:\path\to\opencode.exe'
 npm run test:opencode-v2
 ```
 
-This check covers native plugin loading, tool exposure, scripted root/child billing, questions, live steering, durable notes, bounded titles, compaction, credentials, conversation revert, stopping a parked turn and session teardown. It retains the temporary directory printed in its result for inspection. It does not deploy the bot or test real provider quotas.
+This check covers native plugin loading, tool exposure, scripted root/child billing, general/explore delegation, background vision QA from a text-only builder (including screenshots, concurrent builder work, stopping and parked-result recovery), questions, live steering, durable notes, bounded titles, compaction, credentials, conversation revert, stopping a parked turn and session teardown. It retains the temporary directory printed in its result for inspection. It does not deploy the bot or test real provider quotas.
+
+For a live throughput check, use the same `OPENCODE_V2_BINARY` with
+`npm run test:opencode-v2-throughput` from `bot/`. It selects an available
+zero-cost OpenCode model, follows a sequential read task in an isolated workspace,
+and compares the live card and final rate with saved server timestamps/token counts.
+Set `OPENCODE_THROUGHPUT_MODEL=opencode/model-id` to select another advertised free
+model; paid models are rejected. Timing events, progress and `report.json` stay
+in the printed temporary directory.
 
 The smoke test uses an isolated Context7-compatible server to verify that both
 documentation tools survive the native tool filters and permissions, while an

@@ -25,14 +25,18 @@ const lspCommand = process.env.OPENCODE_LSP_SMOKE_COMMAND ? JSON.parse(process.e
 const source = 'export const count: number = "wrong";\n';
 await fs.writeFile(path.join(workspace, "site", "src", "lsp-smoke.ts"), source);
 const docsCalls: string[] = [];
+const browserCalls: string[] = [];
+const qaRequests: Array<{ tools: string[]; hasImage: boolean }> = [];
+const screenshot = (await fs.readFile(new URL("../assets/skills/threejs-game-studio/assets/scorecard-anchors/scene-1.jpg", import.meta.url))).toString("base64");
 const docsOffline = process.env.OPENCODE_DOCS_SMOKE_OFFLINE === "1";
 const docs = http.createServer(async (request, response) => {
   if (request.method !== "POST") { response.writeHead(405).end(); return; }
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   const message = JSON.parse(Buffer.concat(chunks).toString());
+  const browser = request.url === "/browser";
   if (message.id === undefined) { response.writeHead(202).end(); return; }
-  if (docsOffline) {
+  if (docsOffline && !browser) {
     response.writeHead(503, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: "Documentation fixture unavailable" }));
     return;
@@ -40,12 +44,14 @@ const docs = http.createServer(async (request, response) => {
   let result: any = {};
   if (message.method === "initialize") result = { protocolVersion: message.params.protocolVersion,
     capabilities: { tools: {} }, serverInfo: { name: "context7-fixture", version: "1" } };
-  if (message.method === "tools/list") result = { tools: ["resolve-library-id", "query-docs", "unexpected-write"].map((name) => ({
+  if (message.method === "tools/list") result = { tools: (browser ? ["browser_navigate", "browser_take_screenshot"] : ["resolve-library-id", "query-docs", "unexpected-write"]).map((name) => ({
     name, description: "Public API docs fixture", inputSchema: { type: "object", properties: {} },
   })) };
   if (message.method === "tools/call") {
-    docsCalls.push(message.params.name);
-    result = { content: [{ type: "text", text: "Fixture library documentation" }] };
+    (browser ? browserCalls : docsCalls).push(message.params.name);
+    result = browser && message.params.name === "browser_take_screenshot"
+      ? { content: [{ type: "image", mimeType: "image/jpeg", data: screenshot }] }
+      : { content: [{ type: "text", text: browser ? "Preview loaded" : "Fixture library documentation" }] };
   }
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
@@ -62,6 +68,12 @@ const provider = http.createServer(async (request, response) => {
   const body = JSON.parse(Buffer.concat(chunks).toString());
   providerRequests++;
   models.add(body.model);
+  if (body.model === "vision") {
+    await fs.writeFile(path.join(root, `qa-request-${qaRequests.length}.json`), JSON.stringify(body, null, 2));
+    qaRequests.push({ tools: (body.tools ?? []).map((tool: any) => tool.function.name), hasImage: JSON.stringify(body.messages).includes("image_url") });
+    // Keep QA in flight long enough for the root to finish independent work.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
   for (const tool of body.tools ?? []) toolNames.add(tool.function?.name);
   const user = body.messages.filter((message: any) => message.role === "user").at(-1);
   const text = JSON.stringify(user?.content ?? "");
@@ -74,7 +86,22 @@ const provider = http.createServer(async (request, response) => {
     { id: "call_question", name: "question", arguments: JSON.stringify({ questions: [{ header: "Colour", question: "Choose a colour", options: [{ label: "Blue", description: "Blue palette" }] }] }) },
   ] : [];
   if (text.includes("Delegate smoke") && last?.role !== "tool") calls = [{ id: "call_child", name: "subagent",
-    arguments: JSON.stringify({ agent: "general", description: "Inspect the fixture", prompt: "Inspect the fixture and summarize." }) }];
+    arguments: JSON.stringify({ agent: text.includes("explore") ? "explore" : "general", description: "Inspect the fixture",
+      prompt: "Child inspection smoke: read site/src/lsp-smoke.ts and summarize.", background: false }) }];
+  if (text.includes("Child inspection smoke") && last?.role !== "tool") calls = [{ id: "call_child_read", name: "read",
+    arguments: JSON.stringify({ path: "site/src/lsp-smoke.ts" }) }];
+  if (text.includes("Browser QA smoke")) {
+    if (last?.role !== "tool") calls = [{ id: "call_browser_qa", name: "subagent",
+      arguments: JSON.stringify({ agent: "browser-qa", model: "threadsite-test/text", background: true,
+        description: "Inspect the preview", prompt: "Inspect browser fixture at http://127.0.0.1:8080/100/200/. Navigate and take a screenshot, then report." }) }];
+    else if (last.tool_call_id === "call_browser_qa") calls = [{ id: "call_independent_read", name: "read",
+      arguments: JSON.stringify({ path: "site/src/lsp-smoke.ts" }) }];
+  }
+  if (text.includes("Inspect browser fixture") && !JSON.stringify(body.messages).includes("image_url")) calls = [{
+    id: last?.role === "tool" ? "call_screenshot" : "call_navigate",
+    name: last?.role === "tool" ? "playwright_browser_take_screenshot" : "playwright_browser_navigate",
+    arguments: last?.role === "tool" ? "{}" : JSON.stringify({ url: "http://127.0.0.1:8080/100/200/" }),
+  }];
   if (text.includes("Stop smoke") && last?.role !== "tool") calls = [{ id: "call_stop_question", name: "question",
     arguments: JSON.stringify({ questions: [{ header: "Wait", question: "Wait for stop", options: [{ label: "Wait", description: "Keep waiting" }] }] }) }];
   if (text.includes("Documentation smoke") && last?.role !== "tool") calls = [
@@ -117,12 +144,18 @@ await new Promise<void>((resolve) => lease.close(() => resolve()));
 const legacy = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"));
 legacy.provider = { "threadsite-test": { npm: "@ai-sdk/openai-compatible", name: "Local scripted provider",
   options: { baseURL: `http://127.0.0.1:${providerPort}/v1`, apiKey: "test-only" },
-  models: { text: { name: "Test", limit: { context: 32000, output: 2048 }, modalities: { input: ["text"], output: ["text"] } } } } };
-legacy.mcp = {};
+  models: {
+    text: { name: "Test", limit: { context: 32000, output: 2048 }, modalities: { input: ["text"], output: ["text"] } },
+    child: { name: "Child test", limit: { context: 32000, output: 2048 }, modalities: { input: ["text"], output: ["text"] } },
+    vision: { name: "Vision QA test", limit: { context: 32000, output: 2048 }, modalities: { input: ["text", "image"], output: ["text"] } },
+  } } };
+legacy.mcp = { playwright: { type: "remote", url: `http://127.0.0.1:${docsPort}/browser`, enabled: true, oauth: false, timeout: 5000 } };
 legacy.lsp = lspCommand ? { typescript: { ...legacy.lsp.typescript, command: lspCommand } } : false;
 legacy.formatter = false;
 for (const agent of Object.values(legacy.agent) as any[]) agent.model = "threadsite-test/text";
-const runtime = buildV2Config(legacy, { pluginPath: pathToFileURL(path.resolve(import.meta.dirname, "../../opencode/v2")).href, env: {} });
+const runtime = buildV2Config(legacy, { pluginPath: pathToFileURL(path.resolve(import.meta.dirname, "../../opencode/v2")).href,
+  env: { OPENCODE_BROWSER_QA_MODEL: "threadsite-test/vision" } });
+for (const agent of ["general", "explore"]) runtime.agents[agent].model = "threadsite-test/child";
 runtime.mcp.servers.context7.url = `http://127.0.0.1:${docsPort}/mcp`;
 const configFile = path.join(root, "opencode.json");
 await fs.writeFile(configFile, JSON.stringify(runtime));
@@ -190,9 +223,69 @@ try {
   assert.equal(await harness.steer(workspace, sessionID, "Too late"), false);
   const title = await harness.generateTitle(workspace, "Name this fixture", "threadsite-test/text");
   assert.equal(title.title, "Smoke Project");
-  const delegated = await harness.prompt(workspace, sessionID, "Delegate smoke", "threadsite-test/text");
-  assert.ok(delegated.usage.steps >= 3, "billing includes the root and child steps");
-  assert.ok((await harness.usageMessages(workspace, sessionID)).some((message) => message.info?.sessionID !== sessionID));
+  const delegatedAgents: string[] = [];
+  for (const agent of ["general", "explore"]) {
+    const delegated = await harness.prompt(workspace, sessionID, `Delegate smoke ${agent}`, "threadsite-test/text");
+    assert.ok(delegated.usage.steps >= 4, "billing includes root delegation, child read/response and root completion");
+    const children = (await harness.usageMessages(workspace, sessionID)).filter((message) =>
+      message.info?.sessionID !== sessionID && message.info?.agent === agent);
+    assert.ok(children.some((message) => message.parts?.some((part) => part.type === "tool"
+      && part.tool === "read" && part.state?.status === "completed")), `${agent} must execute the delegated read`);
+    assert.ok(children.some((message) => message.parts?.some((part) => part.type === "text" && part.text === "Smoke Project")),
+      `${agent} must return its result`);
+    assert.ok(children.every((message) => message.info?.modelID === "child"), `${agent} must use its configured model`);
+    delegatedAgents.push(agent);
+  }
+  const qaProgress: import("../src/progress.js").ProgressUpdate[] = [];
+  const browserQa = await harness.prompt(workspace, sessionID, "Browser QA smoke", "threadsite-test/text", (update) => { qaProgress.push(update); });
+  const activeQa = qaProgress.filter((update) => update.activeSubagents !== undefined).map((update) => update.activeSubagents);
+  assert.ok(activeQa.includes(1), "native background QA appears as an active subagent");
+  assert.equal(activeQa.at(-1), 0, "completed QA disappears from the live count");
+  assert.ok(qaProgress.every((update) => !update.tool?.name.startsWith("playwright_")), "child browser actions stay off the parent feed");
+  assert.deepEqual(browserCalls, ["browser_navigate", "browser_take_screenshot"]);
+  assert.ok(qaRequests.length >= 3);
+  assert.ok(qaRequests.every((request) => request.tools.length > 0 && request.tools.every((name) => name.startsWith("playwright_"))),
+    "QA receives only browser tools");
+  assert.ok(qaRequests.some((request) => request.hasImage), "the dedicated vision model receives the screenshot");
+  assert.ok(browserQa.usage.models?.some((model) => model.model === "threadsite-test/vision" && model.outputTokens > 0),
+    "the original turn includes completed background QA usage");
+  const qaHistory = await harness.listMessages(workspace, sessionID);
+  assert.ok(qaHistory.some((message) => message.parts?.some((part) => part.type === "tool" && part.tool === "subagent"
+    && part.state?.input?.agent === "browser-qa" && part.state?.input?.background === true)), "QA stays in background mode");
+  const rawRoot = (await client.message.list({ sessionID })).data;
+  const independent = rawRoot.find((message) => message.type === "assistant" && message.content.some((part) =>
+    part.type === "tool" && part.id === "call_independent_read"));
+  const qaChild = (await client.session.list()).data.find((session) => session.parentID === sessionID && session.agent === "browser-qa");
+  assert.ok(qaChild);
+  const qaSteps = (await client.message.list({ sessionID: qaChild.id })).data.filter((message) => message.type === "assistant");
+  assert.ok(independent && qaSteps.some((message) => message.time.completed! > independent.time.created),
+    "the builder performs independent work before the background inspection finishes");
+  let qaStop: Promise<boolean> | undefined;
+  const stoppedQa = harness.prompt(workspace, sessionID, "Browser QA smoke stop", "threadsite-test/text", (update) => {
+    if (!qaStop && update.tool?.name === "subagent" && update.tool.status === "completed") {
+      qaStop = harness.abortTurn(workspace, sessionID);
+    }
+  });
+  await assert.rejects(stoppedQa, /stopped/);
+  assert.equal(await qaStop, true, "stop interrupts QA and drains its native completion notification");
+  assert.equal(await harness.isBusy(workspace, sessionID), false);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(await harness.isBusy(workspace, sessionID), false, "late QA completion cannot restart a stopped builder");
+  const parked = await client.session.synthetic({ sessionID, text: "Parked QA recovery fixture: the inspection found no defects.",
+    metadata: { source: "subagent", agent: "browser-qa", childID: qaChild.id, state: "completed" }, resume: false });
+  assert.ok((await client.session.inbox.list({ sessionID })).some((item) => item.id === parked.id));
+  const recovered = new OpenCodeV2Harness(client);
+  const stopRecovery = await recovered.watchExistingTurn(workspace, sessionID);
+  try {
+    const recoveryDeadline = Date.now() + 10_000;
+    while (await recovered.isBusy(workspace, sessionID)) {
+      assert.ok(Date.now() < recoveryDeadline, "a parked QA result must resume during owned recovery");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const recoveredMessages = (await client.message.list({ sessionID })).data;
+    assert.equal(recoveredMessages.filter((message) => message.id === parked.id).length, 1, "receipt replay must remain idempotent");
+    assert.ok(recoveredMessages.some((message) => message.type === "assistant" && message.time.created >= parked.time.created));
+  } finally { await stopRecovery(); }
   await harness.compactSession(workspace, sessionID, "threadsite-test", "text");
   assert.ok((await harness.listMessages(workspace, sessionID)).some((message) => message.parts?.some((part) => part.type === "compaction")));
   await harness.setProviderToken("openai", "smoke-test-only");
@@ -214,9 +307,10 @@ try {
   assert.equal(await harness.isBusy(workspace, sessionID), false);
   await harness.deleteSessionsInDirectory(workspace, sessionID);
   assert.deepEqual(await harness.workspaceSessions(), []);
-  assert.deepEqual([...models], ["text"]);
-  console.log(JSON.stringify({ ok: true, providerRequests, steps: result.usage.steps, tools: [...toolNames].sort(), root }));
+  assert.deepEqual([...models], ["text", "child", "vision"]);
+  console.log(JSON.stringify({ ok: true, providerRequests, steps: result.usage.steps, delegatedAgents, browserCalls, tools: [...toolNames].sort(), root }));
 } catch (error) {
+  console.error(`Smoke artifacts: ${root}`);
   console.error(output.split("\n").filter((line) => /WARN|ERROR|plugin|failed/i.test(line)).join("\n").slice(-12000));
   throw error;
 } finally {

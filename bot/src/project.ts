@@ -112,8 +112,15 @@ interface TurnActivity {
 
 export class ProjectService {
   private readonly queues = new Map<string, QueueState>();
-  /** Threads whose running turn the user asked to stop via the Stop button. */
-  private readonly stopRequested = new Set<string>();
+  /**
+   * Threads whose running turn the user asked to stop via the Stop button,
+   * mapped to the pending-turn marker id the stop targets. A mark set for one
+   * wedged turn must not be consumed by a different successor turn: checks and
+   * settlement match the mark against the settling turn's marker id. A null
+   * value is unscoped and applies to the next turn, for marks set when no
+   * pendingTurn identity was available.
+   */
+  private readonly stopRequested = new Map<string, string | null>();
   /**
    * Threads whose turn has left the agent and is now in the delivery tail
    * (restore/validate/commit/publish). Such a turn is not "busy" but still
@@ -708,7 +715,7 @@ export class ProjectService {
       // existed to abort) lands here: fail as a user stop instead of starting
       // the agent work the user just asked to interrupt. The catch consumes
       // the mark and rethrows TurnStoppedError.
-      if (this.stopRequested.has(threadId)) {
+      if (this.stopMarkApplies(this.stopRequested.get(threadId), pendingMarker.id)) {
         stopChangesTimer(); // the changes interval is otherwise cleared inside the prompt guard below
         throw new Error("Stopped before the agent turn started.");
       }
@@ -773,8 +780,10 @@ export class ProjectService {
       this.activeTurns -= 1;
       this.activeTurnThreads.delete(threadId);
       this.delivering.delete(threadId);
-      // A stop that raced an already-completing turn must not poison the next one.
-      this.stopRequested.delete(threadId);
+      // A stop that raced an already-completing turn must not poison the next
+      // one; a mark set for a different, still-running turn stays for it.
+      const stopMark = this.stopRequested.get(threadId);
+      if (stopMark === null || stopMark === pendingMarker.id) this.stopRequested.delete(threadId);
     }
   }
 
@@ -883,6 +892,12 @@ export class ProjectService {
             validationError = errorText(reValidationError);
           }
         } catch (repairError) {
+          if (this.stopMarkApplies(this.stopRequested.get(threadId), input.pendingTurn?.id)) {
+            // The user pressed Stop during the repair round-trip (it is
+            // abortable exactly like a normal turn): report a user stop, not
+            // a validation failure.
+            throw new TurnStoppedError("The update was stopped at the user's request during the repair pass.", { cause: repairError });
+          }
           // The repair round-trip itself failed (agent/provider trouble); the
           // original validation errors still stand and the original summary is
           // kept — commit the work unpublished like any failed validation.
@@ -1080,7 +1095,7 @@ export class ProjectService {
       // checkpoint recovery would sail past the wait and send a fresh prompt
       // (or commit the partials) for exactly the work the user stopped. The
       // catch consumes the mark and rethrows TurnStoppedError.
-      if (this.stopRequested.has(threadId)) throw new Error("Stopped while waiting for the interrupted agent turn.");
+      if (this.stopMarkApplies(this.stopRequested.get(threadId), pending.id)) throw new Error("Stopped while waiting for the interrupted agent turn.");
 
       let agentSummary: string;
       if (await this.turnCompletedSince(project.workspacePath, project.sessionId, pending.startedAt)) {
@@ -1137,7 +1152,10 @@ export class ProjectService {
       this.activeTurns -= 1;
       this.activeTurnThreads.delete(threadId);
       this.delivering.delete(threadId);
-      this.stopRequested.delete(threadId);
+      // Drop only marks this turn owns or that are unscoped; a mark set for a
+      // different, still-running turn stays for that turn.
+      const stopMark = this.stopRequested.get(threadId);
+      if (stopMark === null || stopMark === pending.id) this.stopRequested.delete(threadId);
     }
   }
 
@@ -1545,7 +1563,7 @@ export class ProjectService {
     // does: a reset is intentional, so its aborted turns must not raise
     // spurious failure incidents. Only when a turn is actually in flight — an
     // unconsumed mark would mislabel the next turn's unrelated failure.
-    if (this.activeTurnThreads.has(threadId)) this.stopRequested.add(threadId);
+    if (this.activeTurnThreads.has(threadId)) this.stopRequested.set(threadId, project.pendingTurn?.id ?? null);
     const sweep = await this.opencode
       .stopSessionsInDirectory(project.workspacePath, project.sessionId, new Set([sessionId]))
       .catch((error) => {
@@ -1619,7 +1637,7 @@ export class ProjectService {
     // those failures as user stops (no spurious incidents), mirroring
     // resetSession. Guarded on an active turn so an idle thread keeps no mark.
     const stoppedThreads = projects.filter((project) => this.activeTurnThreads.has(project.threadId));
-    for (const project of stoppedThreads) this.stopRequested.add(project.threadId);
+    for (const project of stoppedThreads) this.stopRequested.set(project.threadId, project.pendingTurn?.id ?? null);
     // With the replacements alive, sweep everything else on the service;
     // the fresh sessions are the only thing left running afterwards.
     const sweep = await this.opencode.stopAllSessions(fresh).catch((error) => {
@@ -1662,7 +1680,7 @@ export class ProjectService {
       pendingDeletion: project.pendingDeletion ?? { requestedAt: new Date().toISOString(), reason }, pendingQueue: undefined,
     });
     this.severQueue(threadId);
-    if (this.activeTurnThreads.has(threadId)) this.stopRequested.add(threadId);
+    if (this.activeTurnThreads.has(threadId)) this.stopRequested.set(threadId, project.pendingTurn?.id ?? null);
     try {
       assertExclusiveResources(project, this.store.listProjects());
       await removalPaths(project);
@@ -1774,7 +1792,7 @@ export class ProjectService {
       if (this.delivering.has(threadId)) return { stopped: false, delivering: true, queueFreed: false };
       if (this.activeTurnThreads.has(threadId)) {
         if (stale()) return idle;
-        this.stopRequested.add(threadId);
+        this.stopRequested.set(threadId, project.pendingTurn?.id ?? null);
         log("warn", "project.turn_stop_before_agent", { threadId, sessionId: project.sessionId });
         return { stopped: true, delivering: false, queueFreed: false };
       }
@@ -1790,7 +1808,7 @@ export class ProjectService {
       // instead of prompting when the service returns.
       if (stale()) return idle;
       if (this.delivering.has(threadId)) return { stopped: false, delivering: true, queueFreed: false };
-      if (this.activeTurnThreads.has(threadId)) this.stopRequested.add(threadId);
+      if (this.activeTurnThreads.has(threadId)) this.stopRequested.set(threadId, project.pendingTurn?.id ?? null);
       this.severQueue(threadId);
       log("warn", "project.turn_stop_unreachable", { threadId, sessionId: project.sessionId });
       return { stopped: false, delivering: false, queueFreed: true };
@@ -1808,7 +1826,7 @@ export class ProjectService {
     // soon as it processes the abort, so the turn's catch can observe the mark
     // before this function resumes. Marking afterwards let the rejection race
     // past and misreport the stop as a project failure.
-    this.stopRequested.add(threadId);
+    this.stopRequested.set(threadId, project.pendingTurn?.id ?? null);
     let aborted: boolean;
     try {
       aborted = await this.opencode.abortTurn(project.workspacePath, project.sessionId);
@@ -1929,6 +1947,15 @@ export class ProjectService {
   }
 
   /**
+   * A stop mark applies to a turn when it was set for that turn's pending
+   * marker id. Unscoped marks (null) apply to any next turn, preserving the
+   * legacy behavior for marks set when no pendingTurn identity was known.
+   */
+  private stopMarkApplies(mark: string | null | undefined, turnId: string | undefined): boolean {
+    return mark !== undefined && (mark === null || mark === turnId);
+  }
+
+  /**
    * Shared failure tail for mutate() and recoverTurn(): ledger the tokens the
    * failed turn spent, then clear the in-flight marker only while this turn
    * still owns it — a hard reset or a successor can swap the session and
@@ -1942,7 +1969,8 @@ export class ProjectService {
     queueClaimed: boolean, queuedStatusIds: readonly string[], supersededTag: string,
   ): Promise<boolean> {
     await this.recordTurnUsage(project, pending, addUsage(usage, errorUsage(error)), true, Date.now() - turnStartedAt);
-    const stoppedByUser = this.stopRequested.delete(threadId);
+    const stoppedByUser = this.stopMarkApplies(this.stopRequested.get(threadId), pending.id);
+    if (stoppedByUser) this.stopRequested.delete(threadId);
     if (!queueClaimed && queuedStatusIds.length) {
       // The turn failed before it could claim the persisted batch: release it
       // now, or the acknowledged messages stay in pendingQueue and replay (or

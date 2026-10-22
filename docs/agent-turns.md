@@ -14,4 +14,14 @@ Browser MCP tools are offered only when the selected model advertises image inpu
 
 Text-only agents inspect source, run syntax/type checks and use browser diagnostics supplied by the harness. The harness's own browser QA and Discord screenshots continue independently of the model and remain advisory. Vision agents retain the full and scratch preview workflows.
 
+`OPENCODE_BROWSER_QA_MODEL=provider/model-id` enables an inspection-only
+`browser-qa` subagent with its own vision model; blank disables it. Builders can
+delegate with `background: true` and continue independent edits. Only browser
+tools reach this child, and model capability checks reject text-only/unknown
+choices. The parent reviews the automatically delivered report before finishing;
+the bot keeps the turn open through QA completion and includes child usage.
+Stopping drains the child notification before the final parent interrupt. QA
+remains advisory, including when unavailable. General/explore delegation stays
+in the foreground.
+
 Generated game `AGENTS.md` rules and initial prompts require a concrete core action, genre-appropriate challenges, meaningful decisions/skill and a complete playable round before optional polish. A generic collect-N-pickups loop is not the default. Explicit collection-game and sandbox requests remain supported, and existing mechanics are preserved on revisions. Existing projects receive the refreshed rules when the harness next prepares their workspace.

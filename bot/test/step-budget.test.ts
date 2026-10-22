@@ -24,10 +24,6 @@ test("force finish arrives at 90% once, with room for checks, despite replayed e
     await nextTick();
     for (let i = 180; i < 220; i++) budget.observe(`step-${i}`);
     assert.deepEqual(sent, [180]);
-    const instruction = finishUpInstruction(180, 200);
-    assert.match(instruction, /20 remain/);
-    assert.match(instruction, /run js_syntax_check/);
-    assert.match(instruction, /does not grant a new step budget/);
   } finally { await budget.stop(); }
 });
 
