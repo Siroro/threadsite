@@ -66,6 +66,18 @@ after either setting changes. Connection, rate-limit or documentation failures
 must not block work; agents can use installed declarations and other docs. V1's
 configuration and LSP runtime are unchanged.
 
+The `websearch` tool's provider is pre-selected from `OPENCODE_WEBSEARCH_PROVIDER`
+(default `exa`; also `tavily`, `firecrawl`, `parallel`, `tinyfish`, `random`, or
+`off` to remove the tool). Without a pre-selection, OpenCode asks a first-use
+consent form that the question flow would surface to Discord users, who cannot
+pick a provider or supply its credentials; the remembered choice also does not
+survive a server restart. Provider keys (`EXA_API_KEY`, `TAVILY_API_KEY`,
+`FIRECRAWL_API_KEY`, `PARALLEL_API_KEY`, `TINYFISH_API_KEY`) are optional —
+Tavily and TinyFish fall back to keyless access, and empty variables are
+ignored. An invalid provider name fails service startup with the allowed values.
+Recreate `opencode` after changing these settings. V1 predates the consent form
+and reads only `OPENCODE_ENABLE_EXA`.
+
 Native synthetic steering uses `delivery: "steer", resume: false`, preserving the running model/variant and preventing an idle session from starting another turn. Stop cancels inbox entries and pending forms before interrupting without resume, then verifies idle. A lost submission response is reconciled against its message ID; it is never blindly resent. Recovery deadlines measure inactivity, exclude pending questions, and preserve partial source edits.
 
 ## Verification

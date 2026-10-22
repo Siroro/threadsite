@@ -27,7 +27,7 @@ A finished turn is presented in two messages: the turn's own message becomes the
 
 ## Why static-only
 
-The agent cannot run `npm install`, unrestricted shell commands, git writes, or server code. Every deliverable — sites and games alike — is HTML/CSS/static browser JavaScript/assets. The `sitebuilder` agent may edit `site/**` and inspect the workspace; external directories are denied and shell commands use an allowlist. `webfetch` and `websearch` are allowed for research; media downloads go through the guarded `asset_download` tool (SSRF/private-network blocking, path containment, redirect limits, timeouts, and `ASSET_MAX_BYTES` all enforced).
+The agent cannot run `npm install`, unrestricted shell commands, git writes, or server code. Every deliverable — sites and games alike — is HTML/CSS/static browser JavaScript/assets. The `sitebuilder` agent may edit `site/**` and inspect the workspace; external directories are denied and shell commands use an allowlist. `webfetch` and `websearch` are allowed for research, with the search provider pre-selected in the agent service (`OPENCODE_WEBSEARCH_PROVIDER`) so its first-use consent prompt never reaches users; media downloads go through the guarded `asset_download` tool (SSRF/private-network blocking, path containment, redirect limits, timeouts, and `ASSET_MAX_BYTES` all enforced).
 
 A second publication boundary applies before anything goes live: `site/index.html` is required; symlinks, dotfiles (including `.htaccess`), and server-executable extensions (PHP, CGI, shell scripts) are rejected; total files and bytes are capped (`MAX_SITE_FILES`, `MAX_SITE_BYTES`). Publication accepts arbitrary static extensions otherwise.
 
