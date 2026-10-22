@@ -1817,7 +1817,7 @@ export class OpenCodeHarness {
         if (text) emit(onProgress, { text: `${label}: ${truncate(text, 100)}` });
       } else {
         const text = String(part.text ?? "").trim();
-        if (text) emit(onProgress, { kind: "thought", text });
+        if (text) emit(onProgress, { kind: "thought", text, narrationId: String(part.id ?? part.messageID) });
       }
       return;
     }
@@ -1870,9 +1870,9 @@ function normalizeQuestion(q: any): { header: string; question: string; multiple
     header: String(q?.header ?? "Question").slice(0, 80),
     question: String(q?.question ?? "").slice(0, 500),
     multiple: Boolean(q?.multiple),
-    options: (Array.isArray(q?.options) ? q.options : []).slice(0, 4).map((o: any) => ({
-      label: String(o?.label ?? "Option").slice(0, 80),
-      description: typeof o?.description === "string" ? o.description.slice(0, 120) : undefined,
+    options: (Array.isArray(q?.options) ? q.options : []).map((o: any) => ({
+      label: String(o?.label ?? "Option"),
+      description: typeof o?.description === "string" ? o.description : undefined,
     })),
   };
 }

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate as nextTick } from "node:timers/promises";
-import { ComponentType, type Message, type MessageEditOptions } from "discord.js";
-import { renderProgressCard } from "../src/progress-view.js";
+import { ButtonStyle, ComponentType, type Message, type MessageEditOptions } from "discord.js";
+import { renderProgressOverview as renderProgressCard } from "../src/progress-view.js";
 import { assertV2, cardView } from "./fixtures/cards.js";
 import { requestDisplayText } from "../src/util.js";
 import { buildingSnapshot, mergedSnapshot } from "./fixtures/progress.js";
@@ -24,7 +24,7 @@ test("the card shows the real stage, plan, changes, usage, saved requests and li
   assert.match(card.description!, /Agent update/);
   assert.match(card.fields!.find((field) => field.name.startsWith("Plan"))!.value, /Connect the live leaderboard/);
   assert.match(card.fields!.find((field) => field.name === "Changes this turn")!.value, /184 \/ −37/);
-  assert.match(card.fields!.find((field) => field.name === "Usage")!.value, /28\.4k \/ 100\.0k · 28%/);
+  assert.match(card.fields!.find((field) => field.name === "Usage")!.value, /28\.4k \/ 100k · 28%/);
   assert.doesNotMatch(JSON.stringify(card), /claude|gpt|surplus|provider\//i);
   assert.match(card.fields!.find((field) => field.name === "Next pass")!.value, /\*\*2\*\*/);
   assert.match(card.buttons[0].url!, /sumo-shove/);
@@ -257,7 +257,7 @@ test("running/completed duplicates count as one tool action, and Stop remains av
   } finally { await progress.close(); }
 });
 
-test("progress needs no embed permission and nests Stop inside the V2 card", async () => {
+test("progress needs no embed permission and nests Stop beside Turn details in the V2 card", async () => {
   const edits: MessageEditOptions[] = [];
   const message = { id: "v2", edit: async (options: MessageEditOptions) => {
     assert.ok(!options.embeds?.length);
@@ -272,8 +272,9 @@ test("progress needs no embed permission and nests Stop inside the V2 card", asy
   assert.equal(edits[0].content, null, "clear the original acknowledgement when upgrading it");
   const card = cardView(edits[0]);
   assert.match(card.text, /Updating without embeds/);
-  assert.ok(card.components.some((component) => component.type === ComponentType.Section));
-  assert.equal(card.buttons.find((button) => button.custom_id === "threadsite:stop")?.label, "Stop turn");
+  const headRow = card.buttons.filter((button) => ["ts2:details:v2", "ts2:stop:v2"].includes(button.custom_id!));
+  assert.deepEqual(headRow.map((button) => button.label), ["Turn details", "Stop turn"]);
+  assert.equal(headRow[1].style, ButtonStyle.Secondary);
 });
 
 test("OpenCode feeds structured plan, public usage and tool events without exposing reasoning or spend", () => {

@@ -1,6 +1,6 @@
 import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, ContainerBuilder, escapeMarkdown,
-  MessageFlags, SectionBuilder, SeparatorBuilder, TextDisplayBuilder,
+  MessageFlags, SectionBuilder, SeparatorBuilder, TextDisplayBuilder, ThumbnailBuilder,
   type APIComponentInContainer, type AttachmentBuilder, type Message, type MessageEditOptions,
 } from "discord.js";
 import type { ProjectKind } from "./types.js";
@@ -20,9 +20,10 @@ export function cardTitle(value: string): string {
   return escapeMarkdown(truncate(value.replace(/\s+/g, " ").trim(), 180));
 }
 
-export function addCardHeader(card: ContainerBuilder, label: string, title: string, status: string, button?: ButtonBuilder): void {
+export function addCardHeader(card: ContainerBuilder, label: string, title: string, status: string, accessory?: ButtonBuilder | ThumbnailBuilder): void {
   const text = new TextDisplayBuilder().setContent(`-# THREADSITE · ${label}\n## ${cardTitle(title)}\n${status}`);
-  if (button) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setButtonAccessory(button));
+  if (accessory instanceof ButtonBuilder) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setButtonAccessory(accessory));
+  else if (accessory) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setThumbnailAccessory(accessory));
   else card.addTextDisplayComponents(text);
 }
 
@@ -84,11 +85,14 @@ export function cardEdit(message: CardMessage): MessageEditOptions {
 
 /** Acknowledging a click must preserve V2 text/media, which live inside components too. */
 export function disableMessageControls(message: Pick<Message, "components">): MessageEditOptions {
+  // Both stop generations stay usable: a stopped turn is the one ack that
+  // must never be locked out by a disabled control.
+  const keepEnabled = (customId?: string) => customId === "threadsite:stop" || customId?.startsWith("ts2:stop:");
   const disable = (component: APIComponentInContainer): APIComponentInContainer => {
     if (component.type === ComponentType.ActionRow) return {
-      ...component, components: component.components.map((control) => "custom_id" in control && control.custom_id !== "threadsite:stop" ? { ...control, disabled: true } : control),
+      ...component, components: component.components.map((control) => "custom_id" in control && !keepEnabled(control.custom_id) ? { ...control, disabled: true } : control),
     };
-    if (component.type === ComponentType.Section && "custom_id" in component.accessory && component.accessory.custom_id !== "threadsite:stop") return {
+    if (component.type === ComponentType.Section && "custom_id" in component.accessory && !keepEnabled(component.accessory.custom_id)) return {
       ...component, accessory: { ...component.accessory, disabled: true },
     };
     return component;

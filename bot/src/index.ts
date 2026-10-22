@@ -16,11 +16,18 @@ import {
   type AutocompleteInteraction,
   type ChatInputCommandInteraction,
   type ButtonInteraction,
+  type ModalSubmitInteraction,
   type Message,
   type TextBasedChannel,
   type ThreadChannel,
 } from "discord.js";
 import { cardEdit, disableMessageControls, renderStatusCard } from "./card-ui.js";
+import { cardId } from "./card-actions.js";
+import { CardInteractions, CardUserError } from "./card-interactions.js";
+import type { RequestFormState, StoredTurnCard } from "./card-state.js";
+import { QuestionService } from "./question-service.js";
+import { renderQueuePanel, type PanelSection } from "./card-panels.js";
+import { readProjectCardDocument } from "./project-docs.js";
 import { AdminReporter } from "./admin-reporter.js";
 import { commandJson } from "./commands.js";
 import { config } from "./config.js";
@@ -122,7 +129,53 @@ const liveProgress = new Map<string, DiscordProgress>();
 
 function registerQuestionButtons(statusMessage: Message, progress: DiscordProgress): void {
   liveProgress.set(statusMessage.id, progress);
+  const threadId = statusMessage.channelId;
+  const saved = store.getCardState<StoredTurnCard>(threadId, statusMessage.id);
+  progress.attachPersistence({
+    load: saved?.result ? undefined : saved?.snapshot,
+    save: (snapshot, question, closed) => {
+      const project = store.getProject(threadId);
+      if (!project || project.pendingDeletion) return;
+      const previous = store.getCardState<StoredTurnCard>(threadId, statusMessage.id);
+      store.patchCardState<StoredTurnCard>(threadId, statusMessage.id, {
+        snapshot, closed: Boolean(closed),
+        question: question ?? (previous?.question ? { ...previous.question, resolved: true } : undefined),
+      });
+    },
+  });
 }
+
+const questionService = new QuestionService({
+  store, progress: (resource) => liveProgress.get(resource),
+  pending: (directory) => opencode.listPendingQuestions(directory),
+  answer: (directory, requestID, answers) => opencode.replyToQuestion(directory, requestID, answers),
+  skip: (directory, requestID) => opencode.rejectQuestion(directory, requestID),
+  error: (error) => logError("discord.question_delivery_failed", error, {}),
+});
+
+const cardInteractions = new CardInteractions({
+  store, questions: questionService,
+  projectSections: projectDetailSections,
+  queue: (threadId) => {
+    const requests = store.getProject(threadId)?.pendingQueue ?? [];
+    return { requests: requests.filter((entry) => !inFlightQueuedRequests.has(entry.statusMessageId)), preparing: requests.filter((entry) => inFlightQueuedRequests.has(entry.statusMessageId)).length };
+  },
+  cancel: cancelQueueRequest,
+  submit: submitCardRequest,
+  stop: async (threadId, statusMessageId) => stopOutcomeText(await projects.stopTurn(threadId, statusMessageId)),
+  busy: (threadId) => projects.agentBusy(threadId),
+  rollback: (threadId, expectedVersion) => projects.enqueue(threadId, async () => {
+    // Serialized with turns: re-check the agent and the failure this rollback
+    // belongs to now that this closure is actually running, so a turn accepted
+    // after the click can never have its work discarded.
+    if (await projects.agentBusy(threadId)) throw new CardUserError("The agent is still working. Stop it before discarding edits.");
+    const project = store.getProject(threadId);
+    if (!project || project.pendingDeletion) throw new CardUserError("This project is no longer available.");
+    if (`${project.lastCommit ?? ""}/${project.lastTurnAt ?? ""}` !== expectedVersion) throw new CardUserError("The project changed since that failure. Use the latest outcome card's controls.");
+    await projects.rollbackEdits(threadId);
+  }),
+  error: (error, interaction) => logError("discord.card_action_failed", error, { customId: interaction.customId, channelId: interaction.channelId, userId: interaction.user.id }),
+});
 
 function unregisterQuestionButtons(statusMessageId: string | undefined): void {
   if (statusMessageId) liveProgress.delete(statusMessageId);
@@ -133,50 +186,11 @@ function unregisterQuestionButtons(statusMessageId: string | undefined): void {
 // judgment. Option indices resolve against the DiscordProgress copy of the
 // question, which also carries each option's real label.
 async function handleQuestionButton(interaction: ButtonInteraction): Promise<void> {
-  const progress = liveProgress.get(interaction.message.id);
-  if (!progress) {
-    await interaction.reply({ content: "That question is no longer pending.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
-    return;
-  }
-  const [kind, requestID, qIndexRaw, oIndexRaw] = interaction.customId.split(":");
-  const directory = store.getProject(interaction.channelId ?? "")?.workspacePath;
-  if (!directory || !requestID) {
-    await interaction.reply({ content: "This question's agent session could not be found.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
-    return;
-  }
-  if (!interaction.memberPermissions?.has(PermissionFlagsBits.SendMessages)) {
-    await interaction.reply({ content: "You need permission to post in this thread to answer the agent.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
-    return;
-  }
-  // One answer per request: disable the buttons immediately so a double click
-  // cannot double-answer, then ack before the awaited OpenCode call.
-  await interaction.update(disableMessageControls(interaction.message)).catch(() => undefined);
-  const responder = interaction.user.globalName ?? interaction.user.username;
-  try {
-    if (kind === "qskip") {
-      await opencode.rejectQuestion(directory, requestID);
-      progress.recordSkip(requestID, responder);
-      await interaction.followUp({ content: "⏭️ Skipped", flags: MessageFlags.Ephemeral }).catch(() => undefined);
-      return;
-    }
-    const question = progress.pendingQuestion(requestID);
-    const qIndex = Number.parseInt(qIndexRaw ?? "", 10);
-    const oIndex = Number.parseInt(oIndexRaw ?? "", 10);
-    const label = question?.questions[qIndex]?.options[oIndex]?.label;
-    if (!question || qIndex < 0 || oIndex < 0 || !label) {
-      await interaction.followUp({ content: "That answer option is no longer available.", flags: MessageFlags.Ephemeral }).catch(() => undefined);
-      await opencode.rejectQuestion(directory, requestID).catch(() => undefined);
-      return;
-    }
-    // OpenCode expects one answer list per asked question, in order; unanswered
-    // questions in the request get an empty selection.
-    const answers = question.questions.map((_, index) => (index === qIndex ? [label] : []));
-    await opencode.replyToQuestion(directory, requestID, answers);
-    progress.recordAnswer(requestID, responder, label);
-    await interaction.followUp({ content: `✅ Answered: **${truncate(label, 80)}**`, flags: MessageFlags.Ephemeral }).catch(() => undefined);
-  } finally {
-    progress.clearQuestion(requestID);
-  }
+  const [kind, revision, questionIndex, optionIndex] = interaction.customId.split(":");
+  const pending = revision ? liveProgress.get(interaction.message.id)?.pendingQuestion(revision) : undefined;
+  const action = kind === "qskip" ? "skip" : pending?.questions.length === 1 && !pending.questions[0].multiple && questionIndex === "0" && /^\d+$/.test(optionIndex ?? "") ? "answer" : "review";
+  if (!revision) throw new Error("That question is no longer pending.");
+  await cardInteractions.handle(interaction, cardId(action, interaction.message.id, revision, action === "answer" ? optionIndex! : "0"));
 }
 
 client.once(Events.ClientReady, (ready) => {
@@ -418,7 +432,7 @@ async function recoverInterruptedTurns(): Promise<void> {
             if (!thread) return Promise.resolve(undefined);
             const state = turnCardState(result, note);
             return thread.send(renderTechnicalCard(state))
-              .then(() => postPlayCard(thread, state))
+              .then((message) => setTurnCards(message, result, note))
               .catch(() => undefined);
           };
       const recoveryCallback = progress
@@ -494,6 +508,7 @@ async function recoverInterruptedTurns(): Promise<void> {
             : await thread.send("🔁 Restored a queued request after restart.");
           entries.push({
             prompt: entry.prompt,
+            displayPrompt: entry.displayPrompt,
             requestStatusId: entry.statusMessageId,
             images: entry.images ?? [],
             author: entry.author,
@@ -520,6 +535,7 @@ async function recoverInterruptedTurns(): Promise<void> {
 }
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if ((interaction.isButton() || interaction.isAnySelectMenu() || interaction.isModalSubmit()) && await cardInteractions.handle(interaction)) return;
   if (interaction.isButton()) {
     try {
       if (interaction.customId.startsWith("q:") || interaction.customId.startsWith("qskip:")) {
@@ -530,8 +546,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleQueueCancelButton(interaction);
       } else if (interaction.customId.startsWith("threadsite:ext")) {
         await handleExternalPushButton(interaction);
-      } else {
+      } else if (interaction.customId === "threadsite:rollback" || interaction.customId === "threadsite:keep") {
         await handleFailureButton(interaction);
+      } else {
+        await interaction.reply({ ...renderStatusCard("That control is no longer supported. Use the current project card."), flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
       }
     } catch (error) {
       logError("discord.button_failed", error, {
@@ -585,6 +603,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // replies so every message gets a visible outcome.
 interface QueuedUpdate {
   prompt: string;
+  displayPrompt?: string;
   images: PromptImage[];
   author?: CommitAuthor;
   /** Discord user whose message started the batch; pinged when the agent asks a question. */
@@ -709,32 +728,63 @@ client.on(Events.MessageCreate, async (message) => {
     id: message.author.id,
   });
 
-  const isGame = project.projectKind === "game-2d" || project.projectKind === "game-3d";
+  await enqueueUserRequest(message.channel.id, status, prompt, images, author, message.author.id);
+});
 
+/** Both normal messages and modal requests use the same durable queue and drain. */
+async function enqueueUserRequest(threadId: string, status: Message, prompt: string, images: PromptImage[], author: CommitAuthor | undefined, requesterId: string, displayPrompt?: string): Promise<void> {
   try {
-    // Save every accepted message, including the first one, before exposing it to a drain.
-    await store.appendQueuedRequest(message.channel.id, {
-      prompt, author, requesterId: message.author.id, statusMessageId: status.id, images: images.length ? images : undefined,
-    });
+    await store.appendQueuedRequest(threadId, { prompt, displayPrompt, author, requesterId, statusMessageId: status.id, images: images.length ? images : undefined });
   } catch (error) {
-    await status.edit("❌ Could not save this request. Please send it again.").catch(() => undefined);
+    await setStatusMessage(status, "❌ Could not save this request. Please send it again.").catch(() => undefined);
     throw error;
   }
-  await status.edit("✅ Request saved — queued for the next update pass.").catch(() => undefined);
-  let pending = pendingUpdates.get(message.channel.id);
-  if (!pending) {
-    pending = { entries: [], scheduled: false };
-    pendingUpdates.set(message.channel.id, pending);
+  await status.edit(cardEdit(renderStatusCard("✅ Request saved — queued for the next update pass."))).catch(() => undefined);
+  let pending = pendingUpdates.get(threadId);
+  if (!pending) { pending = { entries: [], scheduled: false }; pendingUpdates.set(threadId, pending); }
+  pending.entries.push({ prompt, displayPrompt, images, author, requesterId, status });
+  const running = store.getProject(threadId);
+  if (running?.pendingTurn?.statusMessageId) liveProgress.get(running.pendingTurn.statusMessageId)?.callback({
+    kind: "queue", text: "Saved requests", queuedRequests: running.pendingQueue?.length ?? 0,
+  });
+  scheduleUpdateDrain(threadId, running?.projectKind === "game-2d" || running?.projectKind === "game-3d");
+}
+
+async function submitCardRequest(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, attachments: Attachment[]): Promise<string> {
+  if (shuttingDown) throw new CardUserError("The bot is restarting. Your request has not been queued; try again shortly.");
+  let images: PromptImage[] = [];
+  if (attachments.length) {
+    const accepts = await withTimeout(projects.modelAcceptsImages(project.threadId).catch(() => undefined), 3000);
+    if (accepts !== true) throw new CardUserError("This project's model cannot currently accept reference images. Submit a text-only request or try again after changing the model.");
+    images = await downloadImageAttachments(attachments);
+    if (images.length !== attachments.length) throw new CardUserError("Some reference images could not be downloaded. Your request was not queued; please attach them again.");
   }
-  pending.entries.push({ prompt, images, author, requesterId: message.author.id, status });
-  const running = store.getProject(message.channel.id);
-  if (running?.pendingTurn?.statusMessageId) {
-    liveProgress.get(running.pendingTurn.statusMessageId)?.callback({
-      kind: "queue", text: "Saved requests", queuedRequests: running.pendingQueue?.length ?? 0,
-    });
+  const channel = interaction.channel;
+  if (!channel || !("send" in channel)) throw new CardUserError("This project thread is unavailable.");
+  const status = await channel.send(renderStatusCard("⏳ Saving your request…"));
+  store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: status.id });
+  if (form.steer && !images.length) {
+    try {
+      if (await projects.steerActiveTurn(project.threadId, prompt, form.resource)) {
+        await setStatusMessage(status, "🧭 Sent to the running turn").catch(() => undefined);
+        return "🧭 Your instruction was sent to the running turn.";
+      }
+    } catch (error) {
+      // A failed steer never reached the queue, so the form must stay usable.
+      store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: undefined });
+      throw error;
+    }
   }
-  scheduleUpdateDrain(message.channel.id, isGame);
-});
+  const author = commitAuthorIdentity({ globalName: interaction.user.globalName, username: interaction.user.username, id: interaction.user.id });
+  try { await enqueueUserRequest(project.threadId, status, prompt, images, author, interaction.user.id, prompt); }
+  catch (error) {
+    // appendQueuedRequest failed before accepting anything. A new submission
+    // can safely retry without duplicating an accepted prompt.
+    store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: undefined });
+    throw error;
+  }
+  return form.steer ? "✅ That turn had finished accepting instructions, so your request was queued for the next pass." : "✅ Your request was saved in the project's update queue.";
+}
 
 function scheduleUpdateDrain(threadId: string, isGame: boolean): void {
   const pending = pendingUpdates.get(threadId);
@@ -839,7 +889,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
   }
   progress.enableStopButton();
   try {
-    const result = await projects.mutate(threadId, merged.prompt, false, callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id), merged.display, first.requesterId);
+    const result = await projects.mutate(threadId, merged.prompt, false, callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id), merged.display ?? first.displayPrompt, first.requesterId);
     await progress.close();
     if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
       await setStatusMessage(first.status, finishedWithErrorsMessageText(result));
@@ -1635,12 +1685,35 @@ function threadUsageText(total: UsageTotal, includeCost: boolean): string {
 // settings, lifetime usage, links), unlike the per-turn tracking card.
 
 async function projectCardState(project: ProjectRecord): Promise<ProjectCardState> {
+  const last = project.lastCardMessageId ? store.getCardState<StoredTurnCard>(project.threadId, project.lastCardMessageId)?.result : undefined;
+  const channel = project.previewMessageId ? await client.channels.fetch(project.threadId).catch(() => undefined) : undefined;
+  const preview = project.previewMessageId && channel?.isTextBased() ? await channel.messages.fetch(project.previewMessageId).catch(() => undefined) : undefined;
   return {
     project,
     usage: await usageLog.threadTotal(project.threadId),
     siteUrl: project.status !== "creating" ? projects.siteLink(project) : undefined,
     repoUrl: project.repoName ? projects.repoLink(project) : undefined,
+    description: last?.description,
+    thumbnailUrl: preview?.attachments.find((attachment) => attachment.contentType?.startsWith("image/"))?.url,
   };
+}
+
+async function projectDetailSections(project: ProjectRecord): Promise<PanelSection[]> {
+  const state = await projectCardState(project);
+  const last = project.lastCardMessageId ? store.getCardState<StoredTurnCard>(project.threadId, project.lastCardMessageId) : undefined;
+  const [description, changelog] = await Promise.all([
+    last?.documents?.description ?? readProjectCardDocument(project.workspacePath, "description"),
+    last?.documents?.changelog ?? readProjectCardDocument(project.workspacePath, "changelog"),
+  ]);
+  const usage = state.usage;
+  return [
+    { key: "overview", label: "Project overview", text: `${project.displayName}\n${projectKindLabel(project.projectKind)}\nStatus: ${project.status}\n${project.projectKind !== "site" ? multiplayerModeLabel(project.multiplayerMode ?? "arena") : ""}\n${state.siteUrl ?? "First version is being built"}\n${state.repoUrl ?? ""}\nCreated: ${project.createdAt}\nLast turn: ${project.lastTurnAt ?? "not recorded"}\nCommit: ${project.lastCommit ?? "not recorded"}` },
+    { key: "request", label: "Original request", text: project.initialPrompt ?? "The original request was not recorded." },
+    { key: "description", label: "Description & how to play", text: description || "The agent has not written a description yet." },
+    { key: "changelog", label: "Changelog", text: changelog || "No changelog entry has been written yet." },
+    { key: "usage", label: "Lifetime usage", text: usage ? `${usage.turns} turns · ${usage.failedTurns} failed\nInput: ${usage.inputTokens || "unavailable"}\nOutput: ${usage.outputTokens || "unavailable"}\nCached: ${usage.cacheTokens}\nLast recorded: ${usage.lastTs ?? "not recorded"}` : "Provider usage counts unavailable." },
+    { key: "qa", label: "Browser findings", text: project.browserQaFindings ? `Advisory · checked ${project.browserQaFindings.checkedAt}\n\n${project.browserQaFindings.findings.join("\n\n") || "No findings"}` : "No browser findings have been recorded." },
+  ];
 }
 
 /** Any channel a project card can be posted into (project threads, in practice). */
@@ -1791,6 +1864,16 @@ async function setTurnCards(status: Message, result: MutationResult, note?: stri
   await liveProgress.get(status.id)?.close();
   unregisterQuestionButtons(status.id);
   const state = turnCardState(result, note);
+  state.resource = status.id;
+  const { screenshot: _screenshot, ...savedResult } = state;
+  const [description, changelog] = await Promise.all([
+    readProjectCardDocument(result.project.workspacePath, "description").catch(() => undefined),
+    readProjectCardDocument(result.project.workspacePath, "changelog").catch(() => undefined),
+  ]);
+  if (store.getProject(result.project.threadId) && !store.getProject(result.project.threadId)?.pendingDeletion) {
+    store.patchCardState<StoredTurnCard>(result.project.threadId, status.id, { result: savedResult, documents: { description, changelog }, closed: true });
+    if (state.published) await store.patchProject(result.project.threadId, { lastCardMessageId: status.id });
+  }
   try {
     await status.edit(cardEdit(renderTechnicalCard(state)));
   } catch (error) {
@@ -1806,17 +1889,20 @@ async function setTurnCards(status: Message, result: MutationResult, note?: stri
     }
   }
   // The playable card is a message of its own, under the turn's report.
-  await postPlayCard(status.channel, state);
+  await postPlayCard(status.channel, state, result.project.threadId);
 }
 
 /** Post the playable card with the screenshot, project documents and play link. */
-async function postPlayCard(channel: TextBasedChannel, state: TurnCardState): Promise<void> {
+async function postPlayCard(channel: TextBasedChannel, state: TurnCardState, threadId?: string): Promise<void> {
   if (!("send" in channel)) return;
   const card = renderPlayCard(state);
   try {
     // The playable card is a Components V2 container: full message width,
     // with the screenshot in a media gallery and the links as real buttons.
-    await channel.send(card);
+    const message = await channel.send(card);
+    if (threadId && state.screenshot?.length && store.getProject(threadId) && !store.getProject(threadId)?.pendingDeletion) {
+      await store.patchProject(threadId, { previewMessageId: message.id });
+    }
   } catch (error) {
     if ((error as { code?: number }).code === 50013 && state.screenshot?.length) {
       // Retry without media if Attach Files is unavailable. Text and buttons
@@ -1900,6 +1986,18 @@ async function setStatusMessage(
   await liveProgress.get(status.id)?.close();
   unregisterQuestionButtons(status.id);
   const payload = renderStatusCard(truncate(content, MAX_DISCORD_MESSAGE_CHARS), components);
+  const project = store.getProject(status.channelId);
+  if (project && !project.pendingDeletion) {
+    store.patchCardState<StoredTurnCard & { failureVersion?: string }>(project.threadId, status.id, {
+      closed: true, failureVersion: components?.length ? `${project.lastCommit ?? ""}/${project.lastTurnAt ?? ""}` : undefined,
+    });
+    // Old failure rows are upgraded in place to versioned controls scoped to
+    // this outcome, including an explicit confirmation before discarding edits.
+    for (const row of components ?? []) for (const control of row.components) {
+      if ("custom_id" in control.data && control.data.custom_id === "threadsite:rollback") control.setCustomId(cardId("rollback", status.id));
+      if ("custom_id" in control.data && control.data.custom_id === "threadsite:keep") control.setCustomId(cardId("keep", status.id)).setStyle(ButtonStyle.Secondary);
+    }
+  }
   try {
     await status.edit(cardEdit(payload));
   } catch (error) {
@@ -1990,13 +2088,14 @@ async function handleStopButton(interaction: ButtonInteraction): Promise<void> {
     throw new Error("This button only works inside a project thread.");
   }
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const outcome = await projects.stopTurn(interaction.channel.id);
-  await interaction.editReply(stopOutcomeText(outcome));
+  if (store.getProject(interaction.channel.id)?.pendingTurn?.statusMessageId !== interaction.message.id) {
+    await interaction.editReply(cardEdit(renderStatusCard("That turn is no longer running. Use the current turn's controls.")));
+    return;
+  }
+  const outcome = await projects.stopTurn(interaction.channel.id, interaction.message.id);
+  await interaction.editReply(cardEdit(renderStatusCard(stopOutcomeText(outcome))));
   if (outcome.stopped) log("info", "discord.stop_button_used", { threadId: interaction.channel.id, userId: interaction.user.id });
 }
-
-/** How many queued entries `/site queue` lists and offers cancel buttons for. */
-const MAX_QUEUE_LIST = 20;
 
 /**
  * `/site queue`: make the backlog visible and withdraw individual waiting
@@ -2004,45 +2103,10 @@ const MAX_QUEUE_LIST = 20;
  * cannot be cancelled without removing the prompt from under the live batch.
  */
 async function showQueue(interaction: ChatInputCommandInteraction, threadId: string): Promise<void> {
-  const project = store.getProject(threadId);
-  const all = project?.pendingQueue ?? [];
-  const preparing = all.filter((entry) => inFlightQueuedRequests.has(entry.statusMessageId)).length;
-  const queue = all.filter((entry) => !inFlightQueuedRequests.has(entry.statusMessageId));
-  if (!queue.length) {
-    await interaction.editReply(
-      preparing
-        ? `📭 Nothing else is queued. ${preparing} message${preparing === 1 ? " is" : "s are"} already part of the update being prepared — use \`/site stop\` to interrupt that turn.`
-        : "📭 Nothing is queued in this thread.",
-    );
-    return;
-  }
-
-  const listed = queue.slice(0, MAX_QUEUE_LIST);
-  const lines = listed.map((entry, index) => {
-    const prompt = truncate(entry.prompt.replace(/\s+/g, " ").trim(), 70);
-    const author = entry.author?.name ? ` — ${truncate(entry.author.name, 30)}` : "";
-    const images = entry.images?.length ? ` · ${entry.images.length} image${entry.images.length === 1 ? "" : "s"}` : "";
-    return `**${index + 1}.** ${prompt}${author}${images}`;
-  });
-  const header = `📬 **${queue.length}** message${queue.length === 1 ? "" : "s"} waiting for the next update pass. They run together after the current turn; cancel any with the buttons below.`;
-  const preparingLine = preparing ? `\n⏳ ${preparing} more ${preparing === 1 ? "is" : "are"} already part of the update being prepared and can only be interrupted with \`/site stop\`.` : "";
-  const moreLine = queue.length > listed.length ? `\n… and **${queue.length - listed.length}** more; cancel these or run \`/site queue\` again.` : "";
-  const content = truncate(`${header}\n${lines.join("\n")}${preparingLine}${moreLine}`, MAX_DISCORD_MESSAGE_CHARS - 20);
-
-  const rows: Array<ActionRowBuilder<ButtonBuilder>> = [];
-  for (let start = 0; start < listed.length; start += 5) {
-    const row = new ActionRowBuilder<ButtonBuilder>();
-    for (let index = start; index < Math.min(start + 5, listed.length); index += 1) {
-      row.addComponents(
-        new ButtonBuilder()
-          .setCustomId(`threadsite:qcancel:${listed[index].statusMessageId}`)
-          .setLabel(`Cancel ${index + 1}`)
-          .setStyle(ButtonStyle.Secondary),
-      );
-    }
-    rows.push(row);
-  }
-  await interaction.editReply({ content, components: rows });
+  const all = store.getProject(threadId)?.pendingQueue ?? [];
+  const requests = all.filter((entry) => !inFlightQueuedRequests.has(entry.statusMessageId));
+  const preparing = all.length - requests.length;
+  await interaction.editReply(cardEdit(renderQueuePanel(threadId, requests, preparing)));
 }
 
 /** Remove one waiting request from the in-memory batch and the durable queue. */
@@ -2054,10 +2118,12 @@ async function handleQueueCancelButton(interaction: ButtonInteraction): Promise<
   if (!/^\d{5,25}$/.test(statusId)) throw new Error("That queue entry id is invalid.");
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  const threadId = interaction.channel.id;
+  await interaction.editReply(cardEdit(renderStatusCard(await cancelQueueRequest(interaction.channel.id, statusId))));
+}
+
+async function cancelQueueRequest(threadId: string, statusId: string): Promise<string> {
   if (inFlightQueuedRequests.has(statusId)) {
-    await interaction.editReply("⏳ That request is already part of the update being prepared and can no longer be cancelled. Use `/site stop` to interrupt the turn.");
-    return;
+    return "⏳ That request is already part of the update being prepared and can no longer be cancelled. Use `/site stop` to interrupt the turn.";
   }
   const pending = pendingUpdates.get(threadId);
   const index = pending
@@ -2066,13 +2132,12 @@ async function handleQueueCancelButton(interaction: ButtonInteraction): Promise<
   const memory = index >= 0 ? pending!.entries.splice(index, 1)[0] : undefined;
   const stored = await store.cancelQueuedRequest(threadId, statusId);
   if (!memory && !stored.removed) {
-    await interaction.editReply("That request is no longer queued.");
-    return;
+    return "That request is no longer queued.";
   }
 
   // The original acknowledgement message should say what happened to its request.
   const original = memory?.status
-    ?? await interaction.channel.messages.fetch(statusId).catch(() => undefined);
+    ?? await client.channels.fetch(threadId).then((channel) => channel?.isTextBased() ? channel.messages.fetch(statusId) : undefined).catch(() => undefined);
   if (original && original.author.id === client.user?.id) {
     await setStatusMessage(original, "🚫 **Cancelled**").catch(() => undefined);
   }
@@ -2087,32 +2152,11 @@ async function handleQueueCancelButton(interaction: ButtonInteraction): Promise<
     liveProgress.get(fresh.pendingTurn.statusMessageId)?.callback({ kind: "queue", text: "Saved requests", queuedRequests: remaining });
   }
   const preview = truncate((stored.prompt ?? memory?.prompt ?? "").replace(/\s+/g, " ").trim(), 120);
-  await interaction.editReply(`🚫 Cancelled${preview ? `: **${preview}**` : " that request"} · **${remaining}** still queued.`);
-  log("info", "discord.queue_request_cancelled", { threadId, statusId, userId: interaction.user.id });
+  return `🚫 Cancelled${preview ? `: **${preview}**` : " that request"} · **${remaining}** still queued.`;
 }
 
 async function handleFailureButton(interaction: ButtonInteraction): Promise<void> {
-  if (!interaction.inGuild() || !interaction.channel?.isThread()) {
-    throw new Error("This button only works inside a project thread.");
-  }
-  const action = interaction.customId === "threadsite:rollback" ? "rollback" : "keep";
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  if (shuttingDown) throw new Error("The bot is restarting — try again in a moment.");
-  if (await projects.agentBusy(interaction.channel.id)) {
-    throw new Error("An agent turn is currently running in this thread. Wait for it to finish before deciding.");
-  }
-
-  // Disable the buttons while keeping the failure card visible.
-  await interaction.message.edit(disableMessageControls(interaction.message)).catch(() => undefined);
-
-  if (action === "keep") {
-    await interaction.editReply("🗂️ Keeping the partial edits — the next message will build on them.");
-    return;
-  }
-
-  await projects.enqueue(interaction.channel.id, () => projects.rollbackEdits(interaction.channel!.id));
-  await interaction.editReply("↩️ Rolled the workspace back to the last published commit. The partial edits were discarded.");
-  log("info", "discord.failure_button_used", { action, threadId: interaction.channel.id, userId: interaction.user.id });
+  await cardInteractions.handle(interaction, cardId(interaction.customId === "threadsite:rollback" ? "rollback" : "keep", interaction.message.id));
 }
 
 /**

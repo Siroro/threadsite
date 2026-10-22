@@ -105,3 +105,12 @@ export async function readProjectChangelog(workspacePath: string): Promise<Proje
   if (!title && !body) return undefined;
   return { ...(title ? { title } : {}), ...(body ? { body } : {}) };
 }
+
+/** Only author-owned, regular project documents can be exposed in a card panel. */
+export async function readProjectCardDocument(workspacePath: string, kind: "description" | "changelog"): Promise<string | undefined> {
+  const file = path.join(workspacePath, kind === "description" ? DESCRIPTION_FILE : CHANGELOG_FILE);
+  const stat = await fs.lstat(file).catch(() => undefined);
+  if (!stat?.isFile() || stat.isSymbolicLink()) return undefined;
+  const text = await fs.readFile(file, "utf8").catch(() => undefined);
+  return text ? cleanDocument(text) || undefined : undefined;
+}
