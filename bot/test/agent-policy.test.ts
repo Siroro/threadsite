@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate as nextTick } from "node:timers/promises";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
@@ -111,4 +113,23 @@ test("title generation is a bounded tools-free request and cleans up failed atte
   assert.equal(requests, 2);
   assert.equal(aborted, 1);
   assert.equal(deleted, 2);
+});
+
+test("the agent may write the two project documents, and the builder prompt names them", async () => {
+  const file = path.resolve(import.meta.dirname, "../../opencode/opencode.json");
+  const raw = await fs.readFile(file, "utf8");
+  const config = JSON.parse(raw) as { permission: { edit: Record<string, string> }; agent: { sitebuilder: { prompt: string } } };
+  // The play card shows these two documents, so the agent has to be able to
+  // write them — while the rest of the project root stays closed.
+  assert.equal(config.permission.edit["DESCRIPTION.md"], "allow");
+  assert.equal(config.permission.edit["*/DESCRIPTION.md"], "allow");
+  assert.equal(config.permission.edit["CHANGELOG.md"], "allow");
+  assert.equal(config.permission.edit["*/CHANGELOG.md"], "allow");
+  assert.equal(config.permission.edit["*"], "deny", "the rest of the root stays denied");
+  assert.equal(config.permission.edit["AGENTS.md"], undefined, "harness-owned files stay uneditable");
+  // And the agent has to be told about them.
+  const prompt = config.agent.sitebuilder.prompt;
+  assert.match(prompt, /DESCRIPTION\.md/);
+  assert.match(prompt, /CHANGELOG\.md/);
+  assert.match(prompt, /never modify anything outside the workspace's site\/ directory, your scratch files, or the two project documents/);
 });
