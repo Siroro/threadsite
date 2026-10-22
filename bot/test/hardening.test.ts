@@ -213,3 +213,14 @@ test("webhook health check still answers", async () => {
     server.close();
   }
 });
+
+test("failover backup models persist and clear back to the environment list", async () => {
+  const store = await openStore(path.join(root, "failover.db"));
+  assert.equal(store.getFailoverModels(), undefined, "unset follows OPENCODE_FAILOVER_MODELS");
+  await store.setFailoverModels(["other/backup", "main/model"]);
+  assert.deepEqual(store.getFailoverModels(), ["other/backup", "main/model"]);
+  await store.setFailoverModels([]);
+  assert.deepEqual(store.getFailoverModels(), [], "an empty list explicitly disables failover");
+  await store.setFailoverModels(null);
+  assert.equal(store.getFailoverModels(), undefined, "null follows the environment again");
+});

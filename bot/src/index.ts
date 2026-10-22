@@ -72,6 +72,8 @@ const store = await Store.open(config.stateDbFile, config.defaultModel);
 // republish over the gap.
 await recoverPublishRoot();
 const opencode = new OpenCodeHarness();
+// The admin-set backup list wins; without one the configured env list applies.
+opencode.failoverModelSource = () => store.getFailoverModels() ?? null;
 const forgejo = new ForgejoClient();
 const usageLog = new UsageLog(config.usageLogFile);
 const projects = new ProjectService(store, opencode, forgejo, usageLog, async (project, title) => {
@@ -1396,7 +1398,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
       `Effort: \`${store.getEffort() || "auto"}\`\n` +
       `Agent service: ${await opencode.health()}\n` +
       `Provider quota: ${opencode.quotaStatus()}\n` +
-      `Failover: ${config.opencodeFailoverModels.length ? config.opencodeFailoverModels.join(", ") : "disabled (fail fast on quota)"}\n` +
+      `Failover: ${(store.getFailoverModels() ?? config.opencodeFailoverModels).join(", ") || "disabled"}${store.getFailoverModels() ? " (set via command)" : ""}\n` +
       `Light turns: ${config.opencodeLightModel ? `${config.opencodeLightModel} (≤ ${config.opencodeLightPromptChars} chars, no images)` : "disabled"}\n` +
       `Browser QA: ${config.browserQaEnabled ? `enabled (${config.previewMcpUrl})` : "disabled"}\n` +
       `Web search: enabled for agent research\n` +
@@ -1450,6 +1452,34 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     log("info", "admin.model_changed", { userId: interaction.user.id, model: model || "default" });
     await interaction.editReply(`Future turns will use \`${model || "the model default"}\`. Existing thread sessions switch on their next message too.`);
     for (const project of store.listProjects()) void refreshProjectCard(project.threadId);
+    return;
+  }
+
+  if (sub === "failover") {
+    const raw = interaction.options.getString("models")?.trim();
+    if (raw === undefined || raw === "") {
+      const current = store.getFailoverModels();
+      const list = current ?? config.opencodeFailoverModels;
+      const source = current ? "set via command" : "from OPENCODE_FAILOVER_MODELS";
+      await interaction.editReply(list.length
+        ? `Backup models (${source}): ${list.map((model) => `\`${model}\``).join(", ")}`
+        : "No backup models configured — turns that hit quota blocks or persistent upstream errors fail without failing over.");
+      return;
+    }
+    let models: string[] | null = null;
+    if (!/^default$/i.test(raw)) {
+      models = /^none$/i.test(raw) ? [] : [...new Set(raw.split(",").map((entry) => entry.trim()).filter(Boolean))];
+      const invalid = models.find((model) => !/^[^/\s]+\/.+/.test(model));
+      if (invalid) throw new Error(`\`${invalid}\` is not provider/model-id. Use comma-separated entries, \`default\` to follow the environment, or \`none\` to disable.`);
+      if (!models.length) throw new Error("List at least one provider/model backup, or use `default` / `none`.");
+    }
+    await store.setFailoverModels(models);
+    log("info", "admin.failover_changed", { userId: interaction.user.id, models: models ?? "default" });
+    await interaction.editReply(models === null
+      ? "Backup models now follow `OPENCODE_FAILOVER_MODELS`."
+      : models.length
+        ? `Backup models: ${models.map((model) => `\`${model}\``).join(", ")}. Quota-blocked or persistently failing turns retry once on the first entry that is not the model just attempted.`
+        : "Model failover is disabled — failing turns stop at the active model.");
     return;
   }
 

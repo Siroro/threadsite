@@ -673,3 +673,15 @@ test("an upstream blip gets quick nudges before the turn fails onto the failover
     (config as { opencodeFailoverModels: string[] }).opencodeFailoverModels = originalFailover;
   }
 });
+
+test("the admin-set failover list overrides the configured one", async () => {
+  const harness = new OpenCodeHarness();
+  const error = new Error("provider request failed: 503 bad gateway") as Error & { providerBlip: { reason: string } };
+  error.providerBlip = { reason: "upstream error" };
+  harness.failoverModelSource = () => ["cmd/set-model"];
+  assert.equal(harness.failoverModelForError(error, "main/model"), "cmd/set-model", "the command-set list wins over the environment");
+  harness.failoverModelSource = () => null;
+  assert.equal(harness.failoverModelForError(error, "main/model"), undefined, "null falls back to the configured list, which is empty here");
+  harness.failoverModelSource = () => ["cmd/set-model", "main/other"];
+  assert.equal(harness.failoverModelForError(error, "main/model"), "cmd/set-model", "the model just attempted is never retried");
+});

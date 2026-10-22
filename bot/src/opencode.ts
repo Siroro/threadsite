@@ -429,12 +429,23 @@ export class OpenCodeHarness {
   }
 
   /**
+   * Runtime failover-list override (set from the admin command); null or
+   * absent follows the configured OPENCODE_FAILOVER_MODELS. An empty array
+   * explicitly disables failover.
+   */
+  failoverModelSource: (() => string[] | null) | undefined;
+
+  private failoverModelList(): string[] {
+    return this.failoverModelSource?.() ?? config.opencodeFailoverModels;
+  }
+
+  /**
    * First configured failover model that is not the current one and whose
    * provider is not itself quota-blocked; undefined when none is usable.
    */
   private failoverCandidate(current?: { providerID: string; modelID: string }): string | undefined {
     const currentId = current ? `${current.providerID}/${current.modelID}` : undefined;
-    for (const candidate of config.opencodeFailoverModels) {
+    for (const candidate of this.failoverModelList()) {
       if (candidate === currentId) continue;
       let parsed: { providerID: string; modelID: string } | undefined;
       try {
