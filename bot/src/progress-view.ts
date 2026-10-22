@@ -40,8 +40,13 @@ export interface ProgressSnapshot {
   history: ProgressActivity[];
   context: ProgressContext;
   thought?: string;
-  /** Public assistant messages only. Reasoning parts are never supplied by the adapter. */
+  /** Public assistant messages only; streamed parts grow in place. */
   narration?: ProgressActivity[];
+  /**
+   * Raw model reasoning. Never rendered on any public card; it exists for the
+   * owner-only Thinking trace tab in the personal details panel.
+   */
+  reasoning?: ProgressActivity[];
   stats?: string;
   changes?: string;
   files?: ProgressFiles;
@@ -264,6 +269,7 @@ export function progressDetailSections(state: ProgressSnapshot): PanelSection[] 
     { key: "files", label: "Changed files", text: [state.files ? `${state.files.files} files · ${state.files.added} added · ${state.files.modified} modified · ${state.files.deleted} deleted\n+${state.files.additions} / −${state.files.deletions} lines` : "", ...(state.files?.paths ?? []), state.changes ?? ""].filter(Boolean).join("\n") },
     { key: "usage", label: "Usage & context", text: [metrics ? `Input: ${metrics.inputTokens ?? "unavailable"}\nOutput: ${metrics.outputTokens ?? "unavailable"}\nCached: ${metrics.cacheTokens ?? "unavailable"}\nContext: ${metrics.contextTokens ?? "unavailable"} / ${metrics.contextLimit ?? "unavailable"}\nModel steps: ${metrics.steps ?? "unavailable"}\nCompactions: ${metrics.compactions ?? "unavailable"}\nLive output: ${metrics.liveTokensPerSecond ?? "unavailable"} tok/s\nAverage output: ${metrics.outputTokensPerSecond ?? "unavailable"} tok/s` : "Provider counts unavailable.", state.stats ?? ""].filter(Boolean).join("\n\n") },
     { key: "updates", label: "Agent update history", text: (state.narration?.length ? state.narration : state.thought ? [{ text: state.thought, at: state.now }] : []).map((item) => `**${elapsed(item.at - state.startedAt)}**\n${item.text}`).join("\n\n") },
+    ...(state.reasoning?.length ? [{ key: "thinking", label: "Thinking trace", text: state.reasoning.map((item) => `**${elapsed(item.at - state.startedAt)}**\n${item.text}`).join("\n\n") }] : []),
     { key: "activity", label: "Activity history", text: [...state.history, state.latest].map((item) => `${elapsed(item.at - state.startedAt)} · ${item.text}${item.detail ? `\n${item.detail}` : ""}`).join("\n\n") },
     { key: "questions", label: "Questions & decisions", text: [state.questionPin ? `${state.questionPin.question}\n${state.questionPin.resolution ?? ""}` : "", ...(state.questions ?? []).map((question) => `${question.question}\n${question.options.map((option) => `${option.label}${option.description ? ` — ${option.description}` : ""}`).join("\n")}`)].filter(Boolean).join("\n\n") },
     { key: "request", label: "Merged requests", text: state.context.request ?? "This turn's request is shown in the original thread message." },

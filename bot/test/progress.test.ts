@@ -299,7 +299,13 @@ test("OpenCode feeds structured plan, public usage and tool events without expos
   assert.equal(metrics.inputTokens, 1500);
   assert.equal(metrics.outputTokens, 120);
   assert.equal(metrics.cacheTokens, 500);
-  assert.doesNotMatch(JSON.stringify(updates), /PRIVATE_REASONING_TEST_MARKER|12345|"cost"/);
+  // Reasoning rides its own private channel: it reaches the owner-only
+  // details panel but never becomes a public update or a spend figure.
+  const thinking = updates.find((update) => update.kind === "thinking");
+  assert.equal(thinking?.text, "PRIVATE_REASONING_TEST_MARKER");
+  assert.equal(thinking?.narrationId, "reasoning");
+  assert.equal(updates.some((update) => update.kind === "thought" && update.text.includes("PRIVATE_REASONING")), false);
+  assert.doesNotMatch(JSON.stringify(updates.filter((update) => update.kind !== "thinking")), /12345|"cost"/);
 });
 
 test("a resumed session restores the plan the server already holds", async () => {

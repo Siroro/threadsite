@@ -155,6 +155,7 @@ const questionService = new QuestionService({
 
 const cardInteractions = new CardInteractions({
   store, questions: questionService,
+  liveSnapshot: (resource) => liveProgress.get(resource)?.readSnapshot(),
   projectSections: projectDetailSections,
   queue: (threadId) => {
     const requests = store.getProject(threadId)?.pendingQueue ?? [];

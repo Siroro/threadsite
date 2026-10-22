@@ -27,8 +27,10 @@ export interface ProgressUpdate {
    * Activity drives the current action and recent history. Structured updates
    * populate independent card sections; thought is public assistant narration,
    * never the model's reasoning stream. Questions also carry answer buttons.
+   * Thinking is the model's raw reasoning: it never renders publicly and only
+   * feeds the owner-only details panel.
    */
-  kind?: "activity" | "thought" | "stats" | "changes" | "question" | "plan" | "metrics" | "context" | "queue" | "heartbeat";
+  kind?: "activity" | "thought" | "thinking" | "stats" | "changes" | "question" | "plan" | "metrics" | "context" | "queue" | "heartbeat";
   question?: AgentQuestion;
   phase?: ProgressPhase;
   context?: ProgressContext;
@@ -48,6 +50,10 @@ export type ProgressCallback = (update: ProgressUpdate) => void | Promise<void>;
 const MAX_SUMMARY_CHARS = 280;
 // Keep a small event tail; the card shows the most recent useful activities.
 const HISTORY_LINES = 80;
+// The private thinking trail stays bounded: streamed reasoning grows fast and
+// the snapshot is persisted on every flush.
+const THINKING_TRAIL_ENTRIES = 40;
+const THINKING_ENTRY_CHARS = 2000;
 
 export interface ProgressPersistence {
   load?: ProgressSnapshot;
@@ -71,6 +77,8 @@ export class DiscordProgress {
   private dirty = false;
   private thought?: string;
   private narration: ProgressActivity[] = [];
+  /** Raw model reasoning; private to the owner's details panel, never rendered publicly. */
+  private reasoning: ProgressActivity[] = [];
   private persistence?: ProgressPersistence;
   private questionStatus?: { status: "ready" | "submitting" | "answered" | "skipped" | "retry"; error?: string };
   private stats?: string;
@@ -146,6 +154,21 @@ export class DiscordProgress {
         }
       }
       this.schedule();
+    } else if (update.kind === "thinking") {
+      const text = update.text.trim();
+      if (text) {
+        const key = update.narrationId;
+        const previous = this.reasoning.at(-1);
+        // A streamed reasoning part grows in place; older entries stay intact.
+        const capped = (value: string): string => value.length > THINKING_ENTRY_CHARS ? `${value.slice(0, THINKING_ENTRY_CHARS)}…` : value;
+        if ((key && previous?.key === key) || (!key && previous && text.startsWith(previous.text))) {
+          previous.text = capped(text);
+        } else if (previous?.text !== text) {
+          this.reasoning.push({ text: capped(text), at: Date.now(), key });
+          while (this.reasoning.length > THINKING_TRAIL_ENTRIES) this.reasoning.shift();
+        }
+      }
+      this.schedule();
     } else if (update.kind === "stats") {
       this.stats = singleLine(update.text);
       this.schedule();
@@ -184,6 +207,7 @@ export class DiscordProgress {
     this.persistence = persistence;
     if (persistence.load) {
       this.narration = persistence.load.narration ?? [];
+      this.reasoning = persistence.load.reasoning ?? [];
       this.history.push(...persistence.load.history);
       this.thought = persistence.load.thought;
       this.plan = persistence.load.plan;
@@ -317,7 +341,7 @@ export class DiscordProgress {
       waitingReason: latestToolFailed
         ? "A tool reported an error — the agent is retrying"
         : serviceWaiting ? "Waiting on the agent service — it will retry automatically" : undefined,
-      questions: this.question?.questions, questionStatus: this.questionStatus, narration: this.narration,
+      questions: this.question?.questions, questionStatus: this.questionStatus, narration: this.narration, reasoning: this.reasoning,
       stalledForMs: config.turnStallWarnMs > 0 && idleMs >= config.turnStallWarnMs ? idleMs : undefined,
     };
   }

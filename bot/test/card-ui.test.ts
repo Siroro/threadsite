@@ -327,6 +327,28 @@ test("the live card keeps turn details beside Stop and metrics in the footer", (
   assert.deepEqual(controls, ["Add instruction", "Queue · 2"], "the lower row stays actions and links only");
 });
 
+test("the thinking trail stays off the public card and pages into the private details", async () => {
+  const progress = new DiscordProgress({ id: "thinking", edit: async () => {} } as unknown as Message, "Updating");
+  try {
+    progress.callback({ kind: "thinking", text: "SECRET DELIBERATION", narrationId: "r1" });
+    progress.callback({ kind: "thinking", text: "SECRET DELIBERATION — now weighing the shove physics", narrationId: "r1" });
+    progress.callback({ kind: "thought", text: "PUBLIC NARRATION LINE about the arena", narrationId: "t1" });
+    const state = progress.readSnapshot();
+    assert.equal(state.reasoning?.length, 1, "a growing reasoning part replaces its draft in place");
+    assert.match(state.reasoning![0].text, /shove physics/);
+    const card = renderProgressCard(state, { resource: "thinking" });
+    assertV2(card);
+    const text = cardView(card).text;
+    assert.doesNotMatch(text, /SECRET DELIBERATION/, "raw reasoning never renders on the public card");
+    assert.match(text, /PUBLIC NARRATION LINE/);
+    const sections = progressDetailSections(state);
+    assert.match(sections.find((section) => section.key === "thinking")!.text, /SECRET DELIBERATION/);
+    const panel = renderDetailPanel("Turn details", "thinking", "turn", sections, "thinking");
+    assertV2(panel);
+    assert.match(cardView(panel).text, /shove physics/, "the private panel pages the full trail");
+  } finally { await progress.close(); }
+});
+
 test("card action ids round-trip and reject hostile or oversized parts", () => {
   const id = cardId("answer", "123456789012345678", "req-1", 3);
   assert.equal(id, "ts2:answer:123456789012345678:req-1:3");

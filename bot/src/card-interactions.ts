@@ -7,7 +7,7 @@ import { cardId, parseCardId, type CardRoute } from "./card-actions.js";
 import { addCardHeader, cardEdit, cardMessage, renderStatusCard, type CardMessage } from "./card-ui.js";
 import { renderDetailPanel, renderQueuePanel, requestModal, type PanelSection, type PanelScope } from "./card-panels.js";
 import type { RequestFormState, StoredTurnCard } from "./card-state.js";
-import { progressDetailSections } from "./progress-view.js";
+import { progressDetailSections, type ProgressSnapshot } from "./progress-view.js";
 import { answerModal, customAnswerModal, readAnswerForm, renderQuestionReview } from "./question-ui.js";
 import type { QuestionService } from "./question-service.js";
 import type { Store } from "./store.js";
@@ -17,6 +17,8 @@ export type CardInteraction = ButtonInteraction | AnySelectMenuInteraction | Mod
 export interface CardInteractionServices {
   store: Store;
   questions: QuestionService;
+  /** The freshest snapshot for a still-running turn, straight from memory. */
+  liveSnapshot?(resource: string): ProgressSnapshot | undefined;
   projectSections(project: ProjectRecord): Promise<PanelSection[]>;
   queue(threadId: string): { requests: QueuedRequest[]; preparing: number };
   cancel(threadId: string, statusId: string): Promise<string>;
@@ -219,14 +221,17 @@ export class CardInteractions {
 
   private turnSections(threadId: string, resource: string, scope: PanelScope): PanelSection[] {
     const card = this.services.store.getCardState<StoredTurnCard>(threadId, resource);
-    if (!card) throw new CardUserError("No saved details are available for this older turn.");
-    const sections = card.snapshot ? progressDetailSections(card.snapshot) : [];
-    const result = card.result;
+    // A running turn reads from memory: the persisted snapshot only reaches
+    // disk on the few-seconds flush cadence, and Refresh should show now.
+    const snapshot = this.services.liveSnapshot?.(resource) ?? card?.snapshot;
+    if (!card && !snapshot) throw new CardUserError("No saved details are available for this older turn.");
+    const sections = snapshot ? progressDetailSections(snapshot) : [];
+    const result = card?.result;
     if (result) sections.unshift(
       { key: "report", label: "Full agent report", text: result.summary ?? "The agent did not provide a report." },
       { key: "qa", label: "Browser findings", text: result.findings?.length ? `Advisory — publication is not blocked.\n\n${result.findings.join("\n\n")}` : "No browser findings were recorded for this turn." },
-      { key: "description", label: "About & how to play", text: card.documents?.description || [result.description?.pitch, result.description?.play].filter(Boolean).join("\n\n") || result.request || "No description has been written yet." },
-      { key: "changelog", label: "Changelog", text: card.documents?.changelog || [result.changelog?.title, result.changelog?.body].filter(Boolean).join("\n\n") || "No changelog entry was written for this turn." },
+      { key: "description", label: "About & how to play", text: card?.documents?.description || [result.description?.pitch, result.description?.play].filter(Boolean).join("\n\n") || result.request || "No description has been written yet." },
+      { key: "changelog", label: "Changelog", text: card?.documents?.changelog || [result.changelog?.title, result.changelog?.body].filter(Boolean).join("\n\n") || "No changelog entry was written for this turn." },
       { key: "outcome", label: "Outcome & commit", text: `${result.published ? "Published" : "Not published"}\nCommit: ${result.commit ?? "not recorded"}\n${result.commitFiles} files · +${result.additions} / −${result.deletions} lines\nDuration: ${result.durationMs} ms\n${result.note ?? ""}\n${result.siteUrl}\n${result.repoUrl}` },
     );
     if (result?.usage) {
