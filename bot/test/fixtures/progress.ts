@@ -3,7 +3,7 @@ import type { ProgressSnapshot } from "../../src/progress-view.js";
 export function buildingSnapshot(): ProgressSnapshot {
   return {
     title: "🎮 Updating Sumo Shove", phase: "working", startedAt: 1_000_000, now: 1_134_000,
-    latest: { text: "✏️ Editing code", detail: "site/src/player.ts", at: 1_129_000, key: "edit-player" },
+    latest: { text: "✏️ Editing", detail: "site/src/player.ts", at: 1_129_000, key: "edit-player" },
     // A single request is not echoed on the card; see mergedSnapshot().
     context: { siteUrl: "https://sites.example.invalid/sumo-shove/", repoUrl: "https://git.example.invalid/site-sumo-shove" },
     thought: "The arena now has crowd reactions. I’m connecting the leaderboard to the shared match state.",
@@ -17,10 +17,10 @@ export function buildingSnapshot(): ProgressSnapshot {
       { content: "Build, check and publish", status: "pending" },
     ],
     history: [
-      { text: "📚 Project context inspected", detail: "site/src/arena.ts", at: 1_023_000 },
-      { text: "✓ File edit complete", detail: "site/src/arena.ts", at: 1_059_000 },
+      { text: "📚 Read", detail: "site/src/arena.ts", at: 1_023_000 },
+      { text: "✓ Edited", detail: "site/src/arena.ts", at: 1_059_000 },
       { text: "📸 Preview screenshot captured", at: 1_096_000 },
-      { text: "✓ File edit complete", detail: "site/css/main.css", at: 1_122_000 },
+      { text: "✓ Edited", detail: "site/css/main.css", at: 1_122_000 },
     ],
     queuedRequests: 2, actions: 24, activeTools: 1, toolErrors: 0,
   };
