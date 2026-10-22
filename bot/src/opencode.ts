@@ -451,13 +451,15 @@ export class OpenCodeHarness {
 
   /**
    * Failover model for a turn that failed mid-flight on a provider quota
-   * block (the outage was discovered by sending): the first healthy candidate
-   * that is not the model just attempted. Callers retry the same prompt with
-   * it once.
+   * block, or on a persistent upstream blip whose quick nudges were
+   * exhausted: the first healthy candidate that is not the model just
+   * attempted. Callers retry the same prompt with it once.
    */
   failoverModelForError(error: unknown, attemptedModel?: string): string | undefined {
     const block = (error as { quotaBlock?: QuotaBlock } | undefined)?.quotaBlock;
-    if (!block || block.until <= Date.now()) return undefined;
+    if (!block || block.until <= Date.now()) {
+      if (!(error as { providerBlip?: unknown }).providerBlip) return undefined;
+    }
     let current: { providerID: string; modelID: string } | undefined;
     try {
       current = attemptedModel ? parseModel(attemptedModel) : undefined;
@@ -660,6 +662,10 @@ export class OpenCodeHarness {
     const budget = agent === "sitebuilder"
       ? this.watchStepBudget(directory, sessionId, snapshot.startedAt, onProgress, snapshot.ids, () => this.livePromptRequests.has(sessionId))
       : undefined;
+    // Quick same-model nudges for transient upstream errors: a provider 503 or
+    // a rate-limit blip usually clears in seconds, and bailing out immediately
+    // throws away an otherwise healthy turn.
+    let blipNudgesLeft = config.opencodeBlipNudges;
     try {
       for (;;) {
         try {
@@ -731,7 +737,35 @@ export class OpenCodeHarness {
             }
           }
 
+          const blip = isProviderBlip(error);
+          if (blip && blipNudgesLeft > 0) {
+            blipNudgesLeft -= 1;
+            const attempt = config.opencodeBlipNudges - blipNudgesLeft;
+            const delayMs = attempt * 2000;
+            log("warn", "opencode.prompt_provider_blip", {
+              sessionId,
+              model: model || "default",
+              reason: blip,
+              attempt,
+              nudgesLeft: blipNudgesLeft,
+              delayMs,
+              error: serializeError(error),
+            });
+            emit(onProgress, { text: `⚠️ ${model || "The model"} hit a ${blip} — nudging it again in ${Math.round(delayMs / 1000)}s` });
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            // A stop landing during the nudge aborts the turn; it must not be
+            // misread as a blip worth failing over.
+            if (this.deliberateAborts.delete(sessionId)) {
+              logError("opencode.prompt_aborted", error, { sessionId, model: model || "default" });
+              throw enrichProviderError(error, model, await finalUsage(), this.quotaContext(turn, parsed));
+            }
+            continue; // resend the same prompt: a rejected request started no agent work
+          }
+
           const enriched = enrichProviderError(error, model, await finalUsage(), this.quotaContext(turn, parsed));
+          // Persistent blips keep their classification so the caller can hand
+          // the same prompt to a configured backup model.
+          if (blip) (enriched as unknown as { providerBlip: unknown }).providerBlip = { reason: blip, attempts: config.opencodeBlipNudges + 1 };
           logError("opencode.prompt_failed", enriched, {
             sessionId,
             model: model || "default",
@@ -2338,6 +2372,26 @@ function isTransportLikeError(error: unknown): boolean {
   if (error instanceof OpenCodeRequestError && error.details.assistantError) return false;
   const text = diagnosticText(error);
   return /fetch failed|network|socket|connection (?:reset|closed|refused)|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|UND_ERR_|SocketError|HeadersTimeoutError|other side closed|terminated|aborted/i.test(text);
+}
+
+/**
+ * Whether a prompt failure looks like a transient upstream blip worth a quick
+ * nudge: provider 5xx/overload or a plain 429 rate limit. Transport-like
+ * errors recover through reconciliation instead, persisted assistant errors
+ * are conclusive, structured quota blocks have their own failover path, and
+ * auth/billing/model errors cannot succeed on a resend.
+ */
+function isProviderBlip(error: unknown): string | undefined {
+  if (isTransportLikeError(error)) return undefined;
+  if ((error as { quotaBlock?: unknown } | undefined)?.quotaBlock) return undefined;
+  if (error instanceof OpenCodeRequestError && error.details.assistantError) return undefined;
+  const text = diagnosticText(error);
+  if (/\b401\b|unauthori[sz]ed|invalid api key|authentication/i.test(text)) return undefined;
+  if (/\b402\b|payment required|billing|insufficient credit/i.test(text)) return undefined;
+  if (/model.+(?:not found|unknown|invalid model)|\b404\b/i.test(text)) return undefined;
+  if (/\b5\d\d\b|upstream|overloaded|temporarily unavailable|bad gateway|service unavailable|internal server error/i.test(text)) return "upstream error";
+  if (/\b429\b|rate.?limit|too many requests/i.test(text)) return "rate limit";
+  return undefined;
 }
 
 function diagnosticText(error: unknown, depth = 0): string {

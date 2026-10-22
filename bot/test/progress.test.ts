@@ -601,3 +601,75 @@ test("a steering submission the server rejects reports failure, not success", as
   releasePrompt({ parts: [{ type: "text", text: "done" }] });
   await prompting;
 });
+
+test("an upstream blip gets quick nudges before the turn fails onto the failover model", async () => {
+  const { config } = await import("../src/config.js");
+  const originalNudges = config.opencodeBlipNudges;
+  const originalFailover = [...config.opencodeFailoverModels];
+  (config as { opencodeBlipNudges: number }).opencodeBlipNudges = 2;
+  (config as { opencodeFailoverModels: string[] }).opencodeFailoverModels = ["other/backup"];
+  try {
+    const harness = new OpenCodeHarness();
+    const stub = harness as unknown as {
+      startEventStream: () => Promise<never>;
+      client: { session: { prompt: (options: unknown) => Promise<unknown>; messages: () => Promise<unknown[]> } };
+    };
+    stub.startEventStream = async () => { throw new Error("no stream in test"); };
+    stub.client.session.messages = async () => [];
+    let sends = 0;
+    stub.client.session.prompt = async () => {
+      sends += 1;
+      if (sends === 1) throw new Error("provider request failed: 503 upstream overloaded");
+      return { data: { parts: [{ type: "text", text: "arena built" }] } };
+    };
+    const updates: string[] = [];
+    const result = await harness.prompt("/w", "session", "Build the arena", undefined, (update) => updates.push(update.text));
+    assert.match(result.text, /arena built/);
+    assert.equal(sends, 2, "one nudge recovered the turn instead of failing it");
+    assert.ok(updates.some((text) => /nudging it again/.test(text)), "the nudge is visible on the card");
+
+    // Zero nudges restores the old fail-fast behavior.
+    (config as { opencodeBlipNudges: number }).opencodeBlipNudges = 0;
+    const disabled = new OpenCodeHarness();
+    const disabledStub = disabled as unknown as {
+      startEventStream: () => Promise<never>;
+      client: { session: { prompt: (options: unknown) => Promise<unknown>; messages: () => Promise<unknown[]> } };
+    };
+    disabledStub.startEventStream = async () => { throw new Error("no stream in test"); };
+    disabledStub.client.session.messages = async () => [];
+    let disabledSends = 0;
+    disabledStub.client.session.prompt = async () => {
+      disabledSends += 1;
+      throw new Error("provider request failed: 503 upstream overloaded");
+    };
+    await assert.rejects(disabled.prompt("/w", "session", "Build"), /upstream/);
+    assert.equal(disabledSends, 1, "nudging disabled sends exactly once");
+
+    // A persistent blip exhausts the budget, then marks the error for the backup model.
+    (config as { opencodeBlipNudges: number }).opencodeBlipNudges = 1;
+    const failing = new OpenCodeHarness();
+    const failingStub = failing as unknown as {
+      startEventStream: () => Promise<never>;
+      client: { session: { prompt: (options: unknown) => Promise<unknown>; messages: () => Promise<unknown[]> } };
+    };
+    failingStub.startEventStream = async () => { throw new Error("no stream in test"); };
+    failingStub.client.session.messages = async () => [];
+    let attempts = 0;
+    failingStub.client.session.prompt = async () => {
+      attempts += 1;
+      throw new Error("provider request failed: 503 bad gateway");
+    };
+    let failure!: Error & { providerHint?: string; providerBlip?: { reason: string } };
+    try { await failing.prompt("/w", "session", "Build"); } catch (error) { failure = error as typeof failure; }
+    assert.equal(attempts, 2, "the configured nudge budget ran before failing");
+    assert.equal(failure.providerHint, "Provider upstream error");
+    assert.equal(failure.providerBlip?.reason, "upstream error");
+    assert.equal(harness.failoverModelForError(failure, "main/model"), "other/backup", "a persistent blip hands off to the backup model");
+    assert.equal(harness.failoverModelForError(new Error("401 unauthorized"), "main/model"), undefined, "auth errors never fail over");
+    assert.equal(harness.failoverModelForError(new Error("fetch failed: connection reset"), "main/model"), undefined, "transport errors follow reconciliation instead");
+    assert.equal(harness.failoverModelForError(new Error("provider request failed: 503 once"), "main/model"), undefined, "an unmarked blip has not exhausted its nudges yet");
+  } finally {
+    (config as { opencodeBlipNudges: number }).opencodeBlipNudges = originalNudges;
+    (config as { opencodeFailoverModels: string[] }).opencodeFailoverModels = originalFailover;
+  }
+});

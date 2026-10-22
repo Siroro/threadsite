@@ -77,6 +77,8 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 | `OPENCODE_MAX_STEPS` | Builder step budget per turn (default 200); mandatory finish-up steer at 90%. Recreate bot and opencode after changes. |
 | `OPENCODE_RECONCILE_TIMEOUT_MS` / `OPENCODE_RECONCILE_POLL_MS` | Transport-failure recovery window and poll interval |
 | `OPENCODE_QUOTA_BLOCK_MIN_RETRY_MS` | Retry delay that classifies as exhausted quota instead of backoff |
+| `OPENCODE_FAILOVER_MODELS` | Backup models for quota blocks and persistent upstream errors; turns retry once on the first healthy entry |
+| `OPENCODE_BLIP_NUDGES` | Quick same-model retries for transient upstream errors (5xx/overloaded/429) before failing or failing over (default 2; 0 disables) |
 | `SESSION_IDLE_RESET_MS` / `SESSION_CONTEXT_COMPACT_THRESHOLD` | Fresh session after idle; auto-compaction threshold |
 | `OPENCODE_API_KEY` and other provider keys | Provider credentials (or store later via `/site-admin token`) |
 
