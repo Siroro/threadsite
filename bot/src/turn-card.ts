@@ -101,8 +101,9 @@ export function technicalCard(state: TurnCardState): EmbedBuilder {
     .setColor(cardColor(state));
   const summary = state.summary ? stripSummaryPreamble(state.summary) : "";
   // Discord allows a 4096-character description: the agent's full report
-  // belongs here, not a shortened version of it.
-  if (summary) embed.setDescription(truncate(summary, 3900));
+  // belongs here, not a shortened version of it. Its hard-wrapped lines are
+  // joined, so it reads as the report it is instead of a staircase.
+  if (summary) embed.setDescription(clip(prose(summary), 3900));
 
   const turn: string[] = [];
   if (state.commit) turn.push(`commit \`${state.commit.slice(0, 10)}\``);
@@ -145,14 +146,16 @@ export function playableCard(state: TurnCardState, hasScreenshot: boolean): Embe
   // The project's own description is the card's blurb; without one the
   // original brief still says what this is, so the card is never a bare link.
   const pitch = state.description?.pitch;
-  const blurb = pitch ? truncate(pitch, 1500) : state.request ? truncate(state.request, 400) : undefined;
+  const blurb = pitch ? clip(prose(pitch), 300) : state.request ? clip(prose(state.request), 260) : undefined;
   if (blurb) embed.setDescription(blurb);
-  if (state.changelog?.title || state.changelog?.body) {
-    const entry = [state.changelog.title, state.changelog.body].filter(Boolean).join("\n");
-    embed.addFields({ name: "What's new", value: truncate(entry, 1000), inline: false });
-  }
+  // The changelog heading is the field's own name: it says what changed far
+  // better than a generic "What's new".
+  const title = state.changelog?.title?.trim();
+  const entry = state.changelog?.body ? clip(prose(state.changelog.body), 320) : undefined;
+  if (entry) embed.addFields({ name: title ? clip(title, 60) : "What's new", value: entry, inline: false });
+  else if (title) embed.addFields({ name: "What's new", value: clip(title, 200), inline: false });
   if (state.description?.play) {
-    embed.addFields({ name: isGame ? "How to play" : "What to look at", value: truncate(state.description.play, 1000), inline: false });
+    embed.addFields({ name: isGame ? "How to play" : "What to look at", value: clip(prose(state.description.play), 240), inline: false });
   }
   const links = [isGame ? link("▶ **PLAY GAME**", state.siteUrl) : link("▶ **OPEN SITE**", state.siteUrl), link("Source", state.repoUrl)]
     .filter(Boolean)
@@ -171,7 +174,7 @@ export function renderTechnicalText(state: TurnCardState): { content: string; em
   const summary = state.summary ? stripSummaryPreamble(state.summary) : "";
   const content = [
     `**${state.published ? "✅" : "⚠️"} ${state.name}**`,
-    summary ? truncate(summary, 1400) : "",
+    summary ? clip(prose(summary), 1400) : "",
     [
       state.commit ? `commit \`${state.commit.slice(0, 10)}\`` : "",
       `${state.commitFiles} file${state.commitFiles === 1 ? "" : "s"} changed (+${state.additions}/−${state.deletions})`,
@@ -186,13 +189,14 @@ export function renderTechnicalText(state: TurnCardState): { content: string; em
 export function renderPlayText(state: TurnCardState): { content: string; embeds: []; allowedMentions: { parse: [] } } {
   const isGame = state.kind !== "site";
   const pitch = state.description?.pitch;
-  const blurb = pitch ? truncate(pitch, 600) : state.request ? truncate(state.request, 300) : undefined;
-  const entry = [state.changelog?.title, state.changelog?.body].filter(Boolean).join("\n");
+  const blurb = pitch ? clip(prose(pitch), 300) : state.request ? clip(prose(state.request), 260) : undefined;
+  const title = state.changelog?.title?.trim();
+  const entry = state.changelog?.body ? clip(prose(state.changelog.body), 320) : undefined;
   const content = [
     `**${isGame ? "🎮" : "🛠️"} ${isGame ? "Play" : "Open"} ${state.name}**`,
     blurb ?? "",
-    entry ? `**What's new** — ${truncate(entry, 400)}` : "",
-    state.description?.play ? `**${isGame ? "How to play" : "What to look at"}** — ${truncate(state.description.play, 500)}` : "",
+    entry ? `**${title ? clip(title, 60) : "What's new"}** — ${entry}` : title ? `**What's new** — ${clip(title, 200)}` : "",
+    state.description?.play ? `**${isGame ? "How to play" : "What to look at"}** — ${clip(prose(state.description.play), 240)}` : "",
     state.meta ? truncate(state.meta, 120) : "",
     [isGame ? link("▶ **PLAY GAME**", state.siteUrl) : link("▶ **OPEN SITE**", state.siteUrl), link("Source", state.repoUrl)]
       .filter(Boolean).join(" · "),
@@ -210,4 +214,44 @@ function link(label: string, raw?: string): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Render authored markdown the way a reader expects it. The agent writes
+ * with hard line breaks, and an embed shows every one of them: wrapped lines
+ * would read as a staircase. So a soft-wrapped paragraph becomes one line,
+ * blank lines stay paragraph breaks, list items keep their own line, and
+ * fenced code keeps its line breaks.
+ */
+function prose(text: string): string {
+  const blocks: string[] = [];
+  for (const part of text.replace(/\r\n/g, "\n").split(/(```[\s\S]*?```)/g)) {
+    if (!part) continue;
+    if (part.startsWith("```")) { blocks.push(part.trim()); continue; }
+    for (const paragraph of part.split(/\n{2,}/)) {
+      let run: string[] = [];
+      const flush = () => { if (run.length) { blocks.push(run.join(" ")); run = []; } };
+      for (const line of paragraph.split("\n").map((entry) => entry.trim()).filter(Boolean)) {
+        if (/^[-*+•]\s+/.test(line) || /^\d+[.)]\s+/.test(line)) {
+          flush();
+          blocks.push(line);
+          continue;
+        }
+        run.push(line);
+      }
+      flush();
+    }
+  }
+  return blocks.join("\n\n");
+}
+
+/** Cut at a sentence if one is near the end, otherwise at a word. */
+function clip(text: string, max: number): string {
+  const clean = text.trim();
+  if (clean.length <= max) return clean;
+  const head = clean.slice(0, max);
+  const sentence = Math.max(head.lastIndexOf(". "), head.lastIndexOf("! "), head.lastIndexOf("? "));
+  if (sentence > max * 0.5) return `${head.slice(0, sentence + 1).trimEnd()}…`;
+  const space = head.lastIndexOf(" ");
+  return `${(space > max * 0.6 ? head.slice(0, space) : head).trimEnd()}…`;
 }

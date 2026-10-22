@@ -65,11 +65,24 @@ test("the new message carries the playable card, the screenshot and the play lin
   const card = message.embeds[0].toJSON();
   assert.match(card.title!, /Play Koi Pond Arcade/);
   assert.match(card.description!, /feed koi and race them/);
-  assert.match(card.fields!.find((field) => field.name === "What's new")!.value, /top ten koi/);
+  // The changelog heading names its own field: it says what changed far
+  // better than a generic "What's new".
+  const whatsNew = card.fields!.find((field) => field.name === "Leaderboard")!;
+  assert.match(whatsNew.value, /top ten koi/);
   assert.match(card.fields!.find((field) => field.name === "How to play")!.value, /steer your koi/);
   assert.match(card.fields!.find((field) => field.name === "Links")!.value, /PLAY GAME/);
   assert.match(card.footer!.text, /shared arena multiplayer/);
   assert.equal(card.image?.url, "attachment://preview.png");
+});
+
+test("authored markdown is rendered as prose, not as the agent's hard-wrapped lines", () => {
+  const card = renderPlayCard(state({
+    description: { pitch: "A calm pond where you feed koi\nand race them across\nlily pads.", play: "Drop food with a click.\nSteer with the arrow keys." },
+    changelog: { title: "Leaderboard", body: "Added a leaderboard\nfor the top ten koi." },
+  })).embeds[0].toJSON();
+  assert.equal(card.description, "A calm pond where you feed koi and race them across lily pads.");
+  assert.equal(card.fields!.find((field) => field.name === "How to play")!.value, "Drop food with a click. Steer with the arrow keys.");
+  assert.equal(card.fields!.find((field) => field.name === "Leaderboard")!.value, "Added a leaderboard for the top ten koi.");
 });
 
 test("the playable card still renders without a screenshot, a description or a changelog", () => {
@@ -78,7 +91,7 @@ test("the playable card still renders without a screenshot, a description or a c
   const card = message.embeds[0].toJSON();
   assert.equal(card.image, undefined);
   assert.equal(card.description, undefined);
-  assert.equal(card.fields!.find((field) => field.name === "What's new"), undefined);
+  assert.equal(card.fields!.find((field) => field.name === "Leaderboard"), undefined);
   assert.equal(card.fields!.find((field) => field.name === "How to play"), undefined);
   // The play link is the one thing the card must never lose.
   assert.match(card.fields!.find((field) => field.name === "Links")!.value, /PLAY GAME/);

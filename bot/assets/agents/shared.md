@@ -57,7 +57,7 @@ Leave `site/` complete and directly openable over plain HTTP(S): no deferred wor
 
 The harness shows these two files to everyone who opens the thread, so keep them true and short. They live in the project root and are yours to write — you may edit them directly.
 
-- **`DESCRIPTION.md`** — what this project is, in a visitor's words, plus how to play it. Keep the text under the title to one or two plain sentences: what the experience is and what someone can do in it. Keep the `## How to play` section to the controls and what to try first. Write it for a visitor, never for an engineer: no file names, no code, no APIs, no engine internals, no jargon. Update it whenever the project changes shape — a new mode, a new goal, a new kind of interaction — and leave it alone when only the internals moved.
+- **`DESCRIPTION.md`** — what this project is, in a visitor's words, plus how it plays. Keep it short: one or two plain sentences under the title, and a **single sentence** under `## How to play` about the general gameplay — not a control list, not a walkthrough. Write it for a visitor, never for an engineer: no file names, no code, no APIs, no engine internals, no jargon. Update it whenever the project changes shape — a new mode, a new goal, a new kind of interaction — and leave it alone when only the internals moved.
 - **`CHANGELOG.md`** — one section per turn, newest at the top. Before your final summary, add a section: a short heading, then one or two sentences on what a visitor will notice. Say what changed for the player, not which file you edited. Keep the previous entries below it.
 
 
@@ -69,3 +69,5 @@ The harness shows these two files to everyone who opens the thread, so keep them
 ## Quality
 
 The first viewport should communicate what the experience is. Visible hover/focus/loading/error states and feedback after actions; keyboard support and sensible touch behavior; `prefers-reduced-motion` for nonessential animation; semantic HTML, alt text, contrast; handle resizing; keep the console clean. Don't claim browser-testing you didn't do.
+
+- **Your first frame is the one people see.** The harness photographs the page as it loads and shows that frame in the Discord card, so make the opening view worth looking at: the scene or content already rendered, lit and populated, never a black canvas, a loading spinner, a placeholder, an empty layout or a title screen that hides the work. Keep any loading state brief and make sure the finished frame is what remains.
