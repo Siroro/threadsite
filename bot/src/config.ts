@@ -132,10 +132,6 @@ export const config = {
   // get this many quick same-model nudges before the turn fails or the
   // failover model takes over. 0 disables nudging.
   opencodeBlipNudges: intEnv("OPENCODE_BLIP_NUDGES", 2, 0),
-  // Autopilot economy: short non-initial mutations (no images) below
-  // OPENCODE_LIGHT_PROMPT_CHARS run on this cheaper model instead of the default.
-  opencodeLightModel: env("OPENCODE_LIGHT_MODEL"),
-  opencodeLightPromptChars: intEnv("OPENCODE_LIGHT_PROMPT_CHARS", 400),
 
   // Browser QA: after static validation, load the site in the preview
   // service's Playwright browser, collect console/request errors, and capture a
