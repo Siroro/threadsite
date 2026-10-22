@@ -302,3 +302,27 @@ test("a queued compaction is successful only when its persisted result succeeds"
   f.client.session.wait = async () => {};
   await assert.rejects(f.harness.compactSession("/w", "ses_root", "test", "text"), /compaction failed.*required template/);
 });
+
+test("native text and reasoning with the same ordinal never share streamed buffers or public narration", async () => {
+  const f = fixture();
+  f.setActive(true);
+  const updates: any[] = [];
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); });
+  try {
+    const internal = f.harness as any;
+    const watch = internal.watches.get("ses_root");
+    const send = (type: string, content: object) => internal.event({ type, created: Date.now(), data: {
+      sessionID: "ses_root", assistantMessageID: "msg_stream", ordinal: 0, ...content,
+    } }, "/w", "ses_root", watch, (update: any) => { updates.push(update); });
+    send("session.reasoning.delta", { delta: "Private reasoning." });
+    send("session.reasoning.ended", { text: "Private reasoning." });
+    send("session.text.delta", { delta: "Public" });
+    send("session.reasoning.delta", { delta: " Still private." });
+    send("session.text.delta", { delta: " update." });
+    send("session.text.ended", { text: "Public update." });
+    const narration = updates.filter((update) => update.kind === "thought");
+    assert.deepEqual(narration.map((update) => update.text), ["Public", "Public update."]);
+    assert.ok(updates.some((update) => update.kind === "thinking" && update.text === "Private reasoning. Still private."));
+    assert.notEqual(narration[0].narrationId, updates.find((update) => update.kind === "thinking").narrationId);
+  } finally { await stop(); }
+});

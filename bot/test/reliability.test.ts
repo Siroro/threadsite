@@ -767,7 +767,7 @@ test("only a reply to the running turn's status message steers the live session"
   const f = await projectFixture("steer");
   // A real harness with a stubbed transport, so the steering path exercised is
   // the production one (promptAsync into the busy session, no abort).
-  const { OpenCodeHarness: Harness } = await import("../src/opencode.js");
+  const { LegacyOpenCodeHarness: Harness } = await import("../src/opencode.js");
   const harness = new Harness();
   const stub = harness as unknown as {
     startEventStream: () => Promise<never>;

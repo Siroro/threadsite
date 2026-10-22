@@ -9,6 +9,7 @@
     "test:browser": "node test/browser-smoke.mjs",
     "test:warmup": "node test/warmup-check.mjs",
     "test:docker": "node test/docker-compose-smoke.mjs",
+    "test:free-models": "node test/free-model-e2e.mjs",
     "test:docker:pixels": "node test/docker-compose-smoke.mjs --pixels-only"
   },
   "dependencies": {

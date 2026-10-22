@@ -10,7 +10,7 @@ import { buildingSnapshot, mergedSnapshot } from "./fixtures/progress.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { DiscordProgress } = await import("../src/progress.js");
-const { OpenCodeHarness } = await import("../src/opencode.js");
+const { LegacyOpenCodeHarness: OpenCodeHarness } = await import("../src/opencode.js");
 
 test("the card shows the real stage, plan, changes, usage, saved requests and links", () => {
   const state = buildingSnapshot();

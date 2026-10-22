@@ -42,7 +42,7 @@ function fractionEnv(name: string, fallback: number): number {
 const adminUserIds = new Set(env("DISCORD_ADMIN_USER_IDS").split(",").map((x) => x.trim()).filter(Boolean));
 const errorReportIdsRaw = env("DISCORD_ERROR_REPORT_USER_IDS");
 const errorReportUserIds = new Set((errorReportIdsRaw || [...adminUserIds].join(",")).split(",").map((x) => x.trim()).filter(Boolean));
-const opencodeApiVersion = env("OPENCODE_API_VERSION", "v1");
+const opencodeApiVersion = env("OPENCODE_API_VERSION", "v2");
 if (opencodeApiVersion !== "v1" && opencodeApiVersion !== "v2") {
   throw new Error("OPENCODE_API_VERSION must be v1 or v2");
 }

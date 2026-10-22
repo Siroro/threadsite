@@ -33,7 +33,7 @@ services:
     build:
       context: ./opencode
       args:
-        OPENCODE_API_VERSION: ${OPENCODE_API_VERSION:-v1}
+        OPENCODE_API_VERSION: ${OPENCODE_API_VERSION:-v2}
     restart: unless-stopped
     environment:
       XDG_DATA_HOME: /opencode-data
@@ -115,7 +115,7 @@ services:
     env_file:
       - .env
     environment:
-      OPENCODE_API_VERSION: ${OPENCODE_API_VERSION:-v1}
+      OPENCODE_API_VERSION: ${OPENCODE_API_VERSION:-v2}
       OPENCODE_URL: ${OPENCODE_URL:-http://opencode:4096}
       FORGEJO_INTERNAL_URL: ${FORGEJO_INTERNAL_URL:-http://forgejo:3000}
       FORGEJO_TOKEN_FILE: ${FORGEJO_TOKEN_FILE:-/run/secrets/forgejo-token}

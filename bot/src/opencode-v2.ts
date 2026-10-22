@@ -725,7 +725,10 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
       case "session.reasoning.ended": {
         if (child) break;
         const part = event.data;
-        const key = `${part.assistantMessageID}:${part.ordinal}`;
+        // Ordinals are local to the content channel: reasoning and public text
+        // can both be ordinal 0 in one message. Never reuse their buffers/IDs.
+        const reasoning = event.type.startsWith("session.reasoning");
+        const key = `${part.assistantMessageID}:${reasoning ? "reasoning" : "text"}:${part.ordinal}`;
         const text = "text" in part ? part.text : (watch.text.get(key) ?? "") + part.delta;
         watch.text.set(key, text);
         const now = Date.now();
@@ -738,7 +741,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
             / Math.max(250, now - watch.liveSamples[0].at);
           emit(callback, { kind: "metrics", text: "Generating", metrics: { liveTokensPerSecond: rate } });
         }
-        this.publish(watch, key, { kind: event.type.startsWith("session.reasoning") ? "thinking" : "thought", text, narrationId: key }, callback);
+        this.publish(watch, key, { kind: reasoning ? "thinking" : "thought", text, narrationId: key }, callback);
         break;
       }
       case "session.tool.input.started":

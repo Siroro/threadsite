@@ -6,7 +6,8 @@ import path from "node:path";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
-const { OpenCodeHarness } = await import("../src/opencode.js");
+// These transport fixtures exercise the retained v1 SDK contract explicitly.
+const { LegacyOpenCodeHarness: OpenCodeHarness } = await import("../src/opencode.js");
 const { config } = await import("../src/config.js");
 const { projectAgents, initialProjectInstruction } = await import("../src/templates.js");
 

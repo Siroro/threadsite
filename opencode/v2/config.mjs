@@ -49,7 +49,8 @@ export function buildV2Config(legacy, { pluginPath = "/opt/threadsite/v2", env =
       type: "remote", url: "https://mcp.context7.com/mcp", oauth: false, codemode: false,
       disabled: env.CONTEXT7_ENABLED === "0",
       ...(env.CONTEXT7_API_KEY?.trim() ? { headers: { Authorization: `Bearer ${env.CONTEXT7_API_KEY.trim()}` } } : {}),
-      timeout: { startup: 15000, catalog: 15000, execution: 30000 },
+      // Optional research must not exhaust the adapter's plugin-start deadline.
+      timeout: { startup: 5000, catalog: 5000, execution: 30000 },
     } } },
     lsp: legacy.lsp, formatter: legacy.formatter,
     compaction: { auto: legacy.compaction?.auto ?? true,

@@ -25,12 +25,18 @@ const lspCommand = process.env.OPENCODE_LSP_SMOKE_COMMAND ? JSON.parse(process.e
 const source = 'export const count: number = "wrong";\n';
 await fs.writeFile(path.join(workspace, "site", "src", "lsp-smoke.ts"), source);
 const docsCalls: string[] = [];
+const docsOffline = process.env.OPENCODE_DOCS_SMOKE_OFFLINE === "1";
 const docs = http.createServer(async (request, response) => {
   if (request.method !== "POST") { response.writeHead(405).end(); return; }
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   const message = JSON.parse(Buffer.concat(chunks).toString());
   if (message.id === undefined) { response.writeHead(202).end(); return; }
+  if (docsOffline) {
+    response.writeHead(503, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "Documentation fixture unavailable" }));
+    return;
+  }
   let result: any = {};
   if (message.method === "initialize") result = { protocolVersion: message.params.protocolVersion,
     capabilities: { tools: {} }, serverInfo: { name: "context7-fixture", version: "1" } };
@@ -166,8 +172,13 @@ try {
   assert.match(await fs.readFile(path.join(workspace, "PROJECT_NOTES.md"), "utf8"), /Preserve the smoke/);
   for (const name of ["todowrite", "todoread", "project_notes", "js_syntax_check", "asset_download"]) assert.ok(toolNames.has(name), `Missing production tool ${name}`);
   assert.ok(![...toolNames].some((name) => name.startsWith("playwright")));
-  await harness.prompt(workspace, sessionID, "Documentation smoke", "threadsite-test/text");
-  assert.deepEqual(docsCalls.sort(), ["query-docs", "resolve-library-id"]);
+  if (!docsOffline) {
+    await harness.prompt(workspace, sessionID, "Documentation smoke", "threadsite-test/text");
+    assert.deepEqual(docsCalls.sort(), ["query-docs", "resolve-library-id"]);
+  } else {
+    assert.deepEqual(docsCalls, []);
+    assert.ok(!toolNames.has("context7_query-docs"), "an unavailable documentation service must not block builder work");
+  }
   assert.ok(!toolNames.has("context7_unexpected-write"));
   if (lspCommand) {
     await harness.prompt(workspace, sessionID, "Language server smoke", "threadsite-test/text");

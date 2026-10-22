@@ -4,7 +4,8 @@ import fs from "node:fs/promises";
 import { buildV2Config } from "./config.mjs";
 import { applyRuntimeConfig } from "../runtime-config.mjs";
 
-const legacy = JSON.parse(await fs.readFile(new URL("../opencode.json", import.meta.url), "utf8"));
+const legacy = JSON.parse(await fs.readFile(new URL("../opencode.json", import.meta.url), "utf8")
+  .catch((error) => error.code === "ENOENT" ? fs.readFile(new URL("../opencode.base.json", import.meta.url), "utf8") : Promise.reject(error)));
 test("native v2 config preserves builder features and isolated subagent models without modifying v1", () => {
   const original = structuredClone(legacy);
   const config = buildV2Config(applyRuntimeConfig(structuredClone(legacy), { OPENCODE_MAX_STEPS: "350" }));
