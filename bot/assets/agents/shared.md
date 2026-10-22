@@ -1,6 +1,6 @@
 # ThreadSite Project Rules
 
-Maintained by the ThreadSite Discord harness. You author **TypeScript under `site/src/`**; when your reply ends the harness builds minified JavaScript under gitignored `site/js/`, validates it, commits authored source, and publishes only runtime files to Apache under an arbitrary path prefix. `site/src/` and unbundled `site/net/` are never deployed.
+Maintained by the ThreadSite harness. You author **TypeScript under `site/src/`**; when your reply ends the harness builds minified JavaScript under gitignored `site/js/`, validates it, commits authored source, and publishes only runtime files to Apache under an arbitrary path prefix. `site/src/` and unbundled `site/net/` are never deployed.
 
 ## Boundaries
 
@@ -13,7 +13,7 @@ Maintained by the ThreadSite Discord harness. You author **TypeScript under `sit
 ## Planning
 
 - Before editing a request that needs multiple steps or changes across multiple files, call OpenCode's `todowrite` tool and create **3–6 concrete, checkable tasks**. A plan written only in prose does not count. Skip the todo tool only for a truly single-step change.
-- The user watches this list live in Discord, so it must track reality: keep exactly one task `in_progress`, mark a task `completed` as soon as it is finished and promote the next one, and mark abandoned tasks `cancelled`. Do not leave finished work showing as pending.
+- The user watches this list live, so it must track reality: keep exactly one task `in_progress`, mark a task `completed` as soon as it is finished and promote the next one, and mark abandoned tasks `cancelled`. Do not leave finished work showing as pending.
 - Before your final summary, update the list one last time so every finished task is `completed` and every dropped task is `cancelled`.
 - When resuming an interrupted turn, call `todoread` first and continue the existing list — keep its task contents and update their statuses rather than replacing the list. If a multi-step turn has no list yet, create one before making further edits.
 - A `[THREADSITE_FORCE_FINISH]` steering message means the current turn is nearing its configured step limit. Immediately finish the edits in progress, run the required checks, update the todos, and summarize. Stop optional exploration/features and browser retries; this message does not reset your budget. Leave coherent working behavior and disclose unfinished scope.
@@ -49,7 +49,7 @@ Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, 
 
 ## How your work ships
 
-When your reply ends the harness restores ignored build inputs, bundles/minifies `src/` → ignored `js/` (pruning stale outputs), validates, commits only authored files (authored by the requesting Discord user), and publishes the runtime tree with cache-busting asset hashes.
+When your reply ends the harness restores ignored build inputs, bundles/minifies `src/` → ignored `js/` (pruning stale outputs), validates, commits only authored files (authored by the requester), and publishes the runtime tree with cache-busting asset hashes.
 Type, build, or JavaScript errors get exactly **one** automatic repair round-trip; work that still fails is committed but not published — the live site keeps the last validated version and the next reply must fix it.
 Leave `site/` complete and directly openable over plain HTTP(S): no deferred work, no "run this first" steps, no server.
 
@@ -70,4 +70,4 @@ The harness shows these two files to everyone who opens the thread, so keep them
 
 The first viewport should communicate what the experience is. Visible hover/focus/loading/error states and feedback after actions; keyboard support and sensible touch behavior; `prefers-reduced-motion` for nonessential animation; semantic HTML, alt text, contrast; handle resizing; keep the console clean. Don't claim browser-testing you didn't do.
 
-- **Your first frame is the one people see.** The harness photographs the page as it loads and shows that frame in the Discord card, so make the opening view worth looking at: the scene or content already rendered, lit and populated, never a black canvas, a loading spinner, a placeholder, an empty layout or a title screen that hides the work. Keep any loading state brief and make sure the finished frame is what remains.
+- **Your first frame is the one people see.** The harness photographs the page as it loads and shows that frame on the project card, so make the opening view worth looking at: the scene or content already rendered, lit and populated, never a black canvas, a loading spinner, a placeholder, an empty layout or a title screen that hides the work. Keep any loading state brief and make sure the finished frame is what remains.

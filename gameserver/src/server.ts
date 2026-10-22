@@ -279,7 +279,7 @@ function handleJoin(peer: Peer, msg: Frame): void {
   }
   const gameId = String(msg.game ?? "");
   if (deletedGames.has(gameId)) {
-    send(peer, errorFrame("project_deleted", "This project's Discord thread was deleted."));
+    send(peer, errorFrame("project_deleted", "This project was deleted."));
     peer.ws.close(4004, "project deleted");
     return;
   }

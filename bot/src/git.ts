@@ -413,7 +413,7 @@ export async function commitAndPush(
   // caller the tree was already clean and no commit was created.
   const staged = await git(workspace, ["status", "--porcelain=v1"]);
   if (!staged.trim()) return null;
-  const subject = summary.replace(/[\r\n]+/g, " ").trim().slice(0, 72) || "Update from Discord";
+  const subject = summary.replace(/[\r\n]+/g, " ").trim().slice(0, 72) || "Update from chat";
   const message = `${subject}\n\nCo-authored-by: ${config.commitBotName} <${config.commitBotEmail}>`;
   // The Discord requester authors the change; the bot commits it and is
   // credited as co-author so Forgejo can link both identities.

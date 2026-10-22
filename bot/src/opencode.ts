@@ -1075,7 +1075,7 @@ export class OpenCodeHarness {
     let completed = false;
     try {
       const instruction =
-        "Write a concise Discord thread title (3-6 words, Title Case, no quotes, no emoji, no trailing punctuation) " +
+        "Write a concise project title (3-6 words, Title Case, no quotes, no emoji, no trailing punctuation) " +
         "naming the website or game described by this request. Reply with only the title.\n\nREQUEST:\n" +
         truncate(requestText, 1200);
       // A title is a bounded, tools-free request. Do not enter the builder's

@@ -1016,8 +1016,8 @@ export async function publishIndex(
 
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Discord-built sites</title><style>
+<title>ThreadSite-built sites</title><style>
 :root{font-family:ui-sans-serif,system-ui,sans-serif;color-scheme:dark;background:#111;color:#eee}body{max-width:900px;margin:4rem auto;padding:0 1.25rem}h1{font-size:clamp(2rem,7vw,4rem);margin-bottom:.25rem}p{color:#aaa}ul{padding:0;list-style:none}li{display:flex;gap:.65rem;align-items:baseline;flex-wrap:wrap;padding:1rem 0;border-bottom:1px solid #333}.site{font-size:1.25rem;font-weight:700}a{color:#9ecbff}small{margin-left:auto;color:#888}@media(max-width:600px){small{width:100%;margin-left:0}}
-</style></head><body><h1>Discord-built sites</h1><p>Each site has a public git history. Newest updates first.</p><ul>${rows || "<li>No sites yet.</li>"}</ul></body></html>`;
+</style></head><body><h1>ThreadSite-built sites</h1><p>Each site has a public git history. Newest updates first.</p><ul>${rows || "<li>No sites yet.</li>"}</ul></body></html>`;
   await fs.writeFile(safeChild(config.publishRoot, "index.html"), html, "utf8");
 }
