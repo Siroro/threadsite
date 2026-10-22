@@ -192,8 +192,7 @@
       "maxSteps": 1,
       "model": "opencode/mimo-v2.6-flash-free",
       "prompt": "You name projects. The user message contains a website or game request. Reply with ONLY a concise 3-6 word title in Title Case that names the deliverable: no quotes, no emoji, no hashtags, no trailing punctuation, and no explanation. Never call tools."
-    }
-  },
+    },
   "lsp": {
     "typescript": {
       "command": ["typescript-language-server", "--stdio"],
