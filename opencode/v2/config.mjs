@@ -40,6 +40,7 @@ export function buildV2Config(legacy, { pluginPath = "/opt/threadsite/v2", env =
   return {
     update: "disable", share: "disabled", snapshots: false, default_agent: "sitebuilder",
     permissions, agents, providers,
+    websearch: websearchSelection(env),
     experimental: { todo: true },
     plugins: [{ package: pluginPath, options: { lsp: lspSettings(legacy.lsp) } }],
     mcp: { servers: { ...Object.fromEntries(Object.entries(legacy.mcp ?? {}).map(([id, server]) => [id, {
@@ -56,6 +57,20 @@ export function buildV2Config(legacy, { pluginPath = "/opt/threadsite/v2", env =
     compaction: { auto: legacy.compaction?.auto ?? true,
       keep: { tokens: legacy.compaction?.preserve_recent_tokens ?? 15000 }, buffer: legacy.compaction?.reserved ?? 20000 },
   };
+}
+
+const websearchProviders = new Set(["exa", "firecrawl", "parallel", "tavily", "tinyfish"]);
+
+// Without a pre-selected provider OpenCode asks a first-use consent form, which
+// the question flow would surface to Discord users who cannot pick a provider
+// or supply its credentials. Select it here instead.
+function websearchSelection(env) {
+  const provider = (env.OPENCODE_WEBSEARCH_PROVIDER ?? "").trim().toLowerCase() || "exa";
+  if (["off", "disable", "disabled", "false", "none"].includes(provider)) return false;
+  if (provider !== "random" && !websearchProviders.has(provider)) {
+    throw new Error("OPENCODE_WEBSEARCH_PROVIDER must be exa, firecrawl, parallel, tavily, tinyfish, random or off (default: exa).");
+  }
+  return { provider };
 }
 
 function lspSettings(lsp) {

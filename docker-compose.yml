@@ -41,6 +41,14 @@ services:
       OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-change-this-internal-password}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
       OPENCODE_ENABLE_EXA: ${OPENCODE_ENABLE_EXA:-1}
+      # Pre-selected v2 search provider; without it OpenCode asks a first-use
+      # consent form that would surface to Discord users. Keys are optional.
+      OPENCODE_WEBSEARCH_PROVIDER: ${OPENCODE_WEBSEARCH_PROVIDER:-exa}
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+      PARALLEL_API_KEY: ${PARALLEL_API_KEY:-}
+      TINYFISH_API_KEY: ${TINYFISH_API_KEY:-}
       OPENCODE_LOG_LEVEL: ${OPENCODE_LOG_LEVEL:-INFO}
       OPENCODE_MAX_STEPS: ${OPENCODE_MAX_STEPS:-200}
       CONTEXT7_ENABLED: ${CONTEXT7_ENABLED:-1}

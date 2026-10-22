@@ -58,3 +58,13 @@ test("v2 supplies trusted LSP settings and optional Context7 credentials without
   assert.equal(buildV2Config({ ...legacy, lsp: false }).plugins[0].options.lsp, false);
   assert.deepEqual(legacy, original);
 });
+
+test("v2 pre-selects the websearch provider so the consent form never reaches users", () => {
+  const original = structuredClone(legacy);
+  assert.deepEqual(buildV2Config(legacy, { env: {} }).websearch, { provider: "exa" });
+  assert.deepEqual(buildV2Config(legacy, { env: { OPENCODE_WEBSEARCH_PROVIDER: " Tavily " } }).websearch, { provider: "tavily" });
+  assert.deepEqual(buildV2Config(legacy, { env: { OPENCODE_WEBSEARCH_PROVIDER: "random" } }).websearch, { provider: "random" });
+  assert.equal(buildV2Config(legacy, { env: { OPENCODE_WEBSEARCH_PROVIDER: "off" } }).websearch, false);
+  assert.throws(() => buildV2Config(legacy, { env: { OPENCODE_WEBSEARCH_PROVIDER: "googl" } }), /OPENCODE_WEBSEARCH_PROVIDER/);
+  assert.deepEqual(legacy, original);
+});
