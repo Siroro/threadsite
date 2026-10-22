@@ -37,7 +37,9 @@ export function renderDetailPanel(title: string, resource: string, scope: PanelS
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(pages[page]));
   card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(cardId("page", resource, scope, section.key, Math.max(0, page - 1))).setLabel("Previous").setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
-    new ButtonBuilder().setCustomId(cardId("page", resource, scope, section.key, page)).setLabel("Refresh").setStyle(ButtonStyle.Secondary),
+    // The extra marker keeps Refresh's id unique: on page 0 it would otherwise
+    // equal the disabled Previous id, which Discord rejects as a duplicate.
+    new ButtonBuilder().setCustomId(cardId("page", resource, scope, section.key, page, "again")).setLabel("Refresh").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(cardId("page", resource, scope, section.key, page + 1)).setLabel("Next").setStyle(ButtonStyle.Secondary).setDisabled(page === pages.length - 1),
   ));
   return cardMessage(card);
@@ -70,7 +72,7 @@ export function renderQueuePanel(resource: string, queue: QueuedRequest[], prepa
   }
   card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(cardId("queue", resource, Math.max(0, page - 1))).setLabel("Previous").setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
-    new ButtonBuilder().setCustomId(cardId("queue", resource, page)).setLabel("Refresh queue").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(cardId("queue", resource, page, "again")).setLabel("Refresh queue").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(cardId("queue", resource, page + 1)).setLabel("Next").setStyle(ButtonStyle.Secondary).setDisabled(page === pageCount - 1),
   ));
   return cardMessage(card);

@@ -55,4 +55,8 @@ export function assertV2(message: MessageEditOptions): void {
   for (const row of components.filter((component) => component.type === ComponentType.ActionRow)) {
     assert.ok(row.components!.length > 0 && row.components!.length <= 5);
   }
+  // Discord rejects the whole payload when two interactive components share a
+  // custom id — for example a disabled Previous and a Refresh that repeat it.
+  const customIds = components.filter((component) => "custom_id" in component && component.custom_id).map((component) => component.custom_id!);
+  assert.equal(new Set(customIds).size, customIds.length, "component custom ids must be unique within a message");
 }

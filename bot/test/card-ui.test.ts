@@ -202,7 +202,11 @@ test("detail panels paginate every character and keep section choice stable", ()
   assert.equal(cardView(last).buttons.find((button) => button.label === "Previous")?.disabled, false);
   const pageIds = [...cardView(first).buttons, ...cardView(second).buttons]
     .filter((button) => parseCardId(button.custom_id!)?.action === "page").map((button) => button.custom_id);
-  assert.deepEqual([...new Set(pageIds)].sort(), ["ts2:page:turn:turn:report:0", "ts2:page:turn:turn:report:1", "ts2:page:turn:turn:report:2"]);
+  assert.deepEqual([...new Set(pageIds)].sort(), [
+    "ts2:page:turn:turn:report:0", "ts2:page:turn:turn:report:0:again", "ts2:page:turn:turn:report:1", "ts2:page:turn:turn:report:1:again", "ts2:page:turn:turn:report:2",
+  ], "the refresh marker keeps every id in a row unique, even with a disabled Previous");
+  const firstIds = cardView(first).buttons.map((button) => button.custom_id!);
+  assert.equal(new Set(firstIds).size, firstIds.length, "page 0 never repeats a custom id");
   const whole = textPages(sections[0].text).join("");
   assert.equal(whole.includes("Paragraph 40 "), true, "pagination drops nothing");
   assert.ok(textPages(sections[0].text).every((page) => page.length <= 2800));
