@@ -241,11 +241,11 @@ Browser/source links use `FORGEJO_PUBLIC_URL`; API calls and git pushes from the
 
 ## Day-2 operations with start.sh
 
-The root-level `start.sh` pulls the latest code, safely resets tracked files (`.env`, `secrets/`, and `data/` are untracked and untouched — never run `git clean` in this repo), rebuilds and recreates only the containers whose code changed, brings the stack up, and waits for services to report healthy:
+The root-level `start.sh` pulls the latest code, safely resets tracked files (`.env`, `secrets/`, and `data/` are untracked and untouched — never run `git clean` in this repo), rebuilds only the images whose inputs changed — the code commit, `docker-compose.yml`, or `.env` build args differing from the last successful build, stamped under `data/` — brings the stack up, prunes the dangling images a rebuild strands, and waits for services to report healthy. A failed or interrupted build leaves no stamp, so the next start rebuilds it instead of reusing a stale image; the same applies after a manual `git pull`. `--no-update` skips Git but always checks builds through Docker's layer cache (an unchanged service is a cached no-op, never a rebuild); `restart` only restarts existing containers.
 
 ```bash
 ./start.sh                 # update to latest main, rebuild, up, wait healthy
-./start.sh --no-update     # start the current code without touching git
+./start.sh --no-update     # rebuild/start the current code without touching git
 ./start.sh --force         # update, discarding local edits to tracked files
 ./start.sh status          # service health overview
 ./start.sh logs [service]  # follow logs (default: bot)

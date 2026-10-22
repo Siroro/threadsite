@@ -4,7 +4,7 @@
 # main-only: every update tracks origin/main.
 #
 #   ./start.sh                 update to latest main, rebuild, up
-#   ./start.sh --no-update     start the current code without touching git
+#   ./start.sh --no-update     rebuild/start the current code without touching git
 #   ./start.sh --force         update, discarding local edits to tracked files
 #   ./start.sh status          service health overview
 #   ./start.sh logs [service]  follow logs (default: bot)
@@ -87,6 +87,18 @@ wait_healthy() {
 
 maintenance() {
   compose run --rm --no-deps -T --entrypoint node bot dist/maintenance.js "$@"
+}
+
+# Digest of every image-build input start.sh can't see inside Docker: the code
+# commit (deploy.sh leaves tracked files exactly at HEAD), the compose file
+# (contexts, build args) and .env (build-arg values). Stored under untracked
+# data/ after each successful build; see the `up` command.
+IMAGE_STAMP="data/.image-build-stamp"
+image_inputs_digest() {
+  {
+    git rev-parse HEAD 2>/dev/null || echo no-git
+    sha256sum docker-compose.yml docker-compose.override.yml .env 2>/dev/null || true
+  } | sha256sum | cut -d' ' -f1
 }
 
 remove_projects() {
@@ -202,8 +214,26 @@ case "$COMMAND" in
       say "Skipping the git update (--no-update)."
     fi
 
-    say "Bringing the stack up…"
-    compose up -d
+    # Rebuild only when the built images can be out of date. After deploy.sh
+    # the tree is exactly HEAD, so the commit plus docker-compose.yml plus .env
+    # (build args) describe every build input: while they match the stamp of
+    # the last successful build, images are current and startup is buildless.
+    # --no-update skips Git, so tracked files may be locally edited and builds
+    # are always checked — Docker's layer cache makes an unchanged service a
+    # cheap no-op, never a rebuild.
+    if (( UPDATE )) && [[ -f "$IMAGE_STAMP" && "$(image_inputs_digest)" == "$(cat "$IMAGE_STAMP")" ]]; then
+      say "Images already built for this code — starting the stack without rebuilding."
+      compose up -d --remove-orphans
+    else
+      say "Checking image builds and bringing the stack up…"
+      compose up -d --build --remove-orphans
+      mkdir -p data
+      image_inputs_digest >"$IMAGE_STAMP"
+      # A rebuild retags its service image, which strands the previous one as
+      # a dangling <none>; fully cached runs strand nothing, so this usually
+      # reclaims nothing.
+      docker image prune -f >/dev/null || warn "Could not prune dangling images."
+    fi
 
     wait_healthy
     echo
