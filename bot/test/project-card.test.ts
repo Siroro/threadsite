@@ -42,9 +42,8 @@ test("the creating preview shows the request and settings before any build work"
   assert.match(card.description!, /Building the first version/);
   assert.match(card.fields!.find((field) => field.name === "Original request")!.value, /Build a koi pond arcade game/);
   assert.deepEqual(card.fields!.slice(0, 3).map((field) => field.name), ["Type", "Engine", "Multiplayer"]);
-  assert.equal(card.fields![1].value, "Phaser");
+  assert.equal(card.fields![1].value, "Excalibur");
   assert.equal(card.color, 0xf59e0b);
-  // The design version is bookkeeping in the stored record, not card chrome.
   assert.equal(card.footer, undefined);
   // Model routing is operational detail: no Model field on the public card.
   assert.equal(card.fields!.find((field) => field.name === "Model"), undefined);
@@ -109,7 +108,6 @@ test("game settings name the dimension, engine and chosen multiplayer architectu
   const fields = (overrides: Partial<ProjectRecord>) => embed(renderProjectCard({ project: record(overrides) })).fields!;
   const multiplayer = (overrides: Partial<ProjectRecord>) => fields(overrides).find((field) => field.name === "Multiplayer")?.value;
 
-  // A game with no stored mode (legacy) but a relay tenant reads as arena.
   assert.equal(multiplayer({ multiplayerGameId: "koi-pond-arcade" }), "Shared arena multiplayer");
   assert.equal(multiplayer({ multiplayerMode: undefined, multiplayerGameId: undefined }), "Shared arena multiplayer");
   assert.equal(multiplayer({ multiplayerMode: "rooms" }), "Invite-code rooms");
@@ -128,10 +126,5 @@ test("the pinned card shows advisory QA status and keeps long requests within fi
   } }) }));
   assert.match(card.fields!.find((field) => field.name === "Browser QA")!.value, /Advisory · 2 findings · checked <t:\d+:R>/);
   assert.ok(card.fields!.every((field) => field.value.length <= 1024));
-  // Legacy records stored an error list next to warnings; only the errors
-  // were findings, so the card counts one finding for them.
-  const legacy = embed(renderProjectCard({ project: record({ browserQaFindings: {
-    checkedAt: new Date().toISOString(), errors: ["runtime finding"], notes: ["preview unavailable"],
-  } }) }));
-  assert.match(legacy.fields!.find((field) => field.name === "Browser QA")!.value, /Advisory · 1 finding ·/);
+
 });

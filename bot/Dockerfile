@@ -14,7 +14,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
-# The engine packages (three, phaser, @dimforge/rapier3d-compat,
+# The engine packages (three, excalibur, @dimforge/rapier3d-compat,
 # three-mesh-bvh, @types/three) are devDependencies — build-time seed
 # sources only, never imported by the running bot. dist/stage-engines.js
 # staged the exact payload the seeder reads (per the spec in src/engines.ts)

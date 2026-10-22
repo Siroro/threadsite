@@ -1,4 +1,4 @@
-<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
+<!-- Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. ThreadSite context: the rendering engine (three/excalibur) is preinstalled in this workspace's harness-managed node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md. -->
 
 # Feedback recipes — depth for `game-feel`
 
@@ -98,5 +98,4 @@ These pair with `game-ui-ux` (settings menu) and `input-systems` (accessibility 
 - **Unity 6.3 LTS:** coroutines + `SmoothDamp`/curves (or a tween package); `ParticleSystem.Play()`;
  `Time.timeScale` + `WaitForSecondsRealtime`; shake via `CinemachineBasicMultiChannelPerlin`
  amplitude/frequency driven by `trauma^2` (see `camera-systems`).
-- **Web (Phaser/Pixi/three):** tween via the engine/library tween; `this.cameras.main.shake()`
- in Phaser; `requestAnimationFrame`-driven eases elsewhere.
+- **Web (Excalibur/three):** use Excalibur Actor actions and camera shake, or presentation-only eases and camera offsets in three.js.

@@ -149,19 +149,6 @@ test("scratch rejects root files, other views/projects, symlinks and source expo
   assert.equal((await get("__scratch/car/__site/assets/leak.txt")).status, 500);
 });
 
-test("serves legacy static JS, local assets and subpages with correct MIME types", async (t) => {
-  const { site, get } = await fixture(t);
-  await fs.rm(path.join(site, "src"), { recursive: true });
-  await fs.mkdir(path.join(site, "js"));
-  await fs.writeFile(path.join(site, "js", "main.js"), 'document.title = "legacy";');
-  await fs.mkdir(path.join(site, "help"));
-  await fs.writeFile(path.join(site, "help", "index.html"), "Help");
-  assert.match(await (await get("js/main.js")).text(), /legacy/);
-  const page = await get("help/");
-  assert.match(page.headers.get("content-type"), /text\/html/);
-  assert.equal(await page.text(), "Help");
-  assert.equal(page.headers.get("cache-control"), "no-store");
-});
 
 test("nested TypeScript without an entry cannot fall back to old workspace bundles", async (t) => {
   const { site, get } = await fixture(t);

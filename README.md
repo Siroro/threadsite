@@ -13,7 +13,9 @@ The result is a public gallery (`index.html` at the publish root) listing every 
 
 ## How it works
 
-The model never runs builds, shell, or git. Projects are authored in **TypeScript under `site/src/`**; the harness runs the only esbuild bundle before every publish, validates the static tree, and enforces publication boundaries (no symlinks, dotfiles, or server-executable files; size caps). Game engines (three.js + Rapier for 3D, Phaser for 2D) are installed by the harness like dependencies and type-checked against their real declarations.
+The model never runs builds, shell, or git. Projects are authored in **TypeScript under `site/src/`**; the harness runs the only esbuild bundle before every publish, validates the static tree, and enforces publication boundaries (no symlinks, dotfiles, or server-executable files; size caps). Game engines (three.js + Rapier for 3D, Excalibur for 2D) are installed by the harness like dependencies and type-checked against their real declarations.
+
+2D games default to native-size rendering with HiDPI support, adapting the camera and layout on resize instead of stretching a low-resolution canvas. Pixel-art assets use nearest-neighbor filtering and integer zoom for crisp pixels.
 
 The one deliberate runtime exception is the **harness-owned multiplayer relay**: the model never writes server code, it only uses a vendored browser client pointed at a shared multi-tenant WebSocket relay. Games stay fully playable solo when the relay is unreachable.
 

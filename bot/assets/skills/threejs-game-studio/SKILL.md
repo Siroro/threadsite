@@ -66,14 +66,9 @@ upgrades, or changes Three.js API usage.
 
 At discovery, import `three` and log `THREE.REVISION` from the installed engine package to confirm the revision you are authoring against. The harness pins and installs the engine, so record the observed revision and never claim a newer stable target than what is installed.
 
-Recipes in this package use **Three.js r185 as their verified baseline** (last
-checked with npm `three@0.185.1`). For a new project, use the installed revision as the baseline; upgrade intentionally when a newer stable is required. For an existing project, preserve its installed revision
-unless an upgrade is in scope. Any revision other than the verified baseline
-requires the matching
-official migration notes, source/examples, build/typecheck, and browser proof;
-do not assume “r185+” means future APIs are unchanged.
-
-For a maintenance refresh, spot-check the linked official pages; keep this networked check separate from deterministic offline verification.
+The harness supplies the engine versions listed in `references/official-docs.md`.
+Use those packages and their real declarations; do not install dependencies or
+introduce a separate scaffold or build system.
 
 Use this authority order:
 
@@ -86,14 +81,6 @@ Use this authority order:
 5. The bundled references and scaffold in this package.
 6. Third-party examples only as inspiration; re-verify every API against 1-4.
 
-Preserve an existing project's version unless the user asked for an upgrade or
-the requested feature requires one. Never perform a wide revision jump as a
-side effect of an unrelated fix.
-
-If the installed revision differs from live docs or from skill last-check notes,
-verify before copying APIs. When upgrading past recipes last verified against,
-re-check migration notes, source/types, every used addon and renderer path, and
-the full build/browser suite; do not treat skill text as frozen API law.
 
 ## Local-First Runtime Contract
 
@@ -103,9 +90,7 @@ Keep generated games self-contained by default:
 - Use project-owned, user-supplied, or procedurally authored local models,
  textures, fonts, and audio. Do not fetch remote runtime assets, analytics,
  hosted generators, provider SDKs, credentials, or cloud runtimes.
-- Use Three.js and browser APIs for new runtime systems. Preserve historical
- project dependencies when removing them is outside scope, but do not add a
- runtime library silently.
+- Use the installed packages and browser APIs for runtime systems.
 - Keep official documentation links in the skill references; documentation
  links are research sources, not runtime dependencies.
 - If the user explicitly requests networking, cloud saves, multiplayer, or a
@@ -153,12 +138,6 @@ work, not the premium gate itself. Read `references/load-budgets.md` then
 A broad request is not complete after a vertical slice unless the user
 explicitly chose a slice.
 
-A revision-only migration that preserves the renderer family, shader language,
-post stack, and gameplay architecture may use the focused legacy-upgrade route.
-A WebGL↔WebGPU renderer-family port, GLSL↔TSL rewrite, or post-processing
-architecture port is broad-production work even when the request calls it an
-"upgrade".
-
 ### Premium quality overlay
 
 Activate this after a playable browser-proven loop exists whenever the request
@@ -184,28 +163,6 @@ substitute for the playable and premium work they are meant to verify.
 
 Choose these unless project evidence or the request demands otherwise:
 
-- An explicit renderer choice in the request or an established project
- contract takes precedence over the generic defaults below. Preserve it
- unless it is unavailable or incompatible with a required feature; explain
- that conflict before proposing a renderer change.
-- `WebGLRenderer` for the widest mature production path and straightforward
- tutorials.
-- For a graphics-heavy or compute-heavy 3D site/game, offer the experimental
- `WebGPURenderer` as a first-class candidate when the target browsers,
- material/post stack, and measured workload fit it. Explain its status and
- WebGL 2 fallback, then benchmark against the mature WebGL path before the
- user commits to the renderer family.
-- `PerspectiveCamera`, r185 `Timer`, and `renderer.setAnimationLoop()`.
-- glTF 2.0 (`.glb`) through `GLTFLoader` for authored 3D assets.
-- `MeshStandardMaterial` plus an intentional environment and light rig.
-- Simple gameplay colliders separate from render meshes.
-- DOM/CSS HUD and menus over the canvas.
-- Pointer Events mapped into input intents; keyboard plus touch when mobile is
- in scope.
-- Procedural Web Audio or local audio, unlocked by a user gesture.
-- Capped device-pixel ratio, measured budgets, explicit disposal, deterministic
- test hooks, and a production-preview browser pass.
-
 Explain deviations. Treat WebGPU as a first-class candidate for demanding 3D,
 not a guaranteed speed switch: validate the actual WebGPU backend, the
 WebGPURenderer's WebGL 2 fallback, and a preserved `WebGLRenderer` path only
@@ -230,9 +187,7 @@ Use this before opening the full table. Then load only the budgeted refs.
  `references/game-design.md` + **First-Person Or Third-Person Action** in
  `references/genre-playbooks.md` + **Third-Person Action Rig Contract** in
  `references/interaction.md`
-- Revision-only old Three.js / CDN / global `THREE` migration →
- `references/upgrade-existing.md`; renderer-family/shader-architecture ports
- also activate broad-production workflow
+
 - Import or asset issues → `references/local-assets.md`
 - Perception, patrol, pursuit, pathfinding, or crowds → `references/ai-navigation.md`
 - Versioned saves, world streaming, workers, or local diagnostics →
@@ -248,7 +203,6 @@ loading this entire table.
 | Need | Required reference |
 | --- | --- |
 | Minimum refs per scope; hard defer rules | [load-budgets.md](references/load-budgets.md) |
-| Legacy CDN / old-revision migration order | [upgrade-existing.md](references/upgrade-existing.md) |
 | Multiplayer / cloud boundary (approval required) | [networking-boundary.md](references/networking-boundary.md) |
 | Version-sensitive APIs, official sources, migration traps | [official-docs.md](references/official-docs.md) |
 | One-page verified-baseline cheat sheet | [quickref.md](references/quickref.md) |
@@ -326,67 +280,7 @@ and full gates. Preserve this dependency order:
 
 ## Architecture Invariants
 
-- Preserve existing architecture unless evidence justifies a change.
-- Keep one owner for the renderer, active camera, animation loop, timer,
- simulation clock, game state, resize, loading manager, audio context, asset
- cache, and teardown.
-- Use `sample devices -> player/AI intents -> fixed movement +
- collision/physics -> game rules/events -> animation/VFX -> camera ->
- UI/audio bridge -> render` as the default update order. Scheduled AI sensing
- and decisions must publish intent before the step that resolves movement and
- contact.
-- Convert device events into intents. Never make simulation depend directly on
- DOM event timing.
-- Route gameplay randomness through a seeded generator. Keep screenshot and bot
- states deterministic.
-- Separate authoritative game state, collision proxies, and visual meshes.
-- Reuse vectors/quaternions/matrices in hot paths; pool short-lived entities and
- effects; share geometry, materials, and textures deliberately.
-- Treat every listener, worker, mixer, control, render target, texture,
- material, geometry, skeleton, audio voice, and renderer as an owned resource
- with a teardown path.
-- Keep debug/tuning/test hooks explicit and gated from production presentation.
-
 ## Verified-Baseline API Guardrails
-
-Prefer current names; reject legacy aliases:
-
-- Use `THREE.Timer`; do not introduce deprecated `THREE.Clock`.
-- Prefer `renderer.setAnimationLoop()` as the renderer-owned loop. WebXR needs
- it; a manual `requestAnimationFrame()` WebGPU loop must first `await
- renderer.init()` and deliberately own session compatibility.
-- Import official addons from `three/addons/...`.
-- Use `renderer.outputColorSpace`, `texture.colorSpace`,
- `THREE.SRGBColorSpace`, and `THREE.LinearSRGBColorSpace`.
-- Choose intentional tone mapping (`ACESFilmicToneMapping`, `AgXToneMapping`, or
- `NeutralToneMapping`) for lit PBR; do not leave games on default
- `NoToneMapping` without a reason. See `references/tone-mapping-color.md`.
-- Prefer opaque canvases (`alpha: false`) plus opaque `Scene.background` /
- `setClearColor` unless HTML compositing or AR camera passthrough is required.
-- Use `HDRLoader`, not the deprecated `RGBELoader` alias.
-- On the verified r185 WebGL path, use soft `THREE.PCFShadowMap`, not deprecated
- `PCFSoftShadowMap`. On WebGPU, verify the installed revision: r185 still
- exposes `PCFSoftShadowMap`, while the next migration removes it.
-- Use `BufferGeometryUtils.mergeGeometries()`, not
- `mergeBufferGeometries()`.
-- Use `PointerLockControls.object`, not `getObject()`.
-- Treat `Raycaster.firstHitOnly` as third-party behavior, never core Three.js.
-- Use WebGL `EffectComposer` only on the WebGL path. Put linear/HDR effects
- before `OutputPass`; put display-referred passes that require sRGB input,
- such as FXAA, after it.
-- Use WebGPU node materials/TSL and `THREE.RenderPipeline`; never combine
- WebGPU with `ShaderMaterial`, `RawShaderMaterial`, `onBeforeCompile()`, or
- `EffectComposer`.
-- Bypass `RenderPipeline` while `renderer.xr.isPresenting` and render the scene
- directly. The pipeline temporarily disables XR; treat its node post-processing
- as a desktop/non-XR path unless an on-device-tested XR pipeline proves
- otherwise for the installed revision.
-- Initialize WebGPU before renderer-dependent loader detection or eager renders.
-- After WebGPU initialization, prefer current synchronous `render()`,
- `clear()`, `hasFeature()`, and `initTexture()` APIs. `computeAsync()` remains
- current; do not incorrectly classify every async Renderer method as
- deprecated—verify each method against the installed revision.
-- Keep `FileLoader.load()` callback-driven; do not rely on a return value.
 
 ## Evidence And Completion Rules
 

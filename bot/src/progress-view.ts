@@ -58,8 +58,7 @@ export interface ProgressSnapshot {
 const PHASES: ProgressPhase[] = ["preparing", "working", "checking", "publishing"];
 const LABELS: Record<ProgressPhase, string> = { queued: "Queued", preparing: "Prepare", working: "Build", checking: "Check", publishing: "Publish" };
 const COLORS: Record<ProgressPhase, number> = { queued: 0x64748b, preparing: 0x818cf8, working: 0x5865f2, checking: 0x14b8a6, publishing: 0x22c55e };
-// Seven 125-character items stay just under Discord's 1024-character field cap,
-// which is the space the single-request echo used to take.
+// Seven 125-character items fit Discord's 1024-character field cap.
 const PLAN_VISIBLE_ITEMS = 7;
 
 /** One bounded Discord embed; facts come from events rather than an invented completion estimate. */

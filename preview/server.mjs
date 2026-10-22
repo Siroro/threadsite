@@ -45,15 +45,7 @@ async function bundle(workspaceRoot, project, view) {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
-  if (!entries.length) {
-    const sources = await fs.readdir(source, { recursive: true, withFileTypes: true }).catch((error) => {
-      if (error.code === "ENOENT") return [];
-      throw error;
-    });
-    // Match the harness's no-entry case: nested TS alone cannot keep old JS alive.
-    const compiled = sources.some((entry) => entry.isFile() && /\.(?:ts|mts)$/.test(entry.name));
-    return { site, outputs: new Map(), compiled };
-  }
+  if (!entries.length) return { site, outputs: new Map() };
 
   // Keep these production flags aligned with bot/src/build.ts. Only write and
   // the containment plugin differ: previews never touch the workspace/bundles.
@@ -82,16 +74,14 @@ async function bundle(workspaceRoot, project, view) {
     throw new Error("Preview bundles exceed 32 MiB.");
   }
   return {
-    site, compiled: true,
+    site,
     outputs: new Map(result.outputFiles.map((file) => [path.relative(site, file.path).split(path.sep).join("/"), file.contents])),
   };
 }
 
 // Concurrent esbuild builds are bounded because each one is CPU-heavy and this
 // container shares its cores with Chromium's software rasterizer. Requests
-// beyond the limit wait their turn rather than failing: several threads can be
-// previewing at once, and a hard "busy" response used to surface as a blank
-// page whose only content was that error string.
+// beyond the limit wait their turn.
 const MAX_CONCURRENT_BUILDS = Number(process.env.PREVIEW_BUILD_CONCURRENCY || 4);
 const BUILD_QUEUE_TIMEOUT_MS = Number(process.env.PREVIEW_BUILD_QUEUE_TIMEOUT_MS || 30_000);
 // Cached snapshots are what non-HTML requests (js/, css/, assets) are served
@@ -207,12 +197,12 @@ export function createPreviewServer({ workspaceRoot }) {
       const key = view ? `${project}/__scratch/${view}` : project;
       // HTML navigation/reload always builds current edits, including imports.
       const snapshot = sharedAsset
-        ? { site: await checkedPath(root, [...project.split("/"), "site"]), outputs: new Map(), compiled: false }
+        ? { site: await checkedPath(root, [...project.split("/"), "site"]), outputs: new Map() }
         : /\.html?$/i.test(relative) || !snapshots.has(key)
           ? await rebuild(project, view) : await (pending.get(key) || snapshots.get(key));
       let body = snapshot.outputs.get(relative);
       if (!body) {
-        if (snapshot.compiled && parts[0] === "js") {
+        if (parts[0] === "js") {
           res.writeHead(404); res.end("Not emitted by the current TypeScript build."); return;
         }
         const file = await checkedPath(snapshot.site, parts);

@@ -943,12 +943,6 @@ type ReplayFrame = {
 };
 ```
 
-Playback supplies each `ReplayFrame` to the same action/simulation function and
-advances exactly one fixed step. Disable live gameplay input, wall-clock timers,
-`Math.random()`, asynchronous rule decisions, and frame-rate-dependent motion.
-Keep stable entity iteration order; assign deterministic IDs rather than using
-random UUIDs for rule ordering.
-
 Add periodic canonical checksums over quantized gameplay data and compare them
 during playback. Hash positions, velocities, health, scores, active IDs, RNG
 state, wave index, and phase—not render matrices, GPU particles, audio state, or

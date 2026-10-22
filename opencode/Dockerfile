@@ -5,10 +5,7 @@ RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" \
     && mkdir -p /root/.config/opencode/tools /opencode-data /workspace /opt/threadsite
 
 # LSP servers and formatter used by the opencode.json lsp/formatter sections.
-# Installed globally so they resolve in every workspace regardless of whether
-# the generated site has its own package.json. typescript stays pinned to 5.x:
-# typescript-language-server needs the classic tsserver/JS API, which the
-# native TypeScript 7 package no longer ships.
+# Installed globally with the TypeScript compiler used by the validation gate.
 RUN npm install -g typescript-language-server "typescript@5.9.3" \
     vscode-langservers-extracted prettier
 

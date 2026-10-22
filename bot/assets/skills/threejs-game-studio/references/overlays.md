@@ -212,12 +212,6 @@ const line = new Line2(geometry, material);
 scene.add(line);
 ```
 
-In r185, `Line2NodeMaterial` does not support transparent blending. Use
-`worldUnits: true` when thickness should attenuate with perspective and be
-measured in world units. Dispose both line geometry and material when their
-owner is released. Do not use thin `THREE.Line` when the design requires stable
-multi-pixel screen-space thickness.
-
 ## Billboards
 
 Prefer `Sprite` for an icon that should always face the camera:

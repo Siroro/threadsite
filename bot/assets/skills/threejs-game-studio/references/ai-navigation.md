@@ -452,9 +452,6 @@ replans, and stuck actors. Never ship a hidden network analytics sink.
 
 ## Official Three.js API Boundary
 
-Verified against the current r185 API surface. These are the Three.js pieces
-used by the examples; navigation and AI algorithms remain game code:
-
 - [Vector3](https://threejs.org/docs/pages/Vector3.html) and [Quaternion](https://threejs.org/docs/pages/Quaternion.html)
 - [Raycaster](https://threejs.org/docs/pages/Raycaster.html) and [Layers](https://threejs.org/docs/pages/Layers.html)
 - [Box3](https://threejs.org/docs/pages/Box3.html), [Sphere](https://threejs.org/docs/pages/Sphere.html), and [Frustum](https://threejs.org/docs/pages/Frustum.html)

@@ -65,7 +65,7 @@ snapshot.state.state
 
 because `snapshot.state` is the world envelope.
 
-* Snapshots must contain **JSON-serializable DTO data**. Never put Phaser/THREE objects, physics bodies, class instances, functions or circular object graphs into snapshots. Capture plain objects, arrays, strings, booleans and numbers instead.
+* Snapshots must contain **JSON-serializable DTO data**. Never put Excalibur/THREE objects, physics bodies, class instances, functions or circular object graphs into snapshots. Capture plain objects, arrays, strings, booleans and numbers instead.
 
 * Circular/non-serializable data causes `bad_frame`. Lifecycle `publishNow()` catches publication errors, logs them and returns `false`; raw publication may throw.
 

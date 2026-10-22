@@ -45,13 +45,6 @@ requested design fundamentally needs those features, choose deliberately:
 | stacks, joints, ragdolls, arbitrary convex dynamics, robust vehicles | preinstalled Rapier (`@dimforge/rapier3d-compat`) |
 | fast queries against complex static meshes (hitscan, LOS, ground, picking) | preinstalled `three-mesh-bvh` on the static geometry |
 
-Three.js also ships `AmmoPhysics`, `JoltPhysics`, and `RapierPhysics` convenience
-addons. In r185 these automatically import their engines from a CDN. That
-violates an offline/local-first runtime unless the external engine is deliberately
-vendored and the integration adapted. Do not copy those wrappers unchanged into
-a project that promises local-only runtime assets — Rapier itself is already
-preinstalled here, so there is no gap for them to fill.
-
 ## One Simulation Owner
 
 Keep collider state in a gameplay system, not in render code. Visual meshes

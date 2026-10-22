@@ -38,8 +38,8 @@ interface EnginePackage {
   manifest: string;
   /** Files copied verbatim from the bot's node_modules, [bot-relative, package-relative]. */
   files: Array<{ from: string; to: string }>;
-  /** Directories copied recursively, as [bot-relative source, package-relative target]. */
-  dirs: Array<{ from: string; to: string }>;
+  /** Recursive trees; declarationsOnly excludes runtime builds beside .d.ts files. */
+  dirs: Array<{ from: string; to: string; declarationsOnly?: boolean }>;
   /** Package-relative path of the TypeScript declaration entry. */
   typesEntry: string;
 }
@@ -153,39 +153,41 @@ const THREE_MESH_BVH_PACKAGE: EnginePackage = {
   typesEntry: "three-mesh-bvh/src/index.d.ts",
 };
 
-const PHASER_PACKAGE: EnginePackage = {
-  name: "phaser",
-  version: "4.2.1",
+const EXCALIBUR_PACKAGE: EnginePackage = {
+  name: "excalibur",
+  version: "0.32.0",
   manifest: JSON.stringify({
-    name: "phaser",
-    version: "4.2.1",
-    description: "Phaser 4 browser ESM build (harness-seeded, curated manifest)",
+    name: "excalibur",
+    version: "0.32.0",
+    description: "Excalibur browser ESM build (harness-seeded, curated manifest)",
     type: "module",
-    license: "MIT",
-    main: "./dist/phaser.esm.min.js",
-    types: "./types/phaser.d.ts",
+    license: "BSD-2-Clause",
+    sideEffects: false,
+    main: "./build/esm/excalibur.js",
+    types: "./build/dist/excalibur.d.ts",
     exports: {
       ".": {
-        types: "./types/phaser.d.ts",
-        import: "./dist/phaser.esm.min.js",
-        default: "./dist/phaser.esm.min.js",
+        types: "./build/dist/excalibur.d.ts",
+        import: "./build/esm/excalibur.js",
+        default: "./build/esm/excalibur.js",
       },
     },
   }, null, 2) + "\n",
   files: [
-    { from: "phaser/dist/phaser.esm.min.js", to: "dist/phaser.esm.min.js" },
-    { from: "phaser/types/phaser.d.ts", to: "types/phaser.d.ts" },
-    { from: "phaser/types/matter.d.ts", to: "types/matter.d.ts" },
-    { from: "phaser/LICENSE.md", to: "LICENSE.md" },
+    { from: "excalibur/build/esm/excalibur.js", to: "build/esm/excalibur.js" },
+    { from: "excalibur/build/dist/excalibur.d.ts", to: "build/dist/excalibur.d.ts" },
+    { from: "excalibur/LICENSE.md", to: "LICENSE.md" },
   ],
-  dirs: [],
-  typesEntry: "phaser/types/phaser.d.ts",
+  // The declaration graph shares dist/ with large UMD/development builds.
+  // Seed all declarations, including nested imports, without those runtimes.
+  dirs: [{ from: "excalibur/build/dist", to: "build/dist", declarationsOnly: true }],
+  typesEntry: "excalibur/build/dist/excalibur.d.ts",
 };
 
 /** The engine packages a project kind depends on; sites get none. */
 export function enginePackages(kind: ProjectKind): EnginePackage[] {
   if (kind === "game-3d") return [THREE_PACKAGE, RAPIER_PACKAGE, THREE_MESH_BVH_PACKAGE];
-  if (kind === "game-2d") return [PHASER_PACKAGE];
+  if (kind === "game-2d") return [EXCALIBUR_PACKAGE];
   return [];
 }
 
@@ -213,10 +215,28 @@ async function collectRelativeFiles(dir: string): Promise<string[]> {
   return out.sort();
 }
 
+async function directoryFiles(sourceRoot: string, dir: EnginePackage["dirs"][number]): Promise<string[]> {
+  const files = await collectRelativeFiles(path.join(sourceRoot, ...dir.from.split("/")));
+  return dir.declarationsOnly ? files.filter((file) => file.endsWith(".d.ts")) : files;
+}
+
+async function copyEngineDirectory(sourceRoot: string, targetRoot: string, dir: EnginePackage["dirs"][number]): Promise<void> {
+  if (!dir.declarationsOnly) {
+    await fs.cp(path.join(sourceRoot, ...dir.from.split("/")), safeChild(targetRoot, ...dir.to.split("/")), { recursive: true, force: true });
+    return;
+  }
+  for (const relative of await directoryFiles(sourceRoot, dir)) {
+    const source = path.join(sourceRoot, ...dir.from.split("/"), ...relative.split("/"));
+    const target = safeChild(targetRoot, ...dir.to.split("/"), ...relative.split("/"));
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.copyFile(source, target);
+  }
+}
+
 /** Bare import name → bundled declaration for every engine the harness can
  * seed, kind-independent; callers probe for the packages they care about. */
 export function engineTypeEntries(workspacePath: string): Array<{ importName: string; declaration: string }> {
-  return [THREE_PACKAGE, RAPIER_PACKAGE, THREE_MESH_BVH_PACKAGE, PHASER_PACKAGE].map((engine) => ({
+  return [THREE_PACKAGE, RAPIER_PACKAGE, THREE_MESH_BVH_PACKAGE, EXCALIBUR_PACKAGE].map((engine) => ({
     importName: engine.name,
     declaration: safeChild(workspacePath, "node_modules", ...engine.typesEntry.split("/")),
   }));
@@ -255,7 +275,7 @@ export async function ensureEnginePackages(workspacePath: string, kind: ProjectK
         ...engine.files.map((file) =>
           fs.access(path.join(packageDir, ...file.to.split("/"))).then(() => true, () => false)),
         ...(await Promise.all(engine.dirs.map(async (dir) => {
-          const relatives = await collectRelativeFiles(path.join(sourceRoot, ...dir.from.split("/")));
+          const relatives = await directoryFiles(sourceRoot, dir);
           const target = path.join(packageDir, ...dir.to.split("/"));
           return Promise.all(relatives.map((relative) =>
             fs.access(path.join(target, ...relative.split("/"))).then(() => true, () => false)),
@@ -273,7 +293,7 @@ export async function ensureEnginePackages(workspacePath: string, kind: ProjectK
       await fs.copyFile(source, target);
     }
     for (const dir of engine.dirs) {
-      await fs.cp(path.join(sourceRoot, ...dir.from.split("/")), path.join(packageDir, ...dir.to.split("/")), { recursive: true, force: true });
+      await copyEngineDirectory(sourceRoot, packageDir, dir);
     }
     await fs.writeFile(manifestFile, engine.manifest, "utf8");
     changed = true;
@@ -321,9 +341,7 @@ export async function stageEngineSeed(targetDir: string, sourceRoot: string = BO
   }
 
   for (const engine of engines) {
-    // Clear every top-level source subtree this engine reads (package name
-    // plus any cross-package sources like @types/three) so a re-stage never
-    // leaves files behind that a retired spec entry used to stage.
+    // Replace each package subtree with exactly the specified payload.
     const tops = new Set<string>();
     for (const entry of [...engine.files.map((file) => file.from), ...engine.dirs.map((dir) => dir.from)]) {
       const parts = entry.split("/");
@@ -339,7 +357,7 @@ export async function stageEngineSeed(targetDir: string, sourceRoot: string = BO
       await fs.copyFile(source, target);
     }
     for (const dir of engine.dirs) {
-      await fs.cp(path.join(sourceRoot, ...dir.from.split("/")), safeChild(targetDir, ...dir.from.split("/")), { recursive: true, force: true });
+      await copyEngineDirectory(sourceRoot, targetDir, { ...dir, to: dir.from });
     }
   }
   return engines.map((engine) => engine.name);

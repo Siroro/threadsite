@@ -131,9 +131,6 @@ state-machine package merely to avoid ten clear lines of code.
 
 ## Time Domains
 
-Name time sources so pause, hitstop, slow motion, animation, UI, and physics do
-not accidentally share the wrong clock:
-
 - **real time:** browser frame delta; drives diagnostics and feedback decay
 - **simulation time:** fixed or scaled steps; drives rules and collision
 - **presentation time:** smooth visual animation and camera; may continue when
@@ -221,9 +218,6 @@ camera math, or child sockets.
 `worldToLocal()` at ownership boundaries. If a world-space query happens before
 the renderer's normal matrix update, call `updateWorldMatrix(true, true)` on the
 smallest relevant root first.
-
-The following transform caveats are verified against r185. Recheck the
-installed API documentation and migration notes on every Three.js upgrade:
 
 - `Object3D.attach()` preserves world transform while reparenting, but does not
  support hierarchies containing non-uniformly scaled nodes.

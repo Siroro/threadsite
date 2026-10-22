@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 const tests = fileURLToPath(new URL("./compose/", import.meta.url));
+const pixelsOnly = process.argv.includes("--pixels-only");
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-compose-"));
 const project = `threadsite-smoke-${randomUUID().slice(0, 8)}`;
 const override = path.join(root, "compose.override.yaml");
@@ -26,7 +27,7 @@ const opencodeEnv = {
 const botEnv = {
   DISCORD_BOT_TOKEN: "fixture-only", DISCORD_APPLICATION_ID: "100", OPENCODE_URL: "http://opencode:4096",
   OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: "fixture-only", WORKSPACE_ROOT: "/workspace",
-  PUBLISH_ROOT: "/srv/sites", STATE_FILE: "/data/state.json", LOG_FILE: "/data/smoke.jsonl",
+  PUBLISH_ROOT: "/srv/sites", STATE_DB_FILE: "/data/state.db", LOG_FILE: "/data/smoke.jsonl",
   PUBLIC_SITES_BASE_URL: "http://static-web", MULTIPLAYER_ENABLED: "false",
   OPENCODE_MAX_STEPS: "50",
 };
@@ -41,7 +42,7 @@ await fs.writeFile(override, `services:
       timeout: 5s
       retries: 20
   preview:
-    volumes: !override ${JSON.stringify([mount(workspace, "/workspace", true)])}
+    volumes: !override ${JSON.stringify([mount(workspace, "/workspace", true), mount(tests, "/app/fixtures", true)])}
   opencode:
     environment: !override ${JSON.stringify(opencodeEnv)}
     volumes: !override ${JSON.stringify([mount(workspace, "/workspace"), { type: "volume", source: "opencode-data", target: "/opencode-data" }])}
@@ -76,12 +77,18 @@ const compose = async (...command) => {
   return task;
 };
 try {
-  console.log("Building production bot, OpenCode and preview images through Docker Compose...");
-  await compose("build", "bot", "opencode", "preview");
-  console.log("Starting isolated Compose services with production networking, mounts and resource limits...");
-  await compose("up", "-d", "--wait", "--wait-timeout", "180", "fixture", "preview", "opencode", "static-web");
-  console.log("Running production bot modules against the real services (fixture model, no Discord login or paid inference)...");
-  await compose("run", "--rm", "--no-deps", "bot");
+  console.log("Building production images through Docker Compose...");
+  await compose("build", ...(pixelsOnly ? ["bot", "preview"] : ["bot", "opencode", "preview"]));
+  if (pixelsOnly) {
+    await compose("run", "--rm", "--no-deps", "bot", "node", "/fixtures/pixel-seed.mjs");
+  } else {
+    console.log("Starting isolated Compose services with production networking, mounts and resource limits...");
+    await compose("up", "-d", "--wait", "--wait-timeout", "180", "fixture", "preview", "opencode", "static-web");
+    console.log("Running production bot modules against the real services (fixture model, no Discord login or paid inference)...");
+    await compose("run", "--rm", "--no-deps", "bot");
+  }
+  console.log("Checking Excalibur native rendering at desktop/phone sizes and standard/HiDPI densities...");
+  await compose("run", "--rm", "--no-deps", "preview", "node", "/app/fixtures/pixel-perfect.mjs");
 } catch (error) {
   console.error(error.stdout || "");
   console.error(error.stderr || error.message);

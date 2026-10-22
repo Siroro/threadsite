@@ -848,16 +848,13 @@ export class OpenCodeHarness {
         before = fresh.sort((a, b) => (a.info?.time?.created ?? 0) - (b.info?.time?.created ?? 0)
           || a.info!.id!.localeCompare(b.info!.id!))[0].info!.id;
       }
-      // Older SDK mocks/servers may not expose child sessions; root billing
-      // remains useful. A child lookup failure must not discard root history.
-      if (typeof this.client.session.children === "function") {
-        try {
-          const result = await this.client.session.children({ sessionID: id, directory } as any, { signal: AbortSignal.timeout(10_000) });
-          const children = unwrap<Array<{ id: string }>>(result, "OpenCode usage children");
-          for (const child of children) await visit(child.id);
-        } catch (error) {
-          log("warn", "opencode.child_usage_failed", { sessionId: id, error: serializeError(error) });
-        }
+      // Child lookup failures must not discard root history.
+      try {
+        const result = await this.client.session.children({ sessionID: id, directory } as any, { signal: AbortSignal.timeout(10_000) });
+        const children = unwrap<Array<{ id: string }>>(result, "OpenCode usage children");
+        for (const child of children) await visit(child.id);
+      } catch (error) {
+        log("warn", "opencode.child_usage_failed", { sessionId: id, error: serializeError(error) });
       }
     };
     await visit(sessionId);

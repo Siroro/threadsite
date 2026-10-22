@@ -2,7 +2,7 @@
  * Throwaway end-to-end fixture for the TypeScript pipeline:
  * scaffold -> vendor libs -> buildSite -> validateSite -> publishSite,
  * plus failure modes (broken import, misspelled export, TS outside src/,
- * element ids, stale prune, legacy project). Run with:
+ * element ids, stale prune). Run with:
  *   DISCORD_BOT_TOKEN=x DISCORD_APPLICATION_ID=x PUBLISH_ROOT=<tmp> LOG_FILE=<tmp> npx tsx e2e-fixture.ts
  */
 import fs from "node:fs/promises";
@@ -15,7 +15,6 @@ import { ensureMultiplayerFiles } from "./src/multiplayer.js";
 import { MULTIPLAYER_PROTOCOL_VERSION as PROTOCOL_VERSION } from "./src/templates.js";
 import { ensureSkillFiles, skillNames } from "./src/skills.js";
 import { starterSource } from "./src/starter.js";
-import { untrackGeneratedArtifacts } from "./src/git.js";
 
 let passed = 0;
 let failed = 0;
@@ -121,31 +120,6 @@ async function main(): Promise<void> {
     ) as { version: string; commit?: string | null };
     check("git workspace stamps its HEAD commit", /^[0-9a-f]{40}$/.test(stamped.commit ?? ""), JSON.stringify(stamped));
   }
-  // Existing repositories may already track generated files. Migration removes
-  // them from the index while preserving workspace copies for the live build.
-  {
-    const execFileSync = (await import("node:child_process")).execFileSync;
-    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-e2e-untrack-"));
-    await fs.mkdir(path.join(workspace, "site", "src"), { recursive: true });
-    await fs.mkdir(path.join(workspace, "site", "js"), { recursive: true });
-    await fs.mkdir(path.join(workspace, "site", "net"), { recursive: true });
-    await fs.writeFile(path.join(workspace, "site", "src", "main.ts"), "console.log('source');\n");
-    await fs.writeFile(path.join(workspace, "site", "js", "main.js"), "console.log('built');\n");
-    await fs.writeFile(path.join(workspace, "site", "net", "threadsite-net.js"), "export {};\n");
-    await fs.writeFile(path.join(workspace, "build-manifest.json"), "{}\n");
-    await fs.writeFile(path.join(workspace, ".gitignore"), "site/js/\nsite/net/\nbuild-manifest.json\n");
-    execFileSync("git", ["init", "--quiet"], { cwd: workspace });
-    execFileSync("git", ["add", "-f", "."], { cwd: workspace });
-    execFileSync("git", ["-c", "user.email=e2e@local", "-c", "user.name=e2e", "commit", "--quiet", "-m", "old boundary"], { cwd: workspace });
-    await untrackGeneratedArtifacts(workspace);
-    const tracked = execFileSync("git", ["ls-files"], { cwd: workspace, encoding: "utf8" }) as string;
-    check("migration untracks generated bundles/manifest; net client and source stay tracked",
-      tracked.includes("site/src/main.ts") && tracked.includes("site/net/threadsite-net.js") && !tracked.includes("site/js/") && !tracked.includes("build-manifest.json"),
-      tracked.replaceAll("\n", ", "));
-    check("untracking preserves runtime workspace files",
-      await fs.stat(path.join(workspace, "site", "js", "main.js")).then(() => true, () => false)
-      && await fs.stat(path.join(workspace, "site", "net", "threadsite-net.js")).then(() => true, () => false));
-  }
   check("page carries the update checker for its deploy",
     publishedIndex.includes("threadsite-version.json") && publishedIndex.includes(`var DEPLOYED = "${deployed.version}"`),
     publishedIndex.slice(-400));
@@ -233,31 +207,25 @@ async function main(): Promise<void> {
   console.log("\n== 2. net client import bundles cleanly; multiplayer game-2d ==");
   const ws2d = await scaffold("game-2d");
   const site2d = path.join(ws2d, "site");
-  check("Phaser compact ESM seeded", await fs.stat(path.join(ws2d, "node_modules", "phaser", "dist", "phaser.esm.min.js")).then(() => true, () => false));
-  check("Phaser real declarations seeded", await fs.stat(path.join(ws2d, "node_modules", "phaser", "types", "phaser.d.ts")).then(() => true, () => false));
+  check("Excalibur browser ESM seeded", await fs.stat(path.join(ws2d, "node_modules", "excalibur", "build", "esm", "excalibur.js")).then(() => true, () => false));
+  check("Excalibur real declarations seeded", await fs.stat(path.join(ws2d, "node_modules", "excalibur", "build", "dist", "excalibur.d.ts")).then(() => true, () => false));
   // The runtime build could go missing while the (old probe) type file stayed;
   // the freshness check now verifies every seed file and reseeds.
-  await fs.rm(path.join(ws2d, "node_modules", "phaser", "dist", "phaser.esm.min.js"));
+  await fs.rm(path.join(ws2d, "node_modules", "excalibur", "build", "esm", "excalibur.js"));
   check("missing runtime build reseeds", (await ensureEnginePackages(ws2d, "game-2d")) === true
-    && await fs.stat(path.join(ws2d, "node_modules", "phaser", "dist", "phaser.esm.min.js")).then(() => true, () => false));
+    && await fs.stat(path.join(ws2d, "node_modules", "excalibur", "build", "esm", "excalibur.js")).then(() => true, () => false));
   // .gitignore is ensured, never replaced: pre-existing lines survive.
   await fs.writeFile(path.join(ws2d, ".gitignore"), "*.log\nsecrets.txt\n");
   check(".gitignore preserves existing entries", (await ensureEnginePackages(ws2d, "game-2d")) === true
     && (await fs.readFile(path.join(ws2d, ".gitignore"), "utf8")).split(/\r?\n/).includes("node_modules/")
     && (await fs.readFile(path.join(ws2d, ".gitignore"), "utf8")).includes("secrets.txt"));
   check("gitignore ensure idempotent", (await ensureEnginePackages(ws2d, "game-2d")) === false);
-  await fs.mkdir(path.join(ws2d, "node_modules", "pixi.js"), { recursive: true });
-  await fs.writeFile(path.join(ws2d, "node_modules", "pixi.js", "package.json"), "{}\n");
-  // The v2 Phaser migration is complete: the freshness pass no longer scrubs
-  // legacy packages; stray node_modules entries are inert (gitignored).
-  check("legacy Pixi package is inert, not scrubbed", (await ensureEnginePackages(ws2d, "game-2d")) === false
-    && (await fs.stat(path.join(ws2d, "node_modules", "pixi.js")).then(() => true, () => false)));
   await fs.writeFile(path.join(site2d, "src", "main.ts"), [
-    `import * as Phaser from "phaser";`,
+    `import * as ex from "excalibur";`,
     `import { NET_CONFIG } from "../net/net-config.js";`,
     `import { ThreadSiteNet } from "../net/threadsite-net.js";`,
     `const app = document.getElementById("app");`,
-    `if (app) app.textContent = \`phaser \${Phaser.VERSION} relay \${NET_CONFIG.url}\`;`,
+    `if (app) app.textContent = \`excalibur \${ex.EX_VERSION} relay \${NET_CONFIG.url}\`;`,
     `// Typed envelopes: status/peer/event/intent/remote-player fields all resolve from the d.ts.`,
     `void ThreadSiteNet.createAuthoritativeSession({`,
     `  ...NET_CONFIG,`,
@@ -299,12 +267,12 @@ async function main(): Promise<void> {
       && !ignored.includes("site/net/"),
     ignored.join(", "));
   const bundle2d = await fs.readFile(path.join(site2d, "js", "main.js"), "utf8");
-  check("phaser bundled", bundle2d.includes("Phaser") || bundle2d.includes("Scene"), `${(bundle2d.length / 1024).toFixed(0)}KB`);
+  check("Excalibur bundled", bundle2d.includes("excalibur"), `${(bundle2d.length / 1024).toFixed(0)}KB`);
   check("net client bundled", bundle2d.includes("ThreadSiteNet"));
   await validateSite(site2d);
   check("game-2d validates", true);
-  check("game-2d gets curated skill set", skillNames("game-2d").includes("phaser-4")
-    && await fs.stat(path.join(ws2d, ".opencode", "skills", "phaser-4", "SKILL.md")).then(() => true, () => false));
+  check("game-2d gets curated skill set", skillNames("game-2d").includes("excalibur")
+    && await fs.stat(path.join(ws2d, ".opencode", "skills", "excalibur", "SKILL.md")).then(() => true, () => false));
 
   console.log("\n== 3. sibling modules, extensionless + .js imports, dynamic import ==");
   const wsMod = await scaffold("site");
@@ -377,19 +345,6 @@ async function main(): Promise<void> {
     `<!doctype html><html><body><script type="module" src="src/main.ts"></script></body></html>\n`);
   await expectThrow(".ts script src rejected", () => validateSite(siteTsRef), /points at TypeScript source/);
 
-  console.log("\n== 9. legacy plain-JS project still works untouched ==");
-  const wsLegacy = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-e2e-legacy-"));
-  const siteLegacy = path.join(wsLegacy, "site");
-  await fs.mkdir(path.join(siteLegacy, "js"), { recursive: true });
-  await fs.writeFile(path.join(siteLegacy, "index.html"),
-    `<!doctype html><html><body><main id="app"></main><script type="module" src="js/main.js"></script></body></html>\n`);
-  await fs.writeFile(path.join(siteLegacy, "js", "main.js"),
-    `const app = document.getElementById("app");\nif (app) app.textContent = "legacy";\n`);
-  const builtLegacy = await buildSite(wsLegacy);
-  check("legacy build skipped", builtLegacy.skipped === true, JSON.stringify(builtLegacy));
-  await validateSite(siteLegacy);
-  check("legacy validates through the js gate", true);
-
   console.log("\n== 10. import maps: agent-vendored pair passes, split-library 404 fails, node_modules is contained ==");
   const wsMap = await scaffold("game-3d");
   const siteMap = path.join(wsMap, "site");
@@ -442,16 +397,6 @@ async function main(): Promise<void> {
     `<script type="module" src="js/main.js"></script></body></html>\n`);
   await expectThrow("inline module import of a missing file fails", () => validateSite(siteInline), /Broken local reference[\s\S]*missing\.js/);
 
-  console.log("\n== 11. legacy module script with a broken import fails ==");
-  const wsLegacyBroken = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-e2e-legacy-broken-"));
-  const siteLegacyBroken = path.join(wsLegacyBroken, "site");
-  await fs.mkdir(path.join(siteLegacyBroken, "js"), { recursive: true });
-  await fs.writeFile(path.join(siteLegacyBroken, "index.html"),
-    `<!doctype html><html><body><main id="app"></main><script type="module" src="js/main.js"></script></body></html>\n`);
-  await fs.writeFile(path.join(siteLegacyBroken, "js", "main.js"),
-    `import { helper } from "./helpers.js";\nconst app = document.getElementById("app");\nif (app) app.textContent = helper;\n`);
-  await expectThrow("legacy script-src module chain checked", () => validateSite(siteLegacyBroken), /(?:Broken local reference|JavaScript type-check error)[\s\S]*helpers\.js/);
-
   console.log("\n== 12. real engine types: idiomatic code passes, misuse fails ==");
   const wsTypes = await scaffold("game-3d");
   const siteTypes = path.join(wsTypes, "site");
@@ -497,24 +442,26 @@ async function main(): Promise<void> {
   await validateSite(siteTypes);
   check("idiomatic three.js code passes the real-types gate", true);
 
-  const wsPhaserTypes = await scaffold("game-2d");
-  const sitePhaserTypes = path.join(wsPhaserTypes, "site");
-  await fs.writeFile(path.join(sitePhaserTypes, "src", "main.ts"), [
-    `import * as Phaser from "phaser";`,
+  const wsExcaliburTypes = await scaffold("game-2d");
+  const siteExcaliburTypes = path.join(wsExcaliburTypes, "site");
+  await fs.writeFile(path.join(siteExcaliburTypes, "src", "main.ts"), [
+    `import * as ex from "excalibur";`,
     ``,
-    `class DemoScene extends Phaser.Scene {`,
-    `  constructor() { super("demo"); }`,
-    `  create(): void {`,
-    `    const box = this.add.rectangle(480, 270, 64, 64, 0x3fa9f5);`,
-    `    this.tweens.add({ targets: box, angle: 360, duration: 1200, repeat: -1 });`,
+    `class DemoScene extends ex.Scene {`,
+    `  onInitialize(): void {`,
+    `    const box = new ex.Actor({ x: 480, y: 270, width: 64, height: 64, color: ex.Color.fromHex("#3fa9f5") });`,
+    `    box.vel = ex.vec(20, 0);`,
+    `    this.add(box);`,
     `  }`,
     `}`,
-    `new Phaser.Game({ type: Phaser.AUTO, parent: "app", width: 960, height: 540, scene: DemoScene });`,
+    `const game = new ex.Engine({ width: 960, height: 540, suppressPlayButton: true });`,
+    `game.add("demo", new DemoScene());`,
+    `await game.start("demo");`,
     ``,
   ].join("\n"));
-  await buildSite(wsPhaserTypes);
-  await validateSite(sitePhaserTypes);
-  check("idiomatic Phaser code passes the real-types gate", true);
+  await buildSite(wsExcaliburTypes);
+  await validateSite(siteExcaliburTypes);
+  check("idiomatic Excalibur code passes the real-types gate", true);
 
   const wsMisuse = await scaffold("game-3d");
   const siteMisuse = path.join(wsMisuse, "site");
@@ -527,18 +474,10 @@ async function main(): Promise<void> {
   await buildSite(wsMisuse);
   await expectThrow("wrong three.js argument type fails the gate", () => validateSite(siteMisuse), /JavaScript type-check error[\s\S]*(Vector3|TS2345|not assignable)/);
 
-  console.log("\n== 13. net client in site/net/: typed API, d.ts resolution, stale js/ copies removed ==");
+  console.log("\n== 13. net client: typed API and declaration resolution ==");
   const wsNet = await scaffold("game-3d");
   const siteNet = path.join(wsNet, "site");
-  // Legacy copies in site/js/ (pre-TypeSwitch layout) must be removed by the
-  // harness, with the net/ files (including declarations) taking their place.
-  await fs.writeFile(path.join(siteNet, "js", "threadsite-net.js"), "// stale legacy copy\n");
-  await fs.writeFile(path.join(siteNet, "js", "net-config.js"), "// stale legacy copy\n");
   await ensureMultiplayerFiles(wsNet, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: PROTOCOL_VERSION }, "game-3d");
-  // Current contract: the harness never silently deletes project files —
-  // stale js/ copies persist and the build/import gates reject using them.
-  check("stale js/threadsite-net.js left for the gates (no silent deletion)", await fs.access(path.join(siteNet, "js", "threadsite-net.js")).then(() => true, () => false));
-  check("stale js/net-config.js left for the gates (no silent deletion)", await fs.access(path.join(siteNet, "js", "net-config.js")).then(() => true, () => false));
   check("net client seeded in site/net", await fs.access(path.join(siteNet, "net", "threadsite-net.js")).then(() => true, () => false));
   check("net declarations seeded in site/net", await fs.access(path.join(siteNet, "net", "threadsite-net.d.ts")).then(() => true, () => false));
   check("net-config declarations seeded", await fs.access(path.join(siteNet, "net", "net-config.d.ts")).then(() => true, () => false));
@@ -557,57 +496,6 @@ async function main(): Promise<void> {
   ].join("\n"));
   await buildSite(wsNetMisuse); // esbuild does not type-check: bundles fine
   await expectThrow("wrong option type fails the gate via the d.ts", () => validateSite(siteNetMisuse), /JavaScript type-check error[\s\S]*(pstateHz|TS2322|not assignable)/);
-
-  const wsNetLegacyImport = await scaffold("game-2d");
-  const siteNetLegacyImport = path.join(wsNetLegacyImport, "site");
-  await fs.writeFile(path.join(siteNetLegacyImport, "src", "main.ts"), [
-    `import { ThreadSiteNet } from "../js/threadsite-net.js";`,
-    `console.log(typeof ThreadSiteNet.connect);`,
-    ``,
-  ].join("\n"));
-  await expectThrow("import of the old js/ net path fails the build", () => buildSite(wsNetLegacyImport), /TypeScript compile error[\s\S]*Could not resolve "\.\.\/js\/threadsite-net\.js"/);
-
-  console.log("\n== 14. live legacy game survives the harness update turn ==");
-  // A real pre-TypeSwitch game: authored js/main.js, imports the net client
-  // from js/, an import map in the HTML. On its next turn the harness
-  // deletes js/threadsite-net.js + js/net-config.js — the game must keep
-  // working in the same turn (remap to site/net/) or fail loudly into the
-  // repair round-trip, never ship broken.
-  const wsLive = await scaffold("game-2d");
-  const siteLive = path.join(wsLive, "site");
-  // Rewind the scaffold to the legacy layout the game shipped with: authored
-  // JS in js/ including the net client there, no src/.
-  await fs.rm(path.join(siteLive, "src"), { recursive: true, force: true });
-  await fs.rm(path.join(wsLive, "build-manifest.json"), { force: true }).catch(() => undefined);
-  const legacyNet = await fs.readFile(path.join(siteLive, "net", "threadsite-net.js"), "utf8");
-  await fs.writeFile(path.join(siteLive, "js", "threadsite-net.js"), legacyNet);
-  await fs.writeFile(path.join(siteLive, "js", "net-config.js"),
-    `/** @type {{protocol: number, game: string, url: string}} */\nexport const NET_CONFIG = Object.freeze({ protocol: ${PROTOCOL_VERSION}, game: \"e2e\", url: \"ws://localhost:8090/ws\" });\n`);
-  await fs.writeFile(path.join(siteLive, "js", "main.js"),
-    `import { NET_CONFIG } from "./net-config.js";\nimport { ThreadSiteNet } from "./threadsite-net.js";\nconst app = document.getElementById("app");\nif (app) app.textContent = \`legacy \${NET_CONFIG.game}\`;\nconsole.log(typeof ThreadSiteNet.connect);\n`);
-  await fs.writeFile(path.join(siteLive, "index.html"),
-    `<!doctype html><html><body><main id="app"></main><script type="module" src="js/main.js"></script></body></html>\n`);
-
-  // The update turn: harness restore runs (removes the old js/ net copies,
-  // seeds site/net/), then the deploy-tail build+validate — exactly what
-  // completeTurn does before the agent is even prompted.
-  await ensureMultiplayerFiles(wsLive, { gameId: "e2e", wsUrl: "ws://localhost:8090/ws", protocolVersion: PROTOCOL_VERSION }, "game-2d");
-  check("legacy game's js/net copy preserved by restore", await fs.access(path.join(siteLive, "js", "threadsite-net.js")).then(() => true, () => false));
-  const liveBuilt = await buildSite(wsLive);
-  check("legacy project builds skipped (no src/)", liveBuilt.skipped === true, JSON.stringify(liveBuilt));
-  const liveValidateError = await validateSite(siteLive).then(() => undefined, (error: unknown) => String((error as Error).message));
-  // Two acceptable outcomes: passes as-is (nothing referenced the removed
-  // file), or fails loudly through either repairable channel — the tsc gate
-  // (TS2307 on the now-missing module) or the module-resolution pass (Broken
-  // local reference). Both match the repair regex, so the agent fixes the
-  // import the same turn, and AGENTS.md's legacy section documents the new
-  // path. Silently shipping a broken page is the only unacceptable outcome.
-  check("legacy game either validates or fails loudly (never ships broken)",
-    liveValidateError === undefined || /Broken local reference|type-check error/.test(liveValidateError),
-    liveValidateError ?? "validated");
-  if (liveValidateError) {
-    check("failure names the removed file so repair can fix it", /threadsite-net\.js|net-config\.js/.test(liveValidateError), liveValidateError.slice(0, 200));
-  }
 
   console.log(`\n=== ${passed} passed, ${failed} failed ===`);
   if (failed > 0) process.exitCode = 1;

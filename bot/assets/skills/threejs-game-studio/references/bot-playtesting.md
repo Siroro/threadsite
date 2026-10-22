@@ -62,18 +62,6 @@ completed objective ID) within a bounded frame count.
 
 ## Headless WebGL Caveats
 
-- Start Playwright WebGL suites with `workers: 1` (the scaffold does). Multiple
- concurrent GPU contexts can contend for driver or software-rendering
- resources and make wall-time tests flaky. Increase workers only after proving
- isolation on the target CI runner.
-- Never assume headless Chromium uses SwiftShader, and never use an unprobed
- headless FPS as device-performance evidence. Capture the actual WebGL
- vendor/renderer/version string when available, label masked results, and use
- a known real-GPU headed/device run for performance claims.
-- Prefer state predicates, frame counters and bounded polling over exact
- wall-clock waits. Headless functional timing is useful for softlock detection,
- not for claiming frame-rate quality.
-
 ## Difficulty Signals
 
 When difficulty, pacing, or fairness is being tuned or claimed, run two
@@ -91,62 +79,6 @@ assertion. Report the bot playtest decision like the visual harness decision:
 added / extended / skipped with reason.
 
 ## Richer Playwright Recipe
-
-```ts
-import { test, expect } from '@playwright/test';
-
-test('scripted arena sweep progresses score', async ({ page }) => {
- const errors: string[] = [];
- const blockedUrls: string[] = [];
- page.on('console', (message) => {
- if (message.type() === 'error') errors.push(`console: ${message.text()}`);
- });
- page.on('pageerror', (error) => errors.push(`page: ${error.message}`));
- page.on('requestfailed', (request) => {
- errors.push(`request: ${request.url()} (${request.failure()?.errorText ?? 'failed'})`);
- });
- await page.route('**/*', async (route) => {
- const url = new URL(route.request().url());
- const local = url.protocol === 'data:' || url.protocol === 'blob:' ||
- ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
- if (!local && (url.protocol === 'http:' || url.protocol === 'https:')) {
- blockedUrls.push(url.href);
- await route.abort('blockedbyclient');
- return;
- }
- await route.continue();
- });
-
- await page.goto('/');
- await page.waitForFunction(() => window.__THREE_GAME_TEST_HOOKS__ !== undefined);
-
- await page.evaluate(() => {
- const hooks = window.__THREE_GAME_TEST_HOOKS__!;
- if (hooks.seed(42) !== true || hooks.setState('active-play') !== true) {
- throw new Error('Bot seed/state request was rejected');
- }
- });
-
- const before = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!.score);
-
- // Hold move-forward for a bounded number of animation frames, not wall clock alone.
- await page.keyboard.down('w'); // emits KeyboardEvent.code === 'KeyW'
- try {
- await page.waitForFunction(
- (start) => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) >= start + 120,
- await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!.frame),
- );
- } finally {
- await page.keyboard.up('w');
- }
-
- const after = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__!.score);
-
- expect(errors).toEqual([]);
- expect(blockedUrls).toEqual([]);
- expect(after).toBeGreaterThan(before);
-});
-```
 
 Add a second "reckless" script that seeks hazards and asserts fail → retry
 restores `playing`. Prefer frame counters from diagnostics over fixed

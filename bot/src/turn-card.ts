@@ -1,4 +1,17 @@
-import { AttachmentBuilder, EmbedBuilder } from "discord.js";
+import {
+  ActionRowBuilder,
+  AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ContainerBuilder,
+  EmbedBuilder,
+  escapeMarkdown,
+  MediaGalleryBuilder,
+  MediaGalleryItemBuilder,
+  MessageFlags,
+  SeparatorBuilder,
+  TextDisplayBuilder,
+} from "discord.js";
 import type { TurnUsage } from "./opencode.js";
 import type { ProjectKind } from "./types.js";
 import { formatShortDuration, formatTokens, stripSummaryPreamble, truncate } from "./util.js";
@@ -63,6 +76,22 @@ export interface TurnCardMessage {
   allowedMentions: { parse: [] };
 }
 
+/** Full-width Components V2 card with screenshot, project text and link buttons. */
+export interface PlayCardMessage {
+  components: [ContainerBuilder];
+  files: AttachmentBuilder[];
+  flags: typeof MessageFlags.IsComponentsV2;
+  allowedMentions: { parse: [] };
+}
+
+// The playable card's text ceilings, in characters. The documents prompt asks
+// the agent for a sentence each; these caps are the backstop that keeps an
+// over-eager document from flooding the card.
+const PITCH_CHARS = 240;
+const REQUEST_CHARS = 220;
+const CHANGELOG_CHARS = 240;
+const PLAY_CHARS = 200;
+
 // Matches the project card's palette: blurple for sites, green for 2D games,
 // violet for 3D games. Both cards of a turn share one colour so the final
 // post reads as a single presentation.
@@ -85,10 +114,56 @@ export function renderTechnicalCard(state: TurnCardState): TurnCardMessage {
 }
 
 /** Message 2 — the new message that presents the project and opens it. */
-export function renderPlayCard(state: TurnCardState): TurnCardMessage {
+export function renderPlayCard(state: TurnCardState): PlayCardMessage {
   const files: AttachmentBuilder[] = [];
   if (state.screenshot?.length) files.push(new AttachmentBuilder(Buffer.from(state.screenshot), { name: SCREENSHOT_NAME }));
-  return { content: "", embeds: [playableCard(state, files.length > 0)], files, allowedMentions: { parse: [] } };
+  const isGame = state.kind !== "site";
+  const container = new ContainerBuilder().setAccentColor(cardColor(state));
+  // The title and the screenshot lead the card. The gallery spans the
+  // container's full width, so the opening frame keeps its room instead of
+  // squeezing the text beside it.
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`## ${escapeMarkdown(truncate(singleLine(`${isGame ? "🎮" : "🛠️"} ${isGame ? "Play" : "Open"} ${state.name}`), 250))}`),
+  );
+  if (files.length) {
+    container.addMediaGalleryComponents(
+      new MediaGalleryBuilder().addItems(
+        new MediaGalleryItemBuilder().setURL(`attachment://${SCREENSHOT_NAME}`).setDescription(truncate(singleLine(state.name), 100)),
+      ),
+    );
+  }
+  // The project's own description is the card's blurb; without one the
+  // original brief still says what this is, so the card is never a bare link.
+  const pitch = state.description?.pitch;
+  const blurb = pitch ? clip(prose(pitch), PITCH_CHARS) : state.request ? clip(prose(state.request), REQUEST_CHARS) : undefined;
+  if (blurb) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(blurb));
+  // The changelog heading labels its own line: it says what changed far
+  // better than a generic "What's new".
+  const title = state.changelog?.title?.trim();
+  const entry = state.changelog?.body ? clip(prose(state.changelog.body), CHANGELOG_CHARS) : undefined;
+  const details: string[] = [];
+  if (entry) details.push(`**${title ? clip(title, 60) : "What's new"}** — ${entry}`);
+  else if (title) details.push(`**What's new** — ${clip(title, 200)}`);
+  if (state.description?.play) {
+    details.push(`**${isGame ? "How to play" : "What to look at"}** — ${clip(prose(state.description.play), PLAY_CHARS)}`);
+  }
+  if (details.length) {
+    if (blurb) container.addSeparatorComponents(new SeparatorBuilder());
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(details.join("\n")));
+  }
+  // Link buttons are the card's reason to exist; the play link must survive
+  // even when no repository link can be rendered.
+  const playUrl = safeUrl(state.siteUrl);
+  const sourceUrl = safeUrl(state.repoUrl);
+  if (playUrl) {
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setLabel(isGame ? "▶ Play game" : "▶ Open site").setStyle(ButtonStyle.Link).setURL(playUrl),
+    );
+    if (sourceUrl) row.addComponents(new ButtonBuilder().setLabel("Source").setStyle(ButtonStyle.Link).setURL(sourceUrl));
+    container.addActionRowComponents(row);
+  }
+  if (state.meta) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${escapeMarkdown(truncate(singleLine(state.meta), 200))}`));
+  return { components: [container], files, flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
 }
 
 /**
@@ -134,38 +209,6 @@ export function technicalCard(state: TurnCardState): EmbedBuilder {
 }
 
 /**
- * Card 2 — the playable one: the screenshot, what the project is, what this
- * turn changed, how to play it, and the link that opens it.
- */
-export function playableCard(state: TurnCardState, hasScreenshot: boolean): EmbedBuilder {
-  const isGame = state.kind !== "site";
-  const embed = new EmbedBuilder()
-    .setTitle(`${isGame ? "🎮" : "🛠️"} ${isGame ? "Play" : "Open"} ${truncate(state.name, 180)}`)
-    .setColor(cardColor(state));
-  if (hasScreenshot) embed.setImage(`attachment://${SCREENSHOT_NAME}`);
-  // The project's own description is the card's blurb; without one the
-  // original brief still says what this is, so the card is never a bare link.
-  const pitch = state.description?.pitch;
-  const blurb = pitch ? clip(prose(pitch), 300) : state.request ? clip(prose(state.request), 260) : undefined;
-  if (blurb) embed.setDescription(blurb);
-  // The changelog heading is the field's own name: it says what changed far
-  // better than a generic "What's new".
-  const title = state.changelog?.title?.trim();
-  const entry = state.changelog?.body ? clip(prose(state.changelog.body), 320) : undefined;
-  if (entry) embed.addFields({ name: title ? clip(title, 60) : "What's new", value: entry, inline: false });
-  else if (title) embed.addFields({ name: "What's new", value: clip(title, 200), inline: false });
-  if (state.description?.play) {
-    embed.addFields({ name: isGame ? "How to play" : "What to look at", value: clip(prose(state.description.play), 240), inline: false });
-  }
-  const links = [isGame ? link("▶ **PLAY GAME**", state.siteUrl) : link("▶ **OPEN SITE**", state.siteUrl), link("Source", state.repoUrl)]
-    .filter(Boolean)
-    .join("\n");
-  if (links) embed.addFields({ name: "Links", value: links, inline: false });
-  if (state.meta) embed.setFooter({ text: truncate(state.meta, 200) });
-  return embed;
-}
-
-/**
  * Servers without Embed Links permission keep the same information in a
  * compact text view: the technical report on the turn's own message, the
  * playable blurb on the message under it.
@@ -189,14 +232,14 @@ export function renderTechnicalText(state: TurnCardState): { content: string; em
 export function renderPlayText(state: TurnCardState): { content: string; embeds: []; allowedMentions: { parse: [] } } {
   const isGame = state.kind !== "site";
   const pitch = state.description?.pitch;
-  const blurb = pitch ? clip(prose(pitch), 300) : state.request ? clip(prose(state.request), 260) : undefined;
+  const blurb = pitch ? clip(prose(pitch), PITCH_CHARS) : state.request ? clip(prose(state.request), REQUEST_CHARS) : undefined;
   const title = state.changelog?.title?.trim();
-  const entry = state.changelog?.body ? clip(prose(state.changelog.body), 320) : undefined;
+  const entry = state.changelog?.body ? clip(prose(state.changelog.body), CHANGELOG_CHARS) : undefined;
   const content = [
     `**${isGame ? "🎮" : "🛠️"} ${isGame ? "Play" : "Open"} ${state.name}**`,
     blurb ?? "",
     entry ? `**${title ? clip(title, 60) : "What's new"}** — ${entry}` : title ? `**What's new** — ${clip(title, 200)}` : "",
-    state.description?.play ? `**${isGame ? "How to play" : "What to look at"}** — ${clip(prose(state.description.play), 240)}` : "",
+    state.description?.play ? `**${isGame ? "How to play" : "What to look at"}** — ${clip(prose(state.description.play), PLAY_CHARS)}` : "",
     state.meta ? truncate(state.meta, 120) : "",
     [isGame ? link("▶ **PLAY GAME**", state.siteUrl) : link("▶ **OPEN SITE**", state.siteUrl), link("Source", state.repoUrl)]
       .filter(Boolean).join(" · "),
@@ -204,16 +247,28 @@ export function renderPlayText(state: TurnCardState): { content: string; embeds:
   return { content: truncate(content, 1990), embeds: [], allowedMentions: { parse: [] } };
 }
 
-/** A markdown link to an http(s) URL, or an empty string for anything else. */
-function link(label: string, raw?: string): string {
-  if (!raw) return "";
+/** An http(s) URL safe to render as a link, or undefined for anything else. */
+function safeUrl(raw?: string): string | undefined {
+  if (!raw) return undefined;
   try {
     const url = new URL(raw);
-    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return "";
-    return `[${label}](${url.href.replaceAll("(", "%28").replaceAll(")", "%29")})`;
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return undefined;
+    return url.href;
   } catch {
-    return "";
+    return undefined;
   }
+}
+
+/** A markdown link to an http(s) URL, or an empty string for anything else. */
+function link(label: string, raw?: string): string {
+  const url = safeUrl(raw);
+  if (!url) return "";
+  return `[${label}](${url.replaceAll("(", "%28").replaceAll(")", "%29")})`;
+}
+
+/** Embed titles collapsed newlines silently; plain text components do not. */
+function singleLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 /**

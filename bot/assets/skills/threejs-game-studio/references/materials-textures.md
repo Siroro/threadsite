@@ -34,16 +34,6 @@ Texture-loading examples use the project-owned `publicAssetUrl()` helper from
 
 Choose from the smallest material that produces the intended image:
 
-| Requirement | Start with |
-| --- | --- |
-| Intentionally unlit UI marker, debug proxy, or flat graphic | `MeshBasicMaterial` |
-| General game-world PBR surface | `MeshStandardMaterial` |
-| Clearcoat, transmission, dispersion, sheen, iridescence, or anisotropy | `MeshPhysicalMaterial` |
-| Toon ramp | `MeshToonMaterial` |
-| Legacy/specular art that specifically needs it | `MeshPhongMaterial` |
-| WebGL-only custom GLSL | `ShaderMaterial` after a built-in material cannot do it |
-| WebGPU custom surface | A node material and TSL, not `ShaderMaterial` |
-
 Do not add a texture merely because a slot exists. Every map should express a
 visible art decision at the expected screen size.
 
@@ -249,11 +239,6 @@ Use this table for manually loaded maps:
 at an asset boundary documents intent. Do not label data maps
 `LinearSRGBColorSpace`; that asserts color meaning they do not have.
 
-In r185, `HDRLoader`, `EXRLoader`, and `UltraHDRLoader` return environment color
-data tagged `LinearSRGBColorSpace`. Preserve that value for radiance. This is
-different from both nonlinear `SRGBColorSpace` color images and `NoColorSpace`
-numeric data.
-
 Physical feature maps modulate their matching scalar; they do not enable a
 feature whose scalar is `0`. For example, set `transmission > 0` before a
 `transmissionMap` can contribute, and set both `transmission > 0` and
@@ -262,9 +247,6 @@ feature whose scalar is `0`. For example, set `transmission > 0` before a
 `GLTFLoader` configures color space, UV channel, and orientation for textures
 inside a glTF asset. Do not reapply `flipY`, color space, or arbitrary wrapping
 to those maps unless inspection proves an authored exception.
-
-Colors created through normal hexadecimal, CSS, or string inputs are handled by
-the enabled Three.js color-management system. Avoid legacy manual gamma math.
 
 ## UV Sets And `Texture.channel`
 
@@ -453,10 +435,6 @@ worldTexture.anisotropy = Math.min(
  renderer.capabilities.getMaxAnisotropy(),
 );
 ```
-
-`WebGLRenderer` requires WebGL 2 in r185, so old blanket rules that disable
-mipmaps for non-power-of-two images are stale. Power-of-two source dimensions
-can still be useful for compression, atlases, and predictable mip chains.
 
 ### Atlas and sprite sheets
 

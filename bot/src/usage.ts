@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { randomUUID } from "node:crypto";
 import { log } from "./logger.js";
 import { usageFromMessages, type SessionMessage, type ModelUsage, type TurnUsage } from "./opencode.js";
@@ -17,14 +16,14 @@ import { formatCost, formatTokens, truncate } from "./util.js";
 export interface UsageEntry {
   v: 1;
   /** Revisions with the same identity replace earlier snapshots when read. */
-  id?: string;
+  id: string;
   sessionId?: string;
   startedAt?: string;
   pending?: boolean;
   /** ISO completion timestamp. */
   ts: string;
-  /** "turn" is a real agent turn; "title" and "preview" are bounded side prompts. */
-  label: "turn" | "title" | "preview";
+  /** "turn" is a real agent turn; "title" is a bounded side prompt. */
+  label: "turn" | "title";
   threadId: string;
   project: string;
   kind: string;
@@ -80,8 +79,7 @@ function addToTotal(
     models?: Array<ModelUsage & { turns?: number }>;
   },
 ): void {
-  // Only real agent turns count as turns: the title and preview prompts spend
-  // tokens but are not turns, and counting them inflated the turn total.
+  // Title prompts spend tokens without counting as agent turns.
   const isTurn = !entry.label || entry.label === "turn";
   total.turns += entry.turns ?? (isTurn ? 1 : 0);
   total.failedTurns += entry.failedTurns ?? (entry.failed && isTurn ? 1 : 0);
@@ -127,7 +125,7 @@ export class UsageLog {
     sessionId?: string;
     startedAt?: string;
     pending?: boolean;
-    label?: "turn" | "title" | "preview";
+    label?: "turn" | "title";
     threadId: string;
     project: string;
     kind: string;
@@ -150,7 +148,7 @@ export class UsageLog {
     }
     const entry: UsageEntry = {
       v: 1,
-      ...(input.id ? { id: input.id } : {}),
+      id: input.id ?? randomUUID(),
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       ...(input.startedAt ? { startedAt: input.startedAt } : {}),
       ...(input.pending ? { pending: true } : {}),
@@ -173,14 +171,11 @@ export class UsageLog {
   private async append(entry: UsageEntry): Promise<void> {
     const write = this.writes.then(async () => {
       if (this.forgottenThreads.has(entry.threadId)) return;
-      if (entry.id) {
-        const previous = (await this.readEntries(false)).find((value) => value.id === entry.id);
-        // A later recovery may temporarily lose access to history. Never
-        // replace already durable billing with that smaller/empty snapshot.
-        if (previous && previous.inputTokens + previous.outputTokens > entry.inputTokens + entry.outputTokens) {
-          entry = { ...entry, inputTokens: previous.inputTokens, outputTokens: previous.outputTokens,
-            cacheTokens: previous.cacheTokens, cost: previous.cost, models: previous.models };
-        }
+      const previous = (await this.readEntries(false)).find((value) => value.id === entry.id);
+      // Keep durable counts if recovery temporarily cannot read history.
+      if (previous && previous.inputTokens + previous.outputTokens > entry.inputTokens + entry.outputTokens) {
+        entry = { ...entry, inputTokens: previous.inputTokens, outputTokens: previous.outputTokens,
+          cacheTokens: previous.cacheTokens, cost: previous.cost, models: previous.models };
       }
       await fs.mkdir(path.dirname(this.file), { recursive: true });
       const handle = await fs.open(this.file, "a");
@@ -196,20 +191,15 @@ export class UsageLog {
     await this.writes;
   }
 
-  /** Fill old missed-event records from persisted history without adding turns. */
+  /** Reconcile saved turn usage from its session and time boundaries. */
   async reconcileThread(threadId: string, sessionId: string, messages: SessionMessage[]): Promise<boolean> {
     if (this.forgottenThreads.has(threadId)) return false;
-    let previousEnd = 0;
     let changed = false;
     for (const entry of await this.readEntries()) {
       if (entry.threadId !== threadId || entry.label !== "turn") continue;
       const until = Date.parse(entry.ts);
-      const since = entry.startedAt ? Date.parse(entry.startedAt) : previousEnd + 1;
-      previousEnd = Math.max(previousEnd, until);
-      if (entry.pending || (entry.sessionId && entry.sessionId !== sessionId)) continue;
-      // Legacy records have no session identity. Only recover missing totals
-      // within their completion window; preserve any existing observed spend.
-      if (!entry.sessionId && (entry.inputTokens || entry.outputTokens || entry.cost)) continue;
+      if (entry.pending || entry.sessionId !== sessionId || !entry.startedAt) continue;
+      const since = Date.parse(entry.startedAt);
       const saved = usageFromMessages(messages, since, until);
       if (!saved || saved.inputTokens + saved.outputTokens <= entry.inputTokens + entry.outputTokens) continue;
       await this.append({ ...entry, sessionId, startedAt: new Date(since).toISOString(),
@@ -376,14 +366,13 @@ export class UsageLog {
       return [];
     }
     const entries = new Map<string, UsageEntry>();
-    for (const [index, line] of raw.split("\n").entries()) {
+    for (const line of raw.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
         const parsed = JSON.parse(trimmed) as UsageEntry;
-        if (parsed?.v === 1 && typeof parsed.ts === "string") {
-          const id = parsed.id ?? `legacy:${index}:${createHash("sha256").update(trimmed).digest("hex")}`;
-          entries.set(id, { ...parsed, id });
+        if (parsed?.v === 1 && typeof parsed.id === "string" && typeof parsed.ts === "string") {
+          entries.set(parsed.id, parsed);
         }
       } catch {
         log("warn", "usage.entry_parse_failed", { file: this.file });

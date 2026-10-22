@@ -77,30 +77,6 @@ Check:
 
 Check:
 
-- Delta time units in seconds vs milliseconds.
-- Delta clamping for tab sleep and frame spikes.
-- Fixed-step physics accumulator if physics is timing-sensitive.
-- Collision/physics state initialized before creating bodies or stepping.
-- One simulation system owns body/collider creation and disposal.
-- Physics timestep is stable and not tied directly to variable render delta.
-- Animation mixer updates and clip actions.
-- Multiple animation loops or a mixture of `requestAnimationFrame` and
- `renderer.setAnimationLoop()` owners.
-- Deprecated `THREE.Clock`; current r185 code should update one `THREE.Timer`
- exactly once per frame.
-- State transitions that stop updates or restart timers.
-- Collision proxies vs visual meshes.
-- Collider scale, rotation, and offset match the visual expectation.
-- High-speed tunneling and spawn overlap.
-- Swept collision or bounded substeps cover high-speed bodies that need it.
-- Sensors/triggers have explicit enter/stay/exit or overlap checks.
-- Kinematic moving platforms update physics bodies, not only visual meshes.
-- Restart cleanup for entities, listeners, timers, effects, and physics bodies.
-- Repeated restart soak: run enough cycles to reproduce the intermittent window
- and compare active loops, listeners, timers, entities, colliders, geometries,
- textures, render targets, and audio voices after every cycle.
-- Imported model animation mixer exists, clips are bound to the correct root, root motion is intentional, and clip actions are stopped/cleaned up on restart.
-
 ## Input And Mobile Bugs
 
 Check:

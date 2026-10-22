@@ -59,18 +59,6 @@ recenter bugs.
 
 ## Owned Session Entry
 
-The stock `VRButton` and `ARButton` are convenient for page-lifetime examples,
-but they do not expose the pending `requestSession()` promise. Removing their
-DOM element cannot cancel or await a session that resolves after a route has
-unmounted. They also install the session directly; in tagged r185,
-`WebXRManager.setSession()` and `XRManager.setSession()` can retain the session
-and listeners before a later reference-space or backend step rejects.
-Specifically, r185 `VRButton` adds `local-floor` only as an optional feature
-while `WebXRManager` defaults to that space. When the feature is not granted,
-the manager's later `requestReferenceSpace('local-floor')` can reject and the
-stock helper does not catch that setup failure or end the returned session.
-Do not copy that flow into production lifecycle code.
-
 Route-owned games need to own the complete asynchronous boundary. The helper
 below:
 
@@ -386,113 +374,6 @@ installed revision.
 
 ## WebGPU XR Setup
 
-Three.js r185 can install immersive sessions on `WebGPURenderer`, but native
-WebGPU XR requires the session's `webgpu` feature. Route-owned games still use
-the owned entry boundary above. This section is
-**revision-pinned to tagged r185**: native WebGPU XR is experimental and is not
-a forward-compatibility promise. Before every Three.js upgrade, verify the
-installed `XRManager` source/types and the official
-[WebGPU XR example](https://threejs.org/examples/webgpu_xr_cubes.html); fall
-back to the construction-time WebGL route when that native path is absent.
-
-```ts
-import * as THREE from 'three/webgpu';
-
-const renderer = new THREE.WebGPURenderer({
- // Desktop and WebGL fallback can retain these quality options. Tagged r185
- // temporarily disables MSAA and multiview only for native WebGPU XR.
- antialias: true,
- multiview: true,
- alpha: false,
-});
-
-// r185 chooses adapter XR compatibility during initialization.
-renderer.xr.enabled = true;
-await renderer.init();
-
-const ownedNativeVrEntry = createOwnedXrEntry(renderer, {
- mode: 'immersive-vr',
- sessionInit: {
- requiredFeatures: ['webgpu'],
- optionalFeatures: ['local-floor'],
- },
- referenceSpaceCandidates: ['local-floor', 'local'],
- idleLabel: 'ENTER VR',
- activeLabel: 'EXIT VR',
- onReferenceSpaceSelected: (type) => {
- setXrFloorMode(type === 'local-floor' ? 'standing' : 'seated');
- },
- onError: (error) => showXrEntryError(error),
-});
-document.body.appendChild(ownedNativeVrEntry.element);
-
-await renderer.setAnimationLoop(() => {
- renderer.render(scene, camera);
-});
-```
-
-Keep that direct render call while an XR session is presenting. In r185,
-`RenderPipeline.render()` temporarily disables XR, so a desktop TSL/node post
-chain must be bypassed with an `renderer.xr.isPresenting` branch. Resume the
-pipeline after the session ends. Do not promise WebGPU XR post-processing
-unless an alternate path has been verified against the exact installed
-revision and tested on the target headset.
-
-Without the `webgpu` session feature, r185's native WebGPU XR manager rejects
-session setup. If the experience must enter XR on devices whose XR runtime does
-not expose that feature, choose a construction-time WebGL backend before
-requesting the session. Do not forward the same session after a native
-`setSession()` failure in r185: the native manager stores the session and
-listeners before later reference-space/backend setup can reject. End that
-session, wait for its manager cleanup, destroy the failed renderer, and make a
-fresh session request against a new `WebGPURenderer({ forceWebGL: true })`.
-
-```ts
-import * as THREE from 'three/webgpu';
-
-type XrBackendChoice = 'native-webgpu' | 'webgl-fallback';
-
-function createRenderer(choice: XrBackendChoice) {
- const next = new THREE.WebGPURenderer({
- // Native r185 XR overrides samples/multiview while presenting; the WebGL
- // fallback can retain them when the device supports them.
- antialias: true,
- multiview: true,
- forceWebGL: choice === 'webgl-fallback',
- alpha: false,
- outputBufferType: THREE.UnsignedByteType,
- });
- next.xr.enabled = true;
- next.setSize(window.innerWidth, window.innerHeight);
- return next;
-}
-
-// Decide this before session entry from the supported product route. If a
-// native attempt fails, rebuild with 'webgl-fallback' and require a new click
-// and a new XRSession; never transfer the partially installed session.
-const xrBackend: XrBackendChoice = chooseXrBackendBeforeEntry();
-const renderer = createRenderer(xrBackend);
-await renderer.init();
-document.body.append(renderer.domElement);
-await renderer.setAnimationLoop(() => renderer.render(scene, camera));
-
-const ownedBackendVrEntry = createOwnedXrEntry(renderer, {
- mode: 'immersive-vr',
- sessionInit: {
- requiredFeatures: xrBackend === 'native-webgpu' ? ['webgpu'] : [],
- optionalFeatures: ['local-floor'],
- },
- referenceSpaceCandidates: ['local-floor', 'local'],
- idleLabel: 'ENTER VR',
- activeLabel: 'EXIT VR',
- onReferenceSpaceSelected: (type) => {
- setXrFloorMode(type === 'local-floor' ? 'standing' : 'seated');
- },
- onError: (error) => showXrEntryError(error),
-});
-document.body.append(ownedBackendVrEntry.element);
-```
-
 The fresh-retry owner must rebuild renderer-owned controllers, grips,
 listeners, render targets, diagnostics, canvas attachment, and animation loop.
 Validate both construction-time choices on-device; a desktop fallback test is
@@ -504,12 +385,6 @@ generation guard and failed-session rollback that the stock buttons do not.
 that loop. Use node materials and TSL; do not use WebGL `ShaderMaterial`,
 `onBeforeCompile`, or `EffectComposer`. See the official
 [WebGPURenderer guide](https://threejs.org/manual/en/webgpurenderer).
-
-Verify the WebGPU backend and `forceWebGL: true` fallback separately when both
-are claimed. Record the XR session's enabled features. A desktop WebGPU success
-does not prove headset-browser support. In r185, native WebGPU XR forces zero
-MSAA samples and disables multiview; do not advertise those options as active
-without a newer installed revision and on-device evidence.
 
 ## Player Rig And World Origin
 
@@ -748,27 +623,6 @@ loss, pause, and session end.
 Request hand tracking as optional unless the experience requires it and has a
 controller/gaze fallback:
 
-```ts
-const hand0 = renderer.xr.getHand(0);
-const hand1 = renderer.xr.getHand(1);
-playerRig.add(hand0, hand1);
-
-function resetXrSessionInput() {
- inputSources.fill(undefined);
- clearAllControllerIntents();
-
- // The r185 managers cache these roots by index. Hide and reset cached poses
- // between sessions so re-entry cannot display a stale last-frame transform.
- for (const root of [...controllers, ...grips, hand0, hand1]) {
- root.visible = false;
- root.position.set(0, 0, 0);
- root.quaternion.identity();
- root.scale.set(1, 1, 1);
- root.updateMatrix();
- }
-}
-```
-
 Use hand joints for measured pinch/grab/pose recognition. Add hysteresis so a
 noisy threshold cannot flicker each frame. Preserve accessibility with larger
 targets, dwell or controller alternatives, configurable handedness, and no
@@ -997,80 +851,6 @@ Remove session listeners, controller listeners, local visuals, buttons, hit-test
 sources, and shared geometries/materials through one owner. Reuse the
 `OwnedXrEntry` created by the setup section; do not create a second entry
 boundary during cleanup:
-
-```ts
-function createXrDisposer(entry: OwnedXrEntry) {
- // Keep this promise inside one route/game owner. A remount creates a new
- // owner and therefore a new disposer instead of inheriting stale state.
- let disposePromise: Promise<void> | null = null;
-
- return function disposeXr() {
- disposePromise ??= disposeXrOwnedResources(entry);
- return disposePromise;
- };
-}
-
-async function disposeXrOwnedResources(entry: OwnedXrEntry) {
- // Invalidate and await any pending request, then end and await the entry's
- // installed session. Removing a stock DOM button alone cannot do this.
- await entry.dispose();
- // This is normally null. Keep a defensive manager snapshot for a renderer
- // whose setup partially installed state before rejecting.
- const session = renderer.xr.getSession();
-
- try {
- // Session end restores the pre-session loop in the common r185 XRManager.
- // End first, then clear the restored loop in finally.
- if (session) await session.end();
- } finally {
- await renderer.setAnimationLoop(null);
-
- renderer.xr.removeEventListener('sessionstart', handleManagerSessionStart);
- renderer.xr.removeEventListener('sessionend', handleManagerSessionEnd);
- unbindActiveSession();
-
- // Include these three lines when the AR hit-test block is installed.
- renderer.xr.removeEventListener('sessionstart', handleArSessionStart);
- renderer.xr.removeEventListener('sessionend', cancelHitTest);
- cancelHitTest();
-
- for (const controller of controllers) {
- controller.removeEventListener('selectstart', onSelectStart);
- controller.removeEventListener('selectend', onSelectEnd);
- controller.removeEventListener('squeezestart', onSqueezeStart);
- controller.removeEventListener('squeezeend', onSqueezeEnd);
- controller.removeEventListener('connected', onControllerConnected);
- controller.removeEventListener('disconnected', onControllerDisconnected);
- controller.removeFromParent();
- }
-
- for (const binding of inputBindings) {
- binding.controller.removeEventListener('connected', binding.connected);
- binding.controller.removeEventListener(
- 'disconnected',
- binding.disconnected,
- );
- }
-
- resetXrSessionInput();
-
- // XR managers cache controller/grip roots by index. Remove every visual
- // this owner attached before disposing its shared GPU resources; otherwise
- // a remount receives roots containing stale children.
- for (const ray of controllerRays) ray.removeFromParent();
- for (const proxy of gripProxies) proxy.removeFromParent();
- for (const grip of grips) grip.removeFromParent();
- hand0.removeFromParent();
- hand1.removeFromParent();
-
- rayGeometry.dispose();
- rayMaterial.dispose();
- gripGeometry.dispose();
- gripMaterial.dispose();
- timer.dispose();
- }
-}
-```
 
 If a route change should leave an active session gracefully, end it and wait
 for the `end` event before destroying dependent state. Build the disposer once

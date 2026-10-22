@@ -37,7 +37,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-queue-"));
 process.env.LOG_FILE ||= path.join(tmp, "fixture.log");
-process.env.STATE_FILE ||= path.join(tmp, "state.json");
+process.env.STATE_DB_FILE ||= path.join(tmp, "state.db");
 
 const { ProjectService } = await import("./src/project.js");
 const { Store, pendingTurnMatches } = await import("./src/store.js");
@@ -45,7 +45,7 @@ const { OpenCodeHarness } = await import("./src/opencode.js");
 const { ForgejoClient } = await import("./src/forgejo.js");
 const { UsageLog } = await import("./src/usage.js");
 
-const store = await Store.open(path.join(tmp, "state.json"));
+const store = await Store.open(path.join(tmp, "state.db"));
 const service = new ProjectService(store, new OpenCodeHarness(), new ForgejoClient(), new UsageLog(path.join(tmp, "usage.jsonl")));
 const queues = () => (service as unknown as { queues: Map<string, unknown> }).queues;
 const sever = (threadId: string) => (service as unknown as { severQueue: (id: string) => void }).severQueue(threadId);

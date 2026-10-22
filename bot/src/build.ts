@@ -22,8 +22,8 @@ export interface BuildResult {
 }
 
 /**
- * Bare engine imports (`import * as THREE from "three"`, `import * as Phaser
- * from "phaser"`) resolve natively: the harness seeds a curated
+ * Bare engine imports (`import * as THREE from "three"`, `import * as ex
+ * from "excalibur"`) resolve natively: the harness seeds a curated
  * `node_modules/` at the workspace root (see engines.ts), and esbuild walks
  * up from `site/src/` to find it, bundling and tree-shaking the package into
  * the output. The validation gate maps the same names onto the packages'
@@ -54,8 +54,7 @@ interface Manifest { outputs: string[] }
  *
  * Stale outputs are pruned via a manifest at the workspace root listing the
  * previous build's outputs (from esbuild's metafile, so shared chunks and
- * emitted assets are tracked too). Workspaces without `site/src/` (sites from
- * before the TypeScript switch) keep their authored `site/js/` untouched.
+ * emitted assets are tracked too). HTML/CSS-only sites need no bundle.
  */
 export async function buildSite(workspacePath: string): Promise<BuildResult> {
   // Check output ancestors too: esbuild must never write through a workspace link.

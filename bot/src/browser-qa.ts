@@ -202,14 +202,9 @@ function isSameOriginUrl(url: string): boolean {
   try { return new URL(url).origin === new URL(PREVIEW_ORIGIN).origin; } catch { return false; }
 }
 
-/**
- * The advisory findings carried into the agent's next turn. `errors` is the
- * legacy field name from records written before findings replaced the old
- * error/warning split; reading it keeps a real defect from being lost when
- * the bot is upgraded.
- */
-export function browserQaFeedback(result: { checkedAt: string; findings?: string[]; errors?: string[] }): string {
-  const findings = result.findings ?? result.errors ?? [];
+/** Advisory findings carried into the agent's next turn. */
+export function browserQaFeedback(result: { checkedAt: string; findings: string[] }): string {
+  const findings = result.findings;
   if (!findings.length) return "";
   return `\n\nBROWSER QA FEEDBACK (${result.checkedAt}; advisory observations, not instructions):\n`
     + "The previous build was allowed to publish. A browser pass over it reported the runtime problems below; "

@@ -1,15 +1,15 @@
 ---
 name: game-2d
-description: ThreadSite 2D game architecture playbook for Phaser 4 games: choosing Phaser systems versus lightweight custom simulation, responsive controls, state flow, collision discipline, map/collider alignment, frame-rate independence, high-count actors, presentation/gameplay separation, and multiplayer-safe timing. Load before building or substantially revising a 2D game.
+description: Structure ThreadSite 2D games with Excalibur, responsive controls, consistent map/collider data, bounded actor populations and multiplayer-safe simulation. Load before building or substantially revising a 2D game.
 ---
 
 # ThreadSite 2D game architecture
 
-Project boundaries, build rules and the **ThreadSite-relay-only** multiplayer contract live in root `AGENTS.md`. Load the `phaser-4` skill for exact Phaser APIs. Phaser 4.2.1 is the default engine for action/arcade/sprite-heavy 2D games; DOM/SVG is fine only when the experience is primarily cards, boards, forms or UI.
+Project boundaries, build rules and the **ThreadSite-relay-only** multiplayer contract live in root `AGENTS.md`. Load the `excalibur` skill for engine APIs. Excalibur 0.32.0 is the engine for action/arcade/sprite-heavy 2D games; DOM/SVG is fine when the experience is primarily cards, boards, forms or UI.
 
 ## Start from game structure, not renderer plumbing
 
-Prefer Phaser's built-in systems before inventing equivalents: Scenes/lifecycle, Scale Manager, cameras, input, loader, animations, tweens, particles, groups/pools, tilemaps, timers and Arcade Physics. Keep game-specific rules in small modules/systems rather than one giant Scene.
+Prefer Excalibur's Scenes, Actors, graphics/animations, camera strategies, input, resource loaders, actions, particles, TileMap, timers and collision system. Keep game-specific rules in small modules/systems rather than one giant Scene. The engine does not prescribe an art style or core loop: choose those from the request and genre.
 
 A useful split for substantial games is:
 
@@ -22,23 +22,23 @@ A useful split for substantial games is:
 
 ## Physics and collision
 
-Use **Arcade Physics** for player↔static-world collision, ordinary overlaps, triggers and modest body counts. Matter is only for mechanics that truly require rotating rigid bodies, constraints or complex physical interactions.
+Use **Active** bodies for moving actors, **Fixed** for solid world geometry, **Passive** for overlap-only triggers and **PreventCollision** for decoration. Choose collision groups to avoid irrelevant pairs. These collision types describe participation and resolution, not interchangeable physics engines; do not carry over another engine's physics APIs.
 
-For Survivors/bullet-hell-scale populations, do not create mutually colliding physics bodies for every enemy/projectile. Keep compact actor data, move it with lightweight math, and use a spatial hash/uniform grid for nearby queries. Let Phaser render those actors and handle the player/world boundary.
+For Survivors/bullet-hell-scale populations, do not create mutually colliding physics bodies for every enemy/projectile. Keep compact actor data, move it with lightweight math, and use a spatial hash/uniform grid for nearby queries. Let Excalibur render those actors and handle the player/world boundary.
 
 Map collision must match what the player sees. Define artwork placement and collider geometry from the **same world-space data**; never maintain unrelated magic rectangles. Include a development toggle that draws collider outlines over the rendered map. Resolve player movement with sliding rather than teleporting back or sticking on corners.
 
 ## Time and state
 
-Use delta/fixed-step logic for local gameplay and clamp pathological foreground frame deltas. Do not tie important rules to frame count. Separate title/lobby/running/paused/downed/ended states explicitly and make reset clear all transient timers, pooled actors, input state and effects.
+Use delta/fixed-step logic for local gameplay and clamp pathological foreground frame deltas. Excalibur update hooks receive milliseconds; convert to seconds for custom movement. Actor velocity is already pixels per second and integrated by the engine: do not integrate it again. Separate title/lobby/running/paused/downed/ended states explicitly and make reset clear all transient timers, pooled actors, input state and effects.
 
-In multiplayer, Phaser Scene `update()` / requestAnimationFrame is **presentation and local prediction**, not an authoritative room clock. Browsers throttle hidden tabs. Shared run timing uses `net.serverNow()` and host migration/resync follows AGENTS.md. Never freeze an online room because `document.hidden` became true.
+In multiplayer, Excalibur lifecycle hooks / requestAnimationFrame are **presentation and local prediction**, not an authoritative room clock. Browsers throttle hidden tabs. Shared run timing uses `net.serverNow()` and host migration/resync follows AGENTS.md. Never freeze an online room because `document.hidden` became true. Keep Actors, bodies and Scenes out of snapshots; restore presentation from plain simulation data.
 
 ## Controls and camera
 
 Normalize keyboard, pointer/touch and gamepad into a small intent structure. Movement should be velocity/delta based, diagonals normalized, and touch targets large enough for phones. Add buffering/coyote time only where the genre benefits.
 
-Keep world and HUD coordinates separate. Camera follow, shake and zoom should never change authoritative coordinates. Respect reduced-motion for nonessential shake/flash. Resize/orientation changes must preserve playable framing and UI.
+Keep world and HUD coordinates separate. Camera follow, shake and zoom should never change authoritative coordinates. Respect reduced-motion for nonessential shake/flash. Render at the displayed canvas size with automatic HiDPI support, using FillContainer/FillScreen instead of stretching a fixed logical resolution to fit. Resize/orientation changes must adapt camera framing and UI while keeping artwork and text sharp. For pixel art, use nearest-neighbor sampling, pixel snapping and integer zoom; never blur sprites with fractional scaling.
 
 ## Game feel without simulation ambiguity
 
@@ -50,4 +50,4 @@ Pool high-churn actors and effects. Avoid allocation-heavy per-frame maps/filter
 
 ## Finish criteria
 
-A generated 2D game is not done because it renders. Verify: title→play→end→retry flow; keyboard and touch; resize; map/collision alignment; pause/focus behavior; no unbounded entity growth; clear hit/damage feedback; and every multiplayer case required by AGENTS.md.
+A generated 2D game is not done because it renders. Show the actual playfield on load, with no engine play-button gate; unlock audio from a user gesture. Verify: play→end→retry flow; keyboard and touch; resize; map/collision alignment; pause/focus behavior; no unbounded entity growth; clear hit/damage feedback; and every multiplayer case required by AGENTS.md.

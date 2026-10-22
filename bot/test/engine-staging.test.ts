@@ -48,14 +48,14 @@ test("engine staging produces the exact payload the seeder spec reads", async ()
         }
         for (const dir of engine.dirs) {
           for (const relative of await walk(path.join(process.cwd(), "node_modules", ...dir.from.split("/")))) {
+            if (dir.declarationsOnly && !relative.endsWith(".d.ts")) continue;
             expected.add(`${dir.from}/${relative}`);
           }
         }
       }
     }
     assert.deepEqual(new Set(staged), stagedNames);
-    // Exactly the spec's bytes and nothing else: no stale files from retired
-    // spec entries, no full-package spill from the source node_modules.
+    // Staging contains exactly the specified payload.
     assert.deepEqual(await walk(target), [...expected].sort());
   } finally {
     await fs.rm(target, { recursive: true, force: true });

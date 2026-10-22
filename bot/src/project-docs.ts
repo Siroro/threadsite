@@ -35,15 +35,15 @@ export interface ProjectChangelog {
 /** The first `DESCRIPTION.md` a new project starts with. */
 export function descriptionTemplate(name: string): string {
   return `# ${name}\n\n`
-    + "<!-- One or two sentences a visitor would understand: what this is and what they can do. No file names, no code, no internals. Replace this line. -->\n\n"
+    + "<!-- One sentence, at most 25 words, in words a visitor understands: what this is and what they can do. No file names, no code, no internals — and keep it on one line. Replace this line. -->\n\n"
     + "## How to play\n\n"
-    + "<!-- The controls and what to try first, in one or two sentences. Replace this line. -->\n";
+    + "<!-- One sentence, at most 20 words: the goal the player works toward, not the controls. One line. Replace this line. -->\n";
 }
 
 /** The first `CHANGELOG.md` a new project starts with. */
 export function changelogTemplate(): string {
   return "# Changelog\n\n"
-    + "<!-- Add a new section at the top of this file for each turn: a short heading, then one or two sentences on what a visitor will notice. -->\n";
+    + "<!-- Add a new section at the top of this file for each turn: a heading of at most six words, then one sentence, on one line, about what a visitor will notice. -->\n";
 }
 
 /** Strip the placeholder comments and the leading heading from a document. */
@@ -79,7 +79,7 @@ export async function readProjectDescription(workspacePath: string): Promise<Pro
   if (!raw) return undefined;
   const text = cleanDocument(raw).replace(/^#\s+.*$/m, "").trim();
   if (!text) return undefined;
-  const sections = text.split(/^##\s+(?:how to play|controls?|how it works)\s*$/im);
+  const sections = text.split(/^##\s+(?:how to play|the goal|controls?|how it works)\s*$/im);
   const pitch = sections[0].trim();
   const play = sections.slice(1).join("\n").trim();
   // An untouched template carries placeholders only: it says nothing.
