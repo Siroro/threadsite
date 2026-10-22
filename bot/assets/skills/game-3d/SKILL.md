@@ -203,7 +203,7 @@ renderer.setAnimationLoop((time) => update(time));              // one loop, sta
 
 ## Multiplayer note
 
-Rendering of remote players follows AGENTS.md's multiplayer section: key
-avatars by `cid`, interpolate their transforms from the last two states, and
-simulate only the local player. This skill's math helpers (`damp`, `lerp`,
-scratch vectors) are exactly what the interpolation wants.
+Follow the selected mode in `AGENTS.md`. For networked games, read `NETWORKING.md`:
+key live avatars by `peer.id` and render remote players with the client's
+`transforms.sampleAll()`. The host owns shared simulation; do not add manual
+transform interpolation. Singleplayer games need no network client.

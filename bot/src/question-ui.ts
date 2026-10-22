@@ -7,6 +7,7 @@ import { cardId } from "./card-actions.js";
 import { addCardDivider, addCardHeader, cardMessage, type CardMessage } from "./card-ui.js";
 import type { QuestionDelivery, QuestionDraft, QuestionStatus } from "./card-state.js";
 import type { AgentQuestion } from "./progress.js";
+import { plain } from "./progress-view.js";
 import { truncate } from "./util.js";
 
 export type QuestionRow = ActionRowBuilder<MessageActionRowComponentBuilder>;
@@ -108,9 +109,9 @@ export function renderQuestionReview(resource: string, request: AgentQuestion, d
   const complete = draft.answers.filter((answer, i) => answer?.length && !draft.custom?.includes(i)).length;
   const card = new ContainerBuilder().setAccentColor(delivery?.status === "retry" ? 0xef4444 : 0xf59e0b);
   addCardHeader(card, "ANSWERS", question.header || "Your answers", `${complete}/${request.questions.length} answered · question ${index + 1}/${request.questions.length}`);
-  card.addTextDisplayComponents(new TextDisplayBuilder().setContent(truncate(question.question, 1600)));
+  card.addTextDisplayComponents(new TextDisplayBuilder().setContent(plain(question.question, 1600)));
   const selected = draft.answers[index]?.length ? draft.answers[index].join(" · ") : "Not answered yet";
-  card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`**Your draft**\n${truncate(selected, 700)}${draft.custom?.includes(index) ? "\nWrite your custom answer before submitting." : ""}`));
+  card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`**Your draft**\n${plain(selected, 700)}${draft.custom?.includes(index) ? "\nWrite your custom answer before submitting." : ""}`));
   if (delivery?.error) card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`⚠️ ${delivery.error}`));
   addCardDivider(card);
   card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(

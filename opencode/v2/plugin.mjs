@@ -7,6 +7,9 @@ export default {
   id: "threadsite.v2",
   async setup(ctx) {
     const registrations = [];
+    const browserQaModel = ctx.options?.browserQaModel;
+    const configuredQaModel = (model) => `${model.providerID}/${model.id}` === browserQaModel?.split("#")[0];
+    const isBrowserTool = (name) => /^playwright[._]/.test(name);
     const stopLsp = await setupLsp(ctx);
     if (stopLsp) registrations.push({ dispose: stopLsp });
     registrations.push(await ctx.tool.transform((tools) => {
@@ -40,18 +43,45 @@ export default {
       });
     }));
     registrations.push(await ctx.tool.hook("execute.before", async (event) => {
-      // Match v1's owning-turn lifecycle: detached work must not keep editing
-      // after the root reports success and the harness starts publication.
-      if (event.tool === "subagent" || event.tool === "shell") event.input.background = false;
+      // Only the inspection-only QA agent can outlive a tool call. Builders
+      // and shell commands must finish before the parent can publish their edits.
+      if (event.tool === "shell" || (event.tool === "subagent" && event.input.agent !== "browser-qa")) event.input.background = false;
+      if (event.tool === "subagent" && event.input.agent === "browser-qa") {
+        const catalog = await ctx.model.list();
+        const model = browserQaModel && catalog.data.find(configuredQaModel);
+        if (!model?.capabilities.input.includes("image") || model.enabled === false) {
+          throw new Error("Browser QA unavailable: OPENCODE_BROWSER_QA_MODEL must select an available model advertising image input. Continue static checks and report visual QA as unavailable.");
+        }
+        // Delegation cannot replace the dedicated vision model with the parent
+        // model or a tool-call override.
+        event.input.model = browserQaModel;
+      }
       if (event.tool === "shell") await checkExpandedCommand(event.input.command, ctx.location.directory, event.input.workdir);
+    }));
+    // Native children inherit the parent's session rules, including a text
+    // builder's browser denial. Replace those rules only on the QA child before
+    // its first tool registry is selected; never broaden the parent session.
+    registrations.push(await ctx.session.hook("prompt", async (event) => {
+      const session = await ctx.session.get({ sessionID: event.sessionID });
+      if (session.agent !== "browser-qa" || !session.parentID) return;
+      const catalog = await ctx.model.list();
+      const model = catalog.data.find((model) => configuredQaModel(model) && model.providerID === session.model?.providerID && model.id === session.model?.id);
+      const vision = model?.enabled !== false && model?.capabilities.input.includes("image");
+      await ctx.session.update({ sessionID: event.sessionID, permissions: [
+        { action: "*", resource: "*", effect: "deny" },
+        ...(vision ? ["threadsite_browser", "playwright_*", "playwright.*"].map((action) => ({ action, resource: "*", effect: "allow" })) : []),
+      ] });
     }));
     // Last defence if a session's selected model changes outside the bot. This
     // also applies to subagents independently of the parent's image support.
     registrations.push(await ctx.session.hook("context", async (event) => {
       const catalog = await ctx.model.list();
       const model = catalog.data.find((model) => model.id === event.model.id && model.providerID === event.model.providerID);
-      if (["general", "explore"].includes(event.agent) || !model?.capabilities.input.includes("image")) {
-        for (const name of Object.keys(event.tools)) if (/^playwright[._]/.test(name)) delete event.tools[name];
+      const vision = model?.enabled !== false && model?.capabilities.input.includes("image");
+      for (const name of Object.keys(event.tools)) {
+        if (event.agent === "browser-qa") {
+          if (!isBrowserTool(name) || !vision || !configuredQaModel(event.model)) delete event.tools[name];
+        } else if (isBrowserTool(name) && (["general", "explore"].includes(event.agent) || !vision)) delete event.tools[name];
       }
     }));
     return async () => { for (const registration of registrations.reverse()) await registration.dispose(); };

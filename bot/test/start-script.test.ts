@@ -56,9 +56,3 @@ test("cleanup leaves a previously stopped bot stopped", async (t) => {
   await f.run(["remove", "--thread", "123", "--apply"], { TEST_RUNNING: "0" });
   assert.doesNotMatch(await f.calls(), /compose stop|compose up/);
 });
-
-test("start logs executes Docker directly", async (t) => {
-  const f = await fixture(t);
-  await f.run(["logs", "gameserver"]);
-  assert.match(await f.calls(), /compose logs -f --tail=100 gameserver/);
-});

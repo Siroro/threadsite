@@ -2,7 +2,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Agent } from "undici";
 import { OpenCode, type OpenCodeClient, type ModelInfo, type ModelRef, type SessionInfo,
-  type SessionMessageInfo, type FormInfo, type PermissionRuleset, type V2Event } from "@opencode/client";
+  type SessionMessageInfo, type SessionInboxInfo, type FormInfo, type PermissionRuleset, type V2Event } from "@opencode/client";
 import { config } from "./config.js";
 import { log, serializeError } from "./logger.js";
 import { applicationMessage, formQuestion } from "./opencode-v2-messages.js";
@@ -12,7 +12,7 @@ import type { OpenCodeHarness } from "./opencode.js";
 import type { ProgressCallback, ProgressUpdate, ProgressPlanItem } from "./progress.js";
 import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
 import { steeringInstruction } from "./templates.js";
-import { cleanThreadTitle, errorText, parseModel, sleep, truncate } from "./util.js";
+import { cleanThreadTitle, errorText, parseModel, sleep } from "./util.js";
 
 const requestOptions = () => ({ signal: AbortSignal.timeout(10_000) });
 const emptyUsage = (): TurnUsage => ({ inputTokens: 0, outputTokens: 0, cacheTokens: 0,
@@ -32,28 +32,55 @@ export class V2TurnError extends Error {
   constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "OpenCodeV2TurnError"; }
 }
 
-/** The turn's average tok/s, ported from opencode's own turnTokensPerSecond:
- * each assistant step's output+reasoning tokens over its provider-active window
- * (time.created to time.streamed, both server clock), aggregated before dividing
- * so steps weight by their duration. A step without a streamed window withholds
- * the rate rather than letting the remaining steps overstate it. */
-function turnTiming(messages: Array<{ sessionID: string; message: SessionMessageInfo }>, since: number, baseline: ReadonlySet<string>):
-{ generationMs: number; timedOutputTokens: number; outputTokensPerSecond: number } | undefined {
+interface StepTiming { generationMs: number; timedOutputTokens: number }
+
+/** Pair counts and duration from the same provider attempt. An invalid window
+ * contributes neither: adding its tokens alone inflates every other sample. */
+function stepTiming(started: number | undefined, streamed: number | undefined,
+  tokens: { output: number; reasoning: number } | undefined): StepTiming | undefined {
+  if (started === undefined || streamed === undefined || !Number.isFinite(started) || !Number.isFinite(streamed)
+    || streamed <= started || !tokens || !Number.isFinite(tokens.output) || !Number.isFinite(tokens.reasoning)
+    || tokens.output < 0 || tokens.reasoning < 0 || tokens.output + tokens.reasoning <= 0) return undefined;
+  return { generationMs: streamed - started, timedOutputTokens: tokens.output + tokens.reasoning };
+}
+
+function timingTotals(samples: Iterable<StepTiming>): Pick<TurnUsage, "generationMs" | "timedOutputTokens" | "outputTokensPerSecond"> {
   let generationMs = 0;
   let timedOutputTokens = 0;
-  let steps = 0;
-  const seen = new Set<string>();
+  for (const sample of samples) { generationMs += sample.generationMs; timedOutputTokens += sample.timedOutputTokens; }
+  return generationMs > 0 && timedOutputTokens > 0
+    ? { generationMs, timedOutputTokens, outputTokensPerSecond: timedOutputTokens * 1000 / generationMs } : {};
+}
+
+/** Server-clock provider windows exclude tool waits. History and live samples
+ * overlap, so replace by message ID before summing; never divide all billed
+ * tokens by a subset's time or use event-arrival gaps as generation time. */
+function turnTiming(messages: Array<{ sessionID: string; message: SessionMessageInfo }>, since: number, baseline: ReadonlySet<string>):
+Map<string, StepTiming> {
+  const samples = new Map<string, StepTiming>();
   for (const { message } of messages) {
-    if (message.type !== "assistant" || seen.has(message.id) || baseline.has(message.id)) continue;
-    if (message.time.created < since) continue;
-    seen.add(message.id);
-    steps += 1;
-    if (message.time.streamed === undefined) return undefined;
-    generationMs += Math.max(0, message.time.streamed - message.time.created);
-    timedOutputTokens += (message.tokens?.output ?? 0) + (message.tokens?.reasoning ?? 0);
+    if (message.type !== "assistant" || baseline.has(message.id) || message.time.created < since
+      || message.time.completed === undefined) continue;
+    const timed = stepTiming(message.time.created, message.time.streamed, message.tokens);
+    if (timed) samples.set(message.id, timed);
   }
-  if (!steps || generationMs <= 0 || timedOutputTokens <= 0) return undefined;
-  return { generationMs, timedOutputTokens, outputTokensPerSecond: timedOutputTokens * 1000 / generationMs };
+  return samples;
+}
+
+function pendingBrowserQa(history: SessionMessageInfo[], cancelled: unknown = []): Set<string> {
+  const ignored = new Set(Array.isArray(cancelled) ? cancelled.filter((id): id is string => typeof id === "string") : []);
+  const pending = new Set<string>();
+  for (const message of history) {
+    if (message.type === "synthetic" && message.metadata?.source === "subagent"
+      && typeof message.metadata.childID === "string" && message.metadata.state !== "running") pending.delete(message.metadata.childID);
+    if (message.type === "assistant") for (const part of message.content) {
+      if (part.type !== "tool" || part.name !== "subagent" || part.state.status !== "completed"
+        || part.state.input.agent !== "browser-qa" || part.state.input.background !== true) continue;
+      const id = part.state.metadata?.sessionID;
+      if (typeof id === "string" && part.state.metadata?.status === "running" && !ignored.has(`${message.id}:${part.id}`)) pending.add(id);
+    }
+  }
+  return pending;
 }
 
 interface Watch {
@@ -63,6 +90,9 @@ interface Watch {
   done: Promise<void>;
   budget?: TurnStepBudget;
   children: Set<string>;
+  activeChildren: Set<string>;
+  callback?: ProgressCallback;
+  browserQaChildren: Set<string>;
   lastProgress: number;
   questionIds: Set<string>;
   progressKeys: Map<string, string>;
@@ -72,9 +102,7 @@ interface Watch {
   text: Map<string, string>;
   started: Map<string, number>;
   streamed: Map<string, number>;
-  generationMs: number;
-  timedOutputTokens: number;
-  timedSteps: number;
+  timings: Map<string, StepTiming>;
   compactions: number;
   contextLimit?: number;
   quota?: QuotaBlock;
@@ -284,9 +312,17 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         const fingerprint = JSON.stringify(fresh);
         if (fingerprint !== previousFingerprint) { watch.lastProgress = Date.now(); previousFingerprint = fingerprint; }
         await this.restore(directory, sessionID, watch, callback, history);
-        const busy = !!active[sessionID];
-        const idle = [...fresh].reverse().find((message) => message.type === "idle");
-        if (!busy && !inbox.length && accepted && idle?.type === "idle") {
+        this.restoreSubagents(watch, active);
+        // Native background results can wake an idle parent. Keep ownership of
+        // this turn until those results are delivered and the parent finishes.
+        const busy = !!active[sessionID] || pendingBrowserQa(fresh).size > 0;
+        if (!active[sessionID]) await this.resumeBrowserQaResult(sessionID, inbox);
+        const newest = [...fresh].reverse();
+        const idle = newest.find((message) => message.type === "idle");
+        const qaResult = newest.find((message) => message.type === "synthetic" && message.metadata?.source === "subagent"
+          && message.metadata.agent === "browser-qa");
+        const finishedAfterQa = !qaResult || (idle && newest.indexOf(idle) < newest.indexOf(qaResult));
+        if (!busy && !inbox.length && accepted && idle?.type === "idle" && finishedAfterQa) {
           if (idle.outcome === "succeeded") {
             return this.summary(fresh);
           }
@@ -353,7 +389,9 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
       if (cursor && cursors.has(cursor)) throw new Error("OpenCode message pagination did not advance");
       if (cursor) cursors.add(cursor);
     } while (cursor && (!limit || messages.length < limit));
-    return [...new Map(messages.map((message) => [message.id, message])).values()]
+    // Pages are newest first. Reverse before the stable timestamp sort so
+    // records created in the same millisecond retain admission order.
+    return [...new Map(messages.map((message) => [message.id, message])).values()].reverse()
       .sort((a, b) => a.time.created - b.time.created);
   }
 
@@ -385,10 +423,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     const observed = usageFromMessages([...watch.steps.values()], since) ?? emptyUsage();
     observed.contextLimit = watch.contextLimit;
     observed.compactions = watch.compactions;
-    // Live anchors only cover a lost history fetch: every ended step needs a
-    // complete started→streamed window or the turn shows no average at all.
-    if (watch.timedSteps === watch.steps.size && watch.generationMs > 0 && watch.timedOutputTokens > 0) Object.assign(observed, { generationMs: watch.generationMs,
-      timedOutputTokens: watch.timedOutputTokens, outputTokensPerSecond: watch.timedOutputTokens * 1000 / watch.generationMs });
+    Object.assign(observed, timingTotals(watch.timings.values()));
     try {
       const entries = await this.usageHistory(directory, sessionID);
       const messages = entries.map(({ sessionID: id, message }) => applicationMessage(message, id));
@@ -397,10 +432,9 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         && message.parts?.some((part) => part.type === "compaction" && part.status === "completed")).length);
       const saved = usageFromMessages(messages, since, Infinity, baseline);
       const result = reconcileUsage(observed, saved) ?? observed;
-      // Saved history carries the same streamed windows opencode's own UI rates
-      // turns by, so it replaces the live anchors whenever it resolves a rate.
-      const timed = turnTiming(entries, since, baseline);
-      if (timed) Object.assign(result, timed);
+      const samples = new Map(watch.timings);
+      for (const [id, timed] of turnTiming(entries, since, baseline)) samples.set(id, timed);
+      Object.assign(result, timingTotals(samples.values()));
       // Child billing is cumulative, but the context indicator belongs to root.
       result.contextTokens = usageFromMessages(messages.filter((message) => message.info?.sessionID === sessionID), since, Infinity, baseline)?.contextTokens
         ?? result.contextTokens;
@@ -420,13 +454,29 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
   }
 
   async isBusy(directory: string, sessionID: string, signal?: AbortSignal): Promise<boolean> {
-    await this.session(directory, sessionID, signal);
+    const session = await this.session(directory, sessionID, signal);
     const [active, inbox, forms] = await Promise.all([
       this.client.session.active({ signal: signal ?? AbortSignal.timeout(10_000) }),
       this.client.session.inbox.list({ sessionID }, { signal: signal ?? AbortSignal.timeout(10_000) }),
       this.client.session.form.list({ sessionID }, { signal: signal ?? AbortSignal.timeout(10_000) }),
     ]);
-    return !!active[sessionID] || inbox.length > 0 || forms.length > 0;
+    const watch = this.watches.get(sessionID);
+    if (watch) this.restoreSubagents(watch, active);
+    if (!active[sessionID]) await this.resumeBrowserQaResult(sessionID, inbox);
+    if (active[sessionID] || inbox.length || forms.length) return true;
+    return pendingBrowserQa(await this.rawMessages(sessionID), session.metadata?.threadsiteCancelledBrowserQa).size > 0;
+  }
+
+  private async resumeBrowserQaResult(sessionID: string, inbox: SessionInboxInfo[]): Promise<void> {
+    // Native restart recovery can park a job's result without resuming its
+    // parent. Wake only an attached turn and reuse the persisted input ID:
+    // retries admit the same receipt, never duplicate the model's prompt.
+    if (!this.watches.has(sessionID) || this.stopped.has(sessionID)) return;
+    for (const item of inbox) if (item.type === "synthetic" && item.payload.metadata?.source === "subagent"
+      && item.payload.metadata.agent === "browser-qa") {
+      if (this.stopped.has(sessionID)) return;
+      await this.client.session.synthetic({ sessionID, id: item.id, ...item.payload, delivery: item.delivery, resume: true }, requestOptions());
+    }
   }
 
   async steer(directory: string, sessionID: string, text: string): Promise<boolean> {
@@ -437,7 +487,39 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
 
   async abortTurn(directory: string, sessionID: string): Promise<boolean> {
     this.stopped.add(sessionID); // Mark before I/O so no concurrent watcher can resurrect it.
-    await this.session(directory, sessionID);
+    let session = await this.session(directory, sessionID);
+    const initialHistory = await this.rawMessages(sessionID);
+    const pending = pendingBrowserQa(initialHistory, session.metadata?.threadsiteCancelledBrowserQa);
+    if (pending.size) {
+      for (const childID of pending) {
+        const child = await this.session(directory, childID);
+        if (child.parentID !== sessionID) throw new Error("Browser QA session belongs to a different parent");
+        this.stopped.add(childID);
+        await this.client.session.interrupt({ sessionID: childID, resume: false }, requestOptions());
+      }
+      // Drain the native job notifications before the final parent interrupt;
+      // otherwise a late QA result could resurrect a deliberately stopped turn.
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const [history, inbox] = await Promise.all([this.rawMessages(sessionID), this.client.session.inbox.list({ sessionID }, requestOptions())]);
+        const outstanding = pendingBrowserQa(history);
+        for (const item of inbox) if (item.type === "synthetic" && typeof item.payload.metadata?.childID === "string") {
+          outstanding.delete(item.payload.metadata.childID);
+        }
+        if (![...pending].some((id) => outstanding.has(id))) break;
+        await this.client.session.interrupt({ sessionID, resume: false }, requestOptions());
+        if (Date.now() >= deadline) return false;
+        await sleep(100);
+      }
+      session = await this.session(directory, sessionID);
+      const previous = session.metadata?.threadsiteCancelledBrowserQa;
+      const cancelledCalls = initialHistory.flatMap((message) => message.type === "assistant" ? message.content.flatMap((part) =>
+        part.type === "tool" && part.name === "subagent" && part.state.status === "completed"
+          && typeof part.state.metadata?.sessionID === "string" && pending.has(part.state.metadata.sessionID)
+          ? [`${message.id}:${part.id}`] : []) : []);
+      await this.client.session.update({ sessionID, metadata: { ...session.metadata,
+        threadsiteCancelledBrowserQa: [...new Set([...(Array.isArray(previous) ? previous : []), ...cancelledCalls])] } }, requestOptions());
+    }
     // Interrupt alone leaves inbox entries capable of starting another execution.
     for (const input of await this.client.session.inbox.list({ sessionID }, requestOptions())) {
       await this.client.session.inbox.cancel({ sessionID, inboxID: input.id }, requestOptions());
@@ -614,10 +696,9 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
   }
 
   private watch(directory: string, sessionID: string, callback: ProgressCallback | undefined, since: number, baseline: Set<string>, budgeted: boolean): Watch {
-    const watch: Watch = { since, baseline, controller: new AbortController(), done: Promise.resolve(), children: new Set(),
+    const watch: Watch = { since, baseline, controller: new AbortController(), done: Promise.resolve(), children: new Set(), activeChildren: new Set(), callback, browserQaChildren: new Set(),
       lastProgress: Date.now(), questionIds: new Set(), progressKeys: new Map(), steps: new Map(), models: new Map(),
-      tools: new Map(), text: new Map(), started: new Map(), streamed: new Map(), generationMs: 0, timedOutputTokens: 0,
-      timedSteps: 0, compactions: 0,
+      tools: new Map(), text: new Map(), started: new Map(), streamed: new Map(), timings: new Map(), compactions: 0,
       liveSamples: [], lastMeterAt: 0 };
     this.watches.set(sessionID, watch);
     if (budgeted) {
@@ -644,9 +725,12 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
             for (const child of sessions) if (child.parentID && (child.parentID === sessionID || watch.children.has(child.parentID))
               && !watch.children.has(child.id) && sameDirectory(child.location.directory, directory)) {
               watch.children.add(child.id); changed = true;
+              if (child.agent === "browser-qa") watch.browserQaChildren.add(child.id);
             }
           } while (changed);
+          for (const child of watch.children) this.restoreUsage(watch, child, await this.rawMessages(child));
           await this.restore(directory, sessionID, watch, callback, await this.rawMessages(sessionID));
+          this.restoreSubagents(watch, await this.client.session.active(requestOptions()));
           for await (const event of this.client.event.subscribe({ signal: watch.controller.signal })) {
             if (watch.controller.signal.aborted) break;
             this.event(event, directory, sessionID, watch, callback);
@@ -664,6 +748,8 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     watch.controller.abort();
     await watch.budget?.stop();
     await watch.done;
+    watch.activeChildren.clear();
+    this.publishSubagents(watch);
     if (this.watches.get(sessionID) === watch) this.watches.delete(sessionID);
   }
 
@@ -675,7 +761,18 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     emit(callback, value);
   }
 
+  private publishSubagents(watch: Watch): void {
+    this.publish(watch, "subagents", { kind: "heartbeat", text: "", activeSubagents: watch.activeChildren.size }, watch.callback);
+  }
+
+  private restoreSubagents(watch: Watch, active: Record<string, unknown>): void {
+    watch.activeChildren = new Set([...watch.children].filter((id) => active[id]));
+    this.publishSubagents(watch);
+  }
+
   private async restore(directory: string, sessionID: string, watch: Watch, callback: ProgressCallback | undefined, history: SessionMessageInfo[]): Promise<void> {
+    this.restoreUsage(watch, sessionID, history);
+    this.metrics(watch, callback);
     const forms = (await this.forms(directory)).filter((form) => form.sessionID === sessionID);
     const pending = new Set(forms.map((form) => form.id));
     for (const id of watch.questionIds) if (!pending.has(id)) this.publish(watch, `question:${id}`, {
@@ -705,6 +802,32 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     }
   }
 
+  private restoreUsage(watch: Watch, sessionID: string, history: SessionMessageInfo[]): void {
+    for (const message of history) {
+      if (message.type !== "assistant" || watch.baseline.has(message.id) || message.time.created < watch.since
+        || message.time.completed === undefined || !message.tokens) continue;
+      // A history fetch begun before a live retry must not restore its old window.
+      if (message.time.created < (watch.started.get(message.id) ?? -Infinity)) continue;
+      watch.models.set(message.id, message.model);
+      watch.steps.set(message.id, applicationMessage(message, sessionID));
+      watch.started.set(message.id, message.time.created);
+      if (message.time.streamed !== undefined) watch.streamed.set(message.id, message.time.streamed);
+      else watch.streamed.delete(message.id);
+      const timed = stepTiming(message.time.created, message.time.streamed, message.tokens);
+      if (timed) watch.timings.set(message.id, timed);
+      else watch.timings.delete(message.id);
+    }
+  }
+
+  private metrics(watch: Watch, callback?: ProgressCallback): void {
+    const usage = usageFromMessages([...watch.steps.values()]) ?? emptyUsage();
+    const timing = timingTotals(watch.timings.values());
+    this.publish(watch, "metrics", { kind: "metrics", text: "Usage updated", metrics: {
+      ...usage, ...timing, outputTokensPerSecond: timing.outputTokensPerSecond, liveTokensPerSecond: undefined,
+      contextLimit: watch.contextLimit, compactions: watch.compactions,
+    } }, callback);
+  }
+
   private plan(watch: Watch, input: Record<string, unknown>, callback?: ProgressCallback): void {
     if (!Array.isArray(input.todos)) return;
     const plan: ProgressPlanItem[] = input.todos.map((item) => ({ content: String(item?.content ?? ""),
@@ -722,7 +845,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     const text = described ? `${label}${described.text}`
       : status === "error" ? `${label}⚠️ ${toolLabel(tool.name)} hit an error`
       : `${label}${status === "running" ? "⚙️" : "✓"} ${toolLabel(tool.name)}`;
-    this.publish(watch, `tool:${id}`, { text, detail: described?.detail,
+    this.publish(watch, `tool:${id}`, { text, detail: described?.detail, command: described?.command,
       tool: { id: `${sessionID}:${id}`, name: tool.name, status } }, callback);
   }
 
@@ -734,11 +857,20 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
       return;
     }
     if (event.type === "session.created" && (event.data.parentID === sessionID || watch.children.has(event.data.parentID ?? ""))) {
-      watch.children.add(event.data.sessionID); return;
+      watch.children.add(event.data.sessionID);
+      if (event.data.agent === "browser-qa") watch.browserQaChildren.add(event.data.sessionID);
+      return;
     }
     const data = event.data;
     if (!("sessionID" in data) || (data.sessionID !== sessionID && !watch.children.has(data.sessionID))) return;
     const child = data.sessionID !== sessionID;
+    if (child) {
+      if (event.type === "session.execution.started" || event.type === "session.step.started" || event.type === "session.tool.called"
+        || (event.type === "session.status" && event.data.status.type !== "idle")) watch.activeChildren.add(data.sessionID);
+      if (["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)
+        || (event.type === "session.status" && event.data.status.type === "idle")) watch.activeChildren.delete(data.sessionID);
+      this.publishSubagents(watch);
+    }
     switch (event.type) {
       case "session.step.started":
         watch.models.set(event.data.assistantMessageID, event.data.model);
@@ -746,6 +878,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         // A retried step re-anchors and discards its earlier streamed window,
         // mirroring opencode's message updater.
         watch.streamed.delete(event.data.assistantMessageID);
+        watch.timings.delete(event.data.assistantMessageID);
         watch.lastProgress = Date.now();
         if (!child) void this.models().then((models) => {
           const selected = event.data.model;
@@ -759,26 +892,15 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
       case "session.step.failed": {
         const step = event.data;
         const model = watch.models.get(step.assistantMessageID);
-        const previous = watch.steps.has(step.assistantMessageID);
         watch.steps.set(step.assistantMessageID, { info: { id: step.assistantMessageID, sessionID: step.sessionID,
-          role: "assistant", time: { created: event.created }, providerID: model?.providerID, modelID: model?.id,
+          role: "assistant", time: { created: watch.started.get(step.assistantMessageID) ?? event.created }, providerID: model?.providerID, modelID: model?.id,
           tokens: step.tokens, cost: step.cost } });
-        if (!previous) {
-          // opencode's own tok/s window: the step's started anchor to its
-          // streamed event, both server clock. Steps without the full window
-          // drop out and withhold the turn's average instead of biasing it.
-          const started = watch.started.get(step.assistantMessageID);
-          const streamed = watch.streamed.get(step.assistantMessageID);
-          if (started !== undefined && streamed !== undefined) {
-            watch.generationMs += Math.max(0, streamed - started);
-            watch.timedOutputTokens += (step.tokens?.output ?? 0) + (step.tokens?.reasoning ?? 0);
-            watch.timedSteps += 1;
-          }
-        }
+        const timed = stepTiming(watch.started.get(step.assistantMessageID), watch.streamed.get(step.assistantMessageID), step.tokens);
+        if (timed) watch.timings.set(step.assistantMessageID, timed);
+        else watch.timings.delete(step.assistantMessageID);
         if (!child) watch.budget?.observe(step.assistantMessageID);
         watch.liveSamples = [];
-        const usage = usageFromMessages([...watch.steps.values()]) ?? emptyUsage();
-        this.publish(watch, "metrics", { kind: "metrics", text: "Usage updated", metrics: { ...usage, contextLimit: watch.contextLimit, compactions: watch.compactions } }, callback);
+        this.metrics(watch, callback);
         break;
       }
       case "session.text.delta":
@@ -792,11 +914,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         const key = `${part.assistantMessageID}:${reasoning ? "reasoning" : "text"}:${part.ordinal}`;
         const text = "text" in part ? part.text : (watch.text.get(key) ?? "") + part.delta;
         if (child) {
-          // One public line per finished subagent message, as v1 showed: child
-          // streams stay off the card, the completed summary is the activity.
-          if (event.type === "session.text.ended" && text.trim()) {
-            this.publish(watch, key, { text: `🤖 Subagent: ${truncate(text.replace(/\s+/g, " ").trim(), 100)}` }, callback);
-          }
+          if (text.trim()) watch.lastProgress = Date.now();
           break;
         }
         watch.text.set(key, text);
@@ -818,7 +936,8 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
       case "session.tool.called": {
         const tool = watch.tools.get(event.data.id);
         if (tool) { tool.input = event.data.input;
-          this.toolProgress(watch, event.data.sessionID, event.data.id, "running", directory, child, callback);
+          if (child) watch.lastProgress = Date.now();
+          else this.toolProgress(watch, event.data.sessionID, event.data.id, "running", directory, false, callback);
           if (!child && tool.name === "todowrite") this.plan(watch, event.data.input, callback); }
         break;
       }
@@ -828,22 +947,25 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         if (event.type === "session.tool.failed") log("warn", "opencode.v2_tool_failed", {
           sessionID: event.data.sessionID, tool: tool?.name, error: event.data.error,
         });
-        if (tool) this.toolProgress(watch, event.data.sessionID, event.data.id,
-          event.type === "session.tool.success" ? "completed" : "error", directory, child, callback);
+        if (child) watch.lastProgress = Date.now();
+        else if (tool) this.toolProgress(watch, event.data.sessionID, event.data.id,
+          event.type === "session.tool.success" ? "completed" : "error", directory, false, callback);
         break;
       }
       case "session.compaction.ended":
         if (!child) { watch.compactions++; this.publish(watch, "compactions", { text: "🧠 Context compacted — continuing automatically" }, callback); }
         break;
       case "session.status":
-        if (event.data.status.type === "retry") this.retry(watch, event.data.status, callback);
+        if (event.data.status.type === "retry") this.retry(watch, event.data.status, callback,
+          watch.browserQaChildren.has(event.data.sessionID) ? event.data.sessionID : undefined);
         // Status is a heartbeat, never evidence of agent progress — and never a
         // headline: the status stream repeats on every event, and its technical
         // text would bury the real activity line between tools.
-        emit(callback, { kind: "heartbeat", text: "", active: event.data.status.type !== "idle" });
+        if (!child) emit(callback, { kind: "heartbeat", text: "", active: event.data.status.type !== "idle" });
         break;
       case "session.retry.scheduled":
-        this.retry(watch, { next: event.data.at, message: event.data.error.message }, callback); break;
+        this.retry(watch, { next: event.data.at, message: event.data.error.message }, callback,
+          watch.browserQaChildren.has(event.data.sessionID) ? event.data.sessionID : undefined); break;
       case "session.execution.interrupted":
         if (!child && event.data.reason !== "shutdown") this.stopped.add(sessionID);
         break;
@@ -855,7 +977,17 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     }
   }
 
-  private retry(watch: Watch, status: { next: number; message: string; action?: { provider: string; reason: string; title: string } }, callback?: ProgressCallback): void {
+  private retry(watch: Watch, status: { next: number; message: string; action?: { provider: string; reason: string; title: string } }, callback?: ProgressCallback, browserQaSessionID?: string): void {
+    if (browserQaSessionID) {
+      // Optional QA quota cannot fail or switch the builder's provider. Native
+      // cancellation delivers an advisory result to the parent as usual.
+      if (status.next - Date.now() >= config.opencodeQuotaBlockMinRetryMs) {
+        void this.client.session.interrupt({ sessionID: browserQaSessionID, resume: false }, requestOptions())
+          .catch((error) => log("warn", "opencode.v2_qa_interrupt_failed", { sessionID: browserQaSessionID, error: serializeError(error) }));
+      }
+      emit(callback, { kind: "heartbeat", text: "Browser QA provider retry", detail: status.message });
+      return;
+    }
     if (status.next - Date.now() >= config.opencodeQuotaBlockMinRetryMs) {
       const provider = status.action?.provider ?? [...watch.models.values()].at(-1)?.providerID;
       if (provider) {

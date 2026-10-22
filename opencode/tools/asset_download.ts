@@ -161,20 +161,33 @@ function isPrivateAddress(address: string): boolean {
 }
 
 async function queueSourceRecord(root: string, record: Record<string, unknown>): Promise<void> {
-  sourceWriteQueue = sourceWriteQueue.then(async () => {
+  const run = sourceWriteQueue.then(async () => {
     const file = path.join(root, "ASSET_SOURCES.json");
     let records: Array<Record<string, unknown>> = [];
     try {
       const parsed = JSON.parse(await fs.readFile(file, "utf8"));
       if (Array.isArray(parsed)) records = parsed;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        if (!(error instanceof SyntaxError)) throw error;
+        // Corrupt (e.g. truncated by a crash mid-write before writes were
+        // rename-atomic): keep it aside for inspection and start a fresh
+        // list rather than failing every future download.
+        await fs.rename(file, `${file}.corrupt`).catch(() => undefined);
+      }
     }
     records = records.filter((item) => item.file !== record.file);
     records.push(record);
-    await fs.writeFile(file, `${JSON.stringify(records, null, 2)}\n`, { mode: 0o644 });
+    // Rename-atomic: a crash mid-write must not leave truncated JSON behind.
+    const temp = `${file}.tmp`;
+    await fs.writeFile(temp, `${JSON.stringify(records, null, 2)}\n`, { mode: 0o644 });
+    await fs.rename(temp, file);
   });
-  await sourceWriteQueue;
+  // One rejected write must not poison the tail: the tools share one
+  // long-lived server process across every project session, so later calls
+  // still run and only this caller sees its own error.
+  sourceWriteQueue = run.catch(() => {});
+  await run;
 }
 
 function positiveInt(raw: string | undefined, fallback: number): number {

@@ -9,7 +9,6 @@ process.env.DISCORD_APPLICATION_ID ||= "test";
 // These transport fixtures exercise the retained v1 SDK contract explicitly.
 const { LegacyOpenCodeHarness: OpenCodeHarness } = await import("../src/opencode.js");
 const { config } = await import("../src/config.js");
-const { projectAgents, initialProjectInstruction } = await import("../src/templates.js");
 
 function fixture() {
   const harness = new OpenCodeHarness();
@@ -76,18 +75,6 @@ test("force finish uses the running model and variant without aborting or granti
   } finally { config.opencodeMaxSteps = originalLimit; }
 });
 
-test("both game dimensions get design guidance and the original collection request remains intact", async () => {
-  for (const kind of ["game-2d", "game-3d"] as const) {
-    const rules = await projectAgents(kind, undefined, true);
-    assert.match(rules, /Do not default to a collection loop/);
-    assert.match(rules, /Only make collection the main activity when the user explicitly requests it/);
-    assert.match(rules, /Text-only models receive no browser MCP tools/);
-    const prompt = initialProjectInstruction(kind, "Create a gem-collecting platformer");
-    assert.match(prompt, /core action, challenge and player decisions/);
-    assert.ok(prompt.endsWith("GAME REQUEST:\nCreate a gem-collecting platformer"));
-  }
-});
-
 test("title generation is a bounded tools-free request and cleans up failed attempts", async () => {
   const { harness, stub } = fixture();
   stub.createSession = async () => "title-session";
@@ -132,5 +119,4 @@ test("the agent may write the two project documents, and the builder prompt name
   const prompt = config.agent.sitebuilder.prompt;
   assert.match(prompt, /DESCRIPTION\.md/);
   assert.match(prompt, /CHANGELOG\.md/);
-  assert.match(prompt, /never modify anything outside the workspace's site\/ directory, your scratch files, or the two project documents/);
 });

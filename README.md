@@ -2,6 +2,8 @@
 
 ThreadSite is a small Discord harness for an AI coding agent. One Discord thread maps to one persistent static website **or static web game** and one public Forgejo repository.
 
+Live turn cards show an active-subagent count while delegated work is running; child actions and reports stay out of the activity feed.
+
 - `/site start prompt:"..."` creates a Discord thread, a workspace, an agent session, a public Forgejo repository, the first git commit, and a live static site.
 - `/makegam dimension:<2d|3d> multiplayer:<arena|rooms|singleplayer> prompt:"..."` does the same for a **static browser game**. Games default to a shared-arena architecture; `rooms` builds invite-code rooms; `singleplayer` provisions no networking. `/site multiplayer` switches an existing game between the three live.
 
@@ -59,6 +61,8 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 | `OPENCODE_API_VERSION` | `v2` (default) or `v1` for compatibility; selects the bot adapter and server image. Rebuild both services. Existing v1 deployments must follow [the v2 migration guide](docs/opencode-v2.md). |
 | `OPENCODE_URL` / `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` | Internal agent service endpoint and basic auth |
 | `OPENCODE_DEFAULT_MODEL` | Model for new sessions (`provider/model-id`); changeable live via `/site-admin model` |
+| `OPENCODE_SUBAGENT_MODEL` | V2 model for both general and explore subagents (`provider/model-id`); blank keeps `opencode/mimo-v2.6-flash-free`. Recreate opencode after changes. |
+| `OPENCODE_BROWSER_QA_MODEL` | Dedicated v2 `browser-qa` vision model (`provider/model-id`); blank disables it. Browser-only, advisory inspection; supports background work while the builder continues. Independent of builder/general/explore models. |
 | `OPENCODE_MAX_STEPS` | Builder step budget per turn (default 200); mandatory finish-up steer at 90%. Recreate bot and opencode after changes. |
 | `CONTEXT7_ENABLED` / `CONTEXT7_API_KEY` | V2 library documentation MCP: enabled by default (`1`); set `0` to disable. Optional API key raises rate limits. Recreate opencode after changes. |
 | `OPENCODE_RECONCILE_TIMEOUT_MS` / `OPENCODE_RECONCILE_POLL_MS` | Transport-failure recovery window and poll interval |
@@ -123,3 +127,4 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 - [docs/multiplayer.md](docs/multiplayer.md) — relay architecture, multiplayer protocol, relay configuration and proxying
 - [docs/deployment.md](docs/deployment.md) — full deployment walkthrough, one-command Caddy quickstart, Apache/Cloudflare proxying, cache headers, `start.sh`, security notes
 - [docs/maintenance.md](docs/maintenance.md) — project cleanup, regression checks, integration tests
+- [docs/opencode-v2.md](docs/opencode-v2.md) — v2 runtime, scripted integration checks and a live free-model throughput test

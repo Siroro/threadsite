@@ -568,15 +568,18 @@ wss.on("connection", (socket: LiveSocket) => {
     try { msg = JSON.parse(data.toString("utf8")) as Frame; }
     catch { send(peer, errorFrame("bad_frame", "Frames must be JSON objects.")); return; }
     if (!msg || typeof msg !== "object" || typeof msg.t !== "string") { send(peer, errorFrame("bad_frame", "Frames need a string t.")); return; }
-    if (msg.t === "join") {
-      if (peer.room) send(peer, errorFrame("already_joined", "Connection already joined."));
-      else { handleJoin(peer, msg); if (peer.room) clearTimeout(joinTimer); }
-      return;
-    }
+    // The limiter covers join frames too: a flood of them (each costing a JSON
+    // parse plus an error send after the first) is exactly the load the
+    // per-connection cap exists for.
     if (!peer.limiter.allow()) {
       const now = Date.now();
       if (now - lastRateWarning > 1000) { lastRateWarning = now; console.warn(`[threadsite-gameserver] rate_limited peer=${peer.id}`); }
       send(peer, errorFrame("rate_limited", "Frame rate exceeded; slow down.", { id: typeof msg.id === "string" ? msg.id : null }));
+      return;
+    }
+    if (msg.t === "join") {
+      if (peer.room) send(peer, errorFrame("already_joined", "Connection already joined."));
+      else { handleJoin(peer, msg); if (peer.room) clearTimeout(joinTimer); }
       return;
     }
     handleFrame(peer, msg);

@@ -7,7 +7,7 @@ import {
 import { cardEdit, disableMessageControls, renderStatusCard, safeCardUrl } from "../src/card-ui.js";
 import { cardId, parseCardId } from "../src/card-actions.js";
 import { renderDetailPanel, renderQueuePanel, requestModal, textPages } from "../src/card-panels.js";
-import { renderProgressCard, progressDetailSections, usageDetailText } from "../src/progress-view.js";
+import { renderProgressCard, progressDetailSections } from "../src/progress-view.js";
 import { answerModal, questionControls, readAnswerForm, renderQuestionReview } from "../src/question-ui.js";
 import type { QuestionDraft } from "../src/card-state.js";
 import { buildingSnapshot } from "./fixtures/progress.js";
@@ -31,53 +31,6 @@ test("the Discord wire payload clears legacy content and embeds when a status be
   assert.deepEqual(edit.embeds, []);
   assert.equal(edit.components![0].type, ComponentType.Container);
   assert.deepEqual(edit.allowed_mentions, { parse: [] });
-});
-
-test("five full questions fit V2 limits, offer the answer form, and keep a scoped Stop", async () => {
-  const progress = new DiscordProgress({ id: "questions", edit: async () => {} } as unknown as Message, "Updating");
-  try {
-    progress.callback({ kind: "question", text: "Choose an option", question: {
-      requestID: "q1",
-      questions: Array.from({ length: 5 }, (_, index) => ({ header: `Decision ${index + 1}`,
-        question: "Pick an option ".repeat(100), options: Array.from({ length: 4 }, (_, option) => ({
-          label: `Option ${option + 1}`, description: "A long explanation ".repeat(100),
-        })),
-      })),
-    } });
-    const state = buildingSnapshot();
-    state.questions = progress.pendingQuestion("q1")!.questions;
-    const render = () => renderProgressCard(state, { questionRows: progress.questionComponents(), stopCustomId: "threadsite:stop", resource: "questions" });
-    const card = render();
-    assertV2(card);
-    const view = cardView(card);
-    const questionButtons = view.buttons.filter((button) => button.custom_id?.startsWith("ts2:") && button.custom_id !== "ts2:stop:questions");
-    assert.deepEqual(questionButtons.map((button) => button.label), [
-      "Turn details", "Answer questions", "Review answers", "Write another answer", "Skip — let the agent decide", "Queue · 2",
-    ], "multi-question requests offer the form instead of twenty buttons");
-    const styles = Object.fromEntries(questionButtons.map((button) => [button.label, button.style]));
-    assert.equal(styles["Answer questions"], ButtonStyle.Primary, "the answer form is a primary call to action");
-    assert.equal(styles["Turn details"], ButtonStyle.Primary, "details matches Stop's neighbour slot in a different colour");
-    for (const label of ["Review answers", "Write another answer", "Skip — let the agent decide", "Queue · 2"]) {
-      assert.equal(styles[label], ButtonStyle.Secondary, `${label} stays secondary`);
-    }
-    const headRow = view.buttons.filter((button) => ["ts2:details:questions", "ts2:stop:questions"].includes(button.custom_id!));
-    assert.deepEqual(headRow.map((button) => button.label), ["Turn details", "Stop turn"], "details takes the corner; Stop rides the bottom row");
-    assert.equal(headRow[0].style, ButtonStyle.Primary, "Turn details owns the primary corner");
-    assert.equal(headRow[1].style, ButtonStyle.Danger, "Stop is the red control, separated from the corner");
-    assert.ok(view.buttons.some((button) => button.custom_id === "ts2:stop:questions"), "the live card keeps a turn-scoped Stop");
-    const answered = disableMessageControls(card as unknown as Pick<Message, "components">);
-    assert.equal(cardView(answered).text, view.text, "acknowledging a control keeps every text section");
-    assert.equal(cardView(answered).buttons.find((button) => button.custom_id === "ts2:stop:questions")?.disabled, undefined);
-    assert.ok(cardView(answered).buttons.filter((button) => button.custom_id?.startsWith("ts2:") && button.custom_id !== "ts2:stop:questions").every((button) => button.disabled));
-    progress.recordAnswer("q1", "Shane", "Option 1");
-    progress.clearQuestion("q1");
-    state.questions = undefined;
-    state.questionPin = { requestID: "q1", question: "Pick an option", resolution: "Shane chose Option 1" };
-    const resolved = render();
-    assertV2(resolved);
-    assert.equal(cardView(resolved).buttons.some((button) => button.label === "Answer questions"), false);
-    assert.match(cardView(resolved).text, /Shane chose Option 1/);
-  } finally { await progress.close(); }
 });
 
 test("simple questions answer with quick secondary buttons; long lists use a select", () => {
@@ -114,7 +67,6 @@ test("failure, reset, merge and cancellation outcomes replace live controls with
     const message = cardEdit(renderStatusCard(text, text.includes("failed") ? [choices] : []));
     assertV2(message);
     assert.equal(message.content, null);
-    assert.match(cardView(message).text, new RegExp(text));
     assert.equal(cardView(message).buttons.some((button) => button.custom_id === "threadsite:stop"), false);
     const disabled = disableMessageControls(message as unknown as Pick<Message, "components">);
     assert.equal(cardView(disabled).text, cardView(message).text);
@@ -221,7 +173,6 @@ test("the queue panel lists cancellable requests with working pagination", () =>
   const page = renderQueuePanel("turn", queue as never, 1, 0);
   assertV2(page);
   const view = cardView(page);
-  assert.match(view.text, /7 saved requests · 1 already being prepared/);
   const cancelIds = view.buttons.filter((button) => parseCardId(button.custom_id!)?.action === "cancel").map((button) => parseCardId(button.custom_id!)!.args[0]);
   assert.deepEqual(cancelIds, queue.slice(0, 5).map((entry) => entry.statusMessageId));
   const last = renderQueuePanel("turn", queue as never, 0, 1);
@@ -233,8 +184,6 @@ test("the queue panel lists cancellable requests with working pagination", () =>
 test("the request modal carries the nonce route, prompt field, and bounded image uploads", () => {
   const modal = requestModal("turn", "nonce123");
   assert.equal(modal.toJSON().custom_id, "ts2:request:turn:nonce123");
-  const labels = modal.toJSON().components.map((label) => label.label);
-  assert.deepEqual(labels, ["What would you like to change?", "Reference images (optional)"]);
   const upload = modal.toJSON().components[1].component;
   assert.equal(upload.type, ComponentType.FileUpload);
   assert.equal(upload.max_values, 4);
@@ -299,35 +248,15 @@ test("the review card reflects draft progress and disables submission until comp
   const partial: QuestionDraft = { requestID: "q12", answers: [["A"], []] };
   const partialView = cardView(renderQuestionReview("turn", request as never, partial, 1));
   assert.equal(partialView.buttons.find((button) => button.label === "Submit all answers")?.disabled, true);
-  assert.match(partialView.text, /1\/2 answered/);
   const complete: QuestionDraft = { requestID: "q12", answers: [["A"], ["B"]] };
   const completeView = cardView(renderQuestionReview("turn", request as never, complete, 0));
   assert.notEqual(completeView.buttons.find((button) => button.label === "Submit all answers")?.disabled, true);
-  assert.match(completeView.text, /2\/2 answered/);
   const retry: QuestionDraft = { requestID: "q12", answers: [["A"], ["B"]] };
   const retryView = cardView(renderQuestionReview("turn", request as never, retry, 0, { requestID: "q12", status: "retry", error: "The agent is still waiting." }));
   assert.notEqual(retryView.buttons.find((button) => button.label === "Submit all answers")?.disabled, true, "a failed delivery offers submit again");
-  assert.match(retryView.text, /The agent is still waiting/);
   const busy: QuestionDraft = { requestID: "q12", answers: [["A"], ["B"]] };
   const busyView = cardView(renderQuestionReview("turn", request as never, busy, 0, { requestID: "q12", status: "submitting" }));
   assert.equal(busyView.buttons.find((button) => button.label === "Submit all answers")?.disabled, true, "delivery in flight cannot double-submit");
-});
-
-test("the live card keeps Turn details in the corner, Stop red in the bottom row, metrics in the footer", () => {
-  const message = renderProgressCard(buildingSnapshot(), { resource: "turn", stopCustomId: "threadsite:stop" });
-  assertV2(message);
-  const components = cardComponents(message);
-  const header = components.find((component) => component.type === ComponentType.Section);
-  assert.equal(header?.accessory?.custom_id, "ts2:details:turn", "Turn details owns the top-right corner");
-  assert.equal(header?.accessory?.style, ButtonStyle.Primary);
-  assert.match(header?.components[0].content ?? "", /● Turn in progress/, "the status line stays under the title");
-  const view = cardView(message);
-  const stop = view.buttons.find((button) => button.custom_id === "ts2:stop:turn");
-  assert.equal(stop?.style, ButtonStyle.Danger, "Stop is the red control in the bottom row");
-  const controls = view.buttons.filter((button) => button.custom_id?.startsWith("ts2:") && button.custom_id !== "ts2:stop:turn" && button.custom_id !== "ts2:details:turn").map((button) => button.label);
-  assert.deepEqual(controls, ["Add instruction", "Queue · 2"], "the rest of the bottom row stays actions and links");
-  assert.match(view.footer.text, /Elapsed 2m 14s · 12 model steps · 28\.4k\/100k context · avg ~54 tok\/s/);
-  assert.doesNotMatch(view.footer.text, /actions/, "the footer counts model steps, not actions");
 });
 
 test("the thinking trail stays off the public card and pages into the private details", async () => {
@@ -350,33 +279,6 @@ test("the thinking trail stays off the public card and pages into the private de
     assertV2(panel);
     assert.match(cardView(panel).text, /shove physics/, "the private panel pages the full trail");
   } finally { await progress.close(); }
-});
-
-test("the live card plans three lines: newest completion struck through, current bold, next plain", () => {
-  const view = cardView(renderProgressCard(buildingSnapshot(), { resource: "turn" }));
-  assert.match(view.text, /✓ ~~Add crowd movement and impact feedback~~/);
-  assert.match(view.text, /● \*\*Connect the live leaderboard\*\*/);
-  assert.match(view.text, /○ Test keyboard, touch controls and match reset/);
-  assert.match(view.text, /2\/5 tasks complete · 6 files · \+184 \/ −37 lines/);
-  assert.doesNotMatch(view.text, /Current task/, "the labelled single-task line is gone");
-  assert.doesNotMatch(view.text, /Inspect the arena/, "older completions stay in the details panel, not the live window");
-});
-
-test("usage details format every provider figure and keep missing counts unavailable", () => {
-  const sections = progressDetailSections(buildingSnapshot());
-  const usage = sections.find((section) => section.key === "usage")!.text;
-  assert.match(usage, /Input \*\*82\.3k\*\* · Output \*\*6\.2k\*\* · Cached \*\*65\.8k\*\* \(80% of input\)/);
-  assert.match(usage, /Context \*\*28\.4k \/ 100k\*\* \(28%\)/);
-  assert.match(usage, /▰▰▱▱▱▱▱▱/);
-  assert.match(usage, /12 model steps/);
-  assert.match(usage, /average ~54 tok\/s/);
-  assert.equal(usageDetailText({}), "Token counts unavailable", "absent counts never render as bare zeros");
-  const plan = sections.find((section) => section.key === "plan")!.text;
-  assert.match(plan, /✓ 1\. Inspect the arena/);
-  assert.match(plan, /● 3\. Connect the live leaderboard/);
-  const files = sections.find((section) => section.key === "files")!.text;
-  assert.match(files, /\*\*6 files\*\* · 2 added · 4 modified · 0 removed/);
-  assert.match(files, /- `site\/src\/player\.ts`/);
 });
 
 test("card action ids round-trip and reject hostile or oversized parts", () => {

@@ -1,74 +1,69 @@
-# Project Rules
+# Project rules
 
-Maintained by an automated build harness. You author **TypeScript under `site/src/`**; when your reply ends the harness builds minified JavaScript under gitignored `site/js/`, validates it, commits authored source, and publishes only runtime files as plain static files under an arbitrary path prefix. `site/src/` and unbundled `site/net/` are never deployed.
+The harness builds, validates, commits and publishes this project as static files. You author source; it owns the build and deployment.
 
-## Boundaries
+## Workspace
 
-- Static browser deliverable only: HTML, CSS, bundled JS, JSON/data, fonts, media. No backend, server-side rendering, secrets, or build tooling of your own — **the harness runs the only build**; you never run builds or add build configuration.
-- Author the deliverable inside `site/` — TypeScript in `src/`, styles in `css/`, data in `data/`, media in `assets/`. You may also edit `scratch/<name>/` for isolated browser views (see below). Harness-owned (import, never edit): `site/net/` (net client + config + `.d.ts`), `node_modules/`, `AGENTS.md`, `README.md`, `ASSET_SOURCES.json`, `build-manifest.json`, `.opencode/`.
-- `site/js/` is regenerated every turn — never hand-edit it; edit the `src/` module instead. Within the deliverable, TypeScript outside `site/src/` fails validation. Scratch TypeScript belongs in `scratch/<name>/src/` and is compiled separately for preview only.
-- Relative URLs only (the site is served under a path prefix). No dotfiles, symlinks, `package.json`/`tsconfig.json`, shell scripts, or git configuration.
-- Git is read-only for you: `status`/`log`/`diff`/`show` and similar are fine for understanding history; writes are blocked and never needed — the harness owns commits, pushes, validation, rollback, and publication.
+- Edit `site/`, `scratch/<name>/`, and root `DESCRIPTION.md` / `CHANGELOG.md`. Browser TypeScript belongs in `site/src/`; styles, media and data go in `site/css/`, `site/assets/` and `site/data/`.
+- Read/import but never edit harness inputs: `site/net/`, `node_modules/`, `AGENTS.md`, `NETWORKING.md`, `README.md`, `ASSET_SOURCES.json`, `build-manifest.json`, `.opencode/`. Never edit generated `site/js/`.
+- Static browser code only. No backend, secrets, dotfiles, symlinks or package/build configuration. Use relative URLs: publication may be under any path prefix.
+- Author with edit/write/apply_patch. Shell is for permitted inspection, checks and asset handling; never bypass editing restrictions. Git writes, package managers, builds and publication belong to the harness.
 
-## Planning
+## Workflow
 
-- Before editing a request that needs multiple steps or changes across multiple files, call OpenCode's `todowrite` tool and create **3–6 concrete, checkable tasks**. A plan written only in prose does not count. Skip the todo tool only for a truly single-step change.
-- The user watches this list live, so it must track reality: keep exactly one task `in_progress`, mark a task `completed` as soon as it is finished and promote the next one, and mark abandoned tasks `cancelled`. Do not leave finished work showing as pending.
-- Before your final summary, update the list one last time so every finished task is `completed` and every dropped task is `cancelled`.
-- When resuming an interrupted turn, call `todoread` first and continue the existing list — keep its task contents and update their statuses rather than replacing the list. If a multi-step turn has no list yet, create one before making further edits.
-- A `[THREADSITE_FORCE_FINISH]` steering message means the current turn is nearing its configured step limit. Immediately finish the edits in progress, run the required checks, update the todos, and summarize. Stop optional exploration/features and browser retries; this message does not reset your budget. Leave coherent working behavior and disclose unfinished scope.
+- Inspect existing work; preserve working features unless the request changes them. For multi-step work, use `todowrite` before editing: 3–6 checkable tasks, one `in_progress`, updated as each finishes. End with completed/cancelled statuses. On recovery, `todoread` and continue the existing list.
+- A `[THREADSITE_FORCE_FINISH]` steer means finish current edits, run checks and summarize unfinished scope; stop optional work.
+- Record durable project decisions with `project_notes`.
+- Render meaningful content on load: the first viewport becomes the project-card screenshot. Keep controls, feedback, keyboard/touch support, resize behavior and accessibility usable.
 
-## How your TypeScript is built
+## Subagents
 
-- Each **top-level** `src/*.ts` is one bundle entry becoming `js/<name>.js`; `index.html` loads `js/main.js` by convention, and `<script src>` must reference compiled `js/*.js`, never a `.ts` source. Nested files (`src/game/player.ts`) are shared modules with no output of their own.
-- Imports resolve like a normal bundler: `"./player.js"` (preferred) or `"./player"` finds the sibling `player.ts`. JSON imports are inlined; media imported from TypeScript emits hashed asset URLs. Prefer plain `<link>` stylesheets over CSS imports.
-- Fixed compiler flags (no tsconfig exists or is allowed): ES2022 + DOM libs, ES modules, lenient types — implicit `any` and unguarded DOM lookups are fine. Build failures (missing import, misspelled export, syntax damage) fail the turn with file:line and the offending source line — fix what they point at.
+Use the `subagent` tool for focused exploration, research, independent implementation or review when a separate context helps. Handle small edits directly.
 
-## Verification
+- Choose `agent: "explore"` for read-only code searches; `agent: "general"` for research, review or scoped implementation. Omit `model` to use the configured subagent model.
+- Supply a short `description` and a self-contained `prompt`: goal, relevant paths, constraints and expected result. Children share your workspace; assign separate files and avoid overlapping edits.
+- General/explore work runs with `background: false`. Read returned results, inspect changes and integrate them before final checks.
+- General/explore children have no browser or question tools. Handle user questions yourself and remain responsible for the final deliverable and validation.
 
-Shell access is for checking your work: node one-liners, ls/cat/grep, prettier, unzip/tar. OpenCode v2 additionally permits rg, scoped find and rm of explicit editable paths inside site/ or scratch/; follow the active command policy. npm, curl and Git writes remain blocked. Put browser experiments in `scratch/<name>/` using the edit tool; this workspace directory is gitignored and never published.
+## Build and checks
 
-- While editing: use `js_syntax_check` on deliverable files you change under `site/`. Language servers provide navigation and early diagnostics; the full compiler command below remains authoritative. Scratch compilation diagnostics come from its preview page.
-- **For models with image input, inspect the rendered result before finishing visual work.** Microsoft Playwright MCP is available as `playwright_browser_*` tools only to vision models. Text-only models receive no browser MCP tools: use source inspection, `js_syntax_check`, the required TypeScript check, and any harness-provided browser diagnostics; never claim visual inspection or try to bypass unavailable tools. The browser's preview URL is `http://127.0.0.1:8080/<guild-id>/<thread-id>/`, matching your workspace `/workspace/<guild-id>/<thread-id>` (inspect the working directory with `node -p "process.cwd()"` if needed). Navigate there: the preview service bundles the current TypeScript in memory, without writing `site/js/` or publishing anything. Reload/navigate again after every source edit; a build error is displayed on the page and must be fixed.
-- When browser tools are available, use the screenshot tool to **see** the current viewport, inspect console errors and failed network requests, and correct visible layout/rendering problems. Inspect desktop and mobile sizes for websites. For games, get past the start screen, interact with keyboard/mouse, and inspect the actual canvas/WebGL scene; the vision tools support coordinate clicks. Take another screenshot after fixes. Screenshots require a model/provider advertising image input; choosing a text-only model does not give it vision or browser access.
-- The preview browser is isolated, with fresh in-memory storage per MCP connection, and can reach only the local preview origin. Downloaded local assets work; external APIs, fonts, media and the multiplayer relay are unavailable, so test solo fallback and distinguish blocked external requests from missing local assets. Close the browser when inspection is complete. Screenshots and browser output stay in temporary storage and are never committed or published. Previewing does not replace the final validation gate or verify multiplayer.
-- Before finishing, run the gate's own check yourself (it type-checks the whole import graph against the engines' and net client's real declarations):
+Each top-level `site/src/*.ts` becomes `site/js/<name>.js`; nested files are imported modules. HTML loads `js/main.js`, never TypeScript. Relative imports such as `"./player.js"` resolve `player.ts`; installed packages use bare imports. JSON imports inline data; imported media emits asset URLs. Prefer linked CSS.
 
-      node /usr/local/lib/node_modules/typescript/bin/tsc --noEmit --allowJs --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM,DOM.Iterable --skipLibCheck site/src/*.ts
+Use `js_syntax_check` on changed deliverable files. Before finishing, run the same full TypeScript check as the harness and fix its errors:
 
-  Fix everything it reports — errors that reach the harness still get only one automatic repair round-trip.
+```sh
+node /usr/local/lib/node_modules/typescript/bin/tsc --noEmit --allowJs --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM,DOM.Iterable --skipLibCheck site/src/*.ts
+```
 
-## Scratch browser views
+The harness bundles after your reply. Build/type/static errors block publication and get one repair attempt; fix source under `site/src/`, not generated output.
 
-- Scratch browser inspection requires a vision model with browser MCP tools. Text-only models can edit scratch source but cannot render or inspect it through MCP; prioritize the deliverable and its static checks.
-- Use a small isolated view to inspect a vehicle, character, material, lighting setup, sprite, UI component, or deterministic gameplay state without booting or controlling the whole game. Keep reusable factories/components in `site/src/`; import the component you need, not the full game's entry point. A broken unrelated game entry does not prevent scratch compilation.
-- Create `scratch/<name>/index.html` and `scratch/<name>/src/main.ts` with the edit tool. Names are 1–64 letters/digits/hyphens/underscores, starting with a letter or digit. A minimal HTML shell is `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="app"></div><script type="module" src="js/main.js"></script></body></html>`. As in the main project, each top-level `src/*.ts` becomes a `js/*.js` bundle; nested modules are shared imports. Never create generated `js/` files yourself.
-- From `scratch/car/src/main.ts`, import a shared factory with `import { createCar } from "../../../site/src/vehicles/car.js"` (adjust to the real export), and import installed engines by bare name, such as `"three"`. Set up only the required canvas/camera/lights or component mount, with a fixed seed/time and explicit ready flag when useful. Scratch imports can access this view, the project's `site/`, and its installed packages; other views/projects and root files remain outside the boundary.
-- Navigate with `playwright_browser_navigate` to `http://127.0.0.1:8080/<guild-id>/<thread-id>/__scratch/<name>/`. It builds only that view's import graph in memory. Use the existing screenshot, evaluate, resize, keyboard/mouse and console/network tools to inspect it; reload after edits. Shared local assets/styles/data are mounted at `__site/assets/`, `__site/css/`, and `__site/data/` relative to the view URL, even if the full game cannot compile. Example: `new THREE.TextureLoader().load("__site/assets/car.png")`.
-- Keep experiments in `scratch/`; move accepted behavior into `site/src/`. Scratch build errors and browser timeouts are diagnostics for that experiment and do not fail publication. The final site still needs its normal build/type checks and whole-experience browser inspection when available. Scratch files are retained locally for later iterations, excluded from Git and publication, and never required by the shipped game. The same browser isolation, image-model limitations, and close-browser guidance apply.
+## Browser inspection
 
-## How your work ships
+Browser MCP is available only to image-capable models. Text-only models receive no browser MCP tools; use source, syntax/type checks and supplied diagnostics.
 
-When your reply ends the harness restores ignored build inputs, bundles/minifies `src/` → ignored `js/` (pruning stale outputs), validates, commits only authored files (authored by the requester), and publishes the runtime tree with cache-busting asset hashes.
-Type, build, or JavaScript errors get exactly **one** automatic repair round-trip; work that still fails is committed but not published — the live site keeps the last validated version and the next reply must fix it.
-Leave `site/` complete and directly openable over plain HTTP(S): no deferred work, no "run this first" steps, no server.
+When `browser-qa` is available, delegate one bounded inspection after building new UI/gameplay or making substantial visual/interaction changes. It uses a dedicated vision model even if yours is text-only. Pass the preview/scratch URL, viewport sizes, controls, expected behavior and specific checks; omit `model`. Use `background: true` to continue independent work while it inspects; results arrive automatically, so do not poll or duplicate its checks. Review its report before finishing, and request a focused recheck if later edits changed what it inspected. Keep code edits with the builder. If QA is unavailable or the budget is exhausted, finish static checks and state what was untested; findings are advisory.
 
-## Your two project documents
+With browser tools, inspect visual changes at `http://127.0.0.1:8080/<guild-id>/<thread-id>/` (IDs match `/workspace/<guild-id>/<thread-id>`). Reload after edits; preview compiles current source in memory. Inspect screenshots, interactions, console and local asset failures; test website desktop/mobile layouts and actual gameplay beyond the start screen. Close the browser afterward.
 
-The harness shows these two files to everyone who opens the project, so keep them true and tight. They live in the project root and are yours to write — you may edit them directly. In both, write every paragraph on a single line; never break a sentence across lines by hand.
+The preview browser reaches only its local origin: external APIs/fonts/media and the relay are unavailable. Test solo fallback; do not try to repair blocked external access. Harness browser QA is advisory. Report only checks actually performed.
 
-- **`DESCRIPTION.md`** — what this project is, in a visitor's words, in two parts. The **headline** under the title is **one sentence of at most 25 words**: what this is and what a visitor can do — the project card shows the headline alone. Under `## How to play` you have more room: **up to four short paragraphs, about 120 words total** — first the goal and what winning looks like, then the controls, then one or two things worth trying. That section opens from the card's How to play view, so it can teach, but it is still prose for a visitor, never a manual: no file names, no code, no APIs, no engine internals, no jargon. Update the document whenever the project changes shape — a new mode, a new goal, a new kind of interaction — and leave it alone when only the internals moved.
-- **`CHANGELOG.md`** — one section per turn, newest at the top. Before your final summary, add a section: a **heading of at most six words**, then **one sentence of at most 30 words** on what a visitor will notice — what changed for the player, not which file you edited. Keep the previous entries below it.
+### Scratch views
 
+For isolated inspection, create `scratch/<name>/index.html` and `scratch/<name>/src/main.ts`; load `js/main.js`. Names use 1–64 letters/digits/hyphens/underscores, starting with a letter or digit.
+
+Preview at `http://127.0.0.1:8080/<guild-id>/<thread-id>/__scratch/<name>/`. Each view compiles independently; imports may reach only that view, its project's `site/` and installed packages. From `scratch/car/src/main.ts`, a site import looks like `../../../site/src/vehicles/car.js`. Shared assets/styles/data use `__site/assets/`, `__site/css/`, `__site/data/` relative to the view URL.
+
+Keep accepted code in `site/src/`. Scratch files are excluded from production builds, validation and Git, and never published; scratch errors do not block the deliverable.
+
+## Project documents
+
+Write paragraphs on single lines. These files supply the public project card:
+
+- `DESCRIPTION.md`: a title, then one visitor-facing headline sentence (≤25 words). Under `## How to play`, give the goal, controls and tips in up to four short paragraphs (~120 words total). Create it initially and update when the experience changes; avoid implementation jargon.
+- `CHANGELOG.md`: add one section per turn, newest first: a heading (≤6 words), then one sentence (≤30 words) about the visible change. Keep previous entries.
 
 ## Research and assets
 
-- When Context7 documentation tools are available, use them for unfamiliar library APIs: resolve the library, then query documentation for the installed engine version. Keep queries about public APIs; never include credentials, private project source or user conversation text. Installed declarations and compiler results are authoritative when indexed documentation is unavailable or describes a different version. If the service is unavailable or rate-limited, continue with installed types and other available documentation.
-- Use **websearch** when current information or real media would materially improve the result; don't search to appear busy. Verify facts rather than fabricating statistics, dates, or quotes.
-- **asset_download** stores any public file under `site/assets/` — never hotlink search-result media. Prefer official/CC0/clearly-reusable sources; pass source/license notes when known and never invent licenses. Extract archives in place and delete the archive (everything under `site/` counts against the size budget); keep media lean and out of base64 blobs.
+Use documentation/search when it improves the result. Context7 queries must concern public APIs; installed types/compiler results take precedence over mismatched documentation. Continue with local references if research tools are unavailable.
 
-## Quality
-
-The first viewport should communicate what the experience is. Visible hover/focus/loading/error states and feedback after actions; keyboard support and sensible touch behavior; `prefers-reduced-motion` for nonessential animation; semantic HTML, alt text, contrast; handle resizing; keep the console clean. Don't claim browser-testing you didn't do.
-
-- **Your first frame is the one people see.** The harness photographs the page as it loads and shows that frame on the project card, so make the opening view worth looking at: the scene or content already rendered, lit and populated, never a black canvas, a loading spinner, a placeholder, an empty layout or a title screen that hides the work. Keep any loading state brief and make sure the finished frame is what remains.
+Download reusable media with `asset_download` into `site/assets/`; avoid hotlinks/base64 and invented licenses or facts. Supply provenance/license notes when known. Extract archives in place and remove the archive; keep assets within the project's size budget.

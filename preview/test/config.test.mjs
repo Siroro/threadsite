@@ -22,20 +22,20 @@ test("builder permissions and project prompts explain the isolated scratch brows
   const rules = await fs.readFile(new URL("../../bot/assets/agents/shared.md", import.meta.url), "utf8");
   assert.equal(config.permission.edit["scratch/**"], "allow");
   assert.equal(config.permission.edit["*/scratch/**"], "allow");
-  for (const text of [config.agent.sitebuilder.prompt, rules]) {
-    assert.match(text, /scratch\/<name>\/src\/main\.ts/);
-    assert.match(text, /__scratch\/<name>\//);
-    assert.match(text, /__site\/assets\//);
-    assert.match(text, /never published/);
-  }
+  assert.match(config.agent.sitebuilder.prompt, /read the project-root AGENTS\.md/i);
+  assert.match(rules, /scratch\/<name>\/src\/main\.ts/);
+  assert.match(rules, /__scratch\/<name>\//);
+  assert.match(rules, /__site\/assets\//);
+  assert.match(rules, /never published/);
   assert.doesNotMatch(config.agent.sitebuilder.prompt, /Work only inside site\/|use edit only for files inside site\/\./);
 });
 
 test("delegated agents cannot expose browser MCP through a separate model setting", async () => {
   const config = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"));
+  const rules = await fs.readFile(new URL("../../bot/assets/agents/shared.md", import.meta.url), "utf8");
   for (const name of ["general", "explore"]) assert.equal(config.agent[name].permission["playwright_*"], "deny");
   assert.equal(config.agent.titler.permission["*"], "deny");
-  assert.match(config.agent.sitebuilder.prompt, /Text-only models receive no browser MCP tools at all/);
+  assert.match(rules, /Text-only models receive no browser MCP tools/);
 });
 
 // A cold Chromium launch plus a software-rendered (SwiftShader) WebGL canvas

@@ -30,7 +30,7 @@ export interface ProgressFiles {
   files: number; added: number; modified: number; deleted: number; additions: number; deletions: number;
   paths?: string[];
 }
-export interface ProgressActivity { text: string; detail?: string; at: number; key?: string }
+export interface ProgressActivity { text: string; detail?: string; at: number; key?: string; command?: boolean; running?: boolean }
 export interface ProgressSnapshot {
   title: string;
   phase: ProgressPhase;
@@ -55,6 +55,8 @@ export interface ProgressSnapshot {
   queuedRequests: number;
   actions: number;
   activeTools: number;
+  /** Live child sessions only; omitted by older saved cards. */
+  activeSubagents?: number;
   toolErrors: number;
   waiting?: boolean;
   /** Last OpenCode session-status poll reported a running or retrying turn. */
@@ -96,15 +98,16 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   // thread it would repeat the Queued marker directly above. The activity line
   // describes itself. A pending question is different — that is a state change
   // the reader must not miss, so it keeps its heading.
-  const description = [rail, "", ...(state.questions?.length ? ["**Waiting for your answer**"] : []), activity(state.latest, 300)];
+  const description = [rail, "", ...(state.questions?.length ? ["**Waiting for your answer**"] : []), ...activityLines(state, 300)];
   if (stalledForMs) {
     description.push(state.agentReportedActive
       ? `🔌 **OpenCode still reports this turn running** · no new agent event for ${elapsed(stalledForMs)}. Run \`/site stop\` to interrupt it.`
       : `⚠️ **No progress for ${elapsed(stalledForMs)}** — run \`/site stop\` to interrupt this turn.`);
-  } else if (state.waiting && !state.questions?.length) {
-    // The amber colour is driven by `waiting` too, so it needs its own label.
-    description.push(`⚠️ **${plain(state.waitingReason ?? "Waiting on the agent — it will retry automatically", 160)}**`);
-  } else if (age >= 15_000 && state.phase !== "queued" && !state.questions?.length) {
+  } else if (state.waitingReason && !state.questions?.length) {
+    // Only the service wait needs its own line: a failed tool already headlines
+    // the activity line with ⚠️, so a second generic line would just repeat it.
+    description.push(`⚠️ **${plain(state.waitingReason, 160)}**`);
+  } else if (age >= 15_000 && !state.waiting && state.phase !== "queued" && !state.questions?.length) {
     description.push(`${state.metrics?.liveTokensPerSecond ? "Generating" : state.activeTools ? "Running" : "Idle"} · ${elapsed(age)}`);
   }
   // Only a merged batch repeats the request: it is the one case where the
@@ -112,6 +115,7 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   if (state.context.request) description.push("", `**Your requests**\n${plain(state.context.request, 220)}`);
   if (state.thought && !attention) description.push("", `**Agent update**\n> ${plain(state.thought, 280)}`);
   const fields: Array<{ name: string; value: string }> = [];
+  if (state.activeSubagents) fields.push({ name: "Active subagents", value: `🤖 ${state.activeSubagents} active` });
 
   if (state.questions?.length) {
     state.questions.slice(0, 5).forEach((question, index) => fields.push({
@@ -204,12 +208,12 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   addCardTitle(card, state.title, state.questions?.length ? "❓ Waiting for your answer" : state.phase === "queued" ? "Waiting for a build slot" : "● Turn in progress", details);
   const current = PHASES.indexOf(state.phase);
   const rail = [...(state.phase === "queued" ? ["**● Queued**"] : []), ...PHASES.map((phase, index) => index < current ? `✓ ${LABELS[phase]}` : index === current ? `**● ${LABELS[phase]}**` : `○ ${LABELS[phase]}`)].join("  ›  ");
-  const lines = [rail, "", activity(state.latest, 260)];
+  const lines = [rail, "", ...activityLines(state, 260)];
   if (stalled) lines.push(state.agentReportedActive
     ? `🔌 **OpenCode still reports this turn running** · no new agent event for ${elapsed(stalled)}. Run \`/site stop\` to interrupt it.`
     : `⚠️ **No progress for ${elapsed(stalled)}** — run \`/site stop\` to interrupt this turn.`);
-  else if (state.waiting && !state.questions?.length) lines.push(`⚠️ ${plain(state.waitingReason ?? "Waiting on the agent — it will retry automatically", 180)}`);
-  else if (state.now - state.latest.at >= 15_000 && state.phase !== "queued" && !state.questions?.length) lines.push(`${state.metrics?.liveTokensPerSecond ? "Generating" : state.activeTools ? "Running" : "Idle"} · ${elapsed(state.now - state.latest.at)}`);
+  else if (state.waitingReason && !state.questions?.length) lines.push(`⚠️ ${plain(state.waitingReason, 180)}`);
+  else if (!state.waiting && state.now - state.latest.at >= 15_000 && state.phase !== "queued" && !state.questions?.length) lines.push(`${state.metrics?.liveTokensPerSecond ? "Generating" : state.activeTools ? "Running" : "Idle"} · ${elapsed(state.now - state.latest.at)}`);
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join("\n")));
   if (state.context.request) addCardField(card, "Your requests", plain(state.context.request, 220));
   if (state.questions?.length) {
@@ -238,6 +242,7 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
     [state.plan.length ? `${completed}/${state.plan.length} tasks complete${skipped ? ` · ${skipped} skipped` : ""}` : "", state.files ? `${state.files.files} files · +${state.files.additions} / −${state.files.deletions} lines` : ""].filter(Boolean).join(" · "),
   ].filter(Boolean).join("\n");
   if (taskLines) card.addTextDisplayComponents(new TextDisplayBuilder().setContent(taskLines));
+  if (state.activeSubagents) addCardField(card, "Active subagents", `🤖 ${state.activeSubagents} active`);
   const updates = state.narration?.length ? state.narration.slice(-4) : state.thought ? [{ text: state.thought, at: state.now }] : [];
   if (updates.length) {
     addCardDivider(card);
@@ -321,11 +326,22 @@ export function progressDetailSections(state: ProgressSnapshot): PanelSection[] 
 function activity(item: ProgressActivity, max: number): string {
   return `${plain(item.text, max)}${item.detail ? ` · ${plain(item.detail, Math.max(30, max - clean(item.text, max).length))}` : ""}`;
 }
+/**
+ * The activity area: normally the latest line, but a current command opens a
+ * tail of the three most recent commands — the running one bold, the finished
+ * ones plain above it — so a command stream reads like a log.
+ */
+function activityLines(state: ProgressSnapshot, max: number): string[] {
+  if (!state.latest.command) return [activity(state.latest, max)];
+  return [...state.history, state.latest].filter((item) => item.command).slice(-3)
+    .map((item) => item.running ? `**${plain(item.text, max)}**` : plain(item.text, max));
+}
 function clean(value: string, max: number): string {
   const text = value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
-function plain(value: string, max: number): string { return escapeMarkdown(clean(value, max), { maskedLink: true }); }
+/** External text (user prompts, agent questions) rendered as markdown-safe prose. */
+export function plain(value: string, max: number): string { return escapeMarkdown(clean(value, max), { maskedLink: true }); }
 function cleanField(value: string): string { return value.length > 1000 ? `${value.slice(0, 999)}…` : value; }
 export function elapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));

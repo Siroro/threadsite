@@ -154,6 +154,11 @@ interface TurnState {
   stepStartAtByMessage: Map<string, number>;
   /** Time of the most recent step-finish; fallback anchor for messages first seen late. */
   lastStepFinishAt: number;
+  /** Whether the inter-step fallback anchor measures generation. True only for live
+   * streams, where steps run sequentially between finishes; history rebuilds lack
+   * message sightings, so their fallback windows would measure event-processing
+   * gaps (millisecond bursts when parallel steps finish together), not generation. */
+  liveAnchors: boolean;
   /** Rolling live-meter samples: estimated tokens with timestamps. */
   liveTokenSamples: Array<{ tokens: number; at: number }>;
   /** Last accumulated byte length per streaming part key, for growth sampling. */
@@ -166,7 +171,7 @@ interface TurnState {
   quotaBlock?: QuotaBlock;
 }
 
-function createTurnState(startedAt: number, compactions: number): TurnState {
+function createTurnState(startedAt: number, compactions: number, liveAnchors = true): TurnState {
   return {
     assistantMessageIds: new Set<string>(),
     finishedParts: new Set<string>(),
@@ -186,6 +191,7 @@ function createTurnState(startedAt: number, compactions: number): TurnState {
     timedOutputTokens: 0,
     stepStartAtByMessage: new Map(),
     lastStepFinishAt: startedAt,
+    liveAnchors,
     liveTokenSamples: [],
     livePartBytes: new Map(),
     deltaFedParts: new Set(),
@@ -716,6 +722,10 @@ export class OpenCodeHarness {
               return undefined;
             });
             if (stream) emit(onProgress, { text: "🟢 Reconnected — checking the running turn" });
+            // Children created while no stream was attached never announced
+            // themselves; adopt them so their events attribute to this turn
+            // (the watch loop does the same on every reconnect).
+            if (stream) await this.adoptChildSessions(sessionId, turn);
             // Buttons for a question asked before the transport dropped are gone from
             // the event stream; ask the server what is still pending and re-emit it.
             if (stream) {
@@ -1972,11 +1982,13 @@ function stepFigures(part: any): { inputTokens: number; outputTokens: number; ca
   };
 }
 
-/** Recover billing from saved messages, with each model step counted once. */
+/** Recover billing from saved messages, with each model step counted once.
+ * Saved history has no live message sightings, so it never contributes a tok/s
+ * rate: without real anchors the windows would be event-processing gaps. */
 export function usageFromMessages(
   messages: SessionMessage[], since = 0, until = Infinity, excludeIds = new Set<string>(),
 ): TurnUsage | undefined {
-  const turn = createTurnState(since, 0);
+  const turn = createTurnState(since, 0, false);
   const seen = new Set<string>();
   for (const message of [...messages].sort((a, b) => (a.info?.time?.created ?? 0) - (b.info?.time?.created ?? 0))) {
     const info = message.info;
@@ -2049,12 +2061,17 @@ function closeStepWindow(
 ): void {
   const finishedAt = Date.now();
   if (typeof messageId === "string") {
-    const startedAt = turn.stepStartAtByMessage.get(messageId) ?? turn.lastStepFinishAt;
+    // A history rebuild has no live message sightings, so its fallback anchor
+    // would measure the gap between step-end events rather than generation;
+    // such steps keep their tokens in the totals but drop out of the rate.
+    const startedAt = turn.stepStartAtByMessage.get(messageId) ?? (turn.liveAnchors ? turn.lastStepFinishAt : undefined);
     turn.stepStartAtByMessage.delete(messageId);
-    const elapsed = finishedAt - startedAt;
-    if (step.outputTokens > 0 && elapsed > 0 && elapsed <= MAX_TIMED_STEP_MS) {
-      turn.generationMs += elapsed;
-      turn.timedOutputTokens += step.outputTokens;
+    if (startedAt !== undefined) {
+      const elapsed = finishedAt - startedAt;
+      if (step.outputTokens > 0 && elapsed > 0 && elapsed <= MAX_TIMED_STEP_MS) {
+        turn.generationMs += elapsed;
+        turn.timedOutputTokens += step.outputTokens;
+      }
     }
     // The message is finished; its live-meter tracking goes with it.
     const prefix = `${messageId}:`;
@@ -2255,7 +2272,7 @@ function isUnfinished(item: ProgressPlanItem): boolean {
   return item.status === "pending" || item.status === "in_progress";
 }
 
-export function describeTool(tool: string, input: any, status: string, title?: string, directory?: string): { text: string; detail?: string } | undefined {
+export function describeTool(tool: string, input: any, status: string, title?: string, directory?: string): { text: string; detail?: string; command?: boolean } | undefined {
   const normalized = tool.toLowerCase().replace(/-/g, "_");
   if (normalized === "task" || normalized === "subagent") {
     const agent = typeof input?.agent === "string" && input.agent ? input.agent : "subagent";
@@ -2289,8 +2306,10 @@ export function describeTool(tool: string, input: any, status: string, title?: s
       detail: typeof target === "string" ? projectFileLabel(target, directory) : undefined };
   }
   if (normalized === "bash" || normalized === "shell") {
+    // The command is its own label; `command` lets the card render the recent
+    // command tail instead of a generic "Running a command" line.
     const command = typeof input?.command === "string" ? input.command : undefined;
-    return { text: status === "running" ? "⚙️ Running a command" : "✓ Command finished", detail: command ? truncate(command, 90) : undefined };
+    return { text: command ? truncate(command, 90) : status === "running" ? "⚙️ Command" : "✓ Command", command: true };
   }
   if (["todowrite", "todoread"].includes(normalized)) return { text: status === "running" ? "🗺️ Organising the build" : "🗺️ Plan updated" };
   if (title) return { text: status === "running" ? `⚙️ ${toolLabel(tool)}` : `✅ ${truncate(String(title), 90)}` };

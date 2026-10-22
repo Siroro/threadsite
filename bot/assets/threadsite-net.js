@@ -978,7 +978,7 @@ export class ThreadSiteNet {
                 this.retryEvent(frame.id);
             return;
         }
-        if (["room_not_found", "bad_version", "bad_game", "bad_room", "room_full", "too_many_rooms"].includes(code)) {
+        if (["room_not_found", "bad_version", "bad_game", "bad_room", "room_full", "too_many_rooms", "project_deleted"].includes(code)) {
             if (!this.openedSettled) {
                 this.openedSettled = true;
                 this.rejectOpened(error);

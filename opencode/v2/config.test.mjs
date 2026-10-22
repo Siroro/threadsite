@@ -23,6 +23,49 @@ test("native v2 config preserves builder features and isolated subagent models w
   assert.deepEqual(legacy, original);
 });
 
+test("v2 subagent model override applies to general and explore while preserving restrictions and primary agents", () => {
+  const original = structuredClone(legacy);
+  const defaults = buildV2Config(legacy, { env: {} });
+  for (const model of [" opencode/replacement-model ", "surplus/vendor/model-id"]) {
+    const config = buildV2Config(legacy, { env: { OPENCODE_SUBAGENT_MODEL: model } });
+    for (const id of ["general", "explore"]) {
+      assert.deepEqual(config.agents[id], { ...defaults.agents[id], model: model.trim() });
+      for (const action of ["threadsite_browser", "playwright_*", "question"]) {
+        assert.ok(config.agents[id].permissions.some((rule) => rule.action === action && rule.effect === "deny"));
+      }
+    }
+    assert.deepEqual(config.agents.sitebuilder, defaults.agents.sitebuilder);
+    assert.deepEqual(config.agents.titler, defaults.agents.titler);
+  }
+  for (const value of [undefined, "", "  "]) {
+    const config = buildV2Config(legacy, { env: { OPENCODE_SUBAGENT_MODEL: value } });
+    for (const id of ["general", "explore"]) assert.equal(config.agents[id].model, original.agent[id].model);
+  }
+  assert.deepEqual(legacy, original);
+});
+
+test("v2 rejects malformed subagent model overrides at startup", () => {
+  for (const model of ["model-only", "/model", "provider/", "provider/model with spaces"]) {
+    assert.throws(() => buildV2Config(legacy, { env: { OPENCODE_SUBAGENT_MODEL: model } }), /OPENCODE_SUBAGENT_MODEL.*provider\/model-id/);
+  }
+});
+
+test("browser QA has an independent opt-in model and never inherits a text builder/subagent choice", () => {
+  for (const value of [undefined, "", "  "]) {
+    assert.equal(buildV2Config(legacy, { env: { OPENCODE_BROWSER_QA_MODEL: value } }).agents["browser-qa"], undefined);
+  }
+  for (const model of ["test/vision", "surplus/vendor/vision-model"]) {
+    const config = buildV2Config(legacy, { env: { OPENCODE_SUBAGENT_MODEL: "test/text", OPENCODE_BROWSER_QA_MODEL: ` ${model} ` } });
+    assert.equal(config.agents["browser-qa"].model, model);
+    assert.equal(config.plugins[0].options.browserQaModel, model, "runtime model pinning uses the same deployment selection");
+    assert.equal(config.agents.general.model, "test/text");
+    assert.equal(config.agents.explore.model, "test/text");
+  }
+  for (const model of ["model-only", "/model", "provider/", "provider/model with spaces"]) {
+    assert.throws(() => buildV2Config(legacy, { env: { OPENCODE_BROWSER_QA_MODEL: model } }), /OPENCODE_BROWSER_QA_MODEL/);
+  }
+});
+
 test("Surplus catalog capabilities, context caps and reasoning variants use native v2 fields", () => {
   const config = buildV2Config({ ...legacy, provider: { surplus: {
     npm: "@ai-sdk/openai-compatible", options: { baseURL: "http://provider/v1" }, models: {

@@ -38,10 +38,14 @@ export interface ProgressUpdate {
   metrics?: ProgressMetrics;
   files?: ProgressFiles;
   tool?: ProgressTool;
+  /** Marks a shell command activity: its text is the command itself, and the card renders the recent command tail for it. */
+  command?: boolean;
   queuedRequests?: number;
   /** OpenCode status only; this confirms a running session without resetting the no-event timer.
    * A heartbeat with empty text reports this flag without touching the visible feed. */
   active?: boolean;
+  /** Status only: how many child sessions are currently executing. */
+  activeSubagents?: number;
   /** Stable public assistant text part; updates replace its streamed draft instead of duplicating it. */
   narrationId?: string;
 }
@@ -55,6 +59,10 @@ const HISTORY_LINES = 80;
 // the snapshot is persisted on every flush.
 const THINKING_TRAIL_ENTRIES = 40;
 const THINKING_ENTRY_CHARS = 2000;
+// Public narration is bounded the same way: a long, chatty turn must not grow
+// the persisted snapshot without limit.
+const NARRATION_ENTRIES = 40;
+const NARRATION_ENTRY_CHARS = 2000;
 
 export interface ProgressPersistence {
   load?: ProgressSnapshot;
@@ -73,6 +81,7 @@ export class DiscordProgress {
   private files?: ProgressFiles;
   private queuedRequests = 0;
   private agentReportedActive = false;
+  private activeSubagents = 0;
   private readonly tools = new Map<string, ProgressTool>();
   private inFlight?: Promise<void>;
   private dirty = false;
@@ -130,11 +139,15 @@ export class DiscordProgress {
     if (update.files) this.files = update.files;
     if (update.queuedRequests !== undefined) this.queuedRequests = Math.max(0, update.queuedRequests);
     if (update.plan) this.plan = update.plan;
+    if (update.activeSubagents !== undefined && this.activeSubagents !== update.activeSubagents) {
+      this.activeSubagents = Math.max(0, update.activeSubagents);
+      this.schedule();
+    }
     if (update.tool) {
       const previous = this.tools.get(update.tool.id);
       this.tools.set(update.tool.id, update.tool);
       if (previous?.status === update.tool.status) { this.schedule(); return; }
-      this.update(update.text, update.detail, update.tool.id);
+      this.update(update.text, update.detail, update.tool.id, true, update.command);
     } else if (update.kind === "heartbeat") {
       const previous = this.agentReportedActive;
       this.agentReportedActive = update.active ?? this.agentReportedActive;
@@ -152,10 +165,12 @@ export class DiscordProgress {
         const previous = this.narration.at(-1);
         const text = update.text.trim();
         // A streamed part grows in place. Older public messages remain readable.
+        const capped = (value: string): string => value.length > NARRATION_ENTRY_CHARS ? `${value.slice(0, NARRATION_ENTRY_CHARS)}…` : value;
         if ((key && previous?.key === key) || (!key && previous && text.startsWith(previous.text))) {
-          previous.text = text;
+          previous.text = capped(text);
         } else if (previous?.text !== text) {
-          this.narration.push({ text, at: Date.now(), key });
+          this.narration.push({ text: capped(text), at: Date.now(), key });
+          while (this.narration.length > NARRATION_ENTRIES) this.narration.shift();
         }
       }
       this.schedule();
@@ -213,7 +228,9 @@ export class DiscordProgress {
     if (persistence.load) {
       this.narration = persistence.load.narration ?? [];
       this.reasoning = persistence.load.reasoning ?? [];
-      this.history.push(...persistence.load.history);
+      // Restored history keeps its commands but drops any stale running marks:
+      // the tools map starts empty after a restart.
+      this.history.push(...persistence.load.history.map(({ text, detail, at, key, command }) => ({ text, detail, at, key, command })));
       this.thought = persistence.load.thought;
       this.plan = persistence.load.plan;
       this.files = persistence.load.files;
@@ -268,24 +285,28 @@ export class DiscordProgress {
     this.schedule();
   }
 
-  update(text: string, detail?: string, key?: string, countsAsActivity = true): void {
+  update(text: string, detail?: string, key?: string, countsAsActivity = true, command = false): void {
     if (this.closed) return;
     if (countsAsActivity) this.lastActivityAt = Date.now();
-    if (/waiting for (?:the )?project queue|queued/i.test(text)) this.phase = "queued";
+    // A command is its own label, so command text never trips the heuristics
+    // that read intent out of status sentences.
+    if (!command && /waiting for (?:the )?project queue|queued/i.test(text)) this.phase = "queued";
     // A generic session-busy event must not bury a more useful running tool.
     // The v1 busy status and the v2 status stream repeat their busy text on
     // every event, so without this guard the card would only ever say
     // "Model is thinking" while a tool runs.
     if (/(?:model|opencode) is (?:thinking|working)|status updated/i.test(text)
       && [...this.tools.values()].some((tool) => tool.status === "running")) return;
-    if (text !== this.latest.text || detail !== this.latest.detail) {
+    // A different tool re-running the same command must still become current,
+    // or its bold running state would stay on the previous occurrence.
+    if (text !== this.latest.text || detail !== this.latest.detail || key !== this.latest.key) {
       if (!key || this.latest.key !== key) this.history.push(this.latest);
       while (this.history.length > HISTORY_LINES) this.history.shift();
       if (key) {
         const existing = this.history.findIndex((activity) => activity.key === key);
         if (existing >= 0) this.history.splice(existing, 1);
       }
-      this.latest = { text, detail, key, at: key === this.latest.key && text === this.latest.text ? this.latest.at : Date.now() };
+      this.latest = { text, detail, key, at: key === this.latest.key && text === this.latest.text ? this.latest.at : Date.now(), command: command || undefined };
     }
     this.schedule();
   }
@@ -335,21 +356,26 @@ export class DiscordProgress {
     const tools = [...this.tools.values()];
     const idleMs = Date.now() - this.lastActivityAt;
     // A failed tool and a provider retry both turn the card amber, so name the
-    // cause: an alarm without a label tells the reader nothing.
+    // cause: an alarm without a label tells the reader nothing. Command text is
+    // the command itself and must not match the service-wait vocabulary.
     const latestToolFailed = this.latest.key ? this.tools.get(this.latest.key)?.status === "error" : false;
-    const serviceWaiting = /retry|backoff|unavailable|reconnect|waiting for.*(?:agent|service)|status is taking longer|hit an error/i.test(this.latest.text);
+    const serviceWaiting = !this.latest.command && /retry|backoff|unavailable|reconnect|waiting for.*(?:agent|service)|status is taking longer|hit an error/i.test(this.latest.text);
+    // The command tail bolds the occurrence whose tool is still running.
+    const running = (item: ProgressActivity) => item.command && item.key ? this.tools.get(item.key)?.status === "running" : false;
     return {
-      title: this.title, phase: this.phase, startedAt: this.started, now: Date.now(), latest: this.latest,
-      history: this.history, context: this.context, thought: this.thought, stats: this.stats, changes: this.changes,
+      title: this.title, phase: this.phase, startedAt: this.started, now: Date.now(),
+      latest: { ...this.latest, running: running(this.latest) || undefined },
+      history: this.history.map((item) => ({ ...item, running: running(item) || undefined })), context: this.context, thought: this.thought, stats: this.stats, changes: this.changes,
       files: this.files, metrics: this.metrics && Date.now() - this.metricsAt > 5000 ? { ...this.metrics, liveTokensPerSecond: undefined } : this.metrics,
       plan: this.plan, queuedRequests: this.queuedRequests,
       actions: tools.length, activeTools: tools.filter((tool) => tool.status === "running").length,
+      activeSubagents: this.closed ? 0 : this.activeSubagents,
       toolErrors: tools.filter((tool) => tool.status === "error").length, questionPin: this.questionPin,
       waiting: latestToolFailed || serviceWaiting,
       agentReportedActive: this.agentReportedActive,
-      waitingReason: latestToolFailed
-        ? "A tool reported an error — the agent is retrying"
-        : serviceWaiting ? "Waiting on the agent service — it will retry automatically" : undefined,
+      // The errored tool already headlines the activity line with ⚠️, so only a
+      // provider retry needs its own explanatory line.
+      waitingReason: !latestToolFailed && serviceWaiting ? "Waiting on the agent service — it will retry automatically" : undefined,
       questions: this.question?.questions, questionStatus: this.questionStatus, narration: this.narration, reasoning: this.reasoning,
       stalledForMs: config.turnStallWarnMs > 0 && idleMs >= config.turnStallWarnMs ? idleMs : undefined,
     };
