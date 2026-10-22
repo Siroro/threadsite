@@ -134,3 +134,37 @@ test("pinned cards use only V2 components, safe buttons and bounded text", () =>
   assert.equal(card.buttons.filter((button) => button.url).length, 0);
   assert.equal((card.title!.match(/\n/g) ?? []).length, 0);
 });
+
+test("the pinned card links the starter and counts each user's contributions, busiest first", () => {
+  const card = cardView(renderProjectCard({ project: record({
+    starterId: "100000000000000001",
+    contributors: {
+      "100000000000000001": { turns: 3, steers: 0, answers: 2 },
+      "100000000000000002": { turns: 1, steers: 1, answers: 0 },
+      "100000000000000003": { turns: 0, steers: 0, answers: 0 },
+    },
+  }) }));
+  const contributors = card.fields!.find((field) => field.name === "Contributors")!;
+  assert.match(contributors.value, /\*\*Started by\*\* <@100000000000000001>/);
+  // The zero-count user is not listed, and the rest sort by total contributions.
+  assert.equal(contributors.value, "**Started by** <@100000000000000001>\n"
+    + "<@100000000000000001> · 3 turns · 2 answers\n"
+    + "<@100000000000000002> · 1 turn · 1 steer");
+  assert.doesNotMatch(contributors.value, /100000000000000003/);
+});
+
+test("a busy thread summarizes contributors past eight rows", () => {
+  const contributors = Object.fromEntries(Array.from({ length: 10 }, (_, index) => [
+    `3${index}0000000000000000`, { turns: 10 - index, steers: 0, answers: 0 },
+  ]));
+  const card = cardView(renderProjectCard({ project: record({ contributors: contributors as ProjectRecord["contributors"] }) }));
+  const field = card.fields!.find((entry) => entry.name === "Contributors")!;
+  assert.match(field.value, /<@300000000000000000> · 10 turns/);
+  assert.match(field.value, /\+2 more contributors/);
+  assert.doesNotMatch(field.value, /390000000000000000/);
+});
+
+test("projects recorded before contributions keep their original card layout", () => {
+  const card = cardView(renderProjectCard({ project: record() }));
+  assert.equal(card.fields!.find((field) => field.name === "Contributors"), undefined);
+});

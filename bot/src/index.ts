@@ -719,7 +719,7 @@ client.on(Events.MessageCreate, async (message) => {
 
   // Only an explicit Discord reply to the current turn's status can steer it.
   // Ordinary messages, replies to other messages, images and late replies queue.
-  if (!imageAttachments.length && await projects.steerActiveTurn(message.channel.id, prompt, message.reference?.messageId)) {
+  if (!imageAttachments.length && await projects.steerActiveTurn(message.channel.id, prompt, message.reference?.messageId, message.author.id)) {
     await status.edit("🧭 Sent to the running turn").catch(() => undefined);
     return;
   }
@@ -768,7 +768,7 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
   store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: status.id });
   if (form.steer && !images.length) {
     try {
-      if (await projects.steerActiveTurn(project.threadId, prompt, form.resource)) {
+      if (await projects.steerActiveTurn(project.threadId, prompt, form.resource, interaction.user.id)) {
         await setStatusMessage(status, "🧭 Sent to the running turn").catch(() => undefined);
         return "🧭 Your instruction was sent to the running turn.";
       }
@@ -1018,7 +1018,7 @@ async function startProjectThread(
   // message — so the thread opens with its front page on top.
   const card = await postProjectCard(thread, previewProjectRecord(
     thread.id, interaction.guildId, thread.parentId || interaction.channelId, requestedName || thread.name, prompt,
-    options.projectKind, options.multiplayerMode,
+    options.projectKind, options.multiplayerMode, interaction.user.id,
   ));
   const status = await thread.send(options.preparingText);
   const progress = new DiscordProgress(status, `${options.buildingPrefix} Building ${requestedName || thread.name}`);
@@ -1820,13 +1820,14 @@ async function refreshProjectCard(threadId: string): Promise<void> {
 /** A stand-in record so the card can render before createProject persists the real one. */
 function previewProjectRecord(
   threadId: string, guildId: string, parentChannelId: string, displayName: string, prompt: string,
-  projectKind: ProjectKind, multiplayerMode?: MultiplayerMode,
+  projectKind: ProjectKind, multiplayerMode?: MultiplayerMode, starterId?: string,
 ): ProjectRecord {
   const now = new Date().toISOString();
   return {
     threadId, guildId, parentChannelId, displayName, workspacePath: "", siteSlug: "", repoName: "", sessionId: "",
     projectKind, status: "creating", createdAt: now, updatedAt: now, initialPrompt: truncate(prompt, 2_000),
     ...(projectKind !== "site" ? { multiplayerMode: multiplayerMode ?? "arena" as const } : {}),
+    ...(starterId ? { starterId } : {}),
   };
 }
 

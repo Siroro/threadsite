@@ -3,7 +3,7 @@ import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, ca
 import { cardId } from "./card-actions.js";
 import type { ProjectDescription } from "./project-docs.js";
 import { projectKindLabel } from "./templates.js";
-import type { ProjectRecord } from "./types.js";
+import type { ContributionTally, ProjectRecord } from "./types.js";
 import type { UsageTotal } from "./usage.js";
 import { formatTokens, truncate } from "./util.js";
 
@@ -50,6 +50,41 @@ function multiplayerLine(project: ProjectRecord): string | undefined {
   return "Shared arena multiplayer";
 }
 
+// The contributor list stops here; a busy thread summarizes the rest in one line.
+const CONTRIBUTOR_ROWS = 8;
+
+function contributionTotal(tally: ContributionTally): number {
+  return tally.turns + tally.steers + tally.answers;
+}
+
+/** One user's counts as display text, e.g. "2 turns · 1 steer · 3 answers". */
+function contributionList(tally: ContributionTally): string {
+  const labels = { turns: "turn", steers: "steer", answers: "answer" } as const;
+  return (Object.keys(labels) as Array<keyof typeof labels>)
+    .filter((kind) => tally[kind] > 0)
+    .map((kind) => `${tally[kind]} ${labels[kind]}${tally[kind] === 1 ? "" : "s"}`)
+    .join(" · ");
+}
+
+/**
+ * The people behind the project: the founder as a profile link, then each
+ * contributor's lifetime counts, busiest first. Mentions render as profile
+ * links; the card's allowedMentions keeps them from notifying anyone.
+ */
+function contributorSection(project: ProjectRecord): string | undefined {
+  const entries = Object.entries(project.contributors ?? {})
+    .filter(([, tally]) => contributionTotal(tally) > 0)
+    .sort(([, a], [, b]) => contributionTotal(b) - contributionTotal(a) || b.turns - a.turns);
+  if (!project.starterId && !entries.length) return undefined;
+  const rows = entries.slice(0, CONTRIBUTOR_ROWS).map(([userId, tally]) => `<@${userId}> · ${contributionList(tally)}`);
+  const more = entries.length - CONTRIBUTOR_ROWS;
+  return [
+    project.starterId ? `**Started by** <@${project.starterId}>` : undefined,
+    ...rows,
+    more > 0 ? `+${more} more contributor${more === 1 ? "" : "s"}` : undefined,
+  ].filter(Boolean).join("\n");
+}
+
 /** The pinned, self-updating front page of a project thread. */
 export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   const { project, usage } = state;
@@ -87,6 +122,11 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
     settings.push(`**Engine** · ${kind === "game-3d" ? "Three.js" : "Excalibur"}`, `**Multiplayer** · ${multiplayerLine(project)}`);
   }
   addCardField(card, "Project details", settings.join("\n"));
+  const contributors = contributorSection(project);
+  if (contributors) {
+    addCardDivider(card);
+    addCardField(card, "Contributors", contributors);
+  }
   addCardDivider(card);
   addCardField(card, "Original request", `> ${quoted(project.initialPrompt, PROMPT_CHARS)}`);
 

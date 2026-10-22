@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { ProjectRecord, QueuedRequest } from "./types.js";
+import type { ContributionKind, ContributionTally, ProjectRecord, QueuedRequest } from "./types.js";
 
 /** Durable turn identity: matches by the stable id assigned when the turn is claimed. */
 export function pendingTurnMatches(current: ProjectRecord["pendingTurn"], expected: ProjectRecord["pendingTurn"]): boolean {
@@ -175,6 +175,24 @@ export class Store {
     const queue = current.pendingQueue ?? [];
     if (queue.some((entry) => entry.statusMessageId === request.statusMessageId)) return;
     await this.patchProject(threadId, { pendingQueue: [...queue, request] });
+  }
+
+  /**
+   * Count one user contribution on the project record. A lost tally must never
+   * disturb the flow that earned it, so callers treat errors as advisory; a
+   * project pending deletion simply stops counting.
+   */
+  async addContribution(threadId: string, userId: string, kind: ContributionKind): Promise<void> {
+    if (!userId) return;
+    const current = this.getProject(threadId);
+    if (!current || current.pendingDeletion) return;
+    const tally: ContributionTally = { ...(current.contributors?.[userId] ?? { turns: 0, steers: 0, answers: 0 }) };
+    tally[kind] += 1;
+    await this.putProject({
+      ...current,
+      contributors: { ...(current.contributors ?? {}), [userId]: tally },
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   /** One persisted snapshot hands just this batch from the queue to crash recovery. */

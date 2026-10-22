@@ -368,6 +368,8 @@ export class ProjectService {
       updatedAt: now,
       // Keep the original request after pendingTurn is cleared.
       initialPrompt: truncate(input.initialPrompt, 2_000),
+      // The thread's founder, linked on the pinned card for the project's life.
+      ...(input.initiatorUserId ? { starterId: input.initiatorUserId } : {}),
       pendingNaming: { request: input.initialPrompt, ...(input.renameable ? {} : { name: input.displayName }) },
       ...(projectKind !== "site" ? { multiplayerMode } : {}),
       infoMessageId: input.infoMessageId,
@@ -681,12 +683,24 @@ export class ProjectService {
       const changesTimer = onProgress ? setInterval(updateChanges, 3000) : undefined;
       stopChangesTimer = () => { if (changesTimer) clearInterval(changesTimer); };
       emit(onProgress, initial ? "✨ Building the first version" : "🧠 Applying your requested revision", undefined, "working");
+      // Contribution tally inputs, read before the claim consumes the queue:
+      // every distinct requester whose request this turn is about to absorb.
+      // Restart recovery replays the claimed marker without re-entering here,
+      // so each turn is counted exactly once.
+      const turnRequesters = new Set<string>(requesterId ? [requesterId] : []);
+      for (const entry of project.pendingQueue ?? []) {
+        if (entry.requesterId && queuedStatusIds.includes(entry.statusMessageId)) turnRequesters.add(entry.requesterId);
+      }
       // Persist the in-flight request first: if the bot dies mid-turn, boot
       // recovery uses it to continue, commit, and publish this work.
       pendingMarker = { id: randomUUID(), prompt, initial, startedAt: new Date().toISOString(), author, requesterId, statusMessageId,
         beforeCommit: await currentHead(workspacePath), images: turnImages ? [...turnImages] : undefined };
       project = await this.store.startQueuedTurn(threadId, pendingMarker, queuedStatusIds);
       queueClaimed = true;
+      for (const userId of turnRequesters) {
+        await this.store.addContribution(threadId, userId, "turns")
+          .catch((error) => log("warn", "project.contribution_count_failed", { threadId, userId, kind: "turns", error: errorText(error) }));
+      }
       await this.usageLog.record({ id: pendingMarker.id, sessionId: project.sessionId, startedAt: pendingMarker.startedAt,
         pending: true, threadId, project: project.displayName, kind: projectKind });
       await onProgress?.({ kind: "queue", text: "Saved requests", queuedRequests: project.pendingQueue?.length ?? 0 });
@@ -1398,12 +1412,18 @@ export class ProjectService {
    * nothing is steerable right now (idle, delivering, or recovering), so the
    * caller can queue the message instead.
    */
-  async steerActiveTurn(threadId: string, text: string, replyToMessageId?: string): Promise<boolean> {
+  async steerActiveTurn(threadId: string, text: string, replyToMessageId?: string, steererId?: string): Promise<boolean> {
     if (!this.activeTurnThreads.has(threadId) || this.delivering.has(threadId)) return false;
     const project = this.store.getProject(threadId);
     if (!project || !replyToMessageId || project.pendingTurn?.statusMessageId !== replyToMessageId) return false;
     const steered = await this.opencode.steer(project.workspacePath, project.sessionId, text);
-    if (steered) log("info", "project.turn_steered", { threadId, sessionId: project.sessionId });
+    if (steered) {
+      log("info", "project.turn_steered", { threadId, sessionId: project.sessionId });
+      if (steererId) {
+        await this.store.addContribution(threadId, steererId, "steers")
+          .catch((error) => log("warn", "project.contribution_count_failed", { threadId, userId: steererId, kind: "steers", error: errorText(error) }));
+      }
+    }
     return steered;
   }
 
