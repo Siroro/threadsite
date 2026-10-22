@@ -1,7 +1,5 @@
 <!-- ThreadSite-maintained skill, originally derived from chrislaupama/threejs-game-studio (MIT). ThreadSite context: three.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name ("three") with full TypeScript types. This workspace has NO npm, NO Vite, NO dev server, and NO project scaffold: author TypeScript under site/src, keep assets under site/assets, and the harness runs the only build (site/src TypeScript -> site/js ESM via esbuild). Map every project-setup/scaffold/build step of this skill onto the existing ThreadSite workspace layout; skip its npm/Vite instructions entirely. Verification happens in a real browser via the preview URL; see AGENTS.md. -->
 
-# Three.js Game Fundamentals (r185 Verified Baseline)
-
 ## Contents
 
 - Local project baseline
@@ -23,19 +21,11 @@ Asset-loading examples use the project-owned `publicAssetUrl()` helper from
 
 ## Local Project Baseline
 
-For the verified baseline, install matching r185 runtime and community types.
-For a new project, first check current stable and resolve both packages together:
-
 ```bash
 npm install three
 npm install --save-dev @types/three vite typescript
 npm ls three @types/three
 ```
-
-The `three` package does not bundle TypeScript declarations. Confirm
-`THREE.REVISION`, the runtime package, and `@types/three` intentionally align;
-for any revision other than the verified r185 baseline, reconcile official
-migration notes and matching source before copying APIs from this skill.
 
 Use one canvas owned by the renderer:
 
@@ -137,13 +127,6 @@ than every child. `updateWorldMatrix(updateParents, updateChildren)` chooses the
 directions to traverse; `updateMatrixWorld(force)` can force all descendants.
 For a manual-matrix object, mark direct matrix edits explicitly:
 
-```ts
-actor.matrixAutoUpdate = false;
-actor.matrix.copy(authoritativeMatrix);
-actor.matrixWorldNeedsUpdate = true; // required before updateWorldMatrix in r185
-actor.updateWorldMatrix(true, false);
-```
-
 Read the official [scene-graph guide](https://threejs.org/manual/en/scenegraph.html)
 before building nested vehicles, weapons, camera rigs, skeletal attachments, or
 world chunks.
@@ -216,11 +199,6 @@ aspect changes.
 
 ## Minimal Current Render Loop
 
-Use [Timer](https://threejs.org/docs/pages/Timer.html), not deprecated `Clock`.
-Connect it to the document so visibility changes are handled, call
-`update(timestamp)` exactly once per rendered frame, and let the renderer own
-the frame callback with `setAnimationLoop()`.
-
 ```ts
 import * as THREE from 'three';
 
@@ -255,12 +233,6 @@ function updateGame(deltaSeconds: number) {
  // Consume input intents, update gameplay, animation, camera, UI/audio bridge.
 }
 ```
-
-`WebGLRenderer` requires WebGL 2. Catch construction failure at the app shell
-and replace the canvas with an accessible, project-local error/retry surface. A
-blank canvas is not an acceptable unsupported-device state. In a strict
-local-only build, do not copy `WebGL.getWebGL2ErrorMessage()` unchanged: r185's
-default message contains an external help link; write local text instead.
 
 Use `setAnimationLoop()` even when XR is not yet required. It is the official
 renderer loop, supports WebXR, and lets `WebGPURenderer` complete asynchronous
@@ -416,11 +388,6 @@ async function loadLocalColorTexture() {
 
 ### Cancellation is loader-specific
 
-At r185, `LoadingManager.abort()` requests group cancellation only for loaders
-that implement `Loader.abort()` and browsers supporting `AbortSignal.any()`.
-Core `FileLoader` and `ImageBitmapLoader` support it; there is no universal
-loader abort or dispose contract. Treat cancellation separately from failure:
-
 ```ts
 const manager = new THREE.LoadingManager();
 const files = new THREE.FileLoader(manager);
@@ -449,10 +416,6 @@ Annotate base-color and emissive textures with `SRGBColorSpace`. Keep normal,
 roughness, metalness, AO, displacement, and other data textures at
 `NoColorSpace`. See the official
 [color-management guide](https://threejs.org/manual/en/color-management.html).
-
-Do not assume `FileLoader.load()` or `ImageBitmapLoader.load()` returns a
-request in r185.1. Keep abort/cancellation ownership explicit and inspect the
-specific loader's current API.
 
 ## Pause, Restart, And Ownership
 
@@ -615,19 +578,3 @@ visibility, and audio listeners through the same lifecycle owner.
 ## Fundamentals Verification
 
 Before adding deep gameplay or rendering polish, prove:
-
-- The installed runtime, lockfile, and `@types/three` revision intentionally
- align. Any revision other than the verified r185 baseline has matching
- migration/source checks recorded before baseline APIs are copied.
-- Imports resolve locally and the production preview performs no outbound
- runtime requests.
-- The canvas is nonblank, camera framing is intentional, and no object is
- hidden by clip planes.
-- Movement speed remains stable at 30, 60, 90, and 120 Hz render cadence.
-- A simulated one-second frame stall does not launch objects or spiral the
- fixed-step loop.
-- Resize and orientation changes preserve composition and update projection.
-- Pause/resume does not jump simulation time.
-- Restart does not duplicate loops, listeners, actors, mixers, or audio.
-- Repeated enter/exit returns `renderer.info.memory` near its steady baseline.
-- Console, shader, page, and local-asset errors are captured and fixed.

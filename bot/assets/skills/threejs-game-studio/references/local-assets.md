@@ -264,11 +264,6 @@ fresh retry phase needs a fresh manager because its item counters are
 cumulative. `LoadingManager.onProgress` reports completed items, not bytes, and
 `abort()` is best effort, so preserve attempt tokens and dispose late results.
 
-In r185 the addon loaders also provide version-matched module-relative support
-files. Use those defaults when the production bundler emits them correctly; use
-the explicit local directories above when the deployment/CSP requires stable
-public URLs. Test the production build under its real base path either way.
-
 Prefer GLB. If a local `.gltf` is required, every external buffer and image URI
 resolves relative to the model URL. Verify that each dependency exists, remains
 inside the project boundary after symlink resolution, and has no remote or

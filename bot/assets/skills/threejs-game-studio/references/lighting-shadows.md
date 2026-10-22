@@ -140,24 +140,11 @@ scene.add(skyFill);
 
 ### Direct-light intensity
 
-Current Three.js light behavior no longer uses legacy light toggles. Retune old
-projects rather than restoring removed legacy flags. `PointLight` and
-`SpotLight` intensity is measured in candela and their `power` in lumens.
-Default physically meaningful decay is `2`; keep it unless art direction has a
-measured reason to change it. Directional, ambient, and hemisphere intensities
-are relative scene strengths.
-
 Tone mapping and exposure are part of the same calibration. Record exposure,
 environment intensity, and key-light intensity together so one system does not
 silently compensate for another.
 
 ## HDR Environment Lighting
-
-Use `HDRLoader` for local RGBE `.hdr` files in r185. `RGBELoader` still ships
-only as a deprecated compatibility alias, so do not use it in new code. Use
-`EXRLoader` for `.exr` and `UltraHDRLoader` for Ultra HDR JPEG. All three
-loaders return environment color data tagged `LinearSRGBColorSpace`; preserve
-that metadata rather than changing it to `SRGBColorSpace` or `NoColorSpace`.
 
 ```ts
 import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
@@ -223,10 +210,6 @@ await renderer.init();
 const pmrem = new THREE.PMREMGenerator(renderer);
 const environmentTarget = pmrem.fromScene(room);
 ```
-
-Do not pass a `WebGPURenderer` to the WebGL PMREM implementation imported from
-`three`. The older `fromSceneAsync()` initialization workaround is deprecated;
-initialize the renderer explicitly instead.
 
 ## Directional, Spot, Point, And Area-Light Recipes
 
@@ -493,13 +476,6 @@ blob.scale.setScalar(0.9 + player.speed * 0.05);
 
 ### Shadow type
 
-Use `THREE.PCFShadowMap` as the current filtered baseline. Do not introduce
-deprecated `PCFSoftShadowMap`. `BasicShadowMap` is cheapest and unfiltered.
-`VSMShadowMap` adds separable blur controlled by `light.shadow.radius` and
-`light.shadow.blurSamples`, can leak light, and renders `receiveShadow` objects
-into the shadow pass even when `castShadow` is false. Shadow-map type is a
-renderer-wide choice, not a per-light setting.
-
 With `WebGLRenderer`, VSM does not support `PointLight`; the renderer warns and
 skips that point-light shadow. With `WebGPURenderer`, point lights use the point
 shadow filter rather than the VSM blur path, so do not select VSM expecting a
@@ -580,28 +556,6 @@ Do not blindly tag an LDR lightmap as linear; match the encoding produced by
 the baker/export pipeline and verify it through the complete output transform.
 
 ## Common Failures
-
-- **PBR object is black:** no useful direct/environment light, invalid normals,
- extreme exposure, or a color-space error.
-- **Directional/spot light points nowhere:** its target was moved but not added
- to the scene graph or updated.
-- **Shadow is clipped:** caster/receiver lies outside the shadow camera.
-- **Shadow is blocky:** the fitted region is too large for the map, not merely
- a low map-size number.
-- **Shadow acne/peter-panning:** bias is compensating for scale, normals,
- overlapping geometry, or a poor near/far range.
-- **Shadow follows late or swims:** light/target updates occur after render, or
- a continuously moving frustum lacks snapping/stability.
-- **Performance collapses with a point light:** six shadow views multiplied the
- caster cost.
-- **Area light has no visible effect:** initialization was skipped, material is
- unsupported, light faces away, or renderer-specific setup is wrong.
-- **HDR is visible but does not light the model:** it was set only as background
- rather than environment.
-- **Model is lit but floats:** environment/ambient light cannot cast a contact
- shadow; add a direct shadow, bake, or contact cue.
-- **Old project changed brightness after upgrade:** legacy light behavior was
- removed; recalibrate lights and exposure instead of restoring old flags.
 
 ## Performance
 

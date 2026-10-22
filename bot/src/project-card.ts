@@ -22,13 +22,6 @@ export interface ProjectCardState {
 // 2D games, violet for 3D games; amber while the first build runs, red on error.
 const KIND_COLORS: Record<string, number> = { site: 0x5865f2, "game-2d": 0x22c55e, "game-3d": 0x8b5cf6 };
 
-/**
- * Design version of the card. Bump when the layout changes materially: the
- * version is stored next to the pinned message id, and the next boot upgrades
- * every card still on an older design (see reconcileProjectCards in index.ts).
- */
-export const PROJECT_CARD_VERSION = 3;
-
 const PROMPT_CHARS = 900;
 
 function relative(iso: string | undefined): string | undefined {
@@ -51,7 +44,7 @@ export interface ProjectCardMessage {
   allowedMentions: { parse: [] };
 }
 
-/** The configured architecture. Legacy games default to arena, like the build harness. */
+/** The configured multiplayer architecture. */
 function multiplayerLine(project: ProjectRecord): string | undefined {
   if (!project.projectKind || project.projectKind === "site") return undefined;
   const mode = project.multiplayerMode ?? "arena";
@@ -85,15 +78,14 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   embed.addFields({ name: "Type", value: projectKindLabel(project.projectKind), inline: true });
   if (kind !== "site") {
     embed.addFields(
-      { name: "Engine", value: kind === "game-3d" ? "Three.js" : "Phaser", inline: true },
+      { name: "Engine", value: kind === "game-3d" ? "Three.js" : "Excalibur", inline: true },
       { name: "Multiplayer", value: multiplayerLine(project)!, inline: true },
     );
   }
   embed.addFields({ name: "Original request", value: `> ${quoted(project.initialPrompt, PROMPT_CHARS)}`, inline: false });
 
   if (project.browserQaFindings) {
-    // Legacy records stored their findings under `errors`; count both shapes.
-    const findings = project.browserQaFindings.findings?.length ?? project.browserQaFindings.errors?.length ?? 0;
+    const findings = project.browserQaFindings.findings.length;
     const checked = relative(project.browserQaFindings.checkedAt);
     embed.addFields({ name: "Browser QA", value: `Advisory · ${findings ? `${findings} finding${findings === 1 ? "" : "s"}` : "no findings"}${checked ? ` · checked ${checked}` : ""}`, inline: false });
   }
@@ -123,7 +115,5 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   ].filter(Boolean);
   if (links.length) embed.addFields({ name: "Links", value: links.join(" · "), inline: false });
 
-  // No footer: every line must earn its place, and the design version lives in
-  // the stored record (infoCardVersion), not on the card itself.
   return { content: "", embeds: [embed], allowedMentions: { parse: [] } };
 }

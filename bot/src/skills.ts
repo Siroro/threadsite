@@ -5,38 +5,12 @@ import { safeChild } from "./util.js";
 
 const ASSETS_DIR = path.join(process.cwd(), "assets");
 
-const PHASER_SKILLS = [
-  "phaser-4",
-];
-
-/** Legacy PixiJS skills shipped by older harness versions; retained only in the managed-name list so existing workspaces remove them during the Phaser migration. */
-const RETIRED_PIXIJS_SKILLS = [
-  "pixijs-application",
-  "pixijs-assets",
-  "pixijs-core-concepts",
-  "pixijs-events",
-  "pixijs-filters",
-  "pixijs-performance",
-  "pixijs-scene-container",
-  "pixijs-scene-graphics",
-  "pixijs-scene-particle-container",
-  "pixijs-scene-sprite",
-  "pixijs-scene-text",
-  "pixijs-ticker",
+const EXCALIBUR_SKILLS = [
+  "excalibur",
 ];
 
 const THREEJS_SKILLS = [
   "threejs-game-studio",
-];
-
-/**
- * Skills earlier harness versions seeded that are no longer curated. Still in
- * the managed set so reseeding removes them from existing workspaces.
- */
-const RETIRED_SKILLS = [
-  "threejs-scene-setup",
-  "threejs-materials-lighting",
-  "threejs-gltf-loading",
 ];
 
 const SHARED_SKILLS = [
@@ -64,7 +38,7 @@ const SHARED_SKILLS = [
 
 /** Every skill the harness seeds for a project kind; sites get none. */
 export function skillNames(kind: ProjectKind): string[] {
-  if (kind === "game-2d") return ["game-2d", ...PHASER_SKILLS, ...SHARED_SKILLS];
+  if (kind === "game-2d") return ["game-2d", ...EXCALIBUR_SKILLS, ...SHARED_SKILLS];
   if (kind === "game-3d") return ["game-3d", ...THREEJS_SKILLS, ...SHARED_SKILLS];
   return [];
 }
@@ -89,10 +63,7 @@ export async function ensureSkillFiles(workspacePath: string, kind: ProjectKind)
     if (await copyDirectoryIfChanged(source, target)) changed = true;
   }
 
-  // Remove only skills shipped by this harness, including the retired 3D trio
-  // when a workspace predates the threejs-game-studio switch; leave user
-  // skills alone.
-  const managed = new Set(["game-2d", "game-3d", ...RETIRED_SKILLS, ...RETIRED_PIXIJS_SKILLS, ...PHASER_SKILLS, ...THREEJS_SKILLS, ...SHARED_SKILLS]);
+  const managed = new Set([...skillNames("game-2d"), ...skillNames("game-3d")]);
   for (const entry of await fs.readdir(skillsRoot, { withFileTypes: true }).catch(() => [])) {
     if (!entry.isDirectory() || desired.has(entry.name) || !managed.has(entry.name)) continue;
     await fs.rm(path.join(skillsRoot, entry.name), { recursive: true, force: true });

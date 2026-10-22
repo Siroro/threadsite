@@ -43,13 +43,6 @@ Choose compression from measured asset needs:
 | KTX2/Basis textures | `KTX2Loader` after renderer support detection |
 | RGBE `.hdr` environment | `HDRLoader` |
 
-Do not configure a remote decoder or runtime CDN. In r185, `DRACOLoader` and
-`KTX2Loader` resolve version-matched decoder/transcoder files relative to their
-installed addon modules by default. That is local when the bundler copies those
-package assets correctly. Keep an explicit project-owned public-path fallback
-for bundlers, content-security policies, or deployment layouts that cannot use
-the module-relative defaults.
-
 ## Novice Mental Model
 
 Loading has three layers:
@@ -276,9 +269,6 @@ batch.
 
 ## Production glTF Loader Stack
 
-The r185 addon loaders use package-relative bundled support files by default.
-When a deployment requires explicit project-owned paths, a Vite layout can be:
-
 ```text
 public/
  decoders/
@@ -345,13 +335,6 @@ export async function createModelLoaders(
 }
 ```
 
-Call and await this async factory. For WebGPU, `await renderer.init()` must
-finish before `detectSupport()`; an unawaited `renderer.setAnimationLoop()` is
-not an initialization barrier because the common renderer method is async in
-r185. If animation-loop setup is the chosen barrier, await it explicitly.
-The union above is the current r185 `KTX2Loader` contract and does not imply
-that WebGL GLSL materials or composer passes work with WebGPU.
-
 The shown two-plus-two workers are a starting budget, not a universal optimum.
 Coordinate decoder workers with game, physics, audio, and asset-pipeline work;
 lower the limits on constrained devices or when several worker pools coexist.
@@ -362,16 +345,6 @@ For explicit paths, call the factory with local URLs such as
 ## DRACO, KTX2, And Meshopt
 
 ### DRACO
-
-DRACO compresses geometry. It can make files smaller but adds decoder startup
-and CPU decode cost. Use it when measured delivery savings justify that cost.
-The factory uses r185's exported `DRACO_GLTF_CONFIG` for the smaller bundled
-WebAssembly-only glTF decoder. Omit that override to retain the general bundled
-`.drc` decoder and JavaScript fallback, or provide a verified local path when
-module-relative assets do not fit the deployment. Do not use deprecated
-`setDecoderConfig()`.
-Call `DRACOLoader.dispose()` only at final teardown; its decoder module cannot
-be reloaded on that loader afterward.
 
 ### Meshopt
 
@@ -516,12 +489,6 @@ async function disposeAnimationLoop() {
  timer.dispose();
 }
 ```
-
-Keep gameplay simulation on its fixed-step clock. Visual animation can use the
-render delta unless animation events are authoritative game rules. Never call
-deprecated `Clock`, and do not query a timing source twice to derive unrelated
-deltas. A connected `Timer` owns page-visibility listeners, so always call
-`timer.dispose()` during teardown.
 
 ## Production Animation State Machine
 
@@ -739,36 +706,6 @@ state.
 
 ## Common Failures
 
-- **Decoder 404 or MIME error:** the bundler did not emit an r185
- module-relative support file, or an explicit local fallback path/version/MIME
- type is wrong.
-- **KTX2 throws before loading:** renderer support detection happened before
- awaited renderer initialization, or was skipped.
-- **Model loads but is invisible:** scale, bounds, camera, material lighting,
- layers, or local URL is wrong; inspect rather than applying folklore scale.
-- **Textures are flipped or colors wrong:** code overwrote glTF loader-managed
- texture orientation/color space.
-- **Loading reaches 100% despite a failure:** manager completion counts ended
- items; inspect the tracked failure set.
-- **Retry marks ready while old work continues:** the batch used fail-fast
- `Promise.all`, relied on abort alone, or did not guard and dispose late
- fulfilled results.
-- **Two characters share bones incorrectly:** ordinary `.clone()` was used for
- a skinned hierarchy.
-- **One instance's material change affects all:** cloned hierarchies still share
- materials by design.
-- **Animation is frozen:** mixer is not updated, delta is near zero, action was
- stopped, or its effective weight/time scale is zero.
-- **Crossfade snaps:** next action was not reset/weighted/played before fade, or
- state code restarts it every frame.
-- **Procedural head aim disappears:** mixer update runs after the bone write.
-- **Character slides away from collider:** visual root motion and gameplay
- movement both own translation.
-- **Finished event fires for the wrong one-shot:** callback did not compare
- `event.action` and was never removed.
-- **Unload breaks other instances:** shared glTF geometry/material/texture was
- disposed while borrowers remained.
-
 ## Performance
 
 - Load required first-play assets as a bounded phase; lazy-load later local
@@ -788,16 +725,6 @@ state.
  impostors, animation LOD, or baked motion where appropriate.
 - Record loading, decode, upload, first-render, mixer-update, draw-call, and GPU
  costs separately.
-
-Use an application asset cache for parsed glTF sources, with reference counts
-for borrowers and one final disposer. `THREE.Cache` is disabled by default. In
-r185 it is the shared URL-keyed response/image cache consulted directly by
-`FileLoader`, `ImageLoader`, and `ImageBitmapLoader` (and therefore indirectly
-by loaders that delegate to them). It does not cache parsed glTF scenes,
-mixers, decoder workers, materials, textures as GPU resources, or other
-application ownership objects. `THREE.Cache.clear()` only drops cache entries;
-it does not dispose GPU resources or call lifecycle methods such as
-`ImageBitmap.close()`.
 
 Warm only measured, first-visible critical resources while loading UI is still
 present. Initialize WebGPU first, finish the scene's production lights,
@@ -942,29 +869,3 @@ explicit owners because they are not discovered by model traversal.
  steady state after repeated reloads.
 
 ## Official Documentation
-
-- [Loading 3D models](https://threejs.org/manual/en/loading-3d-models.html)
-- [LoadingManager](https://threejs.org/docs/pages/LoadingManager.html)
-- [Cache](https://threejs.org/docs/pages/Cache.html)
-- [Loader.loadAsync](https://threejs.org/docs/pages/Loader.html)
-- [GLTFLoader](https://threejs.org/docs/pages/GLTFLoader.html)
-- [DRACOLoader](https://threejs.org/docs/pages/DRACOLoader.html)
-- [r185 DRACOLoader bundled configuration](https://github.com/mrdoob/three.js/blob/r185/examples/jsm/loaders/DRACOLoader.js)
-- [KTX2Loader](https://threejs.org/docs/pages/KTX2Loader.html)
-- [r185 KTX2Loader bundled transcoder](https://github.com/mrdoob/three.js/blob/r185/examples/jsm/loaders/KTX2Loader.js)
-- [HDRLoader](https://threejs.org/docs/pages/HDRLoader.html)
-- [Meshopt decoder bundled source](https://github.com/mrdoob/three.js/blob/r185/examples/jsm/libs/meshopt_decoder.module.js)
-- [SkeletonUtils](https://threejs.org/docs/pages/module-SkeletonUtils.html)
-- [Animation system manual](https://threejs.org/manual/en/animation-system.html)
-- [AnimationMixer](https://threejs.org/docs/pages/AnimationMixer.html)
-- [AnimationAction](https://threejs.org/docs/pages/AnimationAction.html)
-- [AnimationClip](https://threejs.org/docs/pages/AnimationClip.html)
-- [AnimationUtils](https://threejs.org/docs/pages/AnimationUtils.html)
-- [AnimationObjectGroup](https://threejs.org/docs/pages/AnimationObjectGroup.html)
-- [NumberKeyframeTrack](https://threejs.org/docs/pages/NumberKeyframeTrack.html)
-- [Timer](https://threejs.org/docs/pages/Timer.html)
-- [Renderer](https://threejs.org/docs/pages/Renderer.html)
-- [InstancedMesh](https://threejs.org/docs/pages/InstancedMesh.html)
-- [BatchedMesh](https://threejs.org/docs/pages/BatchedMesh.html)
-- [Light](https://threejs.org/docs/pages/Light.html)
-- [How to dispose of objects](https://threejs.org/manual/en/how-to-dispose-of-objects.html)

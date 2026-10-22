@@ -1,6 +1,6 @@
 /**
  * Build-time CLI for the engine seed payload: stages the exact files and
- * directories the workspace seeder reads (three, phaser, @dimforge/rapier3d-
+ * directories the workspace seeder reads (three, excalibur, @dimforge/rapier3d-
  * compat, three-mesh-bvh, and their declarations) out of the bot's full
  * node_modules into a standalone tree. The production Dockerfile runs this
  * in its build stage and copies the result, so the runtime image carries

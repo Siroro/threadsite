@@ -26,25 +26,6 @@ premium, showcase, or release-ready.
 
 ## Three.js Baseline And Lifecycle
 
-- The report records the installed package version, `THREE.REVISION`, renderer
- class, actual backend, and whether the path is WebGL, WebGPU, or XR.
-- Every copied API was checked against the installed revision. WebGL
- `EffectComposer`/GLSL recipes and WebGPU `RenderPipeline`/TSL recipes are not
- mixed.
-- One owner creates and tears down the renderer, animation loop, r185 `Timer`,
- active camera, resize observer/listener, loading manager, audio context, and
- asset cache.
-- `renderer.setAnimationLoop(null)` stops rendering before disposal. Controls,
- mixers, event listeners, workers, render targets, geometries, materials,
- textures, skeletons, audio nodes, and the renderer are disposed by their
- declared owner.
-- Canvas display size, drawing-buffer size, camera projection, post-processing
- targets, picking coordinates, and DOM overlay metrics stay correct after
- resize and orientation changes. DPR is capped and recorded.
-- A development remount/restart does not create a second loop, duplicate input
- handler, stale physics body, repeated audio voice, or growing GPU resource
- count.
-
 ## Game Design And Level
 
 - The brief names player promise, feeling, verbs, objective, pressure, reward,

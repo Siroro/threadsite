@@ -6,7 +6,6 @@ import { ForgejoClient } from "./forgejo.js";
 import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, turnRevertTarget, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
 import { ensureMultiplayerFiles, multiplayerContext, removeMultiplayerFiles } from "./multiplayer.js";
 import { OpenCodeHarness, addUsage, errorUsage, isTerminalAssistant, reconcileUsage, usageFromMessages, type PromptImage, type PromptResult, type TurnUsage } from "./opencode.js";
-import { PROJECT_CARD_VERSION } from "./project-card.js";
 import { publishIndex, publishSite, publishSiteRedirects, siteUrl, validateSite } from "./publish.js";
 import { buildSite, GENERATED_GITIGNORE } from "./build.js";
 import { enginePackages, ensureEnginePackages } from "./engines.js";
@@ -25,7 +24,7 @@ import { browserQaFeedback, runBrowserQa as driveBrowserQa, type BrowserQaResult
 import { assertExclusiveResources, projectAccounts, projectRepos, removalPaths } from "./project-removal.js";
 import { deleteRelayGame } from "./relay-cleanup.js";
 import { pushRenameMetadata } from "./git.js";
-import { fallbackProjectName, needsProjectNaming, projectName } from "./naming.js";
+import { fallbackProjectName, projectName } from "./naming.js";
 
 export interface MutationResult {
   project: ProjectRecord;
@@ -141,10 +140,10 @@ export class ProjectService {
   async ensureProjectName(threadId: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {
     let project = this.store.getProject(threadId);
     if (!project || project.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
-    if (!needsProjectNaming(project) && !project.pendingRename && !project.pendingThreadName) return project;
+    if (!project.pendingNaming && !project.pendingRename && !project.pendingThreadName) return project;
     if (project.pendingTurn || await this.agentBusy(threadId)) throw new Error("Recover or finish the current turn before completing the project name.");
     if (project.pendingRename) project = await this.resumeRename(threadId, onProgress);
-    if (needsProjectNaming(project)) {
+    if (project.pendingNaming) {
       const automatic = /^(?:site|game)-/i.test(project.displayName);
       let naming = project.pendingNaming ?? {
         request: project.initialPrompt || project.displayName,
@@ -227,7 +226,7 @@ export class ProjectService {
       }
     }
     await this.usageLog.record({
-      id: pending ? pending.id ?? `${project.threadId}:${pending.startedAt}` : undefined,
+      id: pending?.id,
       sessionId: project.sessionId, startedAt: pending?.startedAt,
       threadId: project.threadId, project: project.displayName, kind: project.projectKind ?? "site",
       durationMs, usage, fallbackModel: this.store.getModel(), failed,
@@ -360,14 +359,11 @@ export class ProjectService {
       status: "creating",
       createdAt: now,
       updatedAt: now,
-      // The card's front page: the original request outlives pendingTurn. The
-      // card id arrives from the already-posted message, so it is stamped with
-      // the design version it was rendered at.
+      // Keep the original request after pendingTurn is cleared.
       initialPrompt: truncate(input.initialPrompt, 2_000),
       pendingNaming: { request: input.initialPrompt, ...(input.renameable ? {} : { name: input.displayName }) },
       ...(projectKind !== "site" ? { multiplayerMode } : {}),
       infoMessageId: input.infoMessageId,
-      infoCardVersion: input.infoMessageId ? PROJECT_CARD_VERSION : undefined,
     };
     await this.store.putProject(project);
 
@@ -400,13 +396,12 @@ export class ProjectService {
     if (enginePackages(projectKind).length) {
       // The engine package is installed before the agent session starts, like
       // a dependency manager would, and re-seeded every turn if it ever goes
-      // missing — authored code just imports "three"/"phaser".
+      // missing — authored code just imports "three"/"excalibur".
       emit(onProgress, "📦 Installing the engine package (node_modules)");
       await ensureEnginePackages(workspacePath, projectKind);
     }
     if (skillNames(projectKind).length) {
-      // The matching curated engine/game playbooks ride along as repo content;
-      // OpenCode discovers them from the workspace root and loads them on demand.
+      // OpenCode discovers the curated playbooks from the workspace root.
       emit(onProgress, "🎓 Installing the curated game skills (.opencode/skills)");
       await ensureSkillFiles(workspacePath, projectKind);
     }
@@ -609,12 +604,11 @@ export class ProjectService {
       }
       // The engine playbook skill gets the same per-turn guarantee: seeded
       // before the prompt (and after the turn, below), so it is always
-      // present, current, and committed in game repos.
+      // available and current in game workspaces.
       if (await ensureSkillFiles(workspacePath, projectKind)) {
         emit(onProgress, "🎓 Restored the curated game skills (.opencode/skills)");
       }
-      // The two project documents the play card shows: a project created
-      // before they existed gets them now, so the agent can fill them in.
+      // Ensure the play card's author-maintained documents are available.
       if (await ensureProjectDocuments(workspacePath, project.displayName)) {
         emit(onProgress, "📝 Added the project description and changelog");
       }
@@ -983,7 +977,7 @@ export class ProjectService {
       log("warn", "project.delivery_failed", { threadId, commit: commitStats?.commit, error: truncate(deliveryError || "unknown", 400) });
     }
 
-    if (ownsTurn && !validationError && !deliveryError && (needsProjectNaming(project) || project.pendingThreadName)) {
+    if (ownsTurn && !validationError && !deliveryError && (project.pendingNaming || project.pendingThreadName)) {
       try {
         project = await this.ensureProjectName(threadId, input.onProgress);
         if (commitStats && project.lastCommit) commitStats = { ...commitStats, commit: project.lastCommit };
@@ -1424,7 +1418,6 @@ export class ProjectService {
    * path sees the store's session id change and fails instead of recreating
    * its session. The stopped turn reports failure in the thread through its
    * normal path; messages queued behind it run on the fresh session at once.
-   * Sites, git history, and project notes are untouched.
    */
   async resetSession(threadId: string): Promise<{ project: ProjectRecord; stoppedTurn: boolean }> {
     const project = this.store.getProject(threadId);

@@ -34,12 +34,16 @@ document.querySelector('#game')!.appendChild(renderer.domElement);
 scene.add(new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial({ color: '#33ddaa' })));
 renderer.render(scene, camera); (window as any).smokeReady = true;
 `;
-  if (kind === "game-2d") return `import * as Phaser from 'phaser';
+  if (kind === "game-2d") return `import * as ex from 'excalibur';
 ${common}
-class CheckScene extends Phaser.Scene {
-  create() { this.add.rectangle(100, 80, 80, 80, 0xffaa22); (window as any).smokeReady = true; }
-}
-new Phaser.Game({ type: Phaser.WEBGL, parent: 'game', width: 400, height: 200, backgroundColor: '#162344', scene: CheckScene, audio: { noAudio: true } });
+const host = document.querySelector<HTMLElement>('#game')!;
+host.style.width = 'min(400px, 100%)'; host.style.height = '200px';
+const canvas = document.createElement('canvas'); canvas.style.display = 'block'; host.appendChild(canvas);
+const game = new ex.Engine({ canvasElement: canvas, displayMode: ex.DisplayMode.FillContainer,
+  backgroundColor: ex.Color.fromHex('#162344'), suppressPlayButton: true, suppressConsoleBootMessage: true });
+game.add(new ex.Actor({ x: 100, y: 80, width: 80, height: 80, color: ex.Color.fromHex('#ffaa22') }));
+await game.start();
+game.on('postdraw', () => { (window as any).smokeReady = true; });
 `;
   return `${common}\n(window as any).smokeReady = true;\n`;
 }
@@ -49,6 +53,9 @@ export function planFor(testCase) {
   const inspect = (stage) => `async () => {
     for (let attempt = 0; attempt < 100 && (!window.smokeReady || document.querySelector('#data').textContent !== 'Local data loaded'); attempt++) await new Promise(r => setTimeout(r, 100));
     if (!window.smokeReady) throw new Error('Engine failed to render');
+    ${testCase.kind === "game-2d" ? `const canvas = document.querySelector('#game canvas');
+    const bounds = canvas.getBoundingClientRect();
+    if (Math.abs(canvas.width - bounds.width * devicePixelRatio) > 1 || Math.abs(canvas.height - bounds.height * devicePixelRatio) > 1) throw new Error('Game canvas is being scaled instead of rendering at native display resolution');` : ""}
     if (document.querySelector('#data').textContent !== 'Local data loaded') throw new Error('Local fetch failed');
     if (document.querySelector('#stage').textContent !== '${stage}') throw new Error('Stale preview');
     if (document.querySelector('#greeting').textContent !== 'Hello Ada') throw new Error('Form failed');

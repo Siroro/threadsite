@@ -124,8 +124,6 @@ test("saved feedback gives the agent confirmed findings only", () => {
   assert.match(feedback, /Runtime finding: TypeError at main.js:20/);
   assert.match(feedback, /Environment noise .* is already excluded/);
   assert.equal(browserQaFeedback({ checkedAt: "today", findings: [] }), "");
-  // Records written before findings replaced the old error/warning split.
-  assert.match(browserQaFeedback({ checkedAt: "today", errors: ["TypeError at main.js:20"] }), /Runtime finding/);
 });
 
 test("the render probe's JSON parses and malformed output is ignored", () => {

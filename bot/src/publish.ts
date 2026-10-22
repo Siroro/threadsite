@@ -87,11 +87,14 @@ export async function validateSite(siteDir: string): Promise<SiteStats> {
   }
 
   await walk(root);
+  if (!tsSources.length && scripts.some((file) => path.relative(root, file).replaceAll(path.sep, "/").startsWith("js/"))) {
+    throw new Error("JavaScript type-check error: site/js/ requires TypeScript source under site/src/.");
+  }
   await validateScriptSyntax(root, scripts);
   await validateInlineScripts(root);
   await validateAssetReferences(root);
   await validateModuleResolution(root);
-  await validateScriptTypes(root, scripts, tsSources);
+  if (tsSources.length) await validateTypeScriptSources(root, tsSources, scripts);
   return { files, bytes };
 }
 
@@ -342,132 +345,13 @@ function tagAttr(attrs: string, name: string): string {
 }
 
 /**
- * Check authored browser code with tsc. Deliberately lenient: strict null
- * checks are off (DOM APIs return nullable types everywhere and generated code
- * rarely guards them), TS2307 diagnostics for non-relative imports are dropped
- * because CDN/import-map dependencies like `three` have no local node_modules
- * to resolve against, TS2339 diagnostics on DOM base-type receivers are
- * dropped because un-narrowed DOM lookups are idiomatic here, vendor-prefixed
- * lookups on `window` (`window.webkitAudioContext`) are dropped because tsc's
- * DOM lib does not carry them, diagnostics caused by
- * string-literal inference (TS2367 comparisons and TS2322 assignments whose
- * target type is a string literal — frozen constant maps pin singleton types
- * onto plain status variables) are dropped because the strings are ordinary
- * values at runtime, and TS2554 in the surplus-argument direction is dropped
- * because JavaScript ignores extra call arguments. Everything else — undefined
- * variables, genuinely wrong types, too-few arguments, misspelled imports —
- * fails the turn.
- *
- * Two shapes of project flow through here. TypeScript projects (site/src/
- * exists) are checked on their sources; the bundled site/js/ output is
- * compiler-generated and only needs the node --check pass. Legacy projects
- * (authored .js from before the TypeScript switch) keep the original
- * checkJs-over-authored-JavaScript gate.
- *
- * Vendored code the agent downloads itself is never type-checked: inference
- * over a minified bundle (a vendored three.js yields hundreds of bogus
- * diagnostics) also poisons call sites in authored code that uses it. Those
- * files under `assets/` are replaced in the temp mirror by a `.d.ts` stub
- * re-declaring their real export names as `any`. The harness-seeded engine
- * packages are different: their real declarations are mapped in through
- * tsconfig `paths`, so `from "three"` is checked against the actual API —
- * matching what the agent's language server sees.
- * The harness-owned relay client keeps its real types for authored call sites
- * (it and net-config.js are mirrored verbatim) but is not an input. Vendored
- * files are still syntax-checked by the `node --check` pass over the real
- * tree, so a truncated download still fails the turn.
- */
-async function validateScriptTypes(root: string, scripts: string[], tsSources: string[]): Promise<void> {
-  if (tsSources.length) {
-    await validateTypeScriptSources(root, tsSources, scripts);
-    return;
-  }
-  const authored = scripts.filter((script) => !isVendoredScript(root, script));
-  if (!authored.length) return;
-
-  const typeScriptCli = path.join(process.cwd(), "node_modules", "typescript", "bin", "tsc");
-  const typeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-types-"));
-  const mirrorRoot = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-scripts-"));
-  try {
-    const inputs: string[] = [];
-    for (const script of scripts) {
-      const relative = path.relative(root, script).replaceAll(path.sep, "/");
-      const source = await fs.readFile(script, "utf8");
-      const mirrored = path.join(mirrorRoot, ...relative.split("/"));
-      await fs.mkdir(path.dirname(mirrored), { recursive: true });
-      if (isVendoredLibrary(relative)) {
-        // The implementation is deliberately not mirrored: for every import
-        // style (./x.js, ./x, ./x.mjs) tsc resolves to the sibling stub.
-        await fs.writeFile(stubPath(mirrored), vendorStub(source), "utf8");
-      } else {
-        await fs.writeFile(mirrored, source, "utf8");
-        if (relative !== "js/threadsite-net.js" && relative !== "net/threadsite-net.js") inputs.push(relative);
-      }
-    }
-
-    const args = [
-      typeScriptCli,
-      "--noEmit",
-      "--allowJs",
-      "--checkJs",
-      "--noImplicitAny",
-      "false",
-      // Default: on for this module/resolution combo. It would let
-      // `import lib from` pass against stubbed (and declared) modules that
-      // have no default export — a browser-fatal mistake worth failing.
-      "--allowSyntheticDefaultImports",
-      "false",
-      "--target",
-      "ES2022",
-      "--module",
-      "ESNext",
-      "--moduleResolution",
-      "Bundler",
-      "--lib",
-      "ES2022,DOM,DOM.Iterable",
-      "--skipLibCheck",
-      "--typeRoots",
-      typeRoot,
-      ...inputs,
-    ];
-    let result: { stdout?: string; stderr?: string };
-    let processError: unknown;
-    try {
-      // tsc runs with the mirror as cwd so diagnostics carry clean
-      // site-relative paths (js/main.js(3,10)) instead of temp absolute ones.
-      result = await execFileAsync(process.execPath, args, {
-        cwd: mirrorRoot,
-        timeout: 30_000,
-        maxBuffer: 8 * 1024 * 1024,
-      });
-    } catch (error) {
-      processError = error;
-      result = error as { stdout?: string; stderr?: string };
-    }
-    const raw = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-    // tsc quotes resolved module paths inside some messages; keep the temp
-    // mirror invisible so errors read as site-relative paths.
-    const mirrorPosix = mirrorRoot.replaceAll(path.sep, "/");
-    const significant = significantDiagnostics(raw)
-      .replaceAll(`${mirrorPosix}/`, "")
-      .replaceAll(`${mirrorRoot}${path.sep}`, "");
-    if (significant) throw new Error(`JavaScript type-check error:\n${significant}`);
-    if (processError && !raw) throw new Error(`JavaScript type-checker failed: ${String(processError)}`);
-  } finally {
-    await fs.rm(typeRoot, { recursive: true, force: true });
-    await fs.rm(mirrorRoot, { recursive: true, force: true });
-  }
-  await validateElementIds(root, authored);
-}
-
-/**
  * Type-check the authored TypeScript sources of a bundled project: a temp
  * mirror carries site/src/ verbatim and the harness-owned net files verbatim
  * (real types for call sites, never inputs); the harness-seeded engine
  * packages contribute their REAL declarations through absolute tsconfig
  * `paths`, and hand-downloaded vendored files under assets/ become any-typed
  * stubs with their real export names. tsc runs from a tsconfig in the mirror
- * with the lenient flags and diagnostic filters described above; the bundled
+ * with implicit-any and DOM lookup lenience; the bundled
  * site/js/ output is not checked here (it is compiler output and already
  * covered by node --check).
  */
@@ -498,7 +382,7 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
     }
 
     // Agent-vendored libraries under assets/ become any-typed stubs with their
-    // real export names — the original trust model for hand-downloaded files.
+    // real export names for authored imports.
     for (const script of scripts) {
       const relative = path.relative(root, script).replaceAll(path.sep, "/");
       if (!isVendoredLibrary(relative)) continue;
@@ -508,7 +392,7 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
     }
 
     // The harness-seeded engine packages (workspace node_modules/) contribute
-    // their REAL TypeScript declarations: bare "three"/"phaser" resolve onto
+    // their REAL TypeScript declarations: bare "three"/"excalibur" resolve onto
     // them through tsconfig paths (absolute, pointing into the workspace — no
     // copying), so authored engine code is type-checked against the library's
     // actual API, matching what the agent's language server sees.
@@ -565,12 +449,6 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
     await fs.rm(mirrorRoot, { recursive: true, force: true });
   }
   await validateElementIds(root, tsSources);
-}
-
-/** Scripts excluded from the type-check inputs: vendored libraries and the harness-owned client. */
-function isVendoredScript(root: string, file: string): boolean {
-  const relative = path.relative(root, file).replaceAll(path.sep, "/");
-  return isVendoredLibrary(relative) || relative === "js/threadsite-net.js" || relative === "net/threadsite-net.js";
 }
 
 /** Downloaded vendor/library files live below `assets/` per the AGENTS.md contract. */
@@ -658,19 +536,9 @@ function significantDiagnostics(raw: string): string {
 
 function isIgnoredDiagnostic(header: string): boolean {
   return (
-    isUnresolvedExternalImport(header) ||
     isVendoredFileDiagnostic(header) ||
-    isDomBaseTypeDiagnostic(header) ||
-    isLegacyWindowPropertyDiagnostic(header) ||
-    isStringLiteralInferenceDiagnostic(header) ||
-    isSurplusArgumentDiagnostic(header)
+    isDomBaseTypeDiagnostic(header)
   );
-}
-
-/** Matches TS2307 lines for bare package imports (`three`), not relative paths (`./foo`). */
-function isUnresolvedExternalImport(line: string): boolean {
-  const match = line.match(/error TS2307: Cannot find module '([^']+)'/);
-  return match !== null && !/^[./]/.test(match[1]);
 }
 
 /**
@@ -682,7 +550,7 @@ function isUnresolvedExternalImport(line: string): boolean {
  * includes it.
  */
 function isVendoredFileDiagnostic(line: string): boolean {
-  return /(?:^|[\\/])(?:assets[\\/][^(]*|(?:js|net)[\\/]threadsite-net\.js)\(/.test(line);
+  return /(?:^|[\\/])(?:assets[\\/][^(]*|net[\\/]threadsite-net\.js)\(/.test(line);
 }
 
 /**
@@ -697,54 +565,6 @@ function isVendoredFileDiagnostic(line: string): boolean {
 function isDomBaseTypeDiagnostic(line: string): boolean {
   return /error TS2339: Property '[^']+' does not exist on type '(?:Element|HTMLElement|SVGElement|EventTarget|Node|ChildNode)'\.$/
     .test(line);
-}
-
-/**
- * TS2339/TS2551 property lookups on `window`/`globalThis`. Legacy
- * vendor-prefixed APIs (`window.webkitAudioContext`,
- * `window.mozRequestAnimationFrame`) are absent from tsc's DOM lib even though
- * Safari/old-Chrome support them, so the idiomatic
- * `window.AudioContext || window.webkitAudioContext` fallback pattern flags;
- * reading window globals defined by other scripts flags the same way. The
- * browser resolves these dynamically at runtime.
- */
-function isLegacyWindowPropertyDiagnostic(line: string): boolean {
-  return /error TS25(?:39|51): Property '[^']+' does not exist on type '(?:Window|globalThis)/.test(line);
-}
-
-/**
- * Diagnostics caused by non-widening string-literal inference in untyped JS.
- * Frozen constant maps (`Object.freeze({ MENU: "menu", PLAY: "playing" })`) and
- * other literal-preserving sources pin singleton types onto plain variables,
- * so the idiomatic state-machine pattern — copy a constant into a `let`, later
- * assign or compare a different status — fails with TS2322/TS2367 even though
- * the strings are ordinary values at runtime. (The harness's own NET_STATUS
- * map is JSDoc-typed to string for exactly this reason; games still define
- * their own maps.) Only assignments whose target type is a string literal
- * (or a union led by one) are dropped — every other mismatched-type assignment
- * still fails — and TS2367 (a dead-branch heuristic, never browser-fatal) is
- * dropped outright.
- */
-function isStringLiteralInferenceDiagnostic(line: string): boolean {
-  return (
-    /error TS2367: This comparison appears to be unintentional/.test(line) ||
-    /error TS2322: Type '[^']*' is not assignable to type '"/.test(line)
-  );
-}
-
-/**
- * TS2554 in the surplus-argument direction: more arguments passed than the
- * callee declares. JavaScript ignores extra arguments at runtime, and
- * generated game code routinely passes an event or status object to a helper
- * declared without parameters. The dangerous direction — too few arguments,
- * which surfaces as `undefined` inside the callee — still fails, so only
- * diagnostics whose `got` count exceeds the declared maximum are dropped.
- */
-function isSurplusArgumentDiagnostic(line: string): boolean {
-  const match = line.match(/error TS2554: Expected (?:(\d+)-(\d+)|at most (\d+)|(\d+)) arguments?, but got (\d+)/);
-  if (!match) return false;
-  const expectedMax = Math.max(Number(match[1] ?? match[3] ?? match[4] ?? 0), Number(match[2] ?? 0));
-  return Number(match[5]) > expectedMax;
 }
 
 /**

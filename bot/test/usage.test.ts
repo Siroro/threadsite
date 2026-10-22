@@ -63,22 +63,21 @@ test("side prompts spend tokens without counting as turns", async (t) => {
   const log = new UsageLog(file);
   const usage = usageFromMessages([message("done", Date.now())])!;
   await log.record({ label: "turn", threadId: "thread", project: "Game", kind: "game-2d", usage });
-  await log.record({ label: "preview", threadId: "thread", project: "Game", kind: "game-2d", usage });
   await log.record({ label: "title", threadId: "thread", project: "Game", kind: "game-2d", usage });
   const total = await new UsageLog(file).threadTotal("thread");
   assert.equal(total.turns, 1, "only real agent turns count as turns");
-  assert.equal(total.inputTokens, 405, "side prompts still spent their tokens");
+  assert.equal(total.inputTokens, 270, "side prompts still spent their tokens");
 });
 
-test("legacy zero-token entries backfill within their windows, retaining failures and turn counts", async (t) => {
+test("missing turn usage reconciles within saved boundaries, retaining failures and turn counts", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-backfill-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const file = path.join(root, "usage.jsonl");
   const entry = { v: 1, label: "turn", threadId: "thread", project: "Game", kind: "game-3d",
     inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, models: [] };
   await fs.writeFile(file, [
-    { ...entry, ts: new Date(2000).toISOString(), failed: true },
-    { ...entry, ts: new Date(4000).toISOString() },
+    { ...entry, id: "first-turn", sessionId: "session", startedAt: new Date(1000).toISOString(), ts: new Date(2000).toISOString(), failed: true },
+    { ...entry, id: "second-turn", sessionId: "session", startedAt: new Date(3000).toISOString(), ts: new Date(4000).toISOString() },
   ].map((value) => JSON.stringify(value)).join("\n") + "\n");
   const log = new UsageLog(file);
   const messages = [message("first", 1000), message("second", 3000, 200, 40), message("future", 5000)];

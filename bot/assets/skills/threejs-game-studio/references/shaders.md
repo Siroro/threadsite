@@ -15,18 +15,6 @@
 - Porting GLSL concepts to TSL
 - Performance, fallback, and QA gates
 
-This cookbook is verified against **Three.js r185**. Confirm the installed
-revision and recheck the official API, source, types, migration notes, and
-examples on every upgrade. Keep shader source, textures, lookup data, and
-generated noise modules in the project. Never load shader strings, textures,
-presets, or post-processing code from a runtime URL.
-
-Public APIs in this cookbook should follow the installed documentation.
-Implementation details—shader-chunk injection points, node setup ordering,
-target ownership, and runtime methods missing from community types—are verified
-for r185 only and must be rechecked against source, types, migration notes, and
-official examples on every upgrade.
-
 Texture-loading examples use the project-owned `publicAssetUrl()` helper from
 `local-assets.md`; import it from the local asset boundary in real code.
 
@@ -44,12 +32,6 @@ states that `ShaderMaterial`, `RawShaderMaterial`, `onBeforeCompile`, and
 `EffectComposer` are not supported by `WebGPURenderer`. Port those features to
 node materials and TSL; do not add renderer checks around an incompatible
 material and hope it degrades.
-
-r185 has one narrow bridge in the other direction: a separate
-`WebGLRenderer` can compile supported node materials after installing
-`WebGLNodesHandler`, and can run supported effects through `setEffects()`.
-Use it only as the measured migration aid described in `rendering.md`; it does
-not make `RenderPipeline` valid on WebGL or GLSL valid on WebGPURenderer.
 
 Prefer built-in materials first. Add custom shader logic only when it creates a
 visible gameplay read, art-direction feature, or measured performance win that
@@ -117,14 +99,6 @@ Update the uniform's `.value`; do not recreate the uniform object or material
 every frame. Share one material when all objects share values. Use instanced
 attributes, vertex colors, a data texture, or separate material instances when
 values must differ per object.
-
-Shader chunks and their injection locations are renderer implementation details;
-the example above is pinned to r185. Confirm their names and placement against
-the installed Three.js source, then typecheck and render-test after every
-upgrade. The
-[r185 ShaderChunk source](https://github.com/mrdoob/three.js/blob/r185/src/renderers/shaders/ShaderChunk.js)
-lists the verified-baseline chunks but does not make arbitrary injection points
-stable.
 
 ## Texture Sampling And Color
 
@@ -225,52 +199,6 @@ not supported by `WebGPURenderer`, and shader-chunk replacements are
 version-sensitive.
 
 Current safe pattern:
-
-```ts
-const rimMaterial = new THREE.MeshStandardMaterial({
- color: 0x245ec7,
- metalness: 0.1,
- roughness: 0.48,
-});
-
-const RIM_PROGRAM_KEY = 'player-rim-r185-v1';
-const rimColor = { value: new THREE.Color(0x25d9ff) };
-const rimPower = { value: 3.0 };
-const rimStrength = { value: 1.25 };
-
-rimMaterial.onBeforeCompile = (shader) => {
- // Reuse the same holders across every compiled material variant.
- shader.uniforms.uRimColor = rimColor;
- shader.uniforms.uRimPower = rimPower;
- shader.uniforms.uRimStrength = rimStrength;
-
- const marker = '#include <emissivemap_fragment>';
- if (!shader.fragmentShader.includes(marker)) {
- throw new Error(`Expected shader chunk missing: ${marker}`);
- }
-
- shader.fragmentShader = shader.fragmentShader.replace(
- marker,
- /* glsl */ `
- #include <emissivemap_fragment>
- float rim = pow(
- 1.0 - saturate(dot(normalize(normal), normalize(vViewPosition))),
- uRimPower
- );
- totalEmissiveRadiance += uRimColor * rim * uRimStrength;
- `,
- );
-
- shader.fragmentShader = /* glsl */ `
- uniform vec3 uRimColor;
- uniform float uRimPower;
- uniform float uRimStrength;
- ` + shader.fragmentShader;
-};
-
-rimMaterial.customProgramCacheKey = () => RIM_PROGRAM_KEY;
-rimMaterial.needsUpdate = true;
-```
 
 Update the shared uniform without recompiling every program variant:
 
@@ -400,9 +328,6 @@ for current `colorNode`, `normalNode`, `emissiveNode`, `metalnessNode`,
 
 ## TSL RenderPipeline
 
-Use [RenderPipeline](https://threejs.org/docs/pages/RenderPipeline.html), not
-the deprecated `PostProcessing` wrapper:
-
 ```ts
 import * as THREE from 'three/webgpu';
 import { pass } from 'three/tsl';
@@ -420,12 +345,6 @@ await renderer.setAnimationLoop(() => {
  }
 });
 ```
-
-In r185, `RenderPipeline.render()` temporarily disables XR while rendering.
-Use the pipeline for desktop/non-XR presentation, but call
-`renderer.render(scene, camera)` directly whenever `renderer.xr.isPresenting`.
-That deliberately disables the desktop post chain in-headset; use an alternate
-XR post path only after exact-version, on-device verification.
 
 For a current bloom composition:
 
@@ -465,17 +384,7 @@ If an effect needs display-referred input before the end, insert
 [`renderOutput`](https://threejs.org/docs/pages/RenderOutputNode.html) at that
 point and set `pipeline.outputColorTransform = false`. Never transform twice.
 
-Use `packNormalToRGB()` and `unpackRGBToNormal()` in the installed revision;
-reject deprecated `directionToColor()` and `colorToDirection()`. Use current
-`BloomNode`; reject removed `AnamorphicNode` recipes.
-
 ### Resize and dispose the WebGPU pipeline
-
-Resize the renderer and camera from one owner. In r185, `PassNode` and
-`BloomNode` read the renderer drawing-buffer size during their update and
-resize their own internal targets. There is no `RenderPipeline.setSize()` call.
-Custom targets or effect nodes that are not self-sizing remain their creator's
-responsibility.
 
 ```ts
 let lastWidth = 0;
@@ -552,14 +461,6 @@ Port intent, not syntax:
 | Full-screen effect | Compose nodes in `RenderPipeline` |
 | MRT | `pass()`, `setMRT(mrt({...}))`, and `getTextureNode(name)` |
 | Compute | Build a TSL compute node and dispatch through the initialized renderer |
-
-In r185, `NodeMaterial` applies its built-in morph, skinning, displacement,
-batch, and instance transforms to `positionLocal` before evaluating
-`material.positionNode`. Base an additive deformation on `positionLocal` to
-preserve those transforms. Use `positionGeometry` only when raw attribute-space
-input is intentional and the custom position fully owns any transformations it
-still needs. This setup order is an r185 implementation detail; re-verify it on
-upgrade.
 
 Do not transliterate shader chunks or copy GLSL preprocessor branches into
 TSL. Identify inputs, coordinate spaces, material outputs, render-pass outputs,

@@ -36,7 +36,7 @@ now make the visual design look like a financial terminal without losing the jok
 
 Every normal message in a registered thread becomes the next mutation of the same site. Reply while a turn runs to steer it live — the message is submitted straight into the running agent turn and folded into the current work instead of waiting for the next pass. When the agent asks a question mid-turn, the requester gets pinged with answer buttons.
 
-Each project thread also gets a **pinned project card** — type (site/2D/3D), game engine, multiplayer setting, original request, advisory Browser QA status, lifetime usage, and links — that updates itself after every turn. Settings appear above the request; older pinned cards refresh on the next bot restart. Model routing and spend details stay in admin views.
+Each project thread also gets a **pinned project card** — type (site/2D/3D), game engine, multiplayer setting, original request, advisory Browser QA status, lifetime usage, and links — that updates itself after every turn. Settings appear above the request; pinned cards refresh at startup. Model routing and spend details stay in admin views.
 
 ## Project thread commands
 
@@ -64,7 +64,7 @@ While a turn runs, its Discord message updates in place as a live status card:
 
 Questions switch to a shorter amber card with the question, option descriptions and answer/skip buttons close at hand, including on mobile. The selected answer and responder remain visible afterward. The Stop button remains available while work runs. A full context window is shown as context usage, not a percentage estimate of how close the whole job is to completion. Provider spend, the model name and private reasoning are never included in the public card.
 
-Lifetime token usage is stored in `data/bot/usage-log.jsonl` (`USAGE_LOG_FILE` inside the bot container). Turns have stable IDs, so restart recovery updates the same entry rather than counting it twice. Billing is reconciled from OpenCode's persisted message history, including subagents, and flushed before clearing the recovery marker. Startup also backfills older zero-token entries where saved history is still available and refreshes affected pinned cards. Keep both the bot data and OpenCode data volumes when rebuilding services. If the provider never reported counts, or the original session was deleted, missing historical tokens cannot be reconstructed; the card shows "token counts unavailable" when no counts are known.
+Lifetime token usage is stored in `data/bot/usage-log.jsonl` (`USAGE_LOG_FILE` inside the bot container). Turns have stable IDs, so restart recovery updates the same entry rather than counting it twice. Billing is reconciled from OpenCode's persisted message history, including subagents, and flushed before clearing the recovery marker. Startup reconciles saved turn IDs, session IDs and time boundaries against persisted history, then refreshes the pinned cards. Keep both the bot data and OpenCode data volumes when rebuilding services. If the provider never reported counts, or the original session was deleted, missing historical tokens cannot be reconstructed; the card shows "token counts unavailable" when no counts are known.
 
 Because HTTP request timeouts to the agent service are disabled by design, a provider that stops emitting events would otherwise leave the card heartbeating forever. The card therefore tracks real agent activity (not its own heartbeat) and, after `TURN_STALL_WARN_MS` without any event, switches to an amber **No progress for Nm** state that points at `/site stop`. The warning is suppressed while the thread is queued or waiting for an answer, where idleness is expected. It is a visible watchdog, not an automatic abort.
 
@@ -100,7 +100,7 @@ When `/site start` or `/makegam` creates a new thread and no explicit `name` opt
 
 Initial automatic naming is persisted before the first build, so resumed builds finish it too. If the selected title model fails or returns an unusable name, the bot tries a different available model (up to three attempts, each bounded to 20 seconds plus cleanup). If models are unavailable, a readable name derived from the original request is used. The chosen name is saved before remote changes. Automatic naming can preserve partial failed-turn edits without building or publishing them; the last accepted site moves to the new URL.
 
-Rename commits are metadata, not an additional agent turn: `/site revert` undoes the complete previous agent turn while preserving the current project name and links, including in projects renamed by older versions.
+Rename commits are metadata, not an additional agent turn: `/site revert` uses the saved turn boundary while preserving the current project name and links.
 
 ### `/site compact` and `/site revert`
 

@@ -429,13 +429,6 @@ their CPU cost, and use `setCustomSort()` only when the default order is not
 appropriate. Transparent sorting orders batch objects, not intersecting
 triangles within an object, so transparency artifacts can still remain.
 
-`SceneOptimizer` is an experimental addon that can replace compatible scene
-meshes with `BatchedMesh` instances. It mutates the supplied scene and its
-instancing conversion is not implemented in r185. Treat it as an opt-in loading
-or authoring experiment: clone or otherwise preserve the source hierarchy,
-inspect semantic IDs/material ownership after conversion, and keep it only when
-measurement and lifecycle tests beat an explicit batch design.
-
 ## `LOD`
 
 `LOD` selects one child by camera distance. Create visibly compatible levels,

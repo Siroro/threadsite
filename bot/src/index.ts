@@ -27,7 +27,7 @@ import { ForgejoClient } from "./forgejo.js";
 import { getLogFile, log, logError, recentIncidents, recordIncident, serializeError } from "./logger.js";
 import { multiplayerRelayStatus } from "./multiplayer.js";
 import { OpenCodeHarness, formatTurnUsage, type PromptImage, type QuotaBlock } from "./opencode.js";
-import { PROJECT_CARD_VERSION, renderProjectCard, type ProjectCardMessage, type ProjectCardState } from "./project-card.js";
+import { renderProjectCard, type ProjectCardMessage, type ProjectCardState } from "./project-card.js";
 import { DiscordProgress, type ProgressCallback } from "./progress.js";
 import { ProjectService, TurnStoppedError, type MutationResult, type StopTurnOutcome } from "./project.js";
 import { recoverPublishRoot } from "./publish.js";
@@ -1443,8 +1443,8 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     await interaction.editReply(
       `🛑 Hard reset complete: aborted ${summary.aborted} running turn(s) and deleted every agent session on the service. ` +
       `Fresh sessions were started for ${summary.stopped}/${summary.total} project(s).` +
-      `${summary.failed ? ` ${summary.failed} project(s) could not be re-sessioned — see the bot log.` : ""}\n` +
-      "Sites, git history, and project notes are untouched. Interrupted threads will show a failure message for the turn that was stopped.",
+      `${summary.failed ? ` ${summary.failed} project(s) could not be re-sessioned — see the bot log.` : ""}\n`
+      ,
     );
     return;
   }
@@ -1662,9 +1662,9 @@ async function postProjectCard(thread: CardChannel, project: ProjectRecord): Pro
   // not sit at the top of the thread.
   await message.pin().catch((error) => log("warn", "discord.project_card_pin_failed", { threadId: project.threadId, error: serializeError(error) }));
   if (store.getProject(project.threadId)) {
-    await store.patchProject(project.threadId, { infoMessageId: message.id, infoCardVersion: PROJECT_CARD_VERSION }).catch(() => undefined);
+    await store.patchProject(project.threadId, { infoMessageId: message.id }).catch(() => undefined);
   }
-  log("info", "discord.project_card_posted", { threadId: project.threadId, messageId: message.id, version: PROJECT_CARD_VERSION });
+  log("info", "discord.project_card_posted", { threadId: project.threadId, messageId: message.id });
   return message;
 }
 
@@ -1680,11 +1680,6 @@ async function refreshProjectCard(threadId: string): Promise<void> {
       const card = await thread.messages.fetch(project.infoMessageId).catch(() => undefined);
       if (card && card.author.id === client.user?.id) {
         await card.edit(renderProjectCard(await projectCardState(project)));
-        // A refresh always renders the current design; sync a stale stored
-        // version so boot reconciliation can skip this card next time.
-        if (project.infoCardVersion !== PROJECT_CARD_VERSION) {
-          await store.patchProject(threadId, { infoCardVersion: PROJECT_CARD_VERSION }).catch(() => undefined);
-        }
         return;
       }
     }
@@ -1707,16 +1702,11 @@ function previewProjectRecord(
   };
 }
 
-/**
- * Boot-time card reconciliation: projects from before the card feature get
- * one, and cards still on an older design version are upgraded — bump
- * PROJECT_CARD_VERSION and every pinned card re-renders on the next start.
- */
+/** Reconcile saved usage and refresh pinned cards at startup. */
 async function reconcileProjectCards(): Promise<void> {
   for (const project of store.listProjects()) {
     if (project.pendingDeletion) continue;
-    const usageChanged = await projects.reconcileProjectUsage(project.threadId);
-    if (!usageChanged && project.infoMessageId && project.infoCardVersion === PROJECT_CARD_VERSION) continue;
+    await projects.reconcileProjectUsage(project.threadId);
     await refreshProjectCard(project.threadId);
   }
 }
@@ -1795,7 +1785,7 @@ async function applyAiThreadTitle(thread: ThreadChannel, title: string): Promise
 /**
  * Present a finished turn in two messages: the turn's own message becomes the
  * technical card (the agent's report, the commit, the usage), and a new
- * message under it carries the playable card (the screenshot, the preview, the
+ * message under it carries the playable card (the screenshot, project text and
  * play link). Servers without Embed Links permission get the same information
  * as text.
  */
@@ -1826,12 +1816,14 @@ async function setTurnCards(status: Message, result: MutationResult, note?: stri
   await postPlayCard(status.channel, state);
 }
 
-/** Post the playable card — the screenshot, the preview and the play link. */
+/** Post the playable card with the screenshot, project documents and play link. */
 async function postPlayCard(channel: TextBasedChannel, state: TurnCardState): Promise<void> {
   if (!("send" in channel)) return;
   const card = renderPlayCard(state);
   try {
-    await channel.send({ ...card, components: [] });
+    // The playable card is a Components V2 container: full message width,
+    // with the screenshot in a media gallery and the links as real buttons.
+    await channel.send(card);
   } catch (error) {
     if ((error as { code?: number }).code === 50013) {
       // No Embed Links permission: the same information as plain text, with

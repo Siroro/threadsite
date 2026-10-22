@@ -46,24 +46,16 @@ export interface ProjectRecord {
   initialPrompt?: string;
   /** The pinned project-card message; edited in place after every turn outcome. */
   infoMessageId?: string;
-  /** Design version the pinned card last rendered; the next boot upgrades older designs. */
-  infoCardVersion?: number;
   lastError?: string;
-  /**
-   * Confirmed browser-QA findings carried into the agent's next turn. `errors`
-   * is the legacy field name from records written before findings replaced the
-   * old error/warning split; it is read once and never written again.
-   */
-  browserQaFindings?: { checkedAt: string; findings?: string[]; errors?: string[] };
-  /** Model-written preview of the project, shown on the play card. */
-  preview?: { pitch: string; added?: string; play?: string };
+  /** Confirmed advisory browser findings carried into the next turn. */
+  browserQaFindings?: { checkedAt: string; findings: string[] };
   /** Short hash of the commit belonging to the last accepted turn; used by /site revert. */
   lastCommit?: string;
   /** Pre-turn commit; metadata-only rename commits belong to the same undo boundary. */
   lastTurnBaseCommit?: string;
   /** Stable relay tenant: renaming public URLs must not reset a game's world. */
   multiplayerGameId?: string;
-  /** Multiplayer architecture chosen at /makegam; undefined means arena (the pre-option default). */
+  /** Multiplayer architecture chosen at /makegam. */
   multiplayerMode?: MultiplayerMode;
   siteAliases?: string[];
   pendingThreadName?: string;

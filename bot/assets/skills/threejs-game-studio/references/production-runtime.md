@@ -32,10 +32,6 @@ the boundary in `networking-boundary.md`.
 | Background planning/data transforms | Local worker pool | Optional math/data consumer; no DOM or shared Three object graph |
 | Frame/resource evidence | Local diagnostics | Read `renderer.info`; rendering does not upload telemetry |
 
-Keep four clocks separate: fixed simulation tick, render time, asynchronous I/O
-completion, and wall-clock metadata. Only the simulation tick may control
-gameplay. Async results enter through a deliberate fixed-step boundary.
-
 ## Versioned Save Contract And Migrations
 
 Save plain, bounded, schema-validated data. Include a schema version, content
@@ -702,10 +698,6 @@ session history.
  temporary object URL and observers are released during teardown.
 
 ## Official Three.js API Boundary
-
-Verified against the current r185 API surface. The surrounding persistence,
-streaming scheduler, worker protocol, and diagnostics policy are game/browser
-code:
 
 - [GLTFLoader](https://threejs.org/docs/pages/GLTFLoader.html), [Loader](https://threejs.org/docs/pages/Loader.html), and [LoadingManager](https://threejs.org/docs/pages/LoadingManager.html)
 - [Box3](https://threejs.org/docs/pages/Box3.html), [Sphere](https://threejs.org/docs/pages/Sphere.html), [Frustum](https://threejs.org/docs/pages/Frustum.html), and [LOD](https://threejs.org/docs/pages/LOD.html)

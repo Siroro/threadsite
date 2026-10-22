@@ -418,46 +418,6 @@ may reject unadjusted/raw mouse movement.
 In current Three.js, add the helper returned by `getHelper()` to the scene; the
 controls object itself is not the visual scene node:
 
-```ts
-import { TransformControls } from
- 'three/addons/controls/TransformControls.js';
-
-const transform = new TransformControls(camera, renderer.domElement);
-const transformHelper = transform.getHelper();
-scene.add(transformHelper);
-transform.attach(selectedObject);
-transform.setMode('translate');
-transform.setSpace('world');
-transform.setTranslationSnap(0.25);
-// Tagged r185 runtime uses `minX`; the aligned DefinitelyTyped declaration
-// misspells only this member as `minx`. Bridge that declaration bug locally.
-const runtimeTransform = transform as TransformControls & { minX: number };
-runtimeTransform.minX = -4;
-transform.maxX = 4;
-transform.minY = 0;
-transform.maxY = 3;
-
-function onDraggingChanged(event: unknown) {
- const dragging =
- typeof event === 'object' &&
- event !== null &&
- 'value' in event &&
- (event as { value: unknown }).value === true;
- orbit.enabled = !dragging;
-}
-
-transform.addEventListener('dragging-changed', onDraggingChanged);
-```
-
-Attach only an object already in the scene graph. Decide local/world axes,
-snapping, translation constraints, commit/cancel, and undo/redo before
-presenting the gizmo as an editor. Runtime `minX` through `maxZ` constrain
-translation. Do not assign the r185 type-only typo `minx`: the implementation
-does not read it. Remove the local cast once the installed types declare
-`minX`. Rotation and scale limits remain application policy. Manipulate an
-application-owned container when imported asset internals should remain
-untouched.
-
 For a renderer sub-viewport, set the controls' viewport in logical CSS pixels.
 Its origin is the lower-left of the canvas, even though DOM rectangles use a
 top-left origin:

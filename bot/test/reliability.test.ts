@@ -15,13 +15,12 @@ process.env.PUBLIC_SITES_BASE_URL = "https://sites.example.invalid";
 const { buildSite, GENERATED_GITIGNORE } = await import("../src/build.js");
 const { ensureEnginePackages } = await import("../src/engines.js");
 const { ProjectService, TurnStoppedError } = await import("../src/project.js");
-const { PROJECT_CARD_VERSION } = await import("../src/project-card.js");
 const { ForgejoClient } = await import("../src/forgejo.js");
 const { Store, pendingTurnMatches } = await import("../src/store.js");
 const { UsageLog } = await import("../src/usage.js");
 const { config } = await import("../src/config.js");
 const { publishSite, validateSite } = await import("../src/publish.js");
-const { currentHead, ensureGitRepository, ensureLocalBaseline, commitAndPush, turnRevertTarget } = await import("../src/git.js");
+const { currentHead, ensureGitRepository, ensureLocalBaseline, commitAndPush } = await import("../src/git.js");
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", args, { cwd })).stdout.trim();
 async function openStore(file: string) {
@@ -68,7 +67,6 @@ test("broken scratch experiments stay outside production builds, validation, Git
   await fs.mkdir(path.join(experiment, "src"), { recursive: true });
   await fs.writeFile(path.join(experiment, "index.html"), '<script type="module" src="js/main.js"></script>');
   await fs.writeFile(path.join(experiment, "src", "main.ts"), 'const broken = ;');
-  await exec("git", ["add", "-f", "scratch"], { cwd: f.dir }); // migrate an accidentally tracked experiment
   await buildSite(f.dir);
   await validateSite(path.join(f.dir, "site"));
   await commitAndPush(f.dir, "Keep scratch local", f.forgejo);
@@ -352,14 +350,6 @@ test("a rename interrupted after its remote change resumes using persisted inten
   }
 });
 
-test("older auto-renamed workspaces revert past metadata without a stored turn boundary", async () => {
-  const f = await projectFixture("legacy");
-  await fs.writeFile(path.join(f.dir, "README.md"), "Renamed metadata");
-  await commitAndPush(f.dir, "Rename project to Legacy Title", f.forgejo);
-  const result = await turnRevertTarget(f.dir, f.project.lastCommit);
-  assert.equal(result.headDrifted, false);
-  assert.equal(result.target, f.base);
-});
 
 test("mutate claims queued work durably before the agent starts", async () => {
   const f = await projectFixture("claim");
@@ -409,11 +399,9 @@ test("the first successful build adopts the AI name in the returned site and rep
   assert.equal(result.commit, (await currentHead(workspacePath)).slice(0, 10));
   assert.match(service.siteLink(result.project), /\/fresh-garden\/$/);
   assert.match(service.repoLink(result.project), /\/fresh-garden$/);
-  // The pinned project card posted at thread creation is linked to the record,
-  // stamped with the design version it rendered at, alongside its prompt.
+  // The pinned project card stays linked to the original request.
   const saved = store.getProject("123456789012345678")!;
   assert.equal(saved.infoMessageId, "card-message");
-  assert.equal(saved.infoCardVersion, PROJECT_CARD_VERSION);
   assert.equal(saved.initialPrompt, "Make a garden");
 });
 
@@ -494,28 +482,13 @@ test("a failed Discord rename blocks the next prompt and retries after restart w
   assert.equal(result.deliveryError, undefined);
 });
 
-test("legacy prefixed repositories migrate without changing the chosen human name", async () => {
-  const f = await projectFixture("legacy-repo-name");
-  const oldRepo = `site-${f.project.siteSlug}`;
-  const repo = await f.forgejo.repositoryInfo(f.project.repoName);
-  await f.forgejo.renameRepository(f.project.repoName, oldRepo, undefined, repo!.id);
-  await ensureGitRepository(f.dir, oldRepo, f.forgejo);
-  await f.store.patchProject(f.project.threadId, { repoName: oldRepo });
-  f.opencode.generateTitle = async () => { assert.fail("the existing human name must be kept"); };
-  const named = await f.service.ensureProjectName(f.project.threadId);
-  assert.equal(named.displayName, "Old Name");
-  assert.equal(named.repoName, "old-name");
-  assert.equal(named.siteSlug, "old-name");
-  assert.match(await git(f.dir, "remote", "get-url", "origin"), /old-name\.git$/);
-  assert.match(await fs.readFile(path.join(f.dir, "README.md"), "utf8"), /old-name/);
-});
 
 test("all title models failing still produces a durable readable name", async () => {
   const f = await projectFixture("fallback-title");
   await f.store.setModel("test/primary");
   await f.store.patchProject(f.project.threadId, { displayName: "game-placeholder",
-    initialPrompt: "Build a midnight drift racing game" });
-  assert.equal(f.store.listRecoveryProjects()[0].threadId, f.project.threadId, "legacy placeholders must be discovered without a naming marker");
+    initialPrompt: "Build a midnight drift racing game", pendingNaming: { request: "Build a midnight drift racing game" } });
+  assert.equal(f.store.listRecoveryProjects()[0].threadId, f.project.threadId, "pending naming must survive recovery");
   const models: Array<string | undefined> = [];
   Object.assign(f.opencode, {
     listSelectableModels: async () => ["test/primary", "test/backup"],

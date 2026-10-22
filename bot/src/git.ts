@@ -269,31 +269,10 @@ export async function undoLastCommit(
   return { undone: current, kept: await git(workspace, ["rev-parse", "--short=10", "HEAD"]) };
 }
 
-/** Metadata renames do not constitute an accepted agent turn, including in older workspaces. */
+/** Revert to the saved turn boundary unless the repository tip has changed. */
 export async function turnRevertTarget(workspace: string, lastCommit?: string, beforeCommit?: string): Promise<{ current: string; target?: string; headDrifted: boolean }> {
   const { current } = await commitHistory(workspace);
-  let headDrifted = Boolean(lastCommit && lastCommit !== current);
-  if (headDrifted && lastCommit) {
-    const ancestor = await git(workspace, ["merge-base", "--is-ancestor", lastCommit, "HEAD"]).then(() => true, () => false);
-    const commits = ancestor ? await git(workspace, ["log", "--format=%H", `${lastCommit}..HEAD`]) : "";
-    if (commits && (await Promise.all(commits.split("\n").map((commit) => isRenameMetadata(workspace, commit)))).every(Boolean)) headDrifted = false;
-  }
-  if (headDrifted) return { current, headDrifted };
-  if (beforeCommit) return { current, target: beforeCommit, headDrifted };
-  let authored = "HEAD";
-  while (await isRenameMetadata(workspace, authored)) {
-    authored = await git(workspace, ["rev-parse", `${authored}^`]);
-  }
-  const target = beforeCommit ?? await git(workspace, ["rev-parse", `${authored}^`]).catch(() => undefined);
-  return { current, target, headDrifted };
-}
-
-async function isRenameMetadata(workspace: string, commit: string): Promise<boolean> {
-  if (!(await git(workspace, ["log", "-1", "--format=%s", commit])).startsWith("Rename project to ")) return false;
-  const files = (await git(workspace, ["show", "--format=", "--name-only", commit])).split("\n").filter(Boolean);
-  // A requester can use the same words as a rename commit subject. Never skip
-  // an authored content change merely because its subject looks like metadata.
-  return files.every((file) => ["README.md", "AGENTS.md", "NETWORKING.md", ".gitignore"].includes(file) || file.startsWith("site/net/"));
+  return { current, target: beforeCommit, headDrifted: Boolean(lastCommit && lastCommit !== current) };
 }
 
 export interface WorkingTreeSnapshot {
@@ -422,31 +401,12 @@ export interface CommitStats {
   deletions: number;
 }
 
-/**
- * Migrate generated runtime files out of an existing repository's index while
- * leaving the workspace copies intact for validation and publication.
- * Exported for the manual e2e pipeline fixture.
- */
-export async function untrackGeneratedArtifacts(workspace: string): Promise<void> {
-  await git(workspace, [
-    "rm", "-r", "-f", "--cached", "--ignore-unmatch", "--",
-    ".opencode", "scratch", "site/js", "build-manifest.json",
-  ]);
-}
-
 export async function commitAndPush(
   workspace: string,
   summary: string,
   forgejo: ForgejoClient,
   author?: CommitAuthor,
 ): Promise<CommitStats | null> {
-  // Generated runtime and the curated .opencode skills used to be committed.
-  // Keep the files in the workspace for the agent and validation/publish, but
-  // stage their removal from existing repositories so the new ignore boundary
-  // migrates cleanly in one normal turn. The vendored net client under
-  // site/net/ is the exception: it stays tracked (small, stable, harness-owned
-  // input worth showing in the tree).
-  await untrackGeneratedArtifacts(workspace);
   await git(workspace, ["add", "-A"]);
   // A turn that only asks a question (or answers without edits) stages nothing;
   // committing then would push an empty commit to Forgejo. Null tells the

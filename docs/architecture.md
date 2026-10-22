@@ -39,10 +39,12 @@ Projects are authored in TypeScript under `site/src/`. The model never runs a bu
 
 Game repos get engines installed the way a dependency manager would, in a harness-managed `node_modules/` at the workspace root (gitignored, never published, re-seeded on drift):
 
-- **3D**: three.js (r185), `@dimforge/rapier3d-compat` (0.12) for physics, `three-mesh-bvh` (0.9) for accelerated spatial queries.
-- **2D**: Phaser 4.2.1, seeded from its official minified ESM distribution.
+- **3D**: three.js 0.186.1, `@dimforge/rapier3d-compat` 0.21.0 for physics, `three-mesh-bvh` 0.9.16 for accelerated spatial queries.
+- **2D**: Excalibur 0.32.0, seeded from its official browser ESM distribution and complete TypeScript declaration graph.
 
-Authored code imports bare package names (`import * as THREE from "three"`) and esbuild resolves them by walking up from `site/src/`. Every package ships real TypeScript declarations, so type validation checks engine usage against actual APIs. Each game kind also carries an engine playbook as an OpenCode skill (`.opencode/skills/game-2d` + `phaser-4`, or `game-3d`), re-checked on the same schedule as the engine package; site projects get no skill.
+2D games render at their displayed canvas size by default (`FillContainer` or `FillScreen`), with automatic HiDPI backing resolution. Instructions avoid stretching a fixed low-resolution framebuffer; resize changes framing/layout instead. Pixel art uses nearest-neighbor filtering, pixel snapping and integer zoom rather than blended or fractional scaling.
+
+Authored code imports bare package names (`import * as THREE from "three"`) and esbuild resolves them by walking up from `site/src/`. Every package ships real TypeScript declarations, so type validation checks engine usage against actual APIs. Each game kind also carries an engine playbook as an OpenCode skill (`.opencode/skills/game-2d` + `excalibur`, or `game-3d`), re-checked on the same schedule as the engine package; site projects get no skill.
 
 The generated `AGENTS.md` is committed to the public repository but sits outside `site/`, so the agent can read it but cannot edit it.
 

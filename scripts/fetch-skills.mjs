@@ -19,7 +19,7 @@
  * pointers to skills the agent cannot load.
  *
  * NOT managed here (maintained in-tree, never downloaded or overwritten):
- * the authored skills (game-2d, game-3d, phaser-4) and
+ * the authored skills (game-2d, game-3d, excalibur) and
  * threejs-game-studio, which is forked from chrislaupama/threejs-game-studio
  * because it required heavy ThreadSite re-curation (Rapier/three-mesh-bvh
  * physics guidance, harness-native release gates); edit those files
@@ -64,30 +64,10 @@ const GENRE_SKILLS = [
   "visual-novel",
 ];
 
-/**
- * Skill names the upstream catalogs reference that ThreadSite does not ship
- * (other engines' cores, plus the engine-neutral shader skill we trimmed for
- * leanness). Any `skill-name` mention in shipped prose would send the agent
- * to load a skill that does not exist, so each gets an engine-neutral rewrite.
- */
-const DEAD_SKILL_REWRITES = [
-  [/`godot-[\w-]+`/g, "the engine's equivalent API"],
-  [/`unity-[\w-]+`/g, "the engine's equivalent API"],
-  [/`unreal-[\w-]+`/g, "the engine's equivalent API"],
-  [/`phaser-[\w-]+`/g, "the engine's equivalent API"],
-  [/`pygame-[\w-]+`/g, "the engine's equivalent API"],
-  [/`bevy-[\w-]+`/g, "the engine's equivalent API"],
-  [/`love2d-[\w-]+`/g, "the engine's equivalent API"],
-  [/`roblox-[\w-]+`/g, "the platform's cloud-persistence docs"],
-  [/`shader-programming`/g, "a GPU shader reference"],
-  [/`dialogue-systems`/g, "a branching-dialogue reference"],
-  [/`prototype-fast`/g, "a rapid prototype"],
-];
-
 const BANNERS = {
   "gamedev-skills/awesome-gamedev-agent-skills":
     "Vendored from gamedev-skills/awesome-gamedev-agent-skills (Apache-2.0) by scripts/fetch-skills.mjs. "
-    + "ThreadSite context: the rendering engine (three/phaser) is preinstalled in this workspace's harness-managed "
+    + "ThreadSite context: the rendering engine (three/excalibur) is preinstalled in this workspace's harness-managed "
     + "node_modules — import it by its bare name, never run npm or add package manifests, and no import maps are needed. "
     + "The harness runs the only build (site/src TypeScript -> site/js); see AGENTS.md.",
 };
@@ -108,16 +88,21 @@ function fail(skill, message) {
   throw new Error(`${skill}: ${message}`);
 }
 
-/** Stand-in phrase for a skill we do not ship, e.g. `godot-tilemap`. */
+/** Replacement for a catalog skill that is not shipped. */
 const GENERIC_ENGINE_SKILL = "the engine's equivalent API";
 
 /**
  * Whole-line replacements for references a mechanical token rewrite would
- * mangle (possessives, mixed lists). Matched verbatim; a stale entry is
- * simply skipped, and the dead-reference assert below still guards the
+ * mangle (possessives, mixed lists). Matched literally or with a focused
+ * pattern; a stale entry is simply skipped, and the dead-reference assert below still guards the
  * result.
  */
 const LINE_OVERRIDES = [
+  {
+    skill: "game-feel",
+    find: /^- \*\*Web \([^)]+\):\*\*[^\n]+(?:\r?\n[ \t]+[^\n]+)*/m,
+    replace: "- **Web (Excalibur/three):** use Excalibur Actor actions and camera shake, or presentation-only eases and camera offsets in three.js.",
+  },
   {
     skill: "game-ui-ux",
     find: "This mirrors the state-stack idea in `love2d-core`'s `references/state-stack.md`, applied to UI.",
@@ -130,7 +115,7 @@ const LINE_OVERRIDES = [
   },
 ];
 
-const ENGINE_SKILL_NAME = /(?:godot|unity|unreal|phaser|pygame|bevy|love2d)-[\w-]+/;
+let ENGINE_SKILL_NAME = /(?!)/;
 
 /**
  * Rewrite every mention of an upstream-catalog skill ThreadSite does not ship
@@ -139,24 +124,18 @@ const ENGINE_SKILL_NAME = /(?:godot|unity|unreal|phaser|pygame|bevy|love2d)-[\w-
  */
 function scrubMarkdown(text, skillName) {
   for (const override of LINE_OVERRIDES) {
-    if (override.skill === skillName && text.includes(override.find)) {
+    if (override.skill === skillName) {
       text = text.replace(override.find, override.replace);
     }
   }
 
-  // Collapse adjacent reference groups first (`godot-x`, `unity-y` -> one
-  // phrase), then singles, then bare (unbackticked) name mentions.
+  // Collapse adjacent references, then replace individual skill names.
   text = text.replace(
     new RegExp(`\\\`${ENGINE_SKILL_NAME.source}\\\`(?:\\s*(?:/|,|,? ?or|,? ?and)\\s*\\\`${ENGINE_SKILL_NAME.source}\\\`)+`, "g"),
     GENERIC_ENGINE_SKILL,
   );
   text = text.replace(new RegExp(`\\\`${ENGINE_SKILL_NAME.source}\\\``, "g"), GENERIC_ENGINE_SKILL);
   text = text.replace(new RegExp(`(?<![\\\`\\w])${ENGINE_SKILL_NAME.source}`, "g"), GENERIC_ENGINE_SKILL);
-  // Standalone dead names run after the engine-family passes above (their
-  // engine patterns then match nothing; they stay in the list as the record).
-  for (const [pattern, phrase] of DEAD_SKILL_REWRITES) {
-    text = text.replace(pattern, phrase);
-  }
   text = text.replace(/ {2,}/g, " ");
   // A parenthetical that ended up containing only a scrub phrase adds
   // nothing ("the engine animation skill (the engine's equivalent API)").
@@ -166,9 +145,7 @@ function scrubMarkdown(text, skillName) {
 
 /** Final gate: no pointer to an unshipped skill may survive vendoring. */
 function assertNoDeadReferences(text, skillName) {
-  const survivor = text.match(
-    new RegExp(`\\\`?(?:shader-programming|dialogue-systems|prototype-fast|roblox-datastores)\\\`?|\\\`?${ENGINE_SKILL_NAME.source}\\\``),
-  );
+  const survivor = text.match(ENGINE_SKILL_NAME);
   if (survivor) fail(skillName, `unscrubbed engine-skill reference "${survivor[0].trim()}"`);
 }
 
@@ -263,6 +240,14 @@ async function main() {
   try {
     for (const source of SOURCES) {
       const extracted = await downloadRepo(source.repo, source.ref, work);
+      const selected = new Set(["game-2d", "game-3d", "excalibur", "threejs-game-studio", ...source.skills.map((skill) => skill.name)]);
+      const names = [];
+      for (const file of await listMarkdown(path.join(extracted, "skills"))) {
+        if (path.basename(file) !== "SKILL.md") continue;
+        const name = /^name:\s*["']?([a-z0-9-]+)/m.exec(await readFile(file, "utf8"))?.[1];
+        if (name && !selected.has(name)) names.push(name);
+      }
+      ENGINE_SKILL_NAME = new RegExp(`(?:${names.sort((a, b) => b.length - a.length).join("|") || "(?!)"})`, "g");
       for (const skill of source.skills) {
         const from = path.join(extracted, skill.from);
         if (!await stat(from).then(() => true, () => false)) fail(skill.name, `missing in ${source.repo} at ${skill.from}`);

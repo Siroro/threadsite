@@ -1,4 +1,3 @@
-import type { ProjectRecord } from "./types.js";
 import { cleanThreadTitle } from "./util.js";
 
 export function projectName(raw: string): string | undefined {
@@ -14,9 +13,4 @@ export function fallbackProjectName(request: string, kind = "site"): string {
     .replace(/[^a-zA-Z0-9\s-]/g, " ").split(/[\s-]+/).filter(Boolean).slice(0, 6);
   return projectName(words.map((word) => word[0].toUpperCase() + word.slice(1)).join(" "))
     ?? (kind === "site" ? "Untitled Project" : "Untitled Adventure");
-}
-
-export function needsProjectNaming(project: ProjectRecord): boolean {
-  return Boolean(project.pendingNaming || /^(?:site|game)-/i.test(project.displayName)
-    || project.repoName === `site-${project.siteSlug}`);
 }

@@ -1,7 +1,5 @@
 <!-- ThreadSite-maintained skill, originally derived from chrislaupama/threejs-game-studio (MIT). ThreadSite context: three.js is preinstalled in this workspace's harness-managed node_modules — import it by its bare name ("three") with full TypeScript types. This workspace has NO npm, NO Vite, NO dev server, and NO project scaffold: author TypeScript under site/src, keep assets under site/assets, and the harness runs the only build (site/src TypeScript -> site/js ESM via esbuild). Map every project-setup/scaffold/build step of this skill onto the existing ThreadSite workspace layout; skip its npm/Vite instructions entirely. Verification happens in a real browser via the preview URL; see AGENTS.md. -->
 
-# Rendering, Cameras, Lighting, And Post (r185 Verified Baseline)
-
 ## Contents
 
 - Renderer decision and WebGL baseline
@@ -41,52 +39,12 @@ dedicated `webgpu.md` reference before choosing it.
 
 Classify the workload before asking for a renderer decision:
 
-| Workload evidence | Initial recommendation |
-| --- | --- |
-| Existing GLSL/onBeforeCompile/EffectComposer stack, broad legacy browser/device target, or simple teaching scene | `WebGLRenderer` |
-| GPU compute, TSL-first materials/node post, or a measured many-point-light case suited to clustered lighting | Offer experimental `WebGPURenderer`, then benchmark it against the mature path |
-| Many ordinary meshes or effects without a renderer-specific need | Offer both and benchmark both; optimize instancing/batching, LOD, culling, assets, overdraw, and post cost first |
-| Uncertain target or no representative scene yet | Start with renderer-agnostic game state and a small WebGPU/WebGL spike before material/post architecture hardens |
-
 Use these as the primary production stacks:
 
 | Renderer | Custom material | Post-processing |
 | --- | --- | --- |
 | `WebGLRenderer` | GLSL `ShaderMaterial`, `RawShaderMaterial`, `onBeforeCompile` | `EffectComposer` and addon passes |
 | `WebGPURenderer` | Node materials and TSL | `RenderPipeline` and TSL nodes |
-
-r185 also provides a limited **WebGL migration bridge**. `WebGLRenderer` can
-compile supported node materials after `setNodesHandler(new
-WebGLNodesHandler())`, and `setEffects()` can host supported effect objects.
-This helps stage a future WebGPU port; it does not turn `WebGLRenderer` into a
-`RenderPipeline` renderer, and it does not make WebGL-only GLSL compatible with
-`WebGPURenderer`. Validate every node/effect used on the exact fallback devices.
-
-The installed r185 `WebGLNodesHandler` explicitly does not support VSM shadows,
-MRT, transmission, the WebGPU post stack, or storage textures. Fog/environment
-changes require material disposal/rebuild; instanced geometry cannot be shared;
-and node materials are not supported by `renderer.compile()`. Treat these as
-hard bridge constraints for r185, not promises about r186+. Re-read the
-matching implementation and rerun fallback tests on every Three.js upgrade.
-
-```ts
-import * as THREE from 'three';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { WebGLNodesHandler } from 'three/addons/tsl/WebGLNodesHandler.js';
-
-const renderer = new THREE.WebGLRenderer({
- canvas,
- antialias: false,
- outputBufferType: THREE.HalfFloatType,
-});
-renderer.setNodesHandler(new WebGLNodesHandler());
-
-const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.45, 0.3, 0.9);
-renderer.setEffects([bloom]);
-
-// setEffects applies tone mapping/output conversion; do not add OutputPass.
-renderer.setAnimationLoop(() => renderer.render(scene, camera));
-```
 
 `setEffects()` requires `HalfFloatType` or `FloatType` output buffers. Retain
 and dispose each effect you create, then clear the renderer's reference with
@@ -155,9 +113,6 @@ before `logarithmicDepthBuffer`. Reversed depth is faster and more accurate when
 `renderer.capabilities.reversedDepthBuffer`, retain a fallback, and still keep
 camera near/far tight. Either constructor choice requires rebuilding the
 renderer.
-
-Do not set removed `outputEncoding`, gamma flags, `physicallyCorrectLights`, or
-`useLegacyLights`. Retune lights under the current rendering model.
 
 ## Resize And Output Ownership
 
@@ -474,16 +429,6 @@ hero.castShadow = true;
 ground.receiveShadow = true;
 ```
 
-On verified-r185 `WebGLRenderer`, use soft `PCFShadowMap`, not deprecated
-`PCFSoftShadowMap`. r185 WebGPU still exposes the soft constant, but the
-current untagged 185→186 notes say it will be removed there too. Treat that as
-upgrade-preview information and verify the installed revision. Keep the
-shadow camera tight, select the smallest map that holds up, and inspect
-it with `CameraHelper`. For static scenes, set `light.shadow.autoUpdate = false`
-after the first render and set `needsUpdate = true` when a caster, receiver, or
-light changes. See the official [shadow guide](https://threejs.org/manual/en/shadows.html)
-and [LightShadow API](https://threejs.org/docs/pages/LightShadow.html).
-
 Use cheap contact blobs for repeated or hovering objects when a full shadow
 pass does not change gameplay understanding.
 
@@ -520,53 +465,6 @@ input after it. `OutputPass` performs output color conversion and configured
 tone mapping. Follow the official
 [WebGL post-processing guide](https://threejs.org/manual/en/how-to-use-post-processing.html).
 
-```ts
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-
-const composerTarget = new THREE.WebGLRenderTarget(1, 1, {
- type: THREE.HalfFloatType,
- // Context antialiasing does not antialias this offscreen beauty target.
- samples: Math.min(4, renderer.capabilities.maxSamples),
-});
-const composer = new EffectComposer(renderer, composerTarget);
-const renderPass = new RenderPass(scene, camera);
-composer.addPass(renderPass);
-
-const bloom = new UnrealBloomPass(
- new THREE.Vector2(1, 1),
- 0.45,
- 0.3,
- 0.9,
-);
-composer.addPass(bloom);
-const outputPass = new OutputPass();
-composer.addPass(outputPass);
-// If used: composer.addPass(fxaaPass); // FXAA requires sRGB input, so it follows OutputPass.
-const renderTier: RenderTier = matchMedia('(pointer: coarse)').matches
- ? 'mobile'
- : 'desktop';
-
-renderer.setAnimationLoop((timestamp) => {
- timer.update(timestamp);
- const delta = Math.min(timer.getDelta(), 0.1);
- update(delta);
- resizeFrame(renderer, camera, renderTier, composer);
- composer.render(delta);
-});
-
-function disposePost() {
- renderer.setAnimationLoop(null);
- outputPass.dispose();
- bloom.dispose();
- renderPass.dispose();
- // Owns composerTarget and its internal clone.
- composer.dispose();
-}
-```
-
 Keep bloom threshold high enough that authored emissive cues contribute and
 ordinary white surfaces do not wash out the frame. Measure every full-screen
 pass at the actual drawing-buffer resolution. Provide low-quality and no-post
@@ -585,12 +483,6 @@ and dispose every pass: `EffectComposer.dispose()` releases its ping-pong
 targets and internal copy pass, not arbitrary passes added by the application.
 
 ## WebGPU Post-Processing
-
-Do not use `EffectComposer` or GLSL passes with `WebGPURenderer`. Import the
-renderer family and TSL separately, then build a current
-[RenderPipeline](https://threejs.org/docs/pages/RenderPipeline.html). Read the
-official [WebGPU post-processing guide](https://threejs.org/manual/en/webgpu-postprocessing)
-for effect composition, output transforms, and MRT precision:
 
 ```ts
 import * as THREE from 'three/webgpu';
@@ -678,10 +570,6 @@ silently share a `PassNode` or effect target with the retired graph. Rebuild aft
 changing the output-transform topology as well. On final teardown, end an active
 XR session before clearing the loop, then dispose the active graph and pipeline.
 
-The old WebGPU `PostProcessing` wrapper is deprecated since r183. Do not emit
-it. Keep WebGPU examples behind an explicit renderer choice and verify both the
-WebGPU backend and `forceWebGL: true` fallback when fallback support is claimed.
-
 ## Diagnostics
 
 The WebGL and common/WebGPU `renderer.info` schemas are different. Do not share
@@ -746,13 +634,6 @@ Also record:
 - Active meshes, visible materials, lights, transparent objects, particles,
  skinned meshes, morph targets, render targets, and local asset sizes.
 - Console shader/link errors and WebGPU validation errors.
-
-Use `await renderer.compileAsync(scene, camera)` after required local assets are
-ready when a measured first-use shader hitch warrants precompilation. Do not
-compile every speculative material variant. On the r185 WebGL node-material
-migration bridge, `WebGLNodesHandler` does not support `compile()`;
-`compileAsync()` delegates to that path and is unsupported too. Warm that bridge
-only through measured representative renders.
 
 ### WebGL context loss
 

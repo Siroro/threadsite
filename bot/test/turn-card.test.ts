@@ -3,12 +3,28 @@ import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { ButtonStyle, ComponentType, MessageFlags } from "discord.js";
 import type { TurnCardState } from "../src/turn-card.js";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { renderTechnicalCard, renderPlayCard, renderTechnicalText, renderPlayText } = await import("../src/turn-card.js");
 const { changelogTemplate, descriptionTemplate, readProjectChangelog, readProjectDescription } = await import("../src/project-docs.js");
+
+/** The text-display content of the playable card, joined in render order. */
+function playCardText(message: ReturnType<typeof renderPlayCard>): string {
+  const card = message.components[0].toJSON() as { components: Array<{ type: number; content?: string }> };
+  return card.components
+    .filter((component) => component.type === ComponentType.TextDisplay)
+    .map((component) => component.content ?? "")
+    .join("\n");
+}
+
+/** The link buttons of the playable card's single action row. */
+function playCardButtons(message: ReturnType<typeof renderPlayCard>): Array<{ label?: string; url?: string; style: number }> {
+  const card = message.components[0].toJSON() as { components: Array<{ type: number; components?: Array<{ label?: string; url?: string; style: number }> }> };
+  return card.components.find((component) => component.type === ComponentType.ActionRow)?.components ?? [];
+}
 
 function state(overrides: Partial<TurnCardState> = {}): TurnCardState {
   return {
@@ -60,46 +76,58 @@ test("the technical card keeps the agent's whole report", () => {
 
 test("the new message carries the playable card, the screenshot and the play link", () => {
   const message = renderPlayCard(state());
-  assert.equal(message.embeds.length, 1);
+  assert.equal(message.flags & MessageFlags.IsComponentsV2, MessageFlags.IsComponentsV2, "the playable card is a Components V2 message");
   assert.equal(message.files.length, 1);
-  const card = message.embeds[0].toJSON();
-  assert.match(card.title!, /Play Koi Pond Arcade/);
-  assert.match(card.description!, /feed koi and race them/);
-  // The changelog heading names its own field: it says what changed far
+  const card = message.components[0].toJSON() as { type: number; accent_color?: number; components: Array<{ type: number; items?: Array<{ media: { url: string } }> }> };
+  assert.equal(card.type, ComponentType.Container);
+  assert.equal(card.accent_color, 0x22c55e, "the playable card shares the turn's colour");
+  const text = playCardText(message);
+  assert.match(text, /## 🎮 Play Koi Pond Arcade/);
+  assert.match(text, /feed koi and race them/);
+  // The changelog heading labels its own line: it says what changed far
   // better than a generic "What's new".
-  const whatsNew = card.fields!.find((field) => field.name === "Leaderboard")!;
-  assert.match(whatsNew.value, /top ten koi/);
-  assert.match(card.fields!.find((field) => field.name === "How to play")!.value, /steer your koi/);
-  assert.match(card.fields!.find((field) => field.name === "Links")!.value, /PLAY GAME/);
-  assert.match(card.footer!.text, /shared arena multiplayer/);
-  assert.equal(card.image?.url, "attachment://preview.png");
+  assert.match(text, /\*\*Leaderboard\*\* — Added a leaderboard for the top ten koi\./);
+  assert.match(text, /\*\*How to play\*\* — Click the water to drop food, then steer your koi/);
+  assert.match(text, /-# 2D · shared arena multiplayer/);
+  const gallery = card.components.find((component) => component.type === ComponentType.MediaGallery)!;
+  assert.equal(gallery.items![0].media.url, "attachment://preview.png");
+  // Real link buttons, not a links field.
+  const buttons = playCardButtons(message);
+  assert.equal(buttons[0].style, ButtonStyle.Link);
+  assert.equal(buttons[0].label, "▶ Play game");
+  assert.equal(buttons[0].url, "https://games.example.co.uk/koi-pond-arcade/");
+  assert.equal(buttons[1].label, "Source");
+  assert.equal(buttons[1].url, "https://git.example.co.uk/shane/site-koi-pond-arcade");
 });
 
 test("authored markdown is rendered as prose, not as the agent's hard-wrapped lines", () => {
-  const card = renderPlayCard(state({
+  const message = renderPlayCard(state({
     description: { pitch: "A calm pond where you feed koi\nand race them across\nlily pads.", play: "Drop food with a click.\nSteer with the arrow keys." },
     changelog: { title: "Leaderboard", body: "Added a leaderboard\nfor the top ten koi." },
-  })).embeds[0].toJSON();
-  assert.equal(card.description, "A calm pond where you feed koi and race them across lily pads.");
-  assert.equal(card.fields!.find((field) => field.name === "How to play")!.value, "Drop food with a click. Steer with the arrow keys.");
-  assert.equal(card.fields!.find((field) => field.name === "Leaderboard")!.value, "Added a leaderboard for the top ten koi.");
+  }));
+  const text = playCardText(message);
+  assert.match(text, /A calm pond where you feed koi and race them across lily pads\./);
+  assert.match(text, /Drop food with a click\. Steer with the arrow keys\./);
+  assert.match(text, /Added a leaderboard for the top ten koi\./);
 });
 
 test("the playable card still renders without a screenshot, a description or a changelog", () => {
   const message = renderPlayCard(state({ screenshot: undefined, description: undefined, changelog: undefined }));
   assert.equal(message.files.length, 0);
-  const card = message.embeds[0].toJSON();
-  assert.equal(card.image, undefined);
-  assert.equal(card.description, undefined);
-  assert.equal(card.fields!.find((field) => field.name === "Leaderboard"), undefined);
-  assert.equal(card.fields!.find((field) => field.name === "How to play"), undefined);
+  const card = message.components[0].toJSON() as { components: Array<{ type: number }> };
+  assert.equal(card.components.some((component) => component.type === ComponentType.MediaGallery), false);
+  const text = playCardText(message);
+  assert.doesNotMatch(text, /feed koi/);
+  assert.doesNotMatch(text, /How to play/);
+  assert.doesNotMatch(text, /Leaderboard/);
+  assert.match(text, /## 🎮 Play Koi Pond Arcade/);
   // The play link is the one thing the card must never lose.
-  assert.match(card.fields!.find((field) => field.name === "Links")!.value, /PLAY GAME/);
+  assert.equal(playCardButtons(message)[0].url, "https://games.example.co.uk/koi-pond-arcade/");
 });
 
 test("a project without a description still shows the original brief", () => {
-  const card = renderPlayCard(state({ description: undefined, request: "Build a koi pond arcade game" })).embeds[0].toJSON();
-  assert.match(card.description!, /Build a koi pond arcade game/);
+  const message = renderPlayCard(state({ description: undefined, request: "Build a koi pond arcade game" }));
+  assert.match(playCardText(message), /Build a koi pond arcade game/);
 });
 
 test("a turn that did not publish is marked and its findings are shown", () => {
@@ -113,10 +141,11 @@ test("a turn that did not publish is marked and its findings are shown", () => {
 test("a site says open site, and a note is kept as its own field", () => {
   const technical = renderTechnicalCard(state({ kind: "site", note: "Every message in this thread edits this site." })).embeds[0].toJSON();
   assert.match(technical.fields!.find((field) => field.name === "Note")!.value, /edits this site/);
-  const play = renderPlayCard(state({ kind: "site" })).embeds[0].toJSON();
-  assert.match(play.title!, /Open Koi Pond Arcade/);
-  assert.match(play.fields!.find((field) => field.name === "Links")!.value, /OPEN SITE/);
-  assert.match(play.fields!.find((field) => field.name === "What to look at")!.value, /steer your koi/);
+  const play = renderPlayCard(state({ kind: "site" }));
+  const text = playCardText(play);
+  assert.match(text, /## 🛠️ Open Koi Pond Arcade/);
+  assert.match(text, /\*\*What to look at\*\* — Click the water/);
+  assert.equal(playCardButtons(play)[0].label, "▶ Open site");
 });
 
 test("the text fallback keeps the same facts for servers without embed links", () => {
