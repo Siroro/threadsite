@@ -627,7 +627,7 @@ test("a recovery wait that outlives the window aborts the orphaned agent turn", 
     pendingTurn: { id: "stuck-turn", prompt: "Stuck turn", initial: false, startedAt: new Date().toISOString(), statusMessageId: "status" },
   });
   try {
-    await assert.rejects(f.service.recoverTurn(f.project.threadId), /kept running past the recovery window/i);
+    await assert.rejects(f.service.recoverTurn(f.project.threadId), /stopped making progress/i);
     assert.ok(aborted, "the orphaned server-side turn was aborted, not left burning tokens");
   } finally {
     (config as { opencodeReconcileTimeoutMs: number }).opencodeReconcileTimeoutMs = originalTimeout;

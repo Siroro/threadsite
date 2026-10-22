@@ -103,6 +103,13 @@ function unreleased(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+/** Real-progress view over a reattached agent stream (see attachTracker). */
+interface TurnActivity {
+  progress: ProgressCallback;
+  lastProgressAt(): number;
+  questionsPending(): boolean;
+}
+
 export class ProjectService {
   private readonly queues = new Map<string, QueueState>();
   /** Threads whose running turn the user asked to stop via the Stop button. */
@@ -1018,10 +1025,13 @@ export class ProjectService {
 
   /**
    * Resume a turn that was in flight when the bot restarted. Waits for the
-   * agent service (it may be restarting too) and for a still-running turn to
-   * finish, then either commits already-completed work or asks the session to
-   * continue the interrupted change, and runs the normal publish tail. The
-   * continue-prompt has an inactivity deadline so a wedged agent turn
+   * agent service (it may be restarting too); once the saved session is
+   * reattached and confirmed working, the turn renders and finishes like a
+   * live one — no recovery wall clock cuts it down, only the shared
+   * inactivity deadline does (real progress extends it, a pending question
+   * pauses it). Then either commits already-completed work or asks the session
+   * to continue the interrupted change, and runs the normal publish tail. The
+   * continue-prompt keeps the same inactivity deadline so a wedged agent turn
    * cannot hold the thread's queue — and every message queued behind it —
    * forever.
    */
@@ -1042,9 +1052,12 @@ export class ProjectService {
       emit(onProgress, "🔌 Waiting for the agent service to be reachable");
       await this.waitForAgentService();
       emit(onProgress, "⏳ Waiting for the interrupted agent turn to finish");
-      const stopWatching = await this.opencode.watchExistingTurn(project.workspacePath, project.sessionId, onProgress, Date.parse(pending.startedAt));
+      // Reattach through the activity tracker so the wait below (and the card)
+      // run on the stream's real progress, not a wall clock.
+      const tracker = this.attachTracker(onProgress);
+      const stopWatching = await this.opencode.watchExistingTurn(project.workspacePath, project.sessionId, tracker.progress, Date.parse(pending.startedAt));
       try {
-        await this.waitForIdleTurn(project.workspacePath, project.sessionId, onProgress);
+        await this.waitForIdleTurn(project.workspacePath, project.sessionId, onProgress, tracker);
       } finally {
         await stopWatching();
       }
@@ -1145,6 +1158,40 @@ export class ProjectService {
   }
 
   /**
+   * Classify live stream updates for turn-liveness decisions: real agent
+   * progress is a tool transition, moving metrics, streamed narration, a plan
+   * edit or a file change; a pending user question pauses the inactivity clock;
+   * status heartbeats never count. Shared by the reattach wait and the
+   * continuation prompt so both run on identical inactivity semantics.
+   */
+  private attachTracker(onProgress: ProgressCallback | undefined, onActivity?: () => void): TurnActivity {
+    const questions = new Set<string>();
+    const toolStates = new Map<string, string>();
+    let lastMetrics = "";
+    let progressAt = Date.now();
+    const progress: ProgressCallback = (update) => {
+      let active = false;
+      if (update.question) {
+        if (update.question.resolved) questions.delete(update.question.requestID);
+        else questions.add(update.question.requestID);
+        active = true;
+      } else if (update.kind !== "heartbeat") {
+        const toolChanged = update.tool && toolStates.get(update.tool.id) !== update.tool.status;
+        if (update.tool) toolStates.set(update.tool.id, update.tool.status);
+        const metrics = update.metrics;
+        const metricKey = metrics && JSON.stringify([metrics.inputTokens, metrics.outputTokens, metrics.steps, metrics.compactions]);
+        const metricsChanged = metricKey !== undefined && metricKey !== lastMetrics;
+        if (metricKey !== undefined) lastMetrics = metricKey;
+        if (toolChanged || metricsChanged || (metrics?.liveTokensPerSecond ?? 0) > 0
+          || update.kind === "thought" || update.kind === "plan" || update.kind === "changes") { progressAt = Date.now(); active = true; }
+      }
+      if (active) onActivity?.();
+      return onProgress?.(update);
+    };
+    return { progress, lastProgressAt: () => progressAt, questionsPending: () => questions.size > 0 };
+  }
+
+  /**
    * Allow long recoveries while the agent makes progress. The reconcile window
    * bounds inactivity, excluding time spent waiting for a user's answer.
    * Status heartbeats alone must not keep a wedged turn alive forever.
@@ -1161,13 +1208,10 @@ export class ProjectService {
     let closed = false;
     let timer: NodeJS.Timeout | undefined;
     let rejectTimeout!: (error: Error) => void;
-    const questions = new Set<string>();
-    const toolStates = new Map<string, string>();
-    let lastMetrics = "";
     const inactivity = new Promise<never>((_, reject) => { rejectTimeout = reject; });
     const armTimeout = (): void => {
       if (timer) clearTimeout(timer);
-      if (closed || timedOut || questions.size) return;
+      if (closed || timedOut || tracker.questionsPending()) return;
       timer = setTimeout(() => {
         timedOut = true;
         rejectTimeout(new Error(
@@ -1175,23 +1219,10 @@ export class ProjectService {
         ));
       }, config.opencodeReconcileTimeoutMs);
     };
+    const tracker = this.attachTracker(onProgress, armTimeout);
     const progress: ProgressCallback = (update) => {
       if (closed || timedOut) return;
-      if (update.question) {
-        if (update.question.resolved) questions.delete(update.question.requestID);
-        else questions.add(update.question.requestID);
-        armTimeout();
-      } else if (update.kind !== "heartbeat") {
-        const toolChanged = update.tool && toolStates.get(update.tool.id) !== update.tool.status;
-        if (update.tool) toolStates.set(update.tool.id, update.tool.status);
-        const metrics = update.metrics;
-        const metricKey = metrics && JSON.stringify([metrics.inputTokens, metrics.outputTokens, metrics.steps, metrics.compactions]);
-        const metricsChanged = metricKey !== undefined && metricKey !== lastMetrics;
-        if (metricKey !== undefined) lastMetrics = metricKey;
-        if (toolChanged || metricsChanged || (metrics?.liveTokensPerSecond ?? 0) > 0
-          || update.kind === "thought" || update.kind === "plan" || update.kind === "changes") armTimeout();
-      }
-      return onProgress?.(update);
+      return tracker.progress(update);
     };
     armTimeout();
     const pending = this.promptWithFailover(workspacePath, sessionId, instruction, progress, images, this.store.getModel());
@@ -1222,23 +1253,39 @@ export class ProjectService {
     throw new Error(`The agent service did not come back within ${Math.round(timeoutMs / 60000)} minutes; restart recovery gave up.`);
   }
 
-  /** Block while the session still reports a running turn (bot restart only). */
-  private async waitForIdleTurn(workspacePath: string, sessionId: string, onProgress?: ProgressCallback, timeoutMs = config.opencodeReconcileTimeoutMs): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
+  /**
+   * Block while the session still reports a running turn (bot restart only).
+   * Reconnecting is a technical state and stays bounded by the recovery window,
+   * but once the reattached stream confirms the agent working the fixed clock
+   * is gone: the wait runs on the same inactivity deadline as the continuation
+   * prompt, so a healthy long turn renders and finishes like a live one instead
+   * of being cut down mid-work, while a silent one is still stopped rather than
+   * left burning tokens unsupervised.
+   */
+  private async waitForIdleTurn(workspacePath: string, sessionId: string, onProgress: ProgressCallback | undefined,
+      tracker: TurnActivity, timeoutMs = config.opencodeReconcileTimeoutMs): Promise<void> {
+    const startedAt = Date.now();
+    const stalled = () => !tracker.questionsPending() && Date.now() - tracker.lastProgressAt() > timeoutMs;
     let sawBusy = false;
     let lastHeartbeatAt = 0;
-    let lastPollError: unknown;
-    while (Date.now() < deadline) {
+    for (;;) {
+      if (sawBusy && stalled()) {
+        emit(onProgress, "🛑 No agent progress in the recovery window — stopping the stalled agent turn");
+        await this.opencode.abortTurn(workspacePath, sessionId).catch((error) => {
+          log("warn", "project.recovery_wait_abort_failed", { sessionId, error: serializeError(error) });
+        });
+        throw new Error("The reattached agent turn stopped making progress; recovery stopped it and gave up.");
+      }
       let busy: boolean;
       try {
         busy = await this.opencode.isBusy(workspacePath, sessionId);
-        lastPollError = undefined;
       } catch (error) {
         // A slow status endpoint is not evidence that the agent turn is idle.
-        // Keep waiting while the event stream remains attached.
-        lastPollError = error;
+        // Keep waiting while the event stream remains attached; until the agent
+        // is confirmed working, the reconnect stays bounded by the window.
+        if (!sawBusy && Date.now() - startedAt > timeoutMs) throw new Error(`OpenCode status stayed unavailable throughout the recovery window: ${errorText(error)}`);
         if (Date.now() - lastHeartbeatAt >= 30_000) {
-          onProgress?.({ kind: "heartbeat", text: "🔌 OpenCode status is taking longer than usual", detail: `Still attached to the saved session · ${formatShortDuration(Date.now() - (deadline - timeoutMs))} elapsed`, phase: "working" });
+          onProgress?.({ kind: "heartbeat", text: "🔌 OpenCode status is taking longer than usual", detail: `Still attached to the saved session · ${formatShortDuration(Date.now() - startedAt)} elapsed`, phase: "working" });
           lastHeartbeatAt = Date.now();
         }
         await sleep(config.opencodeReconcilePollMs);
@@ -1249,23 +1296,12 @@ export class ProjectService {
         return;
       }
       sawBusy = true;
-      if (Date.now() - lastHeartbeatAt >= 30_000) {
-        onProgress?.({ kind: "heartbeat", text: "⏳ OpenCode still reports the interrupted turn running", detail: `Reattached to live session · ${formatShortDuration(Date.now() - (deadline - timeoutMs))} elapsed`, active: true, phase: "working" });
-        lastHeartbeatAt = Date.now();
-      }
+      // The reattached event stream owns the visible feed: repeating a technical
+      // "still running" line here would bury live tool activity. The flag alone
+      // drives the card's stall wording while the stream is quiet.
+      onProgress?.({ kind: "heartbeat", text: "", active: true });
       await sleep(config.opencodeReconcilePollMs);
     }
-    if (sawBusy) {
-      // Mirror recoveryPrompt's timeout: leaving the turn running would keep
-      // burning provider tokens unsupervised and wedge the next prompt on a
-      // session that is still busy server-side.
-      emit(onProgress, "🛑 Recovery window exhausted — stopping the orphaned agent turn");
-      await this.opencode.abortTurn(workspacePath, sessionId).catch((error) => {
-        log("warn", "project.recovery_wait_abort_failed", { sessionId, error: serializeError(error) });
-      });
-      throw new Error("The interrupted agent turn kept running past the recovery window; recovery stopped it and gave up.");
-    }
-    if (lastPollError) throw new Error(`OpenCode status stayed unavailable throughout the recovery window: ${errorText(lastPollError)}`);
   }
 
   /**

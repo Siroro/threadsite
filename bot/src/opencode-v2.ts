@@ -362,34 +362,45 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     return (await this.rawMessages(sessionID, limit)).map((message) => applicationMessage(message, sessionID));
   }
 
-  async usageMessages(directory: string, sessionID: string): Promise<SessionMessage[]> {
+  private async usageHistory(directory: string, sessionID: string): Promise<Array<{ sessionID: string; message: SessionMessageInfo }>> {
     await this.session(directory, sessionID);
     const sessions = await this.allSessions();
     const visited = new Set<string>();
-    const result: SessionMessage[] = [];
+    const result: Array<{ sessionID: string; message: SessionMessageInfo }> = [];
     const visit = async (id: string): Promise<void> => {
       if (visited.has(id)) return;
       visited.add(id);
-      result.push(...(await this.rawMessages(id)).map((message) => applicationMessage(message, id)));
+      for (const message of await this.rawMessages(id)) result.push({ sessionID: id, message });
       for (const child of sessions) if (child.parentID === id && sameDirectory(child.location.directory, directory)) await visit(child.id);
     };
     await visit(sessionID);
     return result;
   }
 
+  async usageMessages(directory: string, sessionID: string): Promise<SessionMessage[]> {
+    return (await this.usageHistory(directory, sessionID)).map(({ sessionID: id, message }) => applicationMessage(message, id));
+  }
+
   private async finalUsage(directory: string, sessionID: string, since: number, baseline: Set<string>, watch: Watch): Promise<TurnUsage> {
     const observed = usageFromMessages([...watch.steps.values()], since) ?? emptyUsage();
     observed.contextLimit = watch.contextLimit;
     observed.compactions = watch.compactions;
-    if (watch.generationMs > 0) Object.assign(observed, { generationMs: watch.generationMs,
+    // Live anchors only cover a lost history fetch: every ended step needs a
+    // complete started→streamed window or the turn shows no average at all.
+    if (watch.timedSteps === watch.steps.size && watch.generationMs > 0 && watch.timedOutputTokens > 0) Object.assign(observed, { generationMs: watch.generationMs,
       timedOutputTokens: watch.timedOutputTokens, outputTokensPerSecond: watch.timedOutputTokens * 1000 / watch.generationMs });
     try {
-      const messages = await this.usageMessages(directory, sessionID);
+      const entries = await this.usageHistory(directory, sessionID);
+      const messages = entries.map(({ sessionID: id, message }) => applicationMessage(message, id));
       observed.compactions = Math.max(observed.compactions, messages.filter((message) =>
         !baseline.has(message.info?.id ?? "") && (message.info?.time?.created ?? 0) >= since
         && message.parts?.some((part) => part.type === "compaction" && part.status === "completed")).length);
       const saved = usageFromMessages(messages, since, Infinity, baseline);
       const result = reconcileUsage(observed, saved) ?? observed;
+      // Saved history carries the same streamed windows opencode's own UI rates
+      // turns by, so it replaces the live anchors whenever it resolves a rate.
+      const timed = turnTiming(entries, since, baseline);
+      if (timed) Object.assign(result, timed);
       // Child billing is cumulative, but the context indicator belongs to root.
       result.contextTokens = usageFromMessages(messages.filter((message) => message.info?.sessionID === sessionID), since, Infinity, baseline)?.contextTokens
         ?? result.contextTokens;
@@ -732,11 +743,17 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
       case "session.step.started":
         watch.models.set(event.data.assistantMessageID, event.data.model);
         watch.started.set(event.data.assistantMessageID, event.data.started);
+        // A retried step re-anchors and discards its earlier streamed window,
+        // mirroring opencode's message updater.
+        watch.streamed.delete(event.data.assistantMessageID);
         watch.lastProgress = Date.now();
         if (!child) void this.models().then((models) => {
           const selected = event.data.model;
           watch.contextLimit = models.find((model) => model.id === selected.id && model.providerID === selected.providerID)?.limit.context;
         });
+        break;
+      case "session.step.streamed":
+        watch.streamed.set(event.data.assistantMessageID, event.created);
         break;
       case "session.step.ended":
       case "session.step.failed": {
@@ -747,9 +764,16 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
           role: "assistant", time: { created: event.created }, providerID: model?.providerID, modelID: model?.id,
           tokens: step.tokens, cost: step.cost } });
         if (!previous) {
+          // opencode's own tok/s window: the step's started anchor to its
+          // streamed event, both server clock. Steps without the full window
+          // drop out and withhold the turn's average instead of biasing it.
           const started = watch.started.get(step.assistantMessageID);
-          const elapsed = started ? event.created - started : 0;
-          if (elapsed > 0 && elapsed <= 600_000) { watch.generationMs += elapsed; watch.timedOutputTokens += (step.tokens?.output ?? 0) + (step.tokens?.reasoning ?? 0); }
+          const streamed = watch.streamed.get(step.assistantMessageID);
+          if (started !== undefined && streamed !== undefined) {
+            watch.generationMs += Math.max(0, streamed - started);
+            watch.timedOutputTokens += (step.tokens?.output ?? 0) + (step.tokens?.reasoning ?? 0);
+            watch.timedSteps += 1;
+          }
         }
         if (!child) watch.budget?.observe(step.assistantMessageID);
         watch.liveSamples = [];
@@ -813,8 +837,10 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         break;
       case "session.status":
         if (event.data.status.type === "retry") this.retry(watch, event.data.status, callback);
-        // Status is a heartbeat, never evidence of agent progress.
-        emit(callback, { kind: "heartbeat", text: "OpenCode status updated", active: event.data.status.type !== "idle" });
+        // Status is a heartbeat, never evidence of agent progress — and never a
+        // headline: the status stream repeats on every event, and its technical
+        // text would bury the real activity line between tools.
+        emit(callback, { kind: "heartbeat", text: "", active: event.data.status.type !== "idle" });
         break;
       case "session.retry.scheduled":
         this.retry(watch, { next: event.data.at, message: event.data.error.message }, callback); break;

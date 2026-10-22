@@ -371,3 +371,76 @@ test("native text and reasoning with the same ordinal never share streamed buffe
     assert.notEqual(narration[0].narrationId, updates.find((update) => update.kind === "thinking").narrationId);
   } finally { await stop(); }
 });
+
+test("average tok/s uses opencode's streamed windows: retries re-anchor and unstreamed steps withhold the rate", async () => {
+  const f = fixture();
+  f.setActive(true);
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root");
+  try {
+    const internal = f.harness as any;
+    const watch = internal.watches.get("ses_root");
+    const send = (type: string, created: number, content: object) => internal.event({ type, created, data: {
+      sessionID: "ses_root", ...content } }, "/w", "ses_root", watch);
+    const model = { id: "text", providerID: "test" };
+    const tokens = { input: 100, output: 400, reasoning: 100, cache: { read: 0, write: 0 } };
+    send("session.step.started", 1_000, { assistantMessageID: "msg_a", model, started: 1_000 });
+    send("session.step.streamed", 5_000, { assistantMessageID: "msg_a" });
+    send("session.step.ended", 5_050, { assistantMessageID: "msg_a", finish: "stop", cost: 0.01, tokens });
+    send("session.step.started", 10_000, { assistantMessageID: "msg_b", model, started: 10_000 });
+    send("session.step.streamed", 14_000, { assistantMessageID: "msg_b" });
+    // A retried step re-anchors: the first streamed window is discarded and only
+    // the post-retry generation counts, exactly like opencode's message updater.
+    send("session.step.started", 20_000, { assistantMessageID: "msg_b", model, started: 20_000 });
+    send("session.step.streamed", 21_000, { assistantMessageID: "msg_b" });
+    send("session.step.ended", 21_010, { assistantMessageID: "msg_b", finish: "stop", cost: 0.01,
+      tokens: { ...tokens, output: 50, reasoning: 0 } });
+    const usage = await internal.finalUsage("/w", "ses_root", 0, new Set(), watch);
+    assert.equal(usage.generationMs, 5_000);
+    assert.equal(usage.timedOutputTokens, 550);
+    assert.equal(usage.outputTokensPerSecond, 110);
+    // A step that failed before streaming withholds the average instead of
+    // letting the timed steps overstate the turn's rate.
+    send("session.step.started", 30_000, { assistantMessageID: "msg_c", model, started: 30_000 });
+    send("session.step.failed", 31_000, { assistantMessageID: "msg_c", error: { message: "provider unavailable" } });
+    const withheld = await internal.finalUsage("/w", "ses_root", 0, new Set(), watch);
+    assert.equal(withheld.outputTokensPerSecond, undefined);
+  } finally { await stop(); }
+});
+
+test("persisted streamed windows rate the turn even when live events were never seen", async () => {
+  const f = fixture();
+  const now = Date.now();
+  const step = (id: string, created: number, streamed: number, output: number): SessionMessageInfo => ({
+    type: "assistant", id, agent: "sitebuilder", model: { id: "text", providerID: "test" },
+    time: { created, streamed, completed: streamed + 10 }, finish: "stop", content: [],
+    tokens: { input: 100, output, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0.01 } as SessionMessageInfo);
+  f.history.push(step("msg_p1", now, now + 2_000, 300));
+  f.history.push(step("msg_p2", now + 3_000, now + 4_000, 50));
+  const internal = f.harness as any;
+  const usage = await internal.finalUsage("/w", "ses_root", now - 1, new Set(), {
+    since: now - 1, baseline: new Set(), steps: new Map(), generationMs: 0, timedOutputTokens: 0, timedSteps: 0, compactions: 0 });
+  assert.equal(usage.generationMs, 3_000);
+  assert.equal(usage.timedOutputTokens, 350);
+  assert.equal(usage.outputTokensPerSecond, 350 / 3);
+});
+
+test("session status beats carry the busy flag without claiming the activity line", async () => {
+  const f = fixture();
+  f.setActive(true);
+  const updates: any[] = [];
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); });
+  try {
+    const internal = f.harness as any;
+    const watch = internal.watches.get("ses_root");
+    const send = (type: string, content: object) => internal.event({ type, created: Date.now(), data: {
+      sessionID: "ses_root", ...content } }, "/w", "ses_root", watch, (update: any) => { updates.push(update); });
+    send("session.text.delta", { assistantMessageID: "msg_n", ordinal: 0, delta: "Composing the hero section" });
+    // The status stream repeats on every event; its beats must stay textless so
+    // the streamed activity keeps the headline after a reconnect reattaches.
+    for (let i = 0; i < 3; i++) send("session.status", { status: { type: "busy" } });
+    const beats = updates.filter((update) => update.kind === "heartbeat");
+    assert.equal(beats.length, 3);
+    assert.ok(beats.every((update) => !update.text), "status beats never carry display text");
+    assert.ok(beats.every((update) => update.active === true), "the busy flag still lands");
+  } finally { await stop(); }
+});
