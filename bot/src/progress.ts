@@ -38,7 +38,7 @@ export interface ProgressUpdate {
   metrics?: ProgressMetrics;
   files?: ProgressFiles;
   tool?: ProgressTool;
-  /** Marks a shell command activity: its text is the command itself, and the card renders the recent command tail for it. */
+  /** Marks a shell command activity: its text is the command itself, so it is exempt from the service-wait vocabulary heuristics. */
   command?: boolean;
   queuedRequests?: number;
   /** OpenCode status only; this confirms a running session without resetting the no-event timer.
@@ -228,8 +228,8 @@ export class DiscordProgress {
     if (persistence.load) {
       this.narration = persistence.load.narration ?? [];
       this.reasoning = persistence.load.reasoning ?? [];
-      // Restored history keeps its commands but drops any stale running marks:
-      // the tools map starts empty after a restart.
+      // Restored history keeps its commands; the pick-list also drops fields
+      // older saved cards may still carry.
       this.history.push(...persistence.load.history.map(({ text, detail, at, key, command }) => ({ text, detail, at, key, command })));
       this.thought = persistence.load.thought;
       this.plan = persistence.load.plan;
@@ -297,8 +297,9 @@ export class DiscordProgress {
     // "Model is thinking" while a tool runs.
     if (/(?:model|opencode) is (?:thinking|working)|status updated/i.test(text)
       && [...this.tools.values()].some((tool) => tool.status === "running")) return;
-    // A different tool re-running the same command must still become current,
-    // or its bold running state would stay on the previous occurrence.
+    // A different tool re-running the same command must still become current:
+    // the visible tail collapses exact repeats, so the newest occurrence has
+    // to own the current line.
     if (text !== this.latest.text || detail !== this.latest.detail || key !== this.latest.key) {
       if (!key || this.latest.key !== key) this.history.push(this.latest);
       while (this.history.length > HISTORY_LINES) this.history.shift();
@@ -360,12 +361,10 @@ export class DiscordProgress {
     // the command itself and must not match the service-wait vocabulary.
     const latestToolFailed = this.latest.key ? this.tools.get(this.latest.key)?.status === "error" : false;
     const serviceWaiting = !this.latest.command && /retry|backoff|unavailable|reconnect|waiting for.*(?:agent|service)|status is taking longer|hit an error/i.test(this.latest.text);
-    // The command tail bolds the occurrence whose tool is still running.
-    const running = (item: ProgressActivity) => item.command && item.key ? this.tools.get(item.key)?.status === "running" : false;
     return {
       title: this.title, phase: this.phase, startedAt: this.started, now: Date.now(),
-      latest: { ...this.latest, running: running(this.latest) || undefined },
-      history: this.history.map((item) => ({ ...item, running: running(item) || undefined })), context: this.context, thought: this.thought, stats: this.stats, changes: this.changes,
+      latest: { ...this.latest },
+      history: this.history.map((item) => ({ ...item })), context: this.context, thought: this.thought, stats: this.stats, changes: this.changes,
       files: this.files, metrics: this.metrics && Date.now() - this.metricsAt > 5000 ? { ...this.metrics, liveTokensPerSecond: undefined } : this.metrics,
       plan: this.plan, queuedRequests: this.queuedRequests,
       actions: tools.length, activeTools: tools.filter((tool) => tool.status === "running").length,

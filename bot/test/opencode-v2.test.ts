@@ -470,7 +470,7 @@ test("root tool events retain their targets while child work stays out of the pu
     const tools = updates.filter((update) => update.tool);
     assert.deepEqual(tools.map((update) => update.tool.status), ["running", "completed", "running", "error"]);
     assert.match(tools[0].detail ?? "", /site\/src\/main\.ts$/);
-    // Shell activity is the command itself, flagged so the card renders the command tail.
+    // Shell activity is the command itself, flagged so service-wait heuristics never match it.
     assert.equal(tools[2].command, true);
     assert.equal(tools[2].detail, undefined);
     assert.ok(!updates.some((update) => /still streaming|Researched arena layouts/.test(update.text)));
