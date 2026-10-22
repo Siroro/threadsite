@@ -29,6 +29,16 @@ export interface QueuedRequest {
   images?: Array<{ mime: string; filename?: string; dataUrl: string }>;
 }
 
+/** The kinds of user contribution counted on the pinned project card. */
+export type ContributionKind = "turns" | "steers" | "answers";
+
+/** One user's lifetime contributions to a project thread. */
+export interface ContributionTally {
+  turns: number;
+  steers: number;
+  answers: number;
+}
+
 export interface ProjectRecord {
   threadId: string;
   guildId: string;
@@ -46,6 +56,10 @@ export interface ProjectRecord {
   pendingDeletion?: { requestedAt: string; reason: string; lastError?: string; agentsDeleted?: boolean };
   /** The request that created the project, shown on the pinned project card. */
   initialPrompt?: string;
+  /** Discord user who started the thread, linked as the founder on the pinned project card. */
+  starterId?: string;
+  /** Lifetime per-user contributions (requested turns, live steers, delivered answers), shown on the pinned card. */
+  contributors?: Record<string, ContributionTally>;
   /** The pinned project-card message; edited in place after every turn outcome. */
   infoMessageId?: string;
   /** Play message that owns the last screenshot; fetch it to refresh signed CDN thumbnail URLs. */

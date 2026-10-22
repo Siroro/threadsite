@@ -209,7 +209,15 @@ export class CardInteractions {
     if (action === "skip" || action === "answer" || action === "send" || ((action === "form" || action === "custom") && complete)) {
       if (action !== "skip" && !complete) throw new CardUserError("Answer every question before submitting. Your draft is saved.");
       const delivery = await service.submit(project.threadId, resource, revision, interaction.user.globalName ?? interaction.user.username, action === "skip" ? undefined : draft.answers);
-      if (delivery.status === "answered" || delivery.status === "skipped") { await this.respond(interaction, renderStatusCard(delivery.status === "answered" ? "✅ All answers were delivered to the agent." : "⏭️ Skipped — the agent will decide.")); return; }
+      if (delivery.status === "answered" || delivery.status === "skipped") {
+        // A delivered answer is a contribution; skipping leaves the decision to
+        // the agent and is not one. The tally is advisory: never fail the reply.
+        if (delivery.status === "answered") {
+          await this.services.store.addContribution(project.threadId, interaction.user.id, "answers").catch(() => undefined);
+        }
+        await this.respond(interaction, renderStatusCard(delivery.status === "answered" ? "✅ All answers were delivered to the agent." : "⏭️ Skipped — the agent will decide."));
+        return;
+      }
     }
     if (action === "retry") {
       const delivery = await service.reconcile(project.threadId, resource, revision);
