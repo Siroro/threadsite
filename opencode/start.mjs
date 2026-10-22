@@ -8,7 +8,7 @@ const templatePath = "/opt/threadsite/opencode.base.json";
 const outputPath = "/root/.config/opencode/opencode.json";
 
 let config = applyRuntimeConfig(JSON.parse(await readFile(templatePath, "utf8")));
-const v2 = process.env.OPENCODE_API_VERSION === "v2";
+const v2 = (process.env.OPENCODE_API_VERSION?.trim() || "v2") === "v2";
 console.log(`[threadsite] Builder step limit: ${config.agent.sitebuilder.maxSteps}`);
 const surplus = await buildSurplusProvider({
   env: process.env,

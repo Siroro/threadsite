@@ -6,7 +6,8 @@ import path from "node:path";
 import { setupLsp } from "../dist/lsp.mjs";
 import { buildV2Config } from "./config.mjs";
 
-const legacy = JSON.parse(await fs.readFile(new URL("../opencode.json", import.meta.url), "utf8"));
+const legacy = JSON.parse(await fs.readFile(new URL("../opencode.json", import.meta.url), "utf8")
+  .catch((error) => error.code === "ENOENT" ? fs.readFile(new URL("../opencode.base.json", import.meta.url), "utf8") : Promise.reject(error)));
 
 test("LSP never discovers server commands from generated project configuration", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-lsp-config-"));

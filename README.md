@@ -28,7 +28,7 @@ See [docs/architecture.md](docs/architecture.md) for the full pipeline, agent sa
 ## Stack
 
 - Node 24 + discord.js bot
-- OpenCode v1 + `@opencode-ai/sdk` (default), or native OpenCode v2 + `@opencode/client` (opt-in)
+- Native OpenCode v2 + `@opencode/client` (default), with OpenCode v1 + `@opencode-ai/sdk` available for compatibility
 - One shared Node 24 + `ws` multiplayer relay for all games (multi-tenant, in-memory)
 - Forgejo 15 LTS (SQLite, no separate database needed)
 - Your existing Apache static directory, or an optional bundled `httpd:2.4-alpine` profile
@@ -72,7 +72,7 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 
 | Setting | Purpose |
 | --- | --- |
-| `OPENCODE_API_VERSION` | `v1` (default) or `v2`; selects the bot adapter and server image. Rebuild both services. See [the v2 migration guide](docs/opencode-v2.md). |
+| `OPENCODE_API_VERSION` | `v2` (default) or `v1` for compatibility; selects the bot adapter and server image. Rebuild both services. Existing v1 deployments must follow [the v2 migration guide](docs/opencode-v2.md). |
 | `OPENCODE_URL` / `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` | Internal agent service endpoint and basic auth |
 | `OPENCODE_DEFAULT_MODEL` | Model for new sessions (`provider/model-id`); changeable live via `/site-admin model` |
 | `OPENCODE_MAX_STEPS` | Builder step budget per turn (default 200); mandatory finish-up steer at 90%. Recreate bot and opencode after changes. |

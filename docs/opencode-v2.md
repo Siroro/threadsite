@@ -1,6 +1,6 @@
 # OpenCode 2 migration
 
-ThreadSite supports two backends. `OPENCODE_API_VERSION=v1` remains the default and runs the original OpenCode 1.18.27 server and adapter (`bot/src/opencode-v1.ts`). `v2` runs OpenCode 2.1.3 with the separately implemented `bot/src/opencode-v2.ts` and pinned `@opencode/client` 2.1.3. The old package's `/v2` SDK entrypoint still targets the v1 server API; it is unrelated to OpenCode 2.
+ThreadSite defaults to `OPENCODE_API_VERSION=v2`, running OpenCode 2.1.3 with the separately implemented `bot/src/opencode-v2.ts` and pinned `@opencode/client` 2.1.3. Set `OPENCODE_API_VERSION=v1` to use the retained original OpenCode 1.18.27 server and adapter (`bot/src/opencode-v1.ts`). The old package's `/v2` SDK entrypoint still targets the v1 server API; it is unrelated to OpenCode 2.
 
 The bot's application interface remains stable: prompts with images and reasoning effort, questions and answers, live narration/private reasoning, plans and tools, root and child usage, finish-up steering, provider failover, titles, compaction, conversation revert, stop/reset and project deletion. The v2 adapter accepts an injected native client for contract testing. It uses native inbox submission and persisted execution outcomes instead of treating a prompt HTTP response as a completed turn. Persisted messages and live billing describe overlapping spend and are reconciled rather than added.
 
@@ -8,7 +8,7 @@ The bot's application interface remains stable: prompts with images and reasonin
 
 First test a separate deployment with copied project state. Let active turns finish and drain the queue before switching an existing deployment. Back up the bot SQLite database and the OpenCode volume before the switch. The setting is deployment-wide; it does not route different projects to different server generations.
 
-Set this in `.env`:
+V2 is selected when the setting is absent. If an existing `.env` explicitly selects v1, update it:
 
 ```dotenv
 OPENCODE_API_VERSION=v2
@@ -104,13 +104,38 @@ documentation tools survive the native tool filters and permissions, while an
 unexpected tool is removed. Set `OPENCODE_LSP_SMOKE_COMMAND` to a JSON command
 array (for example `["typescript-language-server","--stdio"]`) to also check
 post-edit TypeScript errors and hover results through the real v2 agent loop.
+Set `OPENCODE_DOCS_SMOKE_OFFLINE=1` to check that an unavailable documentation
+service leaves ordinary builder work operational.
 
 To exercise all four real language servers and the upstream boundary/cancellation
 suite in Linux after building the v2 image:
 
 ```bash
+docker build --build-arg OPENCODE_API_VERSION=v2 -t threadsite-opencode:v2-check opencode
 docker run --rm --entrypoint sh threadsite-opencode:v2-check -c 'cd /opt/threadsite && THREADSITE_TEST_LANGUAGE_SERVERS=1 npm test'
 docker run --rm --entrypoint node threadsite-opencode:v2-check /opt/threadsite/v2/vendor/lsp/test-opencode-lsp.js /opt/threadsite/v2/vendor/lsp
 ```
 
 The upstream test assertions use POSIX path separators; run that suite in Linux.
+
+## Live free-model end-to-end check
+
+Run `npm --prefix preview run test:free-models` under Node 24 with Docker running.
+This opt-in check sends synthetic test prompts to real anonymous OpenCode free
+models; it does not log into Discord or use deployment credentials. It verifies
+the live catalog's zero-cost tiers before selecting MiMo-V2.6-Flash Free and
+GLM-5.3-Flash Free. If either is unavailable, the check fails rather than selecting
+a paid model.
+
+Each run creates a separate Compose project, fresh workspaces/state/volumes and
+an isolated Forgejo account. It runs production ProjectService creation and
+revision, LSP diagnostics/navigation, Context7, questions, delegation, compiler
+and static validation, live steering, Git push, publication, document readback and usage
+accounting and a real screenshot sent back through the prompt image-input API.
+Browser checks exercise the generated website and Three.js game on desktop and
+mobile, including WebGL pixels and keyboard input. Compiler output must match
+preview; published output may differ only by asset-version URL rewriting.
+All containers and test volumes are removed afterward;
+source, reports and screenshots remain in the temporary directory printed by
+the runner. Free-model availability, rate limits and model compliance can make
+this live check fail independently of the deterministic tests.

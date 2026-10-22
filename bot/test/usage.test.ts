@@ -8,7 +8,7 @@ import type { SessionMessage } from "../src/opencode.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { UsageLog } = await import("../src/usage.js");
-const { OpenCodeHarness, usageFromMessages, reconcileUsage } = await import("../src/opencode.js");
+const { LegacyOpenCodeHarness: OpenCodeHarness, usageFromMessages, reconcileUsage } = await import("../src/opencode.js");
 
 function message(id: string, created: number, input = 100, output = 20): SessionMessage {
   return { info: { id, role: "assistant", providerID: "test", modelID: "model", time: { created },
