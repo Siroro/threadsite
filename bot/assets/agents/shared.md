@@ -1,6 +1,6 @@
 # ThreadSite Project Rules
 
-Maintained by the ThreadSite harness. You author **TypeScript under `site/src/`**; when your reply ends the harness builds minified JavaScript under gitignored `site/js/`, validates it, commits authored source, and publishes only runtime files to Apache under an arbitrary path prefix. `site/src/` and unbundled `site/net/` are never deployed.
+Maintained by the ThreadSite harness. You author **TypeScript under `site/src/`**; when your reply ends the harness builds minified JavaScript under gitignored `site/js/`, validates it, commits authored source, and publishes only runtime files as plain static files under an arbitrary path prefix. `site/src/` and unbundled `site/net/` are never deployed.
 
 ## Boundaries
 
