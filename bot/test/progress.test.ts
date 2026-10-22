@@ -257,7 +257,7 @@ test("running/completed duplicates count as one tool action, and Stop remains av
   } finally { await progress.close(); }
 });
 
-test("progress needs no embed permission and nests Stop beside Turn details in the V2 card", async () => {
+test("progress needs no embed permission and nests Turn details and a red Stop in the V2 card", async () => {
   const edits: MessageEditOptions[] = [];
   const message = { id: "v2", edit: async (options: MessageEditOptions) => {
     assert.ok(!options.embeds?.length);
@@ -274,7 +274,8 @@ test("progress needs no embed permission and nests Stop beside Turn details in t
   assert.match(card.text, /Updating without embeds/);
   const headRow = card.buttons.filter((button) => ["ts2:details:v2", "ts2:stop:v2"].includes(button.custom_id!));
   assert.deepEqual(headRow.map((button) => button.label), ["Turn details", "Stop turn"]);
-  assert.equal(headRow[1].style, ButtonStyle.Secondary);
+  assert.equal(headRow[0].style, ButtonStyle.Primary, "Turn details owns the header corner");
+  assert.equal(headRow[1].style, ButtonStyle.Danger, "Stop is red in the bottom row");
 });
 
 test("OpenCode feeds structured plan, public usage and tool events without exposing reasoning or spend", () => {

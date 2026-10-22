@@ -61,9 +61,9 @@ test("five full questions fit V2 limits, offer the answer form, and keep a scope
       assert.equal(styles[label], ButtonStyle.Secondary, `${label} stays secondary`);
     }
     const headRow = view.buttons.filter((button) => ["ts2:details:questions", "ts2:stop:questions"].includes(button.custom_id!));
-    assert.deepEqual(headRow.map((button) => button.label), ["Turn details", "Stop turn"], "details sits directly beside Stop");
-    assert.equal(headRow[0].style, ButtonStyle.Primary);
-    assert.equal(headRow[1].style, ButtonStyle.Secondary, "Stop keeps the quieter colour so it is never the misclick");
+    assert.deepEqual(headRow.map((button) => button.label), ["Turn details", "Stop turn"], "details takes the corner; Stop rides the bottom row");
+    assert.equal(headRow[0].style, ButtonStyle.Primary, "Turn details owns the primary corner");
+    assert.equal(headRow[1].style, ButtonStyle.Danger, "Stop is the red control, separated from the corner");
     assert.ok(view.buttons.some((button) => button.custom_id === "ts2:stop:questions"), "the live card keeps a turn-scoped Stop");
     const answered = disableMessageControls(card as unknown as Pick<Message, "components">);
     assert.equal(cardView(answered).text, view.text, "acknowledging a control keeps every text section");
@@ -313,18 +313,21 @@ test("the review card reflects draft progress and disables submission until comp
   assert.equal(busyView.buttons.find((button) => button.label === "Submit all answers")?.disabled, true, "delivery in flight cannot double-submit");
 });
 
-test("the live card keeps turn details beside Stop and metrics in the footer", () => {
+test("the live card keeps Turn details in the corner, Stop red in the bottom row, metrics in the footer", () => {
   const message = renderProgressCard(buildingSnapshot(), { resource: "turn", stopCustomId: "threadsite:stop" });
   assertV2(message);
+  const components = cardComponents(message);
+  const header = components.find((component) => component.type === ComponentType.Section);
+  assert.equal(header?.accessory?.custom_id, "ts2:details:turn", "Turn details owns the top-right corner");
+  assert.equal(header?.accessory?.style, ButtonStyle.Primary);
+  assert.match(header?.components[0].content ?? "", /● Turn in progress/, "the status line stays under the title");
   const view = cardView(message);
-  const headRow = view.buttons.filter((button) => ["ts2:details:turn", "ts2:stop:turn"].includes(button.custom_id!));
-  assert.deepEqual(headRow.map((button) => button.label), ["Turn details", "Stop turn"], "details sits directly beside Stop at the top");
-  assert.equal(headRow[0].style, ButtonStyle.Primary, "details is the primary colour");
-  assert.equal(headRow[1].style, ButtonStyle.Secondary, "Stop stays grey so the pair can't be confused");
+  const stop = view.buttons.find((button) => button.custom_id === "ts2:stop:turn");
+  assert.equal(stop?.style, ButtonStyle.Danger, "Stop is the red control in the bottom row");
+  const controls = view.buttons.filter((button) => button.custom_id?.startsWith("ts2:") && button.custom_id !== "ts2:stop:turn" && button.custom_id !== "ts2:details:turn").map((button) => button.label);
+  assert.deepEqual(controls, ["Add instruction", "Queue · 2"], "the rest of the bottom row stays actions and links");
   assert.match(view.footer.text, /Elapsed 2m 14s · 12 model steps · 28\.4k\/100k context · avg ~54 tok\/s/);
   assert.doesNotMatch(view.footer.text, /actions/, "the footer counts model steps, not actions");
-  const controls = view.buttons.filter((button) => button.custom_id?.startsWith("ts2:") && button.custom_id !== "ts2:stop:turn" && button.custom_id !== "ts2:details:turn").map((button) => button.label);
-  assert.deepEqual(controls, ["Add instruction", "Queue · 2"], "the lower row stays actions and links only");
 });
 
 test("the thinking trail stays off the public card and pages into the private details", async () => {
