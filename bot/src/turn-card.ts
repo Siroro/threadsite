@@ -21,7 +21,7 @@ import { formatShortDuration, formatTokens, stripSummaryPreamble, truncate } fro
  *
  * 1. the turn's own message becomes the technical card — the agent's full
  *    report of what it did, the commit, the usage;
- * 2. a new message under it carries the playable card — the screenshot, the
+ * 2. a reply to it carries the playable card — the screenshot, the
  *    model-written preview of the project, and the link that opens it.
  *
  * The two answer two different questions. "What did this turn do?" is for the
@@ -120,7 +120,7 @@ export function renderTechnicalCard(state: TurnCardState): TurnCardMessage {
   return { ...cardMessage(card), files };
 }
 
-/** Message 2 — the new message that presents the project and opens it. */
+/** Message 2 — a reply to the technical card that presents the project and opens it. */
 export function renderPlayCard(state: TurnCardState): PlayCardMessage {
   const files: AttachmentBuilder[] = [];
   if (state.screenshot?.length) files.push(new AttachmentBuilder(Buffer.from(state.screenshot), { name: SCREENSHOT_NAME }));
