@@ -18,7 +18,8 @@
 #   ./start.sh purge                       preview orphaned resources; --apply removes them
 #
 # .env, secrets/ and data/ are untracked and never touched by updates.
-# Bundled Apache profile: COMPOSE_PROFILES=bundled-static ./start.sh
+# Optional profiles (set COMPOSE_PROFILES in .env): caddy (edge proxy with
+# automatic HTTPS, see scripts/caddy-quickstart.sh) or bundled-static (httpd).
 # First run on a fresh clone: ./scripts/setup.sh, edit .env, then start.
 #
 set -euo pipefail
@@ -40,7 +41,7 @@ while [[ $# -gt 0 ]]; do
     --no-update) UPDATE=0 ;;
     --force) FORCE=1 ;;
     -h|--help) usage; exit 0 ;;
-    bot|opencode|forgejo|gameserver|preview|httpd) SERVICE="$1" ;;
+    bot|opencode|forgejo|gameserver|preview|httpd|caddy) SERVICE="$1" ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
   shift

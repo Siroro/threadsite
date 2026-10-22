@@ -207,10 +207,42 @@ services:
     ports:
       - "${STATIC_PORT:-8080}:80"
 
+  # Optional edge for fresh-server deployments: Caddy with automatic HTTPS.
+  # The default publication path stays host Apache (or bundled-static above);
+  # enable this profile only when nothing else on the host binds 80/443.
+  # Serves the publish root and, through vhosts written into caddy/vhosts/,
+  # can also proxy Forgejo and the multiplayer relay. One-command setup:
+  # scripts/caddy-quickstart.sh (see caddy/ and docs/deployment.md).
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["caddy"]
+    restart: unless-stopped
+    environment:
+      SITES_DOMAIN: ${SITES_DOMAIN:-localhost}
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+      # HTTP/3 (QUIC); Caddy advertises it via the TCP listener above.
+      - "${CADDY_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/vhosts:/etc/caddy/vhosts:ro
+      - ${SITES_HOST_PATH:-./data/sites}:/srv/sites:ro
+      # TLS certificates and OCSP staples survive restarts.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      forgejo:
+        condition: service_started
+      gameserver:
+        condition: service_started
+
 volumes:
   forgejo-data:
   opencode-data:
   cleanup-control:
+  caddy-data:
+  caddy-config:
 
 networks:
   preview:

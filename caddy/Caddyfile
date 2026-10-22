@@ -1,0 +1,45 @@
+# ThreadSite edge configuration for the optional `caddy` Compose profile.
+#
+# The sites vhost serves the same publish root (SITES_HOST_PATH, mounted
+# read-only at /srv/sites) that the host-Apache default path and the
+# bundled-static profile use, with the same cache policy as
+# apache/threadsite-vhost.conf.example.
+#
+# Optional Forgejo and multiplayer-relay vhosts live in vhosts/*.caddy:
+# copy the matching .example file in that directory, or let
+# scripts/caddy-quickstart.sh write them from your domains. Generated vhost
+# files are per-deployment and untracked.
+#
+# Local default: SITES_DOMAIN=localhost gets an internal certificate
+# (https://localhost; the browser warning is expected). For public automatic
+# HTTPS, set SITES_DOMAIN in .env and point its DNS at this host first.
+
+{
+	# Optional: receive certificate expiry notices from Let's Encrypt.
+	# email you@example.com
+}
+
+{$SITES_DOMAIN:localhost} {
+	root * /srv/sites
+	file_server
+
+	# Cache policy, mirroring apache/threadsite-vhost.conf.example:
+	# ThreadSite appends ?v=<content-hash> to asset references on publish, so
+	# versioned assets are content-addressed and cache immutably; unversioned
+	# assets and HTML revalidate; the deploy marker the injected update checker
+	# polls is never cached. It lives at each site's subroot, hence both path
+	# forms.
+	@immutable {
+		path *.css *.js *.mjs
+		query v=*
+	}
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+	@unversioned_asset path *.css *.js *.mjs
+	header @unversioned_asset Cache-Control "no-cache"
+	@page path *.html *.htm
+	header @page Cache-Control "no-cache"
+	@deploy_marker path /threadsite-version.json */threadsite-version.json
+	header @deploy_marker Cache-Control "no-store"
+}
+
+import vhosts/*.caddy
