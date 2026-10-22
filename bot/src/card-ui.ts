@@ -27,6 +27,18 @@ export function addCardHeader(card: ContainerBuilder, label: string, title: stri
   else card.addTextDisplayComponents(text);
 }
 
+/**
+ * A title-led header for cards whose own name is the brand: the project title
+ * (emoji included) leads the card in the small line, with no THREADSITE label
+ * and no big heading below it.
+ */
+export function addCardTitle(card: ContainerBuilder, title: string, status: string, accessory?: ButtonBuilder | ThumbnailBuilder): void {
+  const text = new TextDisplayBuilder().setContent(`-# ${cardTitle(title)}\n${status}`);
+  if (accessory instanceof ButtonBuilder) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setButtonAccessory(accessory));
+  else if (accessory) card.addSectionComponents(new SectionBuilder().addTextDisplayComponents(text).setThumbnailAccessory(accessory));
+  else card.addTextDisplayComponents(text);
+}
+
 export function addCardField(card: ContainerBuilder, name: string, value: string): void {
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`### ${name}\n${value}`));
 }

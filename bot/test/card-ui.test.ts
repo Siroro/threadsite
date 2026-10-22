@@ -158,7 +158,7 @@ test("every phase keeps a valid V2 payload with long plans, paths, history and p
     const message = renderProgressCard(state, { stopCustomId: "threadsite:stop" });
     assertV2(message);
     assert.ok(cardView(message).buttons.some((button) => button.custom_id === "threadsite:stop"));
-    assert.equal((cardView(message).title!.match(/\n/g) ?? []).length, 0);
+    assert.doesNotMatch(cardView(message).text, /^## /m, "the title leads in the small line; no big heading");
   }
 });
 

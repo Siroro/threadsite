@@ -10,7 +10,7 @@ import {
   SeparatorBuilder,
   TextDisplayBuilder,
 } from "discord.js";
-import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, cardTextLength, CARD_TEXT_LIMIT, KIND_COLORS, type CardMessage } from "./card-ui.js";
+import { addCardDivider, addCardField, addCardHeader, addCardTitle, addCardLinks, cardLink, cardMessage, cardTextLength, CARD_TEXT_LIMIT, KIND_COLORS, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
 import type { TurnUsage } from "./opencode.js";
 import type { ProjectKind } from "./types.js";
@@ -129,7 +129,7 @@ export function renderPlayCard(state: TurnCardState): PlayCardMessage {
   // The title and the screenshot lead the card. The gallery spans the
   // container's full width, so the opening frame keeps its room instead of
   // squeezing the text beside it.
-  addCardHeader(container, isGame ? "PLAY" : "EXPLORE", `${isGame ? "🎮 Play" : "🛠️ Open"} ${state.name}`,
+  addCardTitle(container, `${isGame ? "🎮 Play" : "🛠️ Open"} ${state.name}`,
     state.published ? `● Live · ${isGame ? "ready to play" : "ready to explore"}` : "⚠️ This turn was not published · opens the previous live version");
   if (files.length) {
     container.addMediaGalleryComponents(

@@ -86,7 +86,7 @@ test("the new message carries the playable card, the screenshot and the play lin
   assert.equal(card.type, ComponentType.Container);
   assert.equal(card.accent_color, 0x22c55e, "the playable card shares the turn's colour");
   const text = playCardText(message);
-  assert.match(text, /## 🎮 Play Koi Pond Arcade/);
+  assert.match(text, /-# 🎮 Play Koi Pond Arcade/);
   assert.match(text, /feed koi and race them/);
   // The changelog heading labels its own line: it says what changed far
   // better than a generic "What's new".
@@ -127,7 +127,7 @@ test("the playable card still renders without a screenshot, a description or a c
   assert.doesNotMatch(text, /feed koi/);
   assert.doesNotMatch(text, /How to play/);
   assert.doesNotMatch(text, /Leaderboard/);
-  assert.match(text, /## 🎮 Play Koi Pond Arcade/);
+  assert.match(text, /-# 🎮 Play Koi Pond Arcade/);
   // The play link is the one thing the card must never lose.
   assert.equal(playCardButtons(message)[0].url, "https://games.example.co.uk/koi-pond-arcade/");
 });
@@ -150,7 +150,7 @@ test("a site says open site, and a note is kept as its own field", () => {
   assert.match(technical.fields!.find((field) => field.name === "Note")!.value, /edits this site/);
   const play = renderPlayCard(state({ kind: "site" }));
   const text = playCardText(play);
-  assert.match(text, /## 🛠️ Open Koi Pond Arcade/);
+  assert.match(text, /-# 🛠️ Open Koi Pond Arcade/);
   assert.doesNotMatch(text, /What to look at/, "sites keep their expanded blurb behind the About button too");
   assert.equal(playCardButtons(play)[0].label, "▶ Open site");
 });
