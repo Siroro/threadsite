@@ -20,6 +20,8 @@ export interface CommitAuthor {
 
 export interface QueuedRequest {
   prompt: string;
+  /** Modal requests have no separate user message; retain their words in the turn's details. */
+  displayPrompt?: string;
   statusMessageId: string;
   author?: CommitAuthor;
   /** Discord user who sent the request, so a pending agent question can ping them. */
@@ -46,6 +48,10 @@ export interface ProjectRecord {
   initialPrompt?: string;
   /** The pinned project-card message; edited in place after every turn outcome. */
   infoMessageId?: string;
+  /** Play message that owns the last screenshot; fetch it to refresh signed CDN thumbnail URLs. */
+  previewMessageId?: string;
+  /** Saved presentation of the last published turn; keeps pinned descriptions tied to the live version. */
+  lastCardMessageId?: string;
   lastError?: string;
   /** Confirmed advisory browser findings carried into the next turn. */
   browserQaFindings?: { checkedAt: string; findings: string[] };

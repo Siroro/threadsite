@@ -32,6 +32,7 @@ export class Store {
     db.exec("PRAGMA busy_timeout = 5000");
     db.exec("CREATE TABLE IF NOT EXISTS projects (thread_id TEXT PRIMARY KEY, record TEXT NOT NULL)");
     db.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    db.exec("CREATE TABLE IF NOT EXISTS card_state (thread_id TEXT NOT NULL, card_key TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY (thread_id, card_key))");
     const store = new Store(file, db);
     if (!store.getModel() && defaultModel) await store.setModel(defaultModel);
     return store;
@@ -125,7 +126,34 @@ export class Store {
   }
 
   async deleteProject(threadId: string): Promise<void> {
+    this.db.prepare("DELETE FROM card_state WHERE thread_id = ?").run(threadId);
     this.db.prepare("DELETE FROM projects WHERE thread_id = ?").run(threadId);
+  }
+
+  /** Public card snapshots and interaction drafts, kept separate from project lifecycle writes. */
+  getCardState<T>(threadId: string, key: string): T | undefined {
+    const row = this.db.prepare("SELECT record FROM card_state WHERE thread_id = ? AND card_key = ?").get(threadId, key) as { record?: string } | undefined;
+    if (!row?.record) return undefined;
+    try { return JSON.parse(row.record) as T; } catch { return undefined; }
+  }
+
+  /** Synchronous read/merge/write: a click claims its state before any network await. */
+  patchCardState<T extends object>(threadId: string, key: string, patch: Partial<T>): T {
+    const project = this.getProject(threadId);
+    if (!project || project.pendingDeletion) throw new Error("This project is no longer available.");
+    const next = { ...this.getCardState<T>(threadId, key), ...patch } as T;
+    this.db.prepare("INSERT INTO card_state (thread_id, card_key, record) VALUES (?, ?, ?) ON CONFLICT(thread_id, card_key) DO UPDATE SET record = excluded.record")
+      .run(threadId, key, JSON.stringify(next));
+    return next;
+  }
+
+  /** Durable single-flight claim, including across overlapping bot processes. */
+  claimCardAction<T extends { status: string }>(threadId: string, key: string, record: T): boolean {
+    const project = this.getProject(threadId);
+    if (!project || project.pendingDeletion) return false;
+    const result = this.db.prepare("INSERT INTO card_state (thread_id, card_key, record) VALUES (?, ?, ?) ON CONFLICT(thread_id, card_key) DO UPDATE SET record = excluded.record WHERE json_extract(card_state.record, '$.status') IN ('ready', 'retry')")
+      .run(threadId, key, JSON.stringify(record));
+    return Number(result.changes) === 1;
   }
 
   close(): void {

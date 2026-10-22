@@ -1,5 +1,7 @@
-import { ContainerBuilder, TextDisplayBuilder } from "discord.js";
-import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, KIND_COLORS, type CardMessage } from "./card-ui.js";
+import { ButtonBuilder, ButtonStyle, ContainerBuilder, TextDisplayBuilder, ThumbnailBuilder } from "discord.js";
+import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, KIND_COLORS, safeCardUrl, type CardMessage } from "./card-ui.js";
+import { cardId } from "./card-actions.js";
+import type { ProjectDescription } from "./project-docs.js";
 import { projectKindLabel } from "./templates.js";
 import type { ProjectRecord } from "./types.js";
 import type { UsageTotal } from "./usage.js";
@@ -17,6 +19,8 @@ export interface ProjectCardState {
   usage?: UsageTotal & { lastTs?: string };
   siteUrl?: string;
   repoUrl?: string;
+  description?: ProjectDescription;
+  thumbnailUrl?: string;
 }
 
 const PROMPT_CHARS = 900;
@@ -63,8 +67,18 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
       : `✅ Live${project.lastCommit ? ` · version \`${project.lastCommit}\`` : ""}${relative(project.lastTurnAt) ? ` · updated ${relative(project.lastTurnAt)}` : ""}`;
 
   const card = new ContainerBuilder().setAccentColor(color);
-  addCardHeader(card, "PROJECT", project.displayName, statusLine);
-  addCardLinks(card, [cardLink(kind === "site" ? "Open site" : "Play game", state.siteUrl), cardLink("Source", state.repoUrl)]);
+  // A signed or otherwise unusable URL would fail the whole card send, so the
+  // thumbnail is dropped rather than risking the pinned card.
+  const thumbnailUrl = safeCardUrl(state.thumbnailUrl);
+  const thumbnail = thumbnailUrl ? new ThumbnailBuilder().setURL(thumbnailUrl).setDescription(`Preview of ${project.displayName}`) : undefined;
+  addCardHeader(card, "PROJECT", project.displayName, statusLine, thumbnail);
+  if (state.description?.pitch) card.addTextDisplayComponents(new TextDisplayBuilder().setContent(truncate(state.description.pitch, 300)));
+  addCardLinks(card, [cardLink(kind === "site" ? "Open site" : "Play game", state.siteUrl)?.setEmoji("▶️"), cardLink("Source", state.repoUrl)]);
+  if (project.workspacePath) addCardLinks(card, [
+    new ButtonBuilder().setCustomId(cardId("change", project.threadId)).setLabel("Make a change").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(cardId("project", project.threadId)).setLabel("Project details").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(cardId("queue", project.threadId)).setLabel(`Queue${project.pendingQueue?.length ? ` · ${project.pendingQueue.length}` : ""}`).setStyle(ButtonStyle.Secondary),
+  ]);
   addCardDivider(card);
 
   // Settings come before the long request so they are visible immediately.

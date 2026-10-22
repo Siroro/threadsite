@@ -131,6 +131,6 @@ test("pinned cards use only V2 components, safe buttons and bounded text", () =>
   assertV2(message);
   const card = cardView(message);
   assert.equal(card.components[0].type, ComponentType.Container);
-  assert.equal(card.buttons.length, 0);
+  assert.equal(card.buttons.filter((button) => button.url).length, 0);
   assert.equal((card.title!.match(/\n/g) ?? []).length, 0);
 });

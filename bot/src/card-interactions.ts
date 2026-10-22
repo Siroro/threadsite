@@ -1,0 +1,277 @@
+import { randomBytes } from "node:crypto";
+import {
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ContainerBuilder, MessageFlags, PermissionFlagsBits, TextDisplayBuilder,
+  type AnySelectMenuInteraction, type Attachment, type ButtonInteraction, type ModalSubmitInteraction,
+} from "discord.js";
+import { cardId, parseCardId, type CardRoute } from "./card-actions.js";
+import { addCardHeader, cardEdit, cardMessage, renderStatusCard, type CardMessage } from "./card-ui.js";
+import { renderDetailPanel, renderQueuePanel, requestModal, type PanelSection, type PanelScope } from "./card-panels.js";
+import type { RequestFormState, StoredTurnCard } from "./card-state.js";
+import { progressDetailSections } from "./progress-view.js";
+import { answerModal, customAnswerModal, readAnswerForm, renderQuestionReview } from "./question-ui.js";
+import type { QuestionService } from "./question-service.js";
+import type { Store } from "./store.js";
+import type { ProjectRecord, QueuedRequest } from "./types.js";
+
+export type CardInteraction = ButtonInteraction | AnySelectMenuInteraction | ModalSubmitInteraction;
+export interface CardInteractionServices {
+  store: Store;
+  questions: QuestionService;
+  projectSections(project: ProjectRecord): Promise<PanelSection[]>;
+  queue(threadId: string): { requests: QueuedRequest[]; preparing: number };
+  cancel(threadId: string, statusId: string): Promise<string>;
+  submit(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, images: Attachment[]): Promise<string>;
+  stop(threadId: string, statusMessageId: string): Promise<string>;
+  rollback(threadId: string, expectedVersion: string): Promise<void>;
+  busy(threadId: string): Promise<boolean>;
+  error(error: unknown, interaction: CardInteraction): void;
+}
+
+/** Global routing survives restarts. Private views never edit the shared live card. */
+export class CardInteractions {
+  constructor(private readonly services: CardInteractionServices) {}
+
+  async handle(interaction: CardInteraction, customId = interaction.customId): Promise<boolean> {
+    if (!customId.startsWith("ts2:")) return false;
+    try {
+      const route = parseCardId(customId);
+      if (!route) throw new Error("This control is no longer supported. Use the latest project card.");
+      const project = this.project(interaction);
+      this.checkResource(project, route);
+      const viewing = ["details", "tab", "page", "project", "queue", "doc", "review", "retry"].includes(route.action);
+      if (!viewing && !interaction.memberPermissions?.has(PermissionFlagsBits.SendMessagesInThreads)) throw new Error("You need permission to send messages in this thread to use that action.");
+      await this.dispatch(interaction, project, route);
+    } catch (error) {
+      this.services.error(error, interaction);
+      // Service details remain in private logs. Domain errors below contain
+      // only public wording; transport errors get a useful generic response.
+      const message = error instanceof CardUserError ? error.message : publicMessage(error);
+      await this.respond(interaction, renderStatusCard(`⚠️ ${message}`)).catch(() => undefined);
+    }
+    return true;
+  }
+
+  private project(interaction: CardInteraction): ProjectRecord {
+    const project = interaction.channelId ? this.services.store.getProject(interaction.channelId) : undefined;
+    if (!interaction.inGuild() || !interaction.channel?.isThread() || !project || project.pendingDeletion || project.guildId !== interaction.guildId) throw new CardUserError("This project is no longer available in this thread.");
+    return project;
+  }
+
+  private checkResource(project: ProjectRecord, route: CardRoute): void {
+    if (route.resource !== project.threadId && !this.services.store.getCardState<StoredTurnCard>(project.threadId, route.resource)) throw new CardUserError("That card is no longer available. Open the current project card.");
+  }
+
+  private async dispatch(interaction: CardInteraction, project: ProjectRecord, route: CardRoute): Promise<void> {
+    const { action, resource, args } = route;
+    const threadId = project.threadId;
+    if (action === "details" || action === "project" || action === "doc" || action === "tab" || action === "page") {
+      await this.begin(interaction);
+      const scope: PanelScope = action === "project" ? "project" : action === "doc" ? "doc" : action === "tab" || action === "page" ? parseScope(args[0]) : "turn";
+      const selected = action === "tab" && interaction.isStringSelectMenu() ? interaction.values[0] : action === "page" ? args[1] : args[0];
+      const page = action === "page" ? indexArg(args[2]) : 0;
+      const sections = scope === "project" ? await this.services.projectSections(project) : this.turnSections(threadId, resource, scope);
+      await this.respond(interaction, renderDetailPanel(scope === "project" ? project.displayName : "Turn details", resource, scope, sections, selected, page));
+      return;
+    }
+    if (action === "queue" || action === "cancel") {
+      await this.begin(interaction);
+      let note: string | undefined;
+      if (action === "cancel") {
+        if (!/^\d{5,25}$/.test(args[0] ?? "")) throw new CardUserError("That queue entry is invalid.");
+        note = await this.services.cancel(threadId, args[0]);
+      }
+      const queue = this.services.queue(threadId);
+      const panel = renderQueuePanel(resource, queue.requests, queue.preparing, action === "queue" ? indexArg(args[0]) : 0);
+      if (note) panel.components[0].addTextDisplayComponents(new TextDisplayBuilder().setContent(note));
+      await this.respond(interaction, panel);
+      return;
+    }
+    if (action === "change" || action === "steer") {
+      if (!interaction.isButton()) throw new CardUserError("Open the request form from a button.");
+      if (action === "steer" && project.pendingTurn?.statusMessageId !== resource) throw new CardUserError("That turn has finished. Use Request a change to queue a follow-up.");
+      const nonce = randomBytes(8).toString("hex");
+      this.services.store.patchCardState<RequestFormState>(threadId, `request:${nonce}`, { userId: interaction.user.id, resource, steer: action === "steer", status: "ready" });
+      await interaction.showModal(requestModal(resource, nonce, action === "steer"));
+      return;
+    }
+    if (action === "request") {
+      if (!interaction.isModalSubmit()) throw new CardUserError("Submit the request form to continue.");
+      const nonce = args[0];
+      const form = this.services.store.getCardState<RequestFormState>(threadId, `request:${nonce}`);
+      if (!form || form.userId !== interaction.user.id || form.resource !== resource) throw new CardUserError("That request form has expired. Open a new form from the project card.");
+      await this.begin(interaction);
+      if (form.status !== "ready") { await this.respond(interaction, renderStatusCard(form.status === "accepted" ? "✅ This request was already saved." : "⏳ This request is already being submitted.")); return; }
+      const prompt = interaction.fields.getTextInputValue("prompt").trim();
+      const images = [...(interaction.fields.getUploadedFiles("images")?.values() ?? [])];
+      if (!prompt) throw new CardUserError("Describe the change you want before submitting.");
+      if (images.some((file) => !file.contentType?.startsWith("image/"))) throw new CardUserError("Reference attachments must be images.");
+      if (!this.services.store.claimCardAction(threadId, `request:${nonce}`, { ...form, prompt, status: "submitting" })) {
+        await this.respond(interaction, renderStatusCard("⏳ This request is already being submitted."));
+        return;
+      }
+      try {
+        const text = await this.services.submit(interaction, project, form, nonce, prompt, images);
+        this.services.store.patchCardState<RequestFormState>(threadId, `request:${nonce}`, { status: "accepted" });
+        await this.respond(interaction, renderStatusCard(text));
+      } catch (error) {
+        // Once a public status exists, submission may have reached the durable
+        // queue. Reconcile it instead of making the same form submit twice.
+        const saved = this.services.store.getCardState<RequestFormState>(threadId, `request:${nonce}`);
+        if (!saved?.statusMessageId) this.services.store.patchCardState<RequestFormState>(threadId, `request:${nonce}`, { status: "ready" });
+        throw error;
+      }
+      return;
+    }
+    if (action === "stop") {
+      if (project.pendingTurn?.statusMessageId !== resource) throw new CardUserError("That turn is no longer running. This control cannot stop a later turn.");
+      await this.begin(interaction);
+      await this.respond(interaction, renderStatusCard(await this.services.stop(threadId, resource)));
+      return;
+    }
+    if (action === "rollback" || action === "keep" || action === "confirm") {
+      const version = this.checkFailure(project, resource);
+      await this.begin(interaction);
+      if (action === "keep") { await this.respond(interaction, renderStatusCard("🗂️ Keeping the partial edits — the next message will build on them.")); return; }
+      if (action === "rollback") {
+        const card = new ContainerBuilder().setAccentColor(0xef4444);
+        addCardHeader(card, "CONFIRM · ONLY YOU CAN SEE THIS", "Discard partial edits?", "This restores the workspace to the last published commit. The partial edits will be discarded.");
+        card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId(cardId("confirm", resource, "rollback")).setLabel("Discard partial edits").setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId(cardId("keep", resource)).setLabel("Keep edits").setStyle(ButtonStyle.Secondary),
+        ));
+        await this.respond(interaction, cardMessage(card));
+        return;
+      }
+      if (args[0] !== "rollback") throw new CardUserError("That confirmation is not supported.");
+      if (await this.services.busy(threadId)) throw new CardUserError("The agent is working. Wait until it has stopped before discarding edits.");
+      // The enqueued rollback re-checks this version again once it is the
+      // closure's turn to run: a turn accepted between the click and the queue
+      // position must never have its work discarded.
+      if (!this.services.store.claimCardAction(threadId, `rollback:${resource}`, { status: "submitting" })) throw new CardUserError("This rollback was already requested.");
+      try {
+        await this.services.rollback(threadId, version);
+        this.services.store.patchCardState(threadId, `rollback:${resource}`, { status: "accepted" });
+      } catch (error) {
+        this.services.store.patchCardState(threadId, `rollback:${resource}`, { status: "retry" });
+        throw error;
+      }
+      await this.respond(interaction, renderStatusCard("↩️ Restored the last published commit. The partial edits were discarded."));
+      return;
+    }
+    await this.question(interaction, project, route);
+  }
+
+  private async question(interaction: CardInteraction, project: ProjectRecord, route: CardRoute): Promise<void> {
+    const { action, resource, args } = route;
+    const revision = args[0];
+    if (!revision) throw new CardUserError("The question identifier is missing.");
+    const service = this.services.questions;
+    const request = service.context(project.threadId, resource, revision);
+    const userId = interaction.user.id;
+    const draft = service.draft(project.threadId, resource, revision, userId);
+    const index = indexArg(args[1]);
+    if (action === "questions" || action === "other") {
+      if (!interaction.isButton()) throw new CardUserError("Open the answer form from a button.");
+      if (index >= (action === "questions" ? Math.ceil(request.questions.length / 5) : request.questions.length)) throw new CardUserError("That question page is no longer available.");
+      await interaction.showModal(action === "questions" ? answerModal(resource, request, draft, index) : customAnswerModal(resource, request, index, draft));
+      return;
+    }
+    await this.begin(interaction);
+    if (action === "answer") {
+      if (request.questions.length !== 1 || request.questions[0].multiple || !request.questions[0].options[index]) throw new CardUserError("Open Answer questions to answer this request completely.");
+      draft.answers = [[request.questions[0].options[index].label]];
+      service.saveDraft(project.threadId, resource, revision, userId, draft);
+    } else if (action === "select") {
+      if (!interaction.isStringSelectMenu() || !request.questions[index]) throw new CardUserError("That answer selection is invalid.");
+      draft.answers[index] = interaction.values.map((value) => {
+        if (!/^\d+$/.test(value) || !request.questions[index].options[Number(value)]) throw new CardUserError("That answer option is no longer available.");
+        return request.questions[index].options[Number(value)].label;
+      });
+      draft.custom = draft.custom?.filter((entry) => entry !== index);
+      service.saveDraft(project.threadId, resource, revision, userId, draft);
+    } else if (action === "form") {
+      if (!interaction.isModalSubmit()) throw new CardUserError("Submit the answer form to continue.");
+      const values = readAnswerForm(interaction, request, index);
+      for (const [questionIndex, answers] of values.answers) draft.answers[questionIndex] = answers;
+      draft.custom = [...(draft.custom ?? []).filter((entry) => !values.answers.has(entry)), ...values.custom];
+      service.saveDraft(project.threadId, resource, revision, userId, draft);
+    } else if (action === "custom") {
+      if (!interaction.isModalSubmit() || !request.questions[index]) throw new CardUserError("That question is no longer available.");
+      const text = interaction.fields.getTextInputValue("answer").trim();
+      if (!text) throw new CardUserError("Write an answer before submitting.");
+      draft.answers[index] = request.questions[index].multiple ? text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : [text];
+      draft.custom = draft.custom?.filter((entry) => entry !== index);
+      service.saveDraft(project.threadId, resource, revision, userId, draft);
+    } else if (!["send", "skip", "review", "retry"].includes(action)) throw new CardUserError("That card action is no longer supported.");
+    const complete = draft.answers.length === request.questions.length && draft.answers.every((answer) => answer?.length) && !draft.custom?.length;
+    if (action === "skip" || action === "answer" || action === "send" || ((action === "form" || action === "custom") && complete)) {
+      if (action !== "skip" && !complete) throw new CardUserError("Answer every question before submitting. Your draft is saved.");
+      const delivery = await service.submit(project.threadId, resource, revision, interaction.user.globalName ?? interaction.user.username, action === "skip" ? undefined : draft.answers);
+      if (delivery.status === "answered" || delivery.status === "skipped") { await this.respond(interaction, renderStatusCard(delivery.status === "answered" ? "✅ All answers were delivered to the agent." : "⏭️ Skipped — the agent will decide.")); return; }
+    }
+    if (action === "retry") {
+      const delivery = await service.reconcile(project.threadId, resource, revision);
+      if (delivery.status === "answered" || delivery.status === "skipped") { await this.respond(interaction, renderStatusCard("✅ Answer delivery confirmed.")); return; }
+    }
+    const next = action === "form" ? draft.answers.findIndex((answer, i) => !answer?.length || draft.custom?.includes(i)) : index;
+    await this.respond(interaction, renderQuestionReview(resource, request, draft, next < 0 ? 0 : next, service.delivery(project.threadId, resource, revision)));
+  }
+
+  private turnSections(threadId: string, resource: string, scope: PanelScope): PanelSection[] {
+    const card = this.services.store.getCardState<StoredTurnCard>(threadId, resource);
+    if (!card) throw new CardUserError("No saved details are available for this older turn.");
+    const sections = card.snapshot ? progressDetailSections(card.snapshot) : [];
+    const result = card.result;
+    if (result) sections.unshift(
+      { key: "report", label: "Full agent report", text: result.summary ?? "The agent did not provide a report." },
+      { key: "qa", label: "Browser findings", text: result.findings?.length ? `Advisory — publication is not blocked.\n\n${result.findings.join("\n\n")}` : "No browser findings were recorded for this turn." },
+      { key: "description", label: "About & how to play", text: card.documents?.description || [result.description?.pitch, result.description?.play].filter(Boolean).join("\n\n") || result.request || "No description has been written yet." },
+      { key: "changelog", label: "Changelog", text: card.documents?.changelog || [result.changelog?.title, result.changelog?.body].filter(Boolean).join("\n\n") || "No changelog entry was written for this turn." },
+      { key: "outcome", label: "Outcome & commit", text: `${result.published ? "Published" : "Not published"}\nCommit: ${result.commit ?? "not recorded"}\n${result.commitFiles} files · +${result.additions} / −${result.deletions} lines\nDuration: ${result.durationMs} ms\n${result.note ?? ""}\n${result.siteUrl}\n${result.repoUrl}` },
+    );
+    if (result?.usage) {
+      const usage = result.usage;
+      const finalUsage = { key: "usage", label: "Usage & context", text: `Final provider counts\nInput: ${usage.inputTokens || "unavailable"}\nOutput: ${usage.outputTokens || "unavailable"}\nCached: ${usage.cacheTokens}\nContext: ${usage.contextTokens}\nContext limit: ${usage.contextLimit ?? "unavailable"}\nSteps: ${usage.steps}\nCompactions: ${usage.compactions}\n\n${sections.find((entry) => entry.key === "usage")?.text ?? ""}` };
+      const position = sections.findIndex((entry) => entry.key === "usage");
+      if (position >= 0) sections[position] = finalUsage;
+      else sections.push(finalUsage);
+    }
+    if (result && !sections.some((entry) => entry.key === "files")) sections.push({ key: "files", label: "Changed files", text: `${result.commitFiles} files · +${result.additions} / −${result.deletions} lines\nIndividual paths were not recorded for this turn. View the commit for the full diff.` });
+    if (scope === "doc") return sections.filter((entry) => entry.key === "description" || entry.key === "changelog");
+    return sections.length ? sections : [{ key: "overview", label: "Overview", text: "No further information was recorded for this turn." }];
+  }
+
+  private checkFailure(project: ProjectRecord, resource: string): string {
+    const card = this.services.store.getCardState<StoredTurnCard & { failureVersion?: string }>(project.threadId, resource);
+    if (project.pendingTurn || !card?.failureVersion || card.failureVersion !== `${project.lastCommit ?? ""}/${project.lastTurnAt ?? ""}`) throw new CardUserError("This outcome belongs to an older turn. Use the latest turn's controls.");
+    return card.failureVersion;
+  }
+
+  private async begin(interaction: CardInteraction): Promise<void> {
+    if (interaction.deferred || interaction.replied) return;
+    if (interaction.message?.flags.has(MessageFlags.Ephemeral)) await interaction.deferUpdate();
+    else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  }
+
+  private async respond(interaction: CardInteraction, message: CardMessage): Promise<void> {
+    if (interaction.deferred || interaction.replied) await interaction.editReply(cardEdit(message));
+    else await interaction.reply({ ...message, flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
+  }
+}
+
+export class CardUserError extends Error {}
+function indexArg(value?: string): number {
+  if (value === undefined) return 0;
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new CardUserError("That page is invalid.");
+  return Number(value);
+}
+function parseScope(value?: string): PanelScope {
+  if (value !== "turn" && value !== "project" && value !== "doc") throw new CardUserError("That details view is unavailable.");
+  return value;
+}
+function publicMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  // These errors originate in our local validation and contain no service diagnostics.
+  if (/^(That question|The question|Answer every|Question \d|An answer|Write an answer|This project)/.test(message)) return message;
+  return "The action could not be completed. Your saved work and drafts are kept; try again shortly.";
+}

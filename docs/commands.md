@@ -34,9 +34,9 @@ add a leaderboard for the top 10 capybaras
 now make the visual design look like a financial terminal without losing the jokes
 ```
 
-Every normal message in a registered thread becomes the next mutation of the same site. Reply while a turn runs to steer it live — the message is submitted straight into the running agent turn and folded into the current work instead of waiting for the next pass. When the agent asks a question mid-turn, the requester gets pinged with answer buttons.
+Every normal message in a registered thread becomes the next mutation of the same site. Reply while a turn runs to steer it live — the message is submitted straight into the running agent turn and folded into the current work instead of waiting for the next pass. When the agent asks a question mid-turn, the requester gets pinged: a single simple choice answers with quick buttons, longer option lists open a select menu, and a multi-question request opens an **Answer questions** form (radio groups, checkbox groups, selects and free text as appropriate) that submits every question together. **Write another answer** allows a custom reply for any question, drafts are saved per person until submitted, and a delivery that fails on the wire is reconciled against the agent before offering a retry.
 
-Each project thread also gets a **pinned project card** — type (site/2D/3D), game engine, multiplayer setting, original request, advisory Browser QA status, lifetime usage, and Play/Open and Source buttons — that updates itself after every turn. All project cards use Discord Components V2, with matching accent colors, headings and separated sections. Settings appear above the request; pinned cards refresh at startup, upgrading existing pinned embeds in place. Model routing and spend details stay in admin views.
+Each project thread also gets a **pinned project card** — a thumbnail of the newest screenshot, the project's own description, type (site/2D/3D), game engine, multiplayer setting, original request, advisory Browser QA status, lifetime usage, and Play/Open and Source buttons — that updates itself after every turn. It also carries the project's controls: **Make a change** opens a private request form (with optional reference images), **Project details** opens a private panel with the description, changelog, original request and lifetime usage, and **Queue** lists saved requests. All project cards use Discord Components V2, with matching accent colors, headings and separated sections. Settings appear above the request; pinned cards refresh at startup, upgrading existing pinned embeds in place. Model routing and spend details stay in admin views.
 
 ## Project thread commands
 
@@ -53,22 +53,22 @@ Each project thread also gets a **pinned project card** — type (site/2D/3D), g
 
 ## Live progress during a turn
 
-While a turn runs, its Discord message updates in place as a live status card:
+While a turn runs, its Discord message updates in place as a compact live status card:
 
 - a **Prepare → Build → Check → Publish** stage rail, with the current activity and its duration during longer operations;
-- the request being handled and a short excerpt of the agent's public update;
-- the actual todo plan, with completed, current, pending and skipped work;
-- changed-file counts, added/removed lines and relative filenames;
-- input/output tokens, cache share, context-window usage, model steps and generation speed when available (the model name itself is never shown);
-- a timestamped recent-activity trail, action counts, saved requests waiting for the next pass, and project links.
+- the current plan task and progress counts, plus the most recent of the agent's public updates;
+- the last few public agent updates, so readers can follow the work without opening anything;
+- saved requests waiting for the next pass, and project links.
 
-Questions switch to a shorter amber card with each question and its option descriptions directly above its answer/skip buttons, including on mobile. The selected answer and responder remain visible afterward. Stop stays beside the Turn heading, including when five questions are shown. Live site and Source buttons appear below the normal progress view. A full context window is shown as context usage, not a percentage estimate of how close the whole job is to completion. Provider spend, the model name and private reasoning are never included in the public card.
+Everything longer stays one click away in a **private Turn details panel**: the complete plan, changed files with paths, input/output tokens, cache share, context-window usage, model steps, the full public update history, the timestamped activity trail, past questions and merged requests. The panel pages long sections without dropping text; the public card never grows back to its old height.
+
+Questions pin an amber **Waiting for your answer** block to the card with native controls: quick secondary buttons for a single simple choice, a select menu for longer lists (with multi-select for multiple-answer questions), an **Answer questions** modal for bigger requests, and **Write another answer** for free text. Answers are reviewed on a private card and submitted as one complete batch; drafts survive restarts, and submitting again after a transport failure reconciles against the agent instead of double-answering. The decision and who made it remain visible afterward. Stop stays beside the Turn heading — scoped to that turn, so an old card can never stop a newer one. Provider spend, the model name and private reasoning are never included in the public card.
 
 Lifetime token usage is stored in `data/bot/usage-log.jsonl` (`USAGE_LOG_FILE` inside the bot container). Turns have stable IDs, so restart recovery updates the same entry rather than counting it twice. Billing is reconciled from OpenCode's persisted message history, including subagents, and flushed before clearing the recovery marker. Startup reconciles saved turn IDs, session IDs and time boundaries against persisted history, then refreshes the pinned cards. Keep both the bot data and OpenCode data volumes when rebuilding services. If the provider never reported counts, or the original session was deleted, missing historical tokens cannot be reconstructed; the card shows "token counts unavailable" when no counts are known.
 
 Because HTTP request timeouts to the agent service are disabled by design, a provider that stops emitting events would otherwise leave the card heartbeating forever. The card therefore tracks real agent activity (not its own heartbeat) and, after `TURN_STALL_WARN_MS` without any event, switches to an amber **No progress for Nm** state that points at `/site stop`. The warning is suppressed while the thread is queued or waiting for an answer, where idleness is expected. It is a visible watchdog, not an automatic abort.
 
-`/site stop` (and the Stop button) aborts only the running agent turn: the session, workspace, partial edits, and git history are kept. It is deliberately not queued, so it still works when the turn is wedged on an unreachable agent or when the live status message was deleted before the button could be pressed. A stop lands in every phase: while the turn prepares, while it runs, while recovery waits, and even mid-reconcile — none of them resurrect the stopped turn. `/site queue` lists the backlog with its authors and offers **Cancel N** buttons; cancelling withdraws one waiting request from both the in-memory batch and SQLite and marks its acknowledgement message cancelled. Requests already being prepared by a drain are reported as in-flight instead of being silently removed.
+`/site stop` (and the Stop button) aborts only the running agent turn: the session, workspace, partial edits, and git history are kept. It is deliberately not queued, so it still works when the turn is wedged on an unreachable agent or when the live status message was deleted before the button could be pressed. A stop lands in every phase: while the turn prepares, while it runs, while recovery waits, and even mid-reconcile — none of them resurrect the stopped turn. Stop controls on a card are bound to their own turn, so a stale card cannot interrupt a turn that started later. A failed turn's **Rollback edits** choice asks for confirmation and re-checks, inside the project queue, that no newer turn has accepted work before discarding; **Keep edits** is always safe and idempotent. `/site queue` (and the Queue button) lists the backlog in a private panel with its authors and offers **Cancel N** buttons; cancelling withdraws one waiting request from both the in-memory batch and SQLite and marks its acknowledgement message cancelled. Requests already being prepared by a drain are reported as in-flight instead of being silently removed.
 
 ### Steering a running turn
 
@@ -85,12 +85,14 @@ When a turn finishes, it is presented in two messages:
 - the turn's **own message** becomes the technical card — the agent's full report of what it did, kept as the model wrote it, plus the commit, the files and lines changed, how long it took, and the token usage of the turn;
 - a **new message** under it carries the playable card — the browser-QA screenshot when one was captured, what the project is and how to play it, what this turn changed, and the play link next to the source link.
 
+Both cards keep working after the turn: the technical card adds **Turn details**, **Changed files**, **Browser findings** and a **Follow up** request form, and the playable card adds **How to play**, **Changelog** and **Request a change**. Each opens that turn's saved data in a private panel, so details stay available on old turns and after restarts.
+
 Both come from two documents the agent maintains in the project root, so nothing has to be generated after the fact:
 
 - **`DESCRIPTION.md`** — what the project is, in a visitor's words, plus a `## How to play` section. The project rules ask for one or two plain sentences, no file names, no code, no jargon, and for it to be updated whenever the project's shape changes.
 - **`CHANGELOG.md`** — one section per turn, newest at the top, saying what a visitor will notice. The agent adds its section before its final summary.
 
-The harness reads both after every turn and shows them on the playable card. A project that has neither document yet still renders the card: the original request stands in for the description, and a turn without a screenshot still shows the card. The technical card includes Play/Open, Source and View commit buttons. Reports that exceed the combined V2 text limit include a readable excerpt and the complete report as an attached `turn-report.md` file. If screenshot delivery is denied, the Play card retries without the image, keeping its text and buttons.
+The harness reads both after every turn and shows them on the playable card, and the pinned card shows the newest description pitch. A project that has neither document yet still renders the card: the original request stands in for the description, and a turn without a screenshot still shows the card. The technical card includes Play/Open, Source and View commit buttons. Reports that exceed the combined V2 text limit include a readable excerpt and the complete report as an attached `turn-report.md` file. If screenshot delivery is denied, the Play card retries without the image, keeping its text and buttons.
 
 ### AI-generated thread titles
 

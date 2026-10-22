@@ -65,7 +65,7 @@ test("the turn's own message carries the technical report and nothing else", () 
   assert.match(turn.value, /4 files changed \(\+220\/−18\)/);
   assert.match(turn.value, /⏱️ 1m/);
   const usage = card.fields!.find((field) => field.name === "Usage")!;
-  assert.match(usage.value, /12\.0k in · 4\.0k out/);
+  assert.match(usage.value, /12k in · 4k out/);
   assert.match(usage.value, /18 model steps/);
   assert.equal(card.buttons.find((button) => button.label === "View commit")?.url,
     "https://git.example.co.uk/shane/site-koi-pond-arcade/commit/abc1234def5678");

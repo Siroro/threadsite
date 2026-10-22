@@ -1679,10 +1679,22 @@ export class ProjectService {
    * at its pre-prompt checkpoint), `delivering` (the turn is past the agent
    * and will finish on its own), and `queueFreed` (the agent service could
    * not be reached, so the wedged queue was released instead of aborting).
+   *
+   * `expectedStatusMessageId` scopes the stop to one turn: card controls
+   * carry their own turn's status message, and a stale control must never
+   * abort a turn that started after it rendered. Every re-check runs before
+   * a marker is added, because each intervening await is a window in which
+   * the expected turn can finish and a queued one can begin.
    */
-  async stopTurn(threadId: string): Promise<StopTurnOutcome> {
+  async stopTurn(threadId: string, expectedStatusMessageId?: string): Promise<StopTurnOutcome> {
+    const idle: StopTurnOutcome = { stopped: false, delivering: false, queueFreed: false };
     const project = this.store.getProject(threadId);
-    if (!project) return { stopped: false, delivering: false, queueFreed: false };
+    if (!project) return idle;
+    const stale = () => {
+      if (!expectedStatusMessageId) return false;
+      return this.store.getProject(threadId)?.pendingTurn?.statusMessageId !== expectedStatusMessageId;
+    };
+    if (stale()) return idle;
     const busy = await this.opencode.isBusy(project.workspacePath, project.sessionId).catch(() => undefined);
     if (busy === false) {
       // No server-side turn: the thread is idle, the turn already moved on to
@@ -1692,11 +1704,12 @@ export class ProjectService {
       // checkpoint instead of starting agent work the user just asked to stop.
       if (this.delivering.has(threadId)) return { stopped: false, delivering: true, queueFreed: false };
       if (this.activeTurnThreads.has(threadId)) {
+        if (stale()) return idle;
         this.stopRequested.add(threadId);
         log("warn", "project.turn_stop_before_agent", { threadId, sessionId: project.sessionId });
         return { stopped: true, delivering: false, queueFreed: false };
       }
-      return { stopped: false, delivering: false, queueFreed: false };
+      return idle;
     }
     if (busy === undefined) {
       // The status call failed. A turn in its delivery tail is finishing on its
@@ -1706,6 +1719,7 @@ export class ProjectService {
       // that cannot be aborted is still marked, so it reports a user stop when
       // it finally settles — and restart recovery bails at its checkpoint
       // instead of prompting when the service returns.
+      if (stale()) return idle;
       if (this.delivering.has(threadId)) return { stopped: false, delivering: true, queueFreed: false };
       if (this.activeTurnThreads.has(threadId)) this.stopRequested.add(threadId);
       this.severQueue(threadId);
@@ -1717,6 +1731,10 @@ export class ProjectService {
     // A turn parked on a question holds itself open — the question must be
     // rejected before an abort can land (the same dance as the reset sweep).
     await this.rejectPendingQuestions(project.workspacePath);
+    // The question dance can take seconds; the expected turn may have finished
+    // and a queued turn started meanwhile. Abort targets the session, so it
+    // would land on the newer prompt — refuse instead.
+    if (stale()) return idle;
     // Mark BEFORE the abort request: the server rejects the in-flight prompt as
     // soon as it processes the abort, so the turn's catch can observe the mark
     // before this function resumes. Marking afterwards let the rejection race

@@ -1,5 +1,6 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, type Message } from "discord.js";
+import type { Message } from "discord.js";
 import { cardEdit } from "./card-ui.js";
+import { questionControls } from "./question-ui.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
 import { renderProgressCard, type ProgressSnapshot, type ProgressActivity, type ProgressContext, type ProgressFiles, type ProgressMetrics, type ProgressPhase, type ProgressPlanItem, type ProgressTool } from "./progress-view.js";
@@ -38,13 +39,20 @@ export interface ProgressUpdate {
   queuedRequests?: number;
   /** OpenCode status only; this confirms a running session without resetting the no-event timer. */
   active?: boolean;
+  /** Stable public assistant text part; updates replace its streamed draft instead of duplicating it. */
+  narrationId?: string;
 }
 
 export type ProgressCallback = (update: ProgressUpdate) => void | Promise<void>;
 
 const MAX_SUMMARY_CHARS = 280;
 // Keep a small event tail; the card shows the most recent useful activities.
-const HISTORY_LINES = 8;
+const HISTORY_LINES = 80;
+
+export interface ProgressPersistence {
+  load?: ProgressSnapshot;
+  save(snapshot: ProgressSnapshot, question?: AgentQuestion, closed?: boolean): void;
+}
 
 export class DiscordProgress {
   private readonly started: number;
@@ -62,6 +70,9 @@ export class DiscordProgress {
   private inFlight?: Promise<void>;
   private dirty = false;
   private thought?: string;
+  private narration: ProgressActivity[] = [];
+  private persistence?: ProgressPersistence;
+  private questionStatus?: { status: "ready" | "submitting" | "answered" | "skipped" | "retry"; error?: string };
   private stats?: string;
   private changes?: string;
   private question?: AgentQuestion;
@@ -123,6 +134,17 @@ export class DiscordProgress {
     } else if (update.kind === "thought") {
       const summary = summarizeThought(update.text);
       if (summary !== undefined) this.thought = summary;
+      if (summary !== undefined) {
+        const key = update.narrationId;
+        const previous = this.narration.at(-1);
+        const text = update.text.trim();
+        // A streamed part grows in place. Older public messages remain readable.
+        if ((key && previous?.key === key) || (!key && previous && text.startsWith(previous.text))) {
+          previous.text = text;
+        } else if (previous?.text !== text) {
+          this.narration.push({ text, at: Date.now(), key });
+        }
+      }
       this.schedule();
     } else if (update.kind === "stats") {
       this.stats = singleLine(update.text);
@@ -140,6 +162,7 @@ export class DiscordProgress {
           this.schedule();
         }
       } else if (update.question) {
+        if (this.question?.requestID !== update.question.requestID) this.questionStatus = { status: "ready" };
         this.question = update.question;
         const first = update.question.questions[0];
         const asked = first ? `${first.header}: ${first.question}` : update.text;
@@ -153,32 +176,31 @@ export class DiscordProgress {
   };
 
   /** Buttons for the pending agent question; empty when none is pending. */
-  questionComponents(): Array<ActionRowBuilder<ButtonBuilder>> {
-    if (!this.question) return [];
-    const rows: Array<ActionRowBuilder<ButtonBuilder>> = [];
-    this.question.questions.slice(0, 5).forEach((q, qIndex) => {
-      const row = new ActionRowBuilder<ButtonBuilder>();
-      for (const [oIndex, option] of q.options.slice(0, 4).entries()) {
-        row.addComponents(
-          new ButtonBuilder()
-            .setCustomId(`q:${this.question!.requestID}:${qIndex}:${oIndex}`)
-            .setLabel(option.label.slice(0, 80))
-            .setStyle(ButtonStyle.Primary),
-        );
-      }
-      // Skip rejects the whole request; offer it once, on the first row.
-      if (qIndex === 0) {
-        row.addComponents(
-          new ButtonBuilder()
-            .setCustomId(`qskip:${this.question!.requestID}`)
-            .setLabel("Skip — decide yourself")
-            .setStyle(ButtonStyle.Secondary),
-        );
-      }
-      rows.push(row);
-    });
-    return rows;
+  questionComponents(): ReturnType<typeof questionControls> {
+    return this.question ? questionControls(this.message.id, this.question, this.questionStatus?.status) : [];
   }
+
+  attachPersistence(persistence: ProgressPersistence): void {
+    this.persistence = persistence;
+    if (persistence.load) {
+      this.narration = persistence.load.narration ?? [];
+      this.history.push(...persistence.load.history);
+      this.thought = persistence.load.thought;
+      this.plan = persistence.load.plan;
+      this.files = persistence.load.files;
+      this.context = persistence.load.context;
+      this.metrics = persistence.load.metrics;
+      this.questionPin = persistence.load.questionPin ? { ...persistence.load.questionPin, requestID: persistence.load.questionPin.requestID ?? "restored" } : undefined;
+      this.questionStatus = persistence.load.questionStatus;
+    }
+  }
+
+  setQuestionStatus(status: NonNullable<ProgressSnapshot["questionStatus"]>): void {
+    this.questionStatus = status;
+    this.schedule();
+  }
+
+  readSnapshot(): ProgressSnapshot { return structuredClone(this.snapshot()); }
 
   /** The stored pending question, for resolving button customIds back to labels. */
   pendingQuestion(requestID: string): AgentQuestion | undefined {
@@ -241,7 +263,7 @@ export class DiscordProgress {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.pending = undefined;
     this.heartbeat = undefined;
-    return this.inFlight ?? Promise.resolve();
+    return (this.inFlight ?? Promise.resolve()).then(() => this.persistence?.save(this.snapshot(), this.question, true));
   }
 
   private schedule(): void {
@@ -261,8 +283,9 @@ export class DiscordProgress {
     this.dirty = false;
     this.inFlight = (async () => {
       try {
+        this.persistence?.save(this.snapshot(), this.question);
         await this.message.edit(cardEdit(renderProgressCard(this.snapshot(), {
-          questionRows: this.questionComponents(), stopCustomId: this.stopCustomId,
+          questionRows: this.questionComponents(), stopCustomId: this.stopCustomId, resource: this.message.id,
         })));
       } catch (error) {
         log("debug", "discord.progress_edit_failed", { messageId: this.message.id, error: String(error) });
@@ -294,7 +317,7 @@ export class DiscordProgress {
       waitingReason: latestToolFailed
         ? "A tool reported an error — the agent is retrying"
         : serviceWaiting ? "Waiting on the agent service — it will retry automatically" : undefined,
-      questions: this.question?.questions,
+      questions: this.question?.questions, questionStatus: this.questionStatus, narration: this.narration,
       stalledForMs: config.turnStallWarnMs > 0 && idleMs >= config.turnStallWarnMs ? idleMs : undefined,
     };
   }

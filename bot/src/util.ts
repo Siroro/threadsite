@@ -93,10 +93,11 @@ export function requestDisplayText(prompts: readonly string[]): string {
   return prompts.map((prompt) => prompt.trim()).filter(Boolean).join(" · ");
 }
 
-/** Compact token counts for Discord: 1234 -> "1.2k", 1250000 -> "1.3M". */
+/** Compact token counts for Discord: 1234 -> "1.2k", 100000 -> "100k", 1250000 -> "1.3M". */
 export function formatTokens(count: number): string {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`.replace(/\.0$/, "");
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`.replace(/\.0$/, "");
+  const trim = (value: string): string => value.replace(/\.0$/, "");
+  if (count >= 1_000_000) return `${trim((count / 1_000_000).toFixed(1))}M`;
+  if (count >= 1_000) return `${trim((count / 1_000).toFixed(1))}k`;
   return String(count);
 }
 

@@ -1,5 +1,7 @@
 import {
   AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ContainerBuilder,
   FileBuilder,
   escapeMarkdown,
@@ -9,6 +11,7 @@ import {
   TextDisplayBuilder,
 } from "discord.js";
 import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, cardTextLength, CARD_TEXT_LIMIT, KIND_COLORS, type CardMessage } from "./card-ui.js";
+import { cardId } from "./card-actions.js";
 import type { TurnUsage } from "./opencode.js";
 import type { ProjectKind } from "./types.js";
 import { formatShortDuration, formatTokens, stripSummaryPreamble, truncate } from "./util.js";
@@ -26,6 +29,8 @@ import { formatShortDuration, formatTokens, stripSummaryPreamble, truncate } fro
  * opens the thread later.
  */
 export interface TurnCardState {
+  /** Stable technical message ID; all personal views refer to this turn's saved data. */
+  resource?: string;
   /** Display name of the project. */
   name: string;
   /** Site or game kind; decides the wording and the card colour. */
@@ -155,6 +160,11 @@ export function renderPlayCard(state: TurnCardState): PlayCardMessage {
   }
   addCardDivider(container);
   addCardLinks(container, [cardLink(isGame ? "▶ Play game" : "▶ Open site", state.siteUrl), cardLink("Source", state.repoUrl)]);
+  if (state.resource) addCardLinks(container, [
+    new ButtonBuilder().setCustomId(cardId("doc", state.resource, "description")).setLabel(isGame ? "How to play" : "About this site").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(cardId("doc", state.resource, "changelog")).setLabel("Changelog").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(cardId("change", state.resource)).setLabel("Request a change").setStyle(ButtonStyle.Primary),
+  ]);
   if (state.meta) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${escapeMarkdown(truncate(singleLine(state.meta), 200))}`));
   return { ...cardMessage(container), files };
 }
@@ -197,6 +207,12 @@ function technicalCard(state: TurnCardState): ContainerBuilder {
     cardLink(state.kind === "site" ? "Open site" : "Play game", state.siteUrl),
     cardLink("Source", state.repoUrl),
     state.commit ? cardLink("View commit", `${state.repoUrl.replace(/\/$/, "")}/commit/${encodeURIComponent(state.commit)}`) : undefined,
+  ]);
+  if (state.resource) addCardLinks(card, [
+    new ButtonBuilder().setCustomId(cardId("details", state.resource)).setLabel("Turn details").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(cardId("details", state.resource, "files")).setLabel("Changed files").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(cardId("details", state.resource, "qa")).setLabel("Browser findings").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(cardId("change", state.resource)).setLabel("Follow up").setStyle(ButtonStyle.Primary),
   ]);
   return card;
 }
