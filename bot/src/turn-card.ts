@@ -1,17 +1,14 @@
 import {
-  ActionRowBuilder,
   AttachmentBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   ContainerBuilder,
-  EmbedBuilder,
+  FileBuilder,
   escapeMarkdown,
   MediaGalleryBuilder,
   MediaGalleryItemBuilder,
-  MessageFlags,
   SeparatorBuilder,
   TextDisplayBuilder,
 } from "discord.js";
+import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, cardTextLength, CARD_TEXT_LIMIT, KIND_COLORS, type CardMessage } from "./card-ui.js";
 import type { TurnUsage } from "./opencode.js";
 import type { ProjectKind } from "./types.js";
 import { formatShortDuration, formatTokens, stripSummaryPreamble, truncate } from "./util.js";
@@ -69,20 +66,12 @@ export interface TurnCardState {
 }
 
 /** Message payload shape shared by channel send and message edit. */
-export interface TurnCardMessage {
-  content: string;
-  embeds: EmbedBuilder[];
+export interface TurnCardMessage extends CardMessage {
   files: AttachmentBuilder[];
-  allowedMentions: { parse: [] };
 }
 
 /** Full-width Components V2 card with screenshot, project text and link buttons. */
-export interface PlayCardMessage {
-  components: [ContainerBuilder];
-  files: AttachmentBuilder[];
-  flags: typeof MessageFlags.IsComponentsV2;
-  allowedMentions: { parse: [] };
-}
+export type PlayCardMessage = TurnCardMessage;
 
 // The playable card's text ceilings, in characters. The documents prompt asks
 // the agent for a sentence each; these caps are the backstop that keeps an
@@ -95,7 +84,6 @@ const PLAY_CHARS = 200;
 // Matches the project card's palette: blurple for sites, green for 2D games,
 // violet for 3D games. Both cards of a turn share one colour so the final
 // post reads as a single presentation.
-const KIND_COLORS: Record<string, number> = { site: 0x5865f2, "game-2d": 0x22c55e, "game-3d": 0x8b5cf6 };
 const UNPUBLISHED_COLOR = 0xf59e0b;
 const SCREENSHOT_NAME = "preview.png";
 
@@ -110,7 +98,22 @@ function cardColor(state: TurnCardState): number {
  * turn, not a summary of one.
  */
 export function renderTechnicalCard(state: TurnCardState): TurnCardMessage {
-  return { content: "", embeds: [technicalCard(state)], files: [], allowedMentions: { parse: [] } };
+  const card = technicalCard(state);
+  const files: AttachmentBuilder[] = [];
+  const report = new TextDisplayBuilder().setContent("Report unavailable.");
+  card.spliceComponents(1, 0, new SeparatorBuilder(), report, new SeparatorBuilder());
+  const summary = state.summary ? stripSummaryPreamble(state.summary) : "";
+  const fullReport = summary ? prose(summary) : "The agent did not provide a report for this turn.";
+  const available = CARD_TEXT_LIMIT - cardTextLength(card) + report.data.content!.length;
+  if (fullReport.length > available) {
+    // The entire V2 message shares 4,000 characters. Keep the complete
+    // report as a visible file component when its excerpt cannot fit.
+    const name = "turn-report.md";
+    files.push(new AttachmentBuilder(Buffer.from(state.summary ?? summary), { name }));
+    card.addFileComponents(new FileBuilder().setURL(`attachment://${name}`));
+    report.setContent(`${clip(fullReport, available - 80)}\n\n-# Full report attached below.`);
+  } else report.setContent(fullReport);
+  return { ...cardMessage(card), files };
 }
 
 /** Message 2 — the new message that presents the project and opens it. */
@@ -122,9 +125,8 @@ export function renderPlayCard(state: TurnCardState): PlayCardMessage {
   // The title and the screenshot lead the card. The gallery spans the
   // container's full width, so the opening frame keeps its room instead of
   // squeezing the text beside it.
-  container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`## ${escapeMarkdown(truncate(singleLine(`${isGame ? "🎮" : "🛠️"} ${isGame ? "Play" : "Open"} ${state.name}`), 250))}`),
-  );
+  addCardHeader(container, isGame ? "PLAY" : "EXPLORE", `${isGame ? "🎮 Play" : "🛠️ Open"} ${state.name}`,
+    state.published ? `● Live · ${isGame ? "ready to play" : "ready to explore"}` : "⚠️ This turn was not published · opens the previous live version");
   if (files.length) {
     container.addMediaGalleryComponents(
       new MediaGalleryBuilder().addItems(
@@ -151,40 +153,26 @@ export function renderPlayCard(state: TurnCardState): PlayCardMessage {
     if (blurb) container.addSeparatorComponents(new SeparatorBuilder());
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent(details.join("\n")));
   }
-  // Link buttons are the card's reason to exist; the play link must survive
-  // even when no repository link can be rendered.
-  const playUrl = safeUrl(state.siteUrl);
-  const sourceUrl = safeUrl(state.repoUrl);
-  if (playUrl) {
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setLabel(isGame ? "▶ Play game" : "▶ Open site").setStyle(ButtonStyle.Link).setURL(playUrl),
-    );
-    if (sourceUrl) row.addComponents(new ButtonBuilder().setLabel("Source").setStyle(ButtonStyle.Link).setURL(sourceUrl));
-    container.addActionRowComponents(row);
-  }
+  addCardDivider(container);
+  addCardLinks(container, [cardLink(isGame ? "▶ Play game" : "▶ Open site", state.siteUrl), cardLink("Source", state.repoUrl)]);
   if (state.meta) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${escapeMarkdown(truncate(singleLine(state.meta), 200))}`));
-  return { components: [container], files, flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+  return { ...cardMessage(container), files };
 }
 
 /**
  * Card 1 — the technical report: what the agent did, what shipped, and what
  * it cost. This is the part the person who asked for the change reads.
  */
-export function technicalCard(state: TurnCardState): EmbedBuilder {
-  const embed = new EmbedBuilder()
-    .setTitle(`${state.published ? "✅" : "⚠️"} ${truncate(state.name, 180)}`)
-    .setColor(cardColor(state));
-  const summary = state.summary ? stripSummaryPreamble(state.summary) : "";
-  // Discord allows a 4096-character description: the agent's full report
-  // belongs here, not a shortened version of it. Its hard-wrapped lines are
-  // joined, so it reads as the report it is instead of a staircase.
-  if (summary) embed.setDescription(clip(prose(summary), 3900));
+function technicalCard(state: TurnCardState): ContainerBuilder {
+  const card = new ContainerBuilder().setAccentColor(cardColor(state));
+  addCardHeader(card, "TURN COMPLETE", `${state.published ? "✅" : "⚠️"} ${state.name}`,
+    state.published ? "Published · the new version is live" : "Not published · the live version is unchanged");
 
   const turn: string[] = [];
   if (state.commit) turn.push(`commit \`${state.commit.slice(0, 10)}\``);
   turn.push(`${state.commitFiles} file${state.commitFiles === 1 ? "" : "s"} changed (+${state.additions}/−${state.deletions})`);
   turn.push(`⏱️ ${formatShortDuration(state.durationMs)}`);
-  embed.addFields({ name: "Turn", value: turn.join("\n"), inline: true });
+  addCardField(card, "Turn", turn.join(" · "));
 
   if (state.usage) {
     const usage: string[] = [];
@@ -193,87 +181,34 @@ export function technicalCard(state: TurnCardState): EmbedBuilder {
     }
     if (state.usage.steps) usage.push(`${state.usage.steps} model step${state.usage.steps === 1 ? "" : "s"}`);
     if (state.usage.compactions) usage.push(`context compacted ${state.usage.compactions}×`);
-    if (usage.length) embed.addFields({ name: "Usage", value: usage.join("\n"), inline: true });
+    if (!state.usage.inputTokens && !state.usage.outputTokens) usage.push("Token counts unavailable");
+    if (state.usage.cacheTokens) usage.push(`${formatTokens(state.usage.cacheTokens)} cached`);
+    addCardField(card, "Usage", usage.join(" · "));
+  } else {
+    addCardField(card, "Usage", "Token counts unavailable");
   }
 
   if (state.findings?.length) {
-    embed.addFields({
-      name: "Browser QA",
-      value: `Advisory · ${state.findings.length} finding${state.findings.length === 1 ? "" : "s"} — ${truncate(state.findings[0], 220)}`,
-      inline: true,
-    });
+    addCardField(card, "Browser QA", `Advisory · ${state.findings.length} finding${state.findings.length === 1 ? "" : "s"} — ${truncate(state.findings[0], 220)}`);
   }
 
-  if (state.note) embed.addFields({ name: "Note", value: truncate(state.note, 900), inline: false });
-  return embed;
+  if (state.note) addCardField(card, "Note", truncate(state.note, 900));
+  addCardLinks(card, [
+    cardLink(state.kind === "site" ? "Open site" : "Play game", state.siteUrl),
+    cardLink("Source", state.repoUrl),
+    state.commit ? cardLink("View commit", `${state.repoUrl.replace(/\/$/, "")}/commit/${encodeURIComponent(state.commit)}`) : undefined,
+  ]);
+  return card;
 }
 
-/**
- * Servers without Embed Links permission keep the same information in a
- * compact text view: the technical report on the turn's own message, the
- * playable blurb on the message under it.
- */
-export function renderTechnicalText(state: TurnCardState): { content: string; embeds: []; allowedMentions: { parse: [] } } {
-  const summary = state.summary ? stripSummaryPreamble(state.summary) : "";
-  const content = [
-    `**${state.published ? "✅" : "⚠️"} ${state.name}**`,
-    summary ? clip(prose(summary), 1400) : "",
-    [
-      state.commit ? `commit \`${state.commit.slice(0, 10)}\`` : "",
-      `${state.commitFiles} file${state.commitFiles === 1 ? "" : "s"} changed (+${state.additions}/−${state.deletions})`,
-      `⏱️ ${formatShortDuration(state.durationMs)}`,
-    ].filter(Boolean).join(" · "),
-    state.findings?.length ? `⚠️ Browser QA: ${truncate(state.findings[0], 200)}` : "",
-    state.note ? truncate(state.note, 300) : "",
-  ].filter(Boolean).join("\n");
-  return { content: truncate(content, 1990), embeds: [], allowedMentions: { parse: [] } };
-}
-
-export function renderPlayText(state: TurnCardState): { content: string; embeds: []; allowedMentions: { parse: [] } } {
-  const isGame = state.kind !== "site";
-  const pitch = state.description?.pitch;
-  const blurb = pitch ? clip(prose(pitch), PITCH_CHARS) : state.request ? clip(prose(state.request), REQUEST_CHARS) : undefined;
-  const title = state.changelog?.title?.trim();
-  const entry = state.changelog?.body ? clip(prose(state.changelog.body), CHANGELOG_CHARS) : undefined;
-  const content = [
-    `**${isGame ? "🎮" : "🛠️"} ${isGame ? "Play" : "Open"} ${state.name}**`,
-    blurb ?? "",
-    entry ? `**${title ? clip(title, 60) : "What's new"}** — ${entry}` : title ? `**What's new** — ${clip(title, 200)}` : "",
-    state.description?.play ? `**${isGame ? "How to play" : "What to look at"}** — ${clip(prose(state.description.play), PLAY_CHARS)}` : "",
-    state.meta ? truncate(state.meta, 120) : "",
-    [isGame ? link("▶ **PLAY GAME**", state.siteUrl) : link("▶ **OPEN SITE**", state.siteUrl), link("Source", state.repoUrl)]
-      .filter(Boolean).join(" · "),
-  ].filter(Boolean).join("\n");
-  return { content: truncate(content, 1990), embeds: [], allowedMentions: { parse: [] } };
-}
-
-/** An http(s) URL safe to render as a link, or undefined for anything else. */
-function safeUrl(raw?: string): string | undefined {
-  if (!raw) return undefined;
-  try {
-    const url = new URL(raw);
-    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return undefined;
-    return url.href;
-  } catch {
-    return undefined;
-  }
-}
-
-/** A markdown link to an http(s) URL, or an empty string for anything else. */
-function link(label: string, raw?: string): string {
-  const url = safeUrl(raw);
-  if (!url) return "";
-  return `[${label}](${url.replaceAll("(", "%28").replaceAll(")", "%29")})`;
-}
-
-/** Embed titles collapsed newlines silently; plain text components do not. */
+/** Keep names and media descriptions on one line. */
 function singleLine(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
 /**
  * Render authored markdown the way a reader expects it. The agent writes
- * with hard line breaks, and an embed shows every one of them: wrapped lines
+ * with hard line breaks, and Discord shows every one of them: wrapped lines
  * would read as a staircase. So a soft-wrapped paragraph becomes one line,
  * blank lines stay paragraph breaks, list items keep their own line, and
  * fenced code keeps its line breaks.

@@ -1,4 +1,5 @@
-import { EmbedBuilder, escapeMarkdown, type MessageEditOptions } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ContainerBuilder, escapeMarkdown, TextDisplayBuilder } from "discord.js";
+import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, type CardMessage } from "./card-ui.js";
 import { formatTokens, formatTokensPerSecond } from "./util.js";
 
 export type ProgressPhase = "queued" | "preparing" | "working" | "checking" | "publishing";
@@ -58,11 +59,16 @@ export interface ProgressSnapshot {
 const PHASES: ProgressPhase[] = ["preparing", "working", "checking", "publishing"];
 const LABELS: Record<ProgressPhase, string> = { queued: "Queued", preparing: "Prepare", working: "Build", checking: "Check", publishing: "Publish" };
 const COLORS: Record<ProgressPhase, number> = { queued: 0x64748b, preparing: 0x818cf8, working: 0x5865f2, checking: 0x14b8a6, publishing: 0x22c55e };
-// Seven 125-character items fit Discord's 1024-character field cap.
+// Keep the recent completion and the next useful tasks visible.
 const PLAN_VISIBLE_ITEMS = 7;
 
-/** One bounded Discord embed; facts come from events rather than an invented completion estimate. */
-export function renderProgressCard(state: ProgressSnapshot): MessageEditOptions {
+export interface ProgressControls {
+  questionRows?: ActionRowBuilder<ButtonBuilder>[];
+  stopCustomId?: string;
+}
+
+/** One live V2 panel; facts come from events rather than an invented completion estimate. */
+export function renderProgressCard(state: ProgressSnapshot, controls: ProgressControls = {}): CardMessage {
   // The stall warning is only meaningful while the model is expected to be
   // working: a queued thread and a pending question are both legitimately idle.
   const stalledForMs = state.phase !== "queued" && !state.questions?.length ? state.stalledForMs : undefined;
@@ -92,24 +98,21 @@ export function renderProgressCard(state: ProgressSnapshot): MessageEditOptions 
   // thread does not already show the user what this turn is applying.
   if (state.context.request) description.push("", `**Your requests**\n${plain(state.context.request, 220)}`);
   if (state.thought && !attention) description.push("", `**Agent update**\n> ${plain(state.thought, 280)}`);
-  const embed = new EmbedBuilder()
-    .setTitle(clean(state.title, 180))
-    .setColor(attention ? 0xf59e0b : COLORS[state.phase])
-    .setDescription(description.join("\n"));
+  const fields: Array<{ name: string; value: string }> = [];
 
   if (state.questions?.length) {
-    embed.addFields({ name: "❓ Your input is needed", value: state.questions.slice(0, 3).map((question) =>
-      `${plain(question.question, 180)}\n${question.options.slice(0, 4).map((option) => `**${plain(option.label, 55)}**${option.description ? ` — ${plain(option.description, 90)}` : ""}`).join("\n")}`,
-    ).join("\n\n").slice(0, 900), inline: false });
+    state.questions.slice(0, 5).forEach((question, index) => fields.push({
+      name: index ? `❓ Question ${index + 1}` : "❓ Your input is needed",
+      value: `${plain(question.question, 180)}\n${question.options.slice(0, 4).map((option) => `**${plain(option.label, 55)}**${option.description ? ` — ${plain(option.description, 90)}` : ""}`).join("\n")}`,
+    }));
   } else if (state.questionPin) {
-    embed.addFields({ name: "Decision", value: `${plain(state.questionPin.question, 200)}${state.questionPin.resolution ? `\n${plain(state.questionPin.resolution, 200)}` : ""}`, inline: false });
+    fields.push({ name: "Decision", value: `${plain(state.questionPin.question, 200)}${state.questionPin.resolution ? `\n${plain(state.questionPin.resolution, 200)}` : ""}` });
   }
 
-  // Discord places buttons below embeds: keep the question view short enough
-  // that its actions remain easy to reach on a phone.
+  // Put answer controls immediately below each question, including on a phone.
   if (state.questions?.length && (state.files || state.plan.length)) {
     const done = state.plan.filter((item) => item.status === "completed").length;
-    embed.addFields({ name: "Progress so far", value: [state.plan.length ? `${done}/${state.plan.length} tasks completed` : "", state.files ? `${state.files.files} files changed` : ""].filter(Boolean).join(" · ") });
+    fields.push({ name: "Progress so far", value: [state.plan.length ? `${done}/${state.plan.length} tasks completed` : "", state.files ? `${state.files.files} files changed` : ""].filter(Boolean).join(" · ") });
   }
   if (state.plan.length && !state.questions?.length) {
     const completed = state.plan.filter((item) => item.status === "completed").length;
@@ -120,7 +123,8 @@ export function renderProgressCard(state: ProgressSnapshot): MessageEditOptions 
     if (!visible.length) visible.push(...state.plan.slice(-3));
     const plan = visible.map((item) => `${item.status === "completed" ? "✓" : item.status === "in_progress" ? "●" : item.status === "cancelled" ? "↷" : "○"} ${item.status === "in_progress" ? `**${plain(item.content, 125)}**` : plain(item.content, 125)}`);
     if (remaining.length > visible.filter((item) => item.status === "pending" || item.status === "in_progress").length) plan.push(`… ${remaining.length - visible.filter((item) => item.status === "pending" || item.status === "in_progress").length} more planned`);
-    embed.addFields({ name: `Plan · ${completed}/${state.plan.length} done${skipped ? ` · ${skipped} skipped` : ""}`, value: plan.join("\n"), inline: false });
+    const filled = Math.floor(8 * (completed + skipped) / state.plan.length);
+    fields.push({ name: `Plan · ${completed}/${state.plan.length} done${skipped ? ` · ${skipped} skipped` : ""}`, value: `${"▰".repeat(filled)}${"▱".repeat(8 - filled)}\n${plan.join("\n")}` });
   }
 
   if (state.files && !state.questions?.length) {
@@ -128,9 +132,9 @@ export function renderProgressCard(state: ProgressSnapshot): MessageEditOptions 
     const counts = [files.added ? `${files.added} new` : "", files.modified ? `${files.modified} modified` : "", files.deleted ? `${files.deleted} removed` : ""].filter(Boolean);
     const paths = (files.paths ?? []).slice(0, 3).map((file) => `\`${clean(file, 90).replaceAll("`", "") }\``);
     const rest = (files.paths?.length ?? 0) - paths.length;
-    embed.addFields({ name: "Changes this turn", value: [`**${files.files} file${files.files === 1 ? "" : "s"}** · **+${files.additions} / −${files.deletions}** lines`, counts.join(" · "), ...paths, rest > 0 ? `+${rest} more` : ""].filter(Boolean).join("\n"), inline: true });
+    fields.push({ name: "Changes this turn", value: [`**${files.files} file${files.files === 1 ? "" : "s"}** · **+${files.additions} / −${files.deletions}** lines`, counts.join(" · "), ...paths, rest > 0 ? `+${rest} more` : ""].filter(Boolean).join("\n") });
   } else if (state.changes && !state.questions?.length) {
-    embed.addFields({ name: "Changes this turn", value: plain(state.changes, 500), inline: true });
+    fields.push({ name: "Changes this turn", value: plain(state.changes, 500) });
   }
 
   const metrics = state.metrics;
@@ -148,26 +152,31 @@ export function renderProgressCard(state: ProgressSnapshot): MessageEditOptions 
     if (metrics.steps) usage.push(`${metrics.steps} model step${metrics.steps === 1 ? "" : "s"}`);
     if (metrics.compactions) usage.push(`Context compacted ${metrics.compactions}×`);
   } else if (state.stats) usage.push(plain(state.stats, 500));
-  if (usage.length && !state.questions?.length) embed.addFields({ name: "Usage", value: usage.join("\n").slice(0, 1000), inline: true });
+  if (usage.length && !state.questions?.length) fields.push({ name: "Usage", value: usage.join("\n").slice(0, 1000) });
 
   const recent = state.history.slice(-4);
-  if (recent.length && !state.questions?.length) embed.addFields({ name: "Recent activity", value: recent.map((item) => `\`${elapsed(item.at - state.startedAt)}\` ${activity(item, 145)}`).join("\n"), inline: false });
-  if (state.queuedRequests > 0) embed.addFields({ name: "Next pass", value: `**${state.queuedRequests}** saved request${state.queuedRequests === 1 ? "" : "s"} waiting`, inline: false });
-  const links = [link("Live site ↗", state.context.siteUrl), link("Source ↗", state.context.repoUrl)].filter(Boolean);
-  if (links.length) embed.addFields({ name: "Project", value: links.join(" · "), inline: false });
-  embed.setFooter({ text: [`Elapsed ${elapsed(state.now - state.startedAt)}`, state.actions ? `${state.actions} action${state.actions === 1 ? "" : "s"}` : "", state.questions?.length ? "Waiting for your answer" : stalledForMs ? `No progress for ${elapsed(stalledForMs)}` : state.activeTools ? `${state.activeTools} running` : "", state.toolErrors ? `${state.toolErrors} tool error${state.toolErrors === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ") });
-  embed.setFields((embed.data.fields ?? []).map((field) => ({ ...field, value: cleanField(field.value) })));
-  // Limit the total text independently of Discord's individual field limits.
-  while (embed.length > 5800 && embed.data.fields?.length) embed.spliceFields(embed.data.fields.length - 1, 1);
-  return { content: "", embeds: [embed], allowedMentions: { parse: [] } };
-}
-
-/** Servers without Embed Links permission retain the same information in a compact text view. */
-export function renderProgressText(state: ProgressSnapshot): MessageEditOptions {
-  const card = (renderProgressCard(state).embeds![0] as EmbedBuilder).toJSON();
-  const footer = card.footer?.text ?? "";
-  const body = [`**${card.title}**`, card.description, ...(card.fields ?? []).map((field) => `**${field.name}**\n${field.value}`)].filter(Boolean).join("\n\n");
-  return { content: `${body.slice(0, 1988 - footer.length)}\n${footer}`, embeds: [], allowedMentions: { parse: [] } };
+  if (recent.length && !state.questions?.length) fields.push({ name: "Recent activity", value: recent.map((item) => `\`${elapsed(item.at - state.startedAt)}\` ${activity(item, 145)}`).join("\n") });
+  if (state.queuedRequests > 0) fields.push({ name: "Next pass", value: `**${state.queuedRequests}** saved request${state.queuedRequests === 1 ? "" : "s"} waiting` });
+  const footer = [`Elapsed ${elapsed(state.now - state.startedAt)}`, state.actions ? `${state.actions} action${state.actions === 1 ? "" : "s"}` : "", state.questions?.length ? "Waiting for your answer" : stalledForMs ? `No progress for ${elapsed(stalledForMs)}` : state.activeTools ? `${state.activeTools} running` : "", state.toolErrors ? `${state.toolErrors} tool error${state.toolErrors === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
+  const card = new ContainerBuilder().setAccentColor(attention ? 0xf59e0b : COLORS[state.phase]);
+  const stop = controls.stopCustomId ? new ButtonBuilder().setCustomId(controls.stopCustomId).setLabel("Stop turn").setStyle(ButtonStyle.Danger) : undefined;
+  addCardHeader(card, "LIVE TURN", state.title, state.questions?.length ? "❓ Your answer is needed" : stalledForMs ? "⚠️ Waiting for progress" : state.phase === "queued" ? "Waiting for a build slot" : "● Turn in progress", stop);
+  card.addTextDisplayComponents(new TextDisplayBuilder().setContent(description.join("\n")));
+  addCardDivider(card);
+  let questionIndex = 0;
+  for (const field of fields) {
+    addCardField(card, field.name, cleanField(field.value));
+    if (field.name.startsWith("❓")) {
+      const row = controls.questionRows?.[questionIndex++];
+      if (row) card.addActionRowComponents(row);
+    }
+  }
+  if (!state.questions?.length) {
+    addCardDivider(card);
+    addCardLinks(card, [cardLink("Live site", state.context.siteUrl), cardLink("Source", state.context.repoUrl)]);
+  }
+  card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${footer}`));
+  return cardMessage(card);
 }
 
 function activity(item: ProgressActivity, max: number): string {
@@ -179,14 +188,6 @@ function clean(value: string, max: number): string {
 }
 function plain(value: string, max: number): string { return escapeMarkdown(clean(value, max), { maskedLink: true }); }
 function cleanField(value: string): string { return value.length > 1000 ? `${value.slice(0, 999)}…` : value; }
-function link(label: string, raw?: string): string {
-  if (!raw) return "";
-  try {
-    const url = new URL(raw);
-    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return "";
-    return `[${label}](${url.href.replaceAll("(", "%28").replaceAll(")", "%29")})`;
-  } catch { return ""; }
-}
 function elapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;

@@ -1,7 +1,8 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, type Message, type MessageEditOptions } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, type Message } from "discord.js";
+import { cardEdit } from "./card-ui.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
-import { renderProgressCard, renderProgressText, type ProgressSnapshot, type ProgressActivity, type ProgressContext, type ProgressFiles, type ProgressMetrics, type ProgressPhase, type ProgressPlanItem, type ProgressTool } from "./progress-view.js";
+import { renderProgressCard, type ProgressSnapshot, type ProgressActivity, type ProgressContext, type ProgressFiles, type ProgressMetrics, type ProgressPhase, type ProgressPlanItem, type ProgressTool } from "./progress-view.js";
 export type { ProgressContext, ProgressFiles, ProgressMetrics, ProgressPhase, ProgressPlanItem, ProgressTool } from "./progress-view.js";
 
 /** One question the agent asked via OpenCode's question tool. */
@@ -60,7 +61,6 @@ export class DiscordProgress {
   private readonly tools = new Map<string, ProgressTool>();
   private inFlight?: Promise<void>;
   private dirty = false;
-  private textOnly = false;
   private thought?: string;
   private stats?: string;
   private changes?: string;
@@ -261,24 +261,9 @@ export class DiscordProgress {
     this.dirty = false;
     this.inFlight = (async () => {
       try {
-        const rows = this.questionComponents();
-        // The stop row yields its slot to questions (Discord caps 5 rows); an
-        // answered question's buttons must always be explicitly cleared.
-        if (this.stopCustomId && rows.length < 5) {
-          rows.push(
-            new ActionRowBuilder<ButtonBuilder>().addComponents(
-              new ButtonBuilder().setCustomId(this.stopCustomId).setLabel("Stop").setStyle(ButtonStyle.Danger),
-            ),
-          );
-        }
-        const snapshot = this.snapshot();
-        const options: MessageEditOptions = { ...(this.textOnly ? renderProgressText(snapshot) : renderProgressCard(snapshot)), components: rows };
-        try { await this.message.edit(options); }
-        catch (error) {
-          if (this.textOnly || (error as { code?: number }).code !== 50013) throw error;
-          this.textOnly = true;
-          await this.message.edit({ ...renderProgressText(snapshot), components: rows });
-        }
+        await this.message.edit(cardEdit(renderProgressCard(this.snapshot(), {
+          questionRows: this.questionComponents(), stopCustomId: this.stopCustomId,
+        })));
       } catch (error) {
         log("debug", "discord.progress_edit_failed", { messageId: this.message.id, error: String(error) });
       }

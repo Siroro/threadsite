@@ -4,11 +4,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ButtonStyle, ComponentType, MessageFlags } from "discord.js";
+import { assertV2, cardView } from "./fixtures/cards.js";
 import type { TurnCardState } from "../src/turn-card.js";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
-const { renderTechnicalCard, renderPlayCard, renderTechnicalText, renderPlayText } = await import("../src/turn-card.js");
+const { renderTechnicalCard, renderPlayCard } = await import("../src/turn-card.js");
 const { changelogTemplate, descriptionTemplate, readProjectChangelog, readProjectDescription } = await import("../src/project-docs.js");
 
 /** The text-display content of the playable card, joined in render order. */
@@ -54,9 +55,9 @@ function state(overrides: Partial<TurnCardState> = {}): TurnCardState {
 
 test("the turn's own message carries the technical report and nothing else", () => {
   const message = renderTechnicalCard(state());
-  assert.equal(message.embeds.length, 1);
+  assertV2(message);
   assert.equal(message.files.length, 0, "the technical card carries no screenshot");
-  const card = message.embeds[0].toJSON();
+  const card = cardView(message);
   assert.match(card.title!, /Koi Pond Arcade/);
   assert.match(card.description!, /Added a persistent leaderboard/);
   const turn = card.fields!.find((field) => field.name === "Turn")!;
@@ -66,12 +67,14 @@ test("the turn's own message carries the technical report and nothing else", () 
   const usage = card.fields!.find((field) => field.name === "Usage")!;
   assert.match(usage.value, /12\.0k in · 4\.0k out/);
   assert.match(usage.value, /18 model steps/);
+  assert.equal(card.buttons.find((button) => button.label === "View commit")?.url,
+    "https://git.example.co.uk/shane/site-koi-pond-arcade/commit/abc1234def5678");
 });
 
 test("the technical card keeps the agent's whole report", () => {
   const report = "x".repeat(3500);
-  const card = renderTechnicalCard(state({ summary: report })).embeds[0].toJSON();
-  assert.equal(card.description!.length, 3500, "a long report is not cut for the card");
+  const card = cardView(renderTechnicalCard(state({ summary: report })));
+  assert.ok(card.description!.includes(report), "a long report is not cut for the card");
 });
 
 test("the new message carries the playable card, the screenshot and the play link", () => {
@@ -131,7 +134,7 @@ test("a project without a description still shows the original brief", () => {
 });
 
 test("a turn that did not publish is marked and its findings are shown", () => {
-  const card = renderTechnicalCard(state({ published: false, findings: ["preview rendered a blank page"] })).embeds[0].toJSON();
+  const card = cardView(renderTechnicalCard(state({ published: false, findings: ["preview rendered a blank page"] })));
   assert.match(card.title!, /^⚠️/);
   const qa = card.fields!.find((field) => field.name === "Browser QA")!;
   assert.match(qa.value, /1 finding/);
@@ -139,7 +142,7 @@ test("a turn that did not publish is marked and its findings are shown", () => {
 });
 
 test("a site says open site, and a note is kept as its own field", () => {
-  const technical = renderTechnicalCard(state({ kind: "site", note: "Every message in this thread edits this site." })).embeds[0].toJSON();
+  const technical = cardView(renderTechnicalCard(state({ kind: "site", note: "Every message in this thread edits this site." })));
   assert.match(technical.fields!.find((field) => field.name === "Note")!.value, /edits this site/);
   const play = renderPlayCard(state({ kind: "site" }));
   const text = playCardText(play);
@@ -148,17 +151,35 @@ test("a site says open site, and a note is kept as its own field", () => {
   assert.equal(playCardButtons(play)[0].label, "▶ Open site");
 });
 
-test("the text fallback keeps the same facts for servers without embed links", () => {
-  const technical = renderTechnicalText(state()).content;
-  assert.match(technical, /Koi Pond Arcade/);
-  assert.match(technical, /Added a persistent leaderboard/);
-  assert.match(technical, /abc1234def/);
-  assert.ok(technical.length <= 1990);
-  const play = renderPlayText(state()).content;
-  assert.match(play, /feed koi and race them/);
-  assert.match(play, /How to play/);
-  assert.match(play, /PLAY GAME/);
-  assert.ok(play.length <= 1990);
+test("oversized reports keep their full text in an explicit V2 file component", () => {
+  const report = "A detailed report. ".repeat(800);
+  const message = renderTechnicalCard(state({ summary: report, note: "note ".repeat(200), findings: ["advisory finding"] }));
+  assertV2(message);
+  assert.equal(message.files.length, 1);
+  assert.equal(message.files[0].name, "turn-report.md");
+  assert.equal(Buffer.from(message.files[0].attachment as Uint8Array).toString(), report);
+  assert.match(cardView(message).text, /Full report attached/);
+  const card = message.components[0].toJSON();
+  assert.ok(card.components.some((component) => component.type === ComponentType.File && component.file.url === "attachment://turn-report.md"));
+});
+
+test("cards keep useful source buttons when the play URL is absent or invalid", () => {
+  for (const siteUrl of ["", "javascript:alert(1)", "https://user:password@example.invalid/"]) {
+    const message = renderPlayCard(state({ siteUrl }));
+    assertV2(message);
+    assert.deepEqual(playCardButtons(message).map((button) => button.label), ["Source"]);
+  }
+});
+
+test("unpublished cards say which version opens and missing usage is unavailable", () => {
+  const turn = renderTechnicalCard(state({ published: false, usage: undefined, summary: undefined }));
+  const play = renderPlayCard(state({ published: false, screenshot: undefined }));
+  assertV2(turn);
+  assertV2(play);
+  assert.match(cardView(turn).text, /Not published/);
+  assert.match(cardView(turn).text, /Token counts unavailable/);
+  assert.match(cardView(turn).text, /did not provide a report/);
+  assert.match(cardView(play).text, /opens the previous live version/);
 });
 
 test("the project's own documents are read back as the card's blurb and its newest entry", async (t) => {
