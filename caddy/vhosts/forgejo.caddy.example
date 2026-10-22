@@ -1,0 +1,18 @@
+# Reverse-proxy the bundled Forgejo through the `caddy` profile at
+# https://git.example.com (automatic HTTPS).
+#
+# This file is a template. Deployed copies live at caddy/vhosts/forgejo.caddy
+# (untracked): copy and edit it, or let scripts/caddy-quickstart.sh write it
+# from --git-domain.
+#
+# In .env also set (the quickstart script does this for you):
+#   FORGEJO_PUBLIC_URL=https://git.example.com
+#   FORGEJO_DOMAIN=git.example.com
+# then: docker compose up -d forgejo caddy
+#
+# Caddy adds X-Forwarded-Proto/Host automatically; Forgejo builds its public
+# links from FORGEJO_PUBLIC_URL.
+
+git.example.com {
+	reverse_proxy forgejo:3000
+}

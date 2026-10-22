@@ -5,9 +5,11 @@
 - Docker and Docker Compose
 - Node 24 (service images use it; local test runs should match)
 - A Discord application/bot token
-- Either an existing host Apache (or Virtualmin) serving a static directory, or the bundled `httpd:2.4-alpine` profile
+- One of: an existing host Apache (or Virtualmin) serving a static directory (the default path), the bundled `httpd:2.4-alpine` profile, or the optional Caddy edge profile (one-command fresh-server path, below)
 
 ## Quick start
+
+On a **fresh server**, the one-command Caddy path in the next section handles all of this for you. On an existing server, step through it manually:
 
 ```bash
 git clone <this repository>
@@ -93,6 +95,63 @@ When the agent container starts, its startup script calls the public Surplus `GE
 ```
 
 If `SURPLUS_API_KEY` is set in the environment, that key is placed in the generated provider configuration and should be treated as the authoritative credential. `SURPLUS_CONTEXT_CAP` (default 100000, `0` disables) caps the context window advertised for Surplus models so long threads compact early.
+
+## Caddy quickstart
+
+The optional `caddy` Compose profile runs a single [Caddy](https://caddyserver.com/) container as the edge: it serves the generated sites, obtains and renews Let's Encrypt certificates automatically, and can reverse-proxy Forgejo and the multiplayer relay. It is the one-command path for a fresh server; host Apache (or Virtualmin) remains the default path everywhere else, and the two are never both bound to 80/443.
+
+Requirements: a server with ports 80 and 443 reachable, and DNS for every hostname already pointing at it.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh | bash -s -- \
+  --sites-domain sites.example.com \
+  --git-domain git.example.com \
+  --games-domain games.example.com \
+  --install-docker
+```
+
+The script is safe to re-run — it only touches the `.env` keys it manages, plus `caddy/vhosts/*.caddy` (both untracked). It:
+
+1. installs Docker via `get.docker.com` when `--install-docker` is given (or confirms interactively),
+2. clones this repository (re-running updates the checkout to `origin/main`) when not already inside one,
+3. prepares directories and `.env`, and prompts for the Discord token/application ID when run interactively,
+4. writes `COMPOSE_PROFILES=caddy`, `SITES_DOMAIN`, `PUBLIC_SITES_BASE_URL`, and — when the matching hostname is given — the Forgejo and relay public URLs, plus `GAMESERVER_ALLOWED_ORIGINS`,
+5. generates `caddy/vhosts/forgejo.caddy` and `caddy/vhosts/games.caddy` from the tracked templates,
+6. brings up `forgejo`, `opencode`, `preview`, `gameserver`, and `caddy`, bootstraps Forgejo, and starts the bot when credentials are known.
+
+| Flag | Purpose |
+| --- | --- |
+| `--sites-domain` | Public hostname for the generated sites (required interactively; the only required flag) |
+| `--git-domain` | Hostname for Forgejo; omit to keep it loopback-only |
+| `--games-domain` | Hostname for the multiplayer relay (`wss://…/ws`); omit to keep the default localhost URL |
+| `--discord-token` / `--app-id` | Discord credentials; prompted interactively when omitted |
+| `--install-docker` | Install Docker via `get.docker.com` when missing (otherwise prompted/required) |
+| `--skip-bot` | Deploy everything except the bot |
+
+### Manual Caddy setup
+
+```bash
+# .env
+COMPOSE_PROFILES=caddy
+SITES_DOMAIN=sites.example.com
+PUBLIC_SITES_BASE_URL=https://sites.example.com
+
+# optional vhosts — copy and edit the tracked templates
+cp caddy/vhosts/forgejo.caddy.example caddy/vhosts/forgejo.caddy
+cp caddy/vhosts/games.caddy.example   caddy/vhosts/games.caddy
+
+docker compose up -d forgejo opencode preview gameserver caddy
+./scripts/bootstrap-forgejo.sh
+docker compose up -d bot
+```
+
+How it fits together:
+
+- `caddy/Caddyfile` (tracked) serves the publish root read-only with the same cache policy as [the Apache vhost](#serving-generated-sites-from-your-own-apache): versioned (`?v=`) assets immutable, everything else revalidating, `threadsite-version.json` never cached.
+- `caddy/vhosts/*.caddy` (untracked, generated) add the optional Forgejo and relay vhosts; empty `vhosts/` is valid.
+- Certificates live in the `caddy-data` volume and survive restarts; `CADDY_HTTP_PORT`/`CADDY_HTTPS_PORT` move the host ports, though 80/443 are required for certificate issuance.
+- `SITES_DOMAIN=localhost` (the default) uses Caddy's internal certificate — `https://localhost` works locally with an expected browser warning.
+- Day-2 operations are unchanged: `./start.sh` picks the profile up from `COMPOSE_PROFILES` in `.env`.
 
 ## Serving generated sites from your own Apache
 

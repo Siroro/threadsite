@@ -63,6 +63,10 @@ The relay periodically snapshots the latest authoritative world of each game's s
 
 The relay container is published on `127.0.0.1:8090` only, so browsers reach it only through a proxy.
 
+### Caddy
+
+With the optional `caddy` Compose profile, copy `caddy/vhosts/games.caddy.example` to `caddy/vhosts/games.caddy`, edit the hostname, and set the same two `.env` keys as below (the [Caddy quickstart](deployment.md#caddy-quickstart) does all of it from `--games-domain`). Only `/ws` is exposed; TLS is automatic.
+
 ### Apache / Virtualmin
 
 1. Point DNS at the host and create a virtual server with a TLS certificate.

@@ -31,23 +31,40 @@ See [docs/architecture.md](docs/architecture.md) for the full pipeline, agent sa
 - Native OpenCode v2 + `@opencode/client` (default), with OpenCode v1 + `@opencode-ai/sdk` available for compatibility
 - One shared Node 24 + `ws` multiplayer relay for all games (multi-tenant, in-memory)
 - Forgejo 15 LTS (SQLite, no separate database needed)
-- Your existing Apache static directory, or an optional bundled `httpd:2.4-alpine` profile
+- Your existing Apache static directory (the default), an optional bundled `httpd:2.4-alpine` profile, or an optional Caddy edge with automatic HTTPS
 - Playwright MCP preview service (CPU-rendered Chromium, no GPU required)
 
 ## Deployment
 
+Two paths. **Your own Apache stays the default** for servers that already run it (Virtualmin etc.); the optional **Caddy** profile is the one-command path for a fresh server.
+
+### Fresh server — one command (Caddy)
+
+Point DNS for your hostnames at the server, then:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh | bash -s -- \
+  --sites-domain sites.example.com \
+  --git-domain git.example.com \
+  --games-domain games.example.com \
+  --install-docker
+```
+
+That installs Docker on request, clones this repository, writes `.env` (prompting for the Discord token/application ID when run interactively), creates the Caddy vhosts, brings the stack up behind Caddy with automatic HTTPS, and bootstraps Forgejo. Re-running is safe. All flags: [docs/deployment.md](docs/deployment.md#caddy-quickstart).
+
+### Your own Apache (default path)
+
 ```bash
 ./scripts/setup.sh
-$EDITOR .env
+$EDITOR .env                     # Discord token/ID; point SITES_HOST_PATH at your document root
 
-# Discord app: create the bot, invite it (permissions listed in docs/deployment.md),
+# Discord app: create the bot, invite it (permissions in docs/deployment.md),
 # enable Message Content Intent, put the token/ID in .env.
 
 docker compose up -d forgejo opencode gameserver
-./scripts/bootstrap-forgejo.sh   # creates Forgejo admin + service account/token
-
-docker compose up -d bot         # with your host Apache
-# or the whole stack with bundled static Apache on :8080:
+./scripts/bootstrap-forgejo.sh   # creates the Forgejo admin + service account/token
+docker compose up -d bot
+# or the whole stack with a bundled static server on :8080:
 docker compose --profile bundled-static up -d
 ```
 
@@ -108,6 +125,7 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 | --- | --- |
 | `SITES_HOST_PATH` | Host directory served by Apache, bind-mounted into the bot |
 | `PUBLIC_SITES_BASE_URL` | Public base URL of the generated sites |
+| `COMPOSE_PROFILES` / `SITES_DOMAIN` | Activate the optional Caddy edge (`caddy`) and its public hostname with automatic HTTPS |
 | `MAX_SITE_BYTES` / `MAX_SITE_FILES` / `MAX_PROMPT_CHARS` | Publication and prompt limits |
 | `COMMIT_BOT_NAME` / `COMMIT_BOT_EMAIL` | Committer identity for harness-made commits |
 
@@ -136,5 +154,5 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 - [docs/commands.md](docs/commands.md) — Discord workflow, all `/site`, `/makegam`, and `/site-admin` commands, live progress cards, repo push keys
 - [docs/architecture.md](docs/architecture.md) — pipeline, static-only boundary, harness build, preview/browser QA, transport recovery, persistence
 - [docs/multiplayer.md](docs/multiplayer.md) — relay architecture, multiplayer protocol, relay configuration and proxying
-- [docs/deployment.md](docs/deployment.md) — full deployment walkthrough, Apache/Cloudflare proxying, cache headers, `start.sh`, security notes
+- [docs/deployment.md](docs/deployment.md) — full deployment walkthrough, one-command Caddy quickstart, Apache/Cloudflare proxying, cache headers, `start.sh`, security notes
 - [docs/maintenance.md](docs/maintenance.md) — project cleanup, regression checks, integration tests

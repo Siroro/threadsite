@@ -2,6 +2,10 @@
 secrets/*
 !secrets/.gitkeep
 data/
+# Per-deployment Caddy vhosts generated from the tracked .example templates.
+caddy/vhosts/*
+!caddy/vhosts/forgejo.caddy.example
+!caddy/vhosts/games.caddy.example
 node_modules/
 dist/
 .DS_Store

@@ -1,0 +1,24 @@
+# Expose the multiplayer relay through the `caddy` profile as
+# wss://games.example.com/ws (automatic HTTPS).
+#
+# This file is a template. Deployed copies live at caddy/vhosts/games.caddy
+# (untracked): copy and edit it, or let scripts/caddy-quickstart.sh write it
+# from --games-domain.
+#
+# In .env also set (the quickstart script does this for you):
+#   GAMESERVER_PUBLIC_URL=wss://games.example.com/ws
+#   GAMESERVER_ALLOWED_ORIGINS=https://sites.example.com
+# then: docker compose up -d gameserver caddy
+#
+# Only /ws is exposed — the relay's /health and /stats stay internal —
+# matching apache/gameserver-vhost.conf.example.
+
+games.example.com {
+	handle /ws* {
+		reverse_proxy gameserver:8090
+	}
+	# Everything else is denied, mirroring the Apache vhost example.
+	handle {
+		respond 404
+	}
+}
