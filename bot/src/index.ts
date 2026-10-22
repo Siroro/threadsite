@@ -746,6 +746,9 @@ client.on(Events.MessageCreate, async (message) => {
   // Ordinary messages, replies to other messages, images and late replies queue.
   if (!imageAttachments.length && await projects.steerActiveTurn(message.channel.id, prompt, message.reference?.messageId, message.author.id)) {
     await status.edit("🧭 Sent to the running turn").catch(() => undefined);
+    // A doorbell, not a record: long enough to read, then the confirmation
+    // leaves the thread — the turn's own card carries the story from here.
+    setTimeout(() => void status.delete().catch(() => undefined), 10_000);
     return;
   }
 
@@ -787,22 +790,17 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
     images = await downloadImageAttachments(attachments);
     if (images.length !== attachments.length) throw new CardUserError("Some reference images could not be downloaded. Your request was not queued; please attach them again.");
   }
+  // A steer is confirmed by the private interaction reply alone: no public
+  // card is posted unless the request falls through to the durable queue (the
+  // turn ended first, or images forced the queue path). A steer that throws
+  // also never reaches the queue, so the interaction handler resets the form.
+  if (form.steer && !images.length && await projects.steerActiveTurn(project.threadId, prompt, form.resource, interaction.user.id)) {
+    return "🧭 Your instruction was sent to the running turn.";
+  }
   const channel = interaction.channel;
   if (!channel || !("send" in channel)) throw new CardUserError("This project thread is unavailable.");
   const status = await channel.send(renderStatusCard("⏳ Saving your request…"));
   store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: status.id });
-  if (form.steer && !images.length) {
-    try {
-      if (await projects.steerActiveTurn(project.threadId, prompt, form.resource, interaction.user.id)) {
-        await setStatusMessage(status, "🧭 Sent to the running turn").catch(() => undefined);
-        return "🧭 Your instruction was sent to the running turn.";
-      }
-    } catch (error) {
-      // A failed steer never reached the queue, so the form must stay usable.
-      store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: undefined });
-      throw error;
-    }
-  }
   const author = commitAuthorIdentity({ globalName: interaction.user.globalName, username: interaction.user.username, id: interaction.user.id });
   try { await enqueueUserRequest(project.threadId, status, prompt, images, author, interaction.user.id, prompt); }
   catch (error) {
