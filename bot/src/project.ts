@@ -1106,11 +1106,12 @@ export class ProjectService {
   }
 
   /**
-   * One agent prompt with mid-flight quota failover: when the send fails on a
-   * provider quota block and a healthy failover model is configured, the same
-   * prompt is retried once on it. (The pre-send check inside prompt() already
-   * switched before sending when it could; this covers blocks discovered by
-   * sending.)
+   * One agent prompt with mid-flight model failover: when the send fails on a
+   * provider quota block or a persistent upstream blip (the quick same-model
+   * nudges inside prompt() were exhausted) and a healthy failover model is
+   * configured, the same prompt is retried once on it. (The pre-send check
+   * inside prompt() already switched before sending when it could; this
+   * covers blocks and blips discovered by sending.)
    */
   private async promptWithFailover(
     workspacePath: string,
@@ -1125,8 +1126,11 @@ export class ProjectService {
     } catch (error) {
       const retryModel = this.opencode.failoverModelForError(error, requestedModel);
       if (!retryModel) throw error;
-      log("warn", "project.quota_failover_retry", { sessionId, from: requestedModel || "default", to: retryModel, error: serializeError(error) });
-      emit(onProgress, `⚠️ The provider quota ran out mid-turn — retrying with \`${retryModel}\``);
+      const quota = (error as { quotaBlock?: unknown }).quotaBlock;
+      log("warn", "project.model_failover_retry", { sessionId, from: requestedModel || "default", to: retryModel, reason: quota ? "quota" : "provider-blip", error: serializeError(error) });
+      emit(onProgress, quota
+        ? `⚠️ The provider quota ran out mid-turn — retrying with \`${retryModel}\``
+        : `⚠️ \`${requestedModel || "The model"}\` keeps failing upstream — retrying with \`${retryModel}\``);
       return this.opencode.prompt(workspacePath, sessionId, instruction, retryModel, onProgress, "sitebuilder", this.store.getEffort(), images);
     }
   }

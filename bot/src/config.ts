@@ -123,6 +123,10 @@ export const config = {
   // turns are re-routed to the first healthy model in this list instead of
   // failing fast until the provider resets. Empty = fail fast (old behavior).
   opencodeFailoverModels: env("OPENCODE_FAILOVER_MODELS").split(",").map((x) => x.trim()).filter(Boolean),
+  // Provider resilience: transient upstream model errors (5xx/overloaded/429)
+  // get this many quick same-model nudges before the turn fails or the
+  // failover model takes over. 0 disables nudging.
+  opencodeBlipNudges: intEnv("OPENCODE_BLIP_NUDGES", 2, 0),
   // Autopilot economy: short non-initial mutations (no images) below
   // OPENCODE_LIGHT_PROMPT_CHARS run on this cheaper model instead of the default.
   opencodeLightModel: env("OPENCODE_LIGHT_MODEL"),
