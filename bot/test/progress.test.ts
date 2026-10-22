@@ -598,14 +598,24 @@ test("the admin-set failover list overrides the configured one", async () => {
   assert.equal(harness.failoverModelForError(error, "main/model"), "cmd/set-model", "the model just attempted is never retried");
 });
 
-test("public narration stays bounded like the private thinking trail", () => {
+test("public narration evicts old entries and updates streamed parts without growing the history", async () => {
   const progress = new DiscordProgress({ id: "amber", edit: async () => {} } as unknown as Message, "Updating");
-  const snapshot = () => (progress as unknown as { snapshot: () => ReturnType<typeof buildingSnapshot> }).snapshot();
-  for (let index = 0; index < 60; index += 1) {
-    progress.callback({ kind: "thought", text: `update ${index}`, narrationId: `n${index}` });
-  }
-  // The snapshot is persisted on every flush; a chatty turn must not grow it
-  // without limit while history and the reasoning trail are capped.
-  assert.ok(snapshot().narration.length <= 40, `narration entries bounded, got ${snapshot().narration.length}`);
-  assert.equal(snapshot().narration.at(-1)?.text, "update 59", "the newest narration is kept");
+  try {
+    // Public narration filters incomplete stream fragments; send substantive
+    // updates so this actually exercises retention rather than that filter.
+    const updates = Array.from({ length: 60 }, (_, index) => ({ kind: "thought" as const,
+      text: `Completed layout inspection for section ${index}.`, narrationId: `n${index}` }));
+    for (const update of updates) progress.callback(update);
+    const narration = progress.readSnapshot().narration!;
+    assert.ok(narration.length > 0 && narration.length <= 40, "a chatty turn keeps a bounded, nonempty history");
+    assert.deepEqual(narration.map((entry) => entry.key), updates.slice(-narration.length).map((update) => update.narrationId),
+      "eviction retains the newest entries in order");
+
+    const continued = { ...updates.at(-1)!, text: `${updates.at(-1)!.text} Verified its keyboard controls.` };
+    progress.callback(continued);
+    const streamed = progress.readSnapshot().narration!;
+    assert.equal(streamed.length, narration.length, "continuing one streamed part does not add another entry");
+    assert.equal(streamed.at(-1)?.text, continued.text);
+    assert.deepEqual(streamed.slice(0, -1), narration.slice(0, -1));
+  } finally { await progress.close(); }
 });
