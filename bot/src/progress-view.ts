@@ -1,5 +1,5 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ContainerBuilder, escapeMarkdown, TextDisplayBuilder } from "discord.js";
-import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, type CardMessage } from "./card-ui.js";
+import { addCardDivider, addCardField, addCardHeader, addCardLinks, addCardTitle, cardLink, cardMessage, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
 import type { PanelSection } from "./card-panels.js";
 import type { QuestionRow } from "./question-ui.js";
@@ -201,7 +201,7 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   // Turn details owns the header corner; Stop rides the bottom action row in
   // the danger colour, far enough from the primary action to avoid misclicks.
   const details = resource ? new ButtonBuilder().setCustomId(cardId("details", resource)).setLabel("Turn details").setStyle(ButtonStyle.Primary) : undefined;
-  addCardHeader(card, "LIVE TURN", state.title, state.questions?.length ? "❓ Waiting for your answer" : state.phase === "queued" ? "Waiting for a build slot" : "● Turn in progress", details);
+  addCardTitle(card, state.title, state.questions?.length ? "❓ Waiting for your answer" : state.phase === "queued" ? "Waiting for a build slot" : "● Turn in progress", details);
   const current = PHASES.indexOf(state.phase);
   const rail = [...(state.phase === "queued" ? ["**● Queued**"] : []), ...PHASES.map((phase, index) => index < current ? `✓ ${LABELS[phase]}` : index === current ? `**● ${LABELS[phase]}**` : `○ ${LABELS[phase]}`)].join("  ›  ");
   const lines = [rail, "", activity(state.latest, 260)];
