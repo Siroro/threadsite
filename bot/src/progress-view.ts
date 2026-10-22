@@ -30,7 +30,7 @@ export interface ProgressFiles {
   files: number; added: number; modified: number; deleted: number; additions: number; deletions: number;
   paths?: string[];
 }
-export interface ProgressActivity { text: string; detail?: string; at: number; key?: string; command?: boolean; running?: boolean }
+export interface ProgressActivity { text: string; detail?: string; at: number; key?: string; command?: boolean }
 export interface ProgressSnapshot {
   title: string;
   phase: ProgressPhase;
@@ -171,7 +171,7 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   } else if (state.stats) usage.push(plain(state.stats, 500));
   if (usage.length && !state.questions?.length) fields.push({ name: "Usage", value: usage.join("\n").slice(0, 1000) });
 
-  const recent = state.history.slice(-4);
+  const recent = distinctTail(state.history, 4);
   if (recent.length && !state.questions?.length) fields.push({ name: "Recent activity", value: recent.map((item) => `\`${elapsed(item.at - state.startedAt)}\` ${activity(item, 145)}`).join("\n") });
   if (state.queuedRequests > 0) fields.push({ name: "Next pass", value: `**${state.queuedRequests}** saved request${state.queuedRequests === 1 ? "" : "s"} waiting` });
   const footer = [`Elapsed ${elapsed(state.now - state.startedAt)}`, state.actions ? `${state.actions} action${state.actions === 1 ? "" : "s"}` : "", state.questions?.length ? "Waiting for your answer" : stalledForMs ? `No progress for ${elapsed(stalledForMs)}` : state.activeTools ? `${state.activeTools} running` : "", state.toolErrors ? `${state.toolErrors} tool error${state.toolErrors === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
@@ -327,14 +327,31 @@ function activity(item: ProgressActivity, max: number): string {
   return `${plain(item.text, max)}${item.detail ? ` · ${plain(item.detail, Math.max(30, max - clean(item.text, max).length))}` : ""}`;
 }
 /**
- * The activity area: normally the latest line, but a current command opens a
- * tail of the three most recent commands — the running one bold, the finished
- * ones plain above it — so a command stream reads like a log.
+ * The newest distinct actions, oldest first. Exact repeats — the same command
+ * re-run by a later tool call — keep one slot, so a visible tail is several
+ * different actions. Identity is text plus detail, so the same verb on another
+ * file still counts as its own action.
+ */
+function distinctTail(items: ProgressActivity[], count: number): ProgressActivity[] {
+  const tail: ProgressActivity[] = [];
+  const seen = new Set<string>();
+  for (let index = items.length - 1; index >= 0 && tail.length < count; index -= 1) {
+    const item = items[index]!;
+    const identity = JSON.stringify([item.text, item.detail]);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    tail.unshift(item);
+  }
+  return tail;
+}
+/**
+ * The activity area: the last three distinct actions, newest at the bottom.
+ * The current one is prefixed and bold so it reads apart from the finished
+ * ones above it.
  */
 function activityLines(state: ProgressSnapshot, max: number): string[] {
-  if (!state.latest.command) return [activity(state.latest, max)];
-  return [...state.history, state.latest].filter((item) => item.command).slice(-3)
-    .map((item) => item.running ? `**${plain(item.text, max)}**` : plain(item.text, max));
+  const tail = distinctTail([...state.history, state.latest], 3);
+  return tail.map((item, index) => index === tail.length - 1 ? `▶ **${activity(item, max)}**` : activity(item, max));
 }
 function clean(value: string, max: number): string {
   const text = value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();

@@ -2306,8 +2306,8 @@ export function describeTool(tool: string, input: any, status: string, title?: s
       detail: typeof target === "string" ? projectFileLabel(target, directory) : undefined };
   }
   if (normalized === "bash" || normalized === "shell") {
-    // The command is its own label; `command` lets the card render the recent
-    // command tail instead of a generic "Running a command" line.
+    // The command is its own label; `command` keeps the service-wait
+    // heuristics from ever matching command text.
     const command = typeof input?.command === "string" ? input.command : undefined;
     return { text: command ? truncate(command, 90) : status === "running" ? "⚙️ Command" : "✓ Command", command: true };
   }

@@ -92,6 +92,26 @@ test("the plan shows up to seven items instead of four", () => {
   assert.ok(value.length <= 1024, `plan field is ${value.length} chars`);
 });
 
+test("the activity area shows the last three distinct actions with the current one marked", async () => {
+  const progress = new DiscordProgress({ id: "tail", edit: async () => {} } as unknown as Message, "Updating");
+  try {
+    progress.callback({ text: "📚 Reading", detail: "site/src/arena.ts", tool: { id: "read", name: "read", status: "completed" } });
+    // Three separate bash calls run the same command: each is its own tool, so
+    // an un-deduped tail would show the identical line three times.
+    for (const id of ["b1", "b2", "b3"]) progress.callback({ text: "npm test", command: true, tool: { id, name: "bash", status: "completed" } });
+    progress.callback({ text: "✏️ Editing", detail: "site/src/player.ts", tool: { id: "edit", name: "edit", status: "running" } });
+    const view = cardView(renderProgressCard(progress.readSnapshot()));
+    assert.equal(view.description.match(/npm test/g)?.length, 1, "a re-run command occupies one line, not three");
+    assert.match(view.description, /▶ \*\*✏️ Editing · site\/src\/player\.ts\*\*/, "the current action is prefixed and bold");
+    assert.equal(view.description.match(/▶/g)?.length, 1, "only the current action is marked");
+    const read = view.description.indexOf("📚 Reading · site/src/arena.ts");
+    const command = view.description.indexOf("npm test");
+    const current = view.description.indexOf("▶");
+    assert.ok(read >= 0 && read < command && command < current, "the tail runs oldest to newest");
+    assert.doesNotMatch(view.description, /Preparing your update/, "older actions fall off the three-line tail");
+  } finally { await progress.close(); }
+});
+
 test("the watchdog derives stall time from agent events, not queued-user notifications", async () => {
   const { config } = await import("../src/config.js");
   const original = config.turnStallWarnMs;
