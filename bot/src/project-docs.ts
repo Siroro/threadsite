@@ -76,6 +76,10 @@ export async function ensureProjectDocuments(workspacePath: string, name: string
 /** Read the project's own description: the pitch above the "How to play" heading, and the play section below it. */
 export async function readProjectDescription(workspacePath: string): Promise<ProjectDescription | undefined> {
   const raw = await fs.readFile(path.join(workspacePath, DESCRIPTION_FILE), "utf8").catch(() => undefined);
+  return parseProjectDescription(raw);
+}
+
+export function parseProjectDescription(raw: string | undefined): ProjectDescription | undefined {
   if (!raw) return undefined;
   const text = cleanDocument(raw).replace(/^#\s+.*$/m, "").trim();
   if (!text) return undefined;
@@ -93,6 +97,10 @@ export async function readProjectDescription(workspacePath: string): Promise<Pro
 /** Read the newest changelog entry: the first section below the title. */
 export async function readProjectChangelog(workspacePath: string): Promise<ProjectChangelog | undefined> {
   const raw = await fs.readFile(path.join(workspacePath, CHANGELOG_FILE), "utf8").catch(() => undefined);
+  return parseProjectChangelog(raw);
+}
+
+export function parseProjectChangelog(raw: string | undefined): ProjectChangelog | undefined {
   if (!raw) return undefined;
   const text = cleanDocument(raw);
   const sections = text.split(/^##\s+/m);

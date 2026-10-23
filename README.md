@@ -17,6 +17,10 @@ Networked games can also use harness-managed personal save slots and public best
 
 See [docs/architecture.md](docs/architecture.md) for the full pipeline, agent sandboxing, transport recovery, and persistence model.
 
+## Public gallery
+
+The static gallery includes search, 2D/3D/website and multiplayer filters, sorting, grid/list layouts, saved favourites, recently opened projects, shareable project details, play instructions and recent changes. It supports light/dark themes, keyboard navigation and a random-project picker. Favourites and history stay in the visitor's browser; direct project links also work without JavaScript. See [gallery behaviour and checks](docs/gallery.md).
+
 ## Stack
 
 - Node 24 + discord.js bot
@@ -25,7 +29,6 @@ See [docs/architecture.md](docs/architecture.md) for the full pipeline, agent sa
 - Forgejo 15 LTS (SQLite, no separate database needed)
 - Your existing Apache static directory (the default), an optional bundled `httpd:2.4-alpine` profile, or an optional Caddy edge with automatic HTTPS
 - Playwright MCP preview service (CPU-rendered Chromium, no GPU required)
-
 
 ### Fresh server
 
@@ -129,6 +132,7 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 - [docs/commands.md](docs/commands.md) — Discord workflow, all `/site`, `/makegam`, and `/site-admin` commands, live progress cards, repo push keys
 - [docs/architecture.md](docs/architecture.md) — pipeline, static-only boundary, harness build, preview/browser QA, transport recovery, persistence
 - [docs/multiplayer.md](docs/multiplayer.md) — relay architecture, multiplayer protocol, relay configuration and proxying
+- [docs/gallery.md](docs/gallery.md) — gallery discovery, public metadata, local collections and browser checks
 - [docs/deployment.md](docs/deployment.md) — full deployment walkthrough, one-command Caddy quickstart, Apache/Cloudflare proxying, cache headers, `start.sh`, security notes
 - [docs/maintenance.md](docs/maintenance.md) — project cleanup, regression checks, integration tests
 - [docs/opencode-v2.md](docs/opencode-v2.md) — v2 runtime, scripted integration checks and a live free-model throughput test

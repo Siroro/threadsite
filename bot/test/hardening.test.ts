@@ -241,7 +241,8 @@ test("the public gallery saves turn screenshots and renders escaped project card
   assert.match(html, /Shared arena/);
   assert.match(html, /Evil &lt;b&gt;Name&lt;\/b&gt;/, "project names are escaped");
   assert.match(html, /neon ring &lt;b&gt;before&lt;\/b&gt;/, "pitches are escaped");
-  assert.doesNotMatch(html, /How to play/, "only the pitch reaches the card, not the how-to-play");
+  const galleryData = JSON.parse(/<script id="gallery-data" type="application\/json">([\s\S]*?)<\/script>/.exec(html)![1]);
+  assert.equal(galleryData.projects.find((project: { name: string }) => project.name === game.displayName).play, "Move with WASD.", "public play instructions reach the detail panel");
   assert.doesNotMatch(html, /__gallery\/plain-site\.png/, "a project without a saved image keeps its styled placeholder");
   // Renames carry the image to the new slug.
   await moveGalleryPreview("evil-game", "evil-game-2");

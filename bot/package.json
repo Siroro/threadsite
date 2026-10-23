@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --import tsx --test test/*.test.ts",
+    "test:gallery": "node --import tsx test/gallery-browser.mjs",
     "test:opencode-v2": "node --import tsx test/opencode-v2-smoke.ts",
     "test:opencode-v2-throughput": "node --import tsx test/opencode-v2-throughput-smoke.ts",
     "build": "npm run build:net && tsc -p tsconfig.json",

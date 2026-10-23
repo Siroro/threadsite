@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import os from "node:os";
@@ -8,7 +9,9 @@ import { config } from "./config.js";
 import { engineTypeEntries } from "./engines.js";
 import { currentHead } from "./git.js";
 import { log } from "./logger.js";
-import { readProjectDescription } from "./project-docs.js";
+import { parseProjectDescription, parseProjectChangelog } from "./project-docs.js";
+import { renderGallery } from "./gallery.js";
+import { publicGalleryUrl, type GalleryProject } from "./gallery-model.js";
 import type { ProjectRecord } from "./types.js";
 import { htmlEscape, safeChild } from "./util.js";
 
@@ -1075,114 +1078,70 @@ export async function removeGalleryPreview(slug: string): Promise<void> {
   await fs.rm(galleryPreviewPath(slug), { force: true });
 }
 
-const KIND_META: Record<string, { label: string; accent: string; emoji: string }> = {
-  site: { label: "Site", accent: "#5865f2", emoji: "🌐" },
-  "game-2d": { label: "2D game", accent: "#22c55e", emoji: "🕹️" },
-  "game-3d": { label: "3D game", accent: "#8b5cf6", emoji: "🎮" },
-};
-
-function multiplayerLabel(mode: NonNullable<ProjectRecord["multiplayerMode"]>): string {
-  if (mode === "singleplayer") return "Singleplayer";
-  if (mode === "rooms") return "Invite rooms";
-  return "Shared arena";
+/** Public documents must be small regular files, never workspace symlinks. */
+async function readGalleryDocument(file: string): Promise<string | undefined> {
+  const stat = await fs.lstat(file).catch(() => undefined);
+  if (!stat?.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) return undefined;
+  const handle = await fs.open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)).catch(() => undefined);
+  if (!handle) return undefined;
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.ino !== stat.ino || opened.dev !== stat.dev || opened.size > 64 * 1024) return undefined;
+    const content = await handle.readFile("utf8");
+    return Buffer.byteLength(content) <= 64 * 1024 ? content : undefined;
+  } finally { await handle.close(); }
 }
 
-function galleryCardHtml(card: {
-  name: string;
-  kind: ProjectRecord["projectKind"];
-  multiplayer?: ProjectRecord["multiplayerMode"];
-  slug: string;
-  repoUrl: string;
-  updated: string;
-  pitch?: string;
-  hasPreview: boolean;
-}): string {
-  const meta = KIND_META[card.kind ?? "site"] ?? KIND_META.site;
-  const href = htmlEscape(`${config.publicSitesBaseUrl}/${encodeURIComponent(card.slug)}/`);
-  const thumb = card.hasPreview
-    ? `<img src="${htmlEscape(`${config.publicSitesBaseUrl}/${GALLERY_DIR}/${encodeURIComponent(card.slug)}.png`)}" alt="Preview of ${htmlEscape(card.name)}" loading="lazy">`
-    : `<div class="placeholder" aria-hidden="true">${meta.emoji}</div>`;
-  const pitch = card.pitch ? `\n          <p class="pitch">${htmlEscape(card.pitch)}</p>` : "";
-  const badge = card.multiplayer && card.kind !== "site"
-    ? `<span class="badge outline">${htmlEscape(multiplayerLabel(card.multiplayer))}</span>`
-    : "";
-  return `
-      <article class="card" style="--accent:${meta.accent}">
-        <a class="thumb" href="${href}" tabindex="-1">${thumb}</a>
-        <div class="body">
-          <h2><a href="${href}">${htmlEscape(card.name)}</a></h2>${pitch}
-          <div class="badges"><span class="badge">${meta.label}</span>${badge}</div>
-          <div class="foot">
-            <time>${htmlEscape(card.updated)}</time>
-            <span class="links"><a class="play" href="${href}">Play&nbsp;↗</a><a href="${htmlEscape(card.repoUrl)}">Source</a></span>
-          </div>
-        </div>
-      </article>`;
-}
-
-export async function publishIndex(
-  projects: ProjectRecord[],
-  repoUrl: (repo: string) => string,
-): Promise<void> {
+let galleryPublishTail: Promise<void> = Promise.resolve();
+export async function publishIndex(projects: ProjectRecord[], repoUrl: (repo: string) => string): Promise<void> {
   if (!config.publicIndexEnabled) return;
-  await fs.mkdir(config.publishRoot, { recursive: true });
-  const cards = await Promise.all(projects
-    .filter((p) => p.status === "ready" && !p.pendingDeletion)
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    .map(async (project) => ({
-      name: project.displayName,
-      kind: project.projectKind,
-      multiplayer: project.multiplayerMode,
-      slug: project.siteSlug,
-      repoUrl: repoUrl(project.repoName),
-      updated: new Date(project.updatedAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }),
-      pitch: (await readProjectDescription(project.workspacePath).catch(() => undefined))?.pitch?.replace(/\s+/g, " ").trim(),
-      hasPreview: await fs.access(galleryPreviewPath(project.siteSlug)).then(() => true, () => false),
-    })));
-  const count = cards.length;
-  const grid = cards.map(galleryCardHtml).join("\n");
-  const html = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ThreadSite · built from chat</title><style>
-:root{color-scheme:dark}
-*{box-sizing:border-box}
-body{margin:0;min-height:100vh;font-family:ui-sans-serif,system-ui,'Segoe UI',sans-serif;background:radial-gradient(1200px 600px at 80% -10%,#1c2440 0%,transparent 60%),radial-gradient(900px 500px at -10% 10%,#182248 0%,transparent 55%),#0b0d13;color:#e8eaf0;display:flex;flex-direction:column}
-header{padding:4.5rem 1.5rem 2.5rem;max-width:1180px;margin:0 auto;width:100%}
-.wordmark{font-size:clamp(2.1rem,6vw,3.4rem);font-weight:800;letter-spacing:-.03em;margin:0}
-.wordmark span{background:linear-gradient(92deg,#7c8cff,#4fe3c1 55%,#e873fa);-webkit-background-clip:text;background-clip:text;color:transparent}
-.tagline{color:#9aa3b8;margin:.6rem 0 0;font-size:1.05rem;max-width:44rem}
-.count{display:inline-block;margin-top:1.1rem;padding:.25rem .7rem;border:1px solid #2a3040;border-radius:999px;color:#aab3c7;font-size:.8rem;background:#12151ee6}
-main{max-width:1180px;margin:0 auto;width:100%;padding:0 1.5rem 4rem}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:1.4rem}
-.card{display:flex;flex-direction:column;background:#12151ee6;border:1px solid #262b38;border-radius:16px;overflow:hidden;transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease}
-.card:hover{transform:translateY(-3px);border-color:var(--accent);box-shadow:0 12px 30px -12px var(--accent)}
-.thumb{display:block;aspect-ratio:16/9;background:linear-gradient(135deg,var(--accent)33%,#151824 100%)}
-.thumb img{display:block;width:100%;height:100%;object-fit:cover}
-.placeholder{display:grid;place-items:center;width:100%;height:100%;font-size:2.6rem;opacity:.9}
-.body{display:flex;flex-direction:column;gap:.55rem;padding:1rem 1.1rem 1.1rem;flex:1}
-h2{font-size:1.15rem;margin:0;line-height:1.3}
-h2 a{color:#f0f2f8;text-decoration:none}
-h2 a:hover{text-decoration:underline}
-.pitch{margin:0;color:#9aa3b8;font-size:.9rem;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.badges{display:flex;gap:.45rem;flex-wrap:wrap}
-.badge{padding:.14rem .55rem;border-radius:999px;font-size:.72rem;font-weight:600;background:var(--accent);color:#0b0d13}
-.badge.outline{background:transparent;border:1px solid #3a4156;color:#aab3c7}
-.foot{display:flex;align-items:center;justify-content:space-between;gap:.6rem;margin-top:auto;padding-top:.55rem;border-top:1px solid #20242f}
-time{color:#69718a;font-size:.78rem}
-.links{display:flex;gap:.9rem;font-size:.85rem;font-weight:600}
-a{color:#9ecbff;text-decoration:none}
-.play{color:#4fe3c1}
-.empty{grid-column:1/-1;border:1px dashed #2a3040;border-radius:16px;padding:3rem;text-align:center;color:#7d869c}
-footer{border-top:1px solid #1c202b;padding:1.6rem 1.5rem;color:#5d6478;font-size:.8rem;text-align:center}
-@media(max-width:600px){header{padding-top:3rem}}
-</style></head><body>
-<header>
-  <h1 class="wordmark">Thread<span>Site</span></h1>
-  <p class="tagline">Websites and browser games designed, built and shipped by an AI team — one conversation per project. Every card opens the live result.</p>
-  <span class="count">${count} project${count === 1 ? "" : "s"} · newest first</span>
-</header>
-<main><div class="grid">${grid || '<div class="empty">No projects yet — the first one ships soon.</div>'}</div></main>
-<footer>Every project has a public git history. Built and published by ThreadSite.</footer>
-</body></html>`;
-  await fs.writeFile(safeChild(config.publishRoot, "index.html"), html, "utf8");
+  const next = galleryPublishTail.catch(() => undefined).then(async () => {
+    const candidates = await Promise.all(projects.map(async (project): Promise<GalleryProject | undefined> => {
+      if (project.pendingDeletion || !/^[a-z0-9][a-z0-9-]{0,79}$/.test(project.siteSlug)) return undefined;
+      const published = safeChild(config.publishRoot, project.siteSlug);
+      // A failed update must not hide a working, previously published project.
+      if (project.status !== "ready") {
+        if (project.status !== "error" || !(await fs.lstat(path.join(published, "index.html")).catch(() => undefined))?.isFile()) return undefined;
+      }
+      const url = publicGalleryUrl(siteUrl(project));
+      if (!url) return undefined;
+      const kind = project.projectKind === "game-2d" || project.projectKind === "game-3d" ? project.projectKind : "site";
+      const [rawDescription, rawChangelog, rawVersion, hasImage] = await Promise.all([
+        project.status === "ready" ? readGalleryDocument(path.join(project.workspacePath, "DESCRIPTION.md")) : undefined,
+        project.status === "ready" ? readGalleryDocument(path.join(project.workspacePath, "CHANGELOG.md")) : undefined,
+        readGalleryDocument(path.join(published, VERSION_FILE)),
+        fs.lstat(galleryPreviewPath(project.siteSlug)).then((stat) => stat.isFile() && !stat.isSymbolicLink(), () => false),
+      ]);
+      const description = parseProjectDescription(rawDescription);
+      const changelog = parseProjectChangelog(rawChangelog);
+      const date = (value: string): string => Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : "1970-01-01T00:00:00.000Z";
+      let updatedAt = date(project.updatedAt);
+      try {
+        const version = JSON.parse(rawVersion ?? "null") as { publishedAt?: string } | null;
+        if (version?.publishedAt && Number.isFinite(Date.parse(version.publishedAt))) updatedAt = date(version.publishedAt);
+      } catch { /* Legacy publications can lack deployment metadata. */ }
+      return {
+        id: crypto.createHash("sha256").update(`gallery:${project.threadId}`).digest("hex").slice(0, 20),
+        name: project.displayName.slice(0, 180), kind,
+        mode: kind === "site" ? null : project.multiplayerMode ?? "arena",
+        url, source: publicGalleryUrl(repoUrl(project.repoName)),
+        image: hasImage ? `${config.publicSitesBaseUrl}/${GALLERY_DIR}/${encodeURIComponent(project.siteSlug)}.png?v=${encodeURIComponent(updatedAt)}` : null,
+        pitch: (description?.pitch ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+        play: description?.play?.slice(0, 6000) ?? "",
+        changeTitle: changelog?.title?.slice(0, 160) ?? "", change: changelog?.body?.slice(0, 3000) ?? "",
+        createdAt: date(project.createdAt), updatedAt,
+      };
+    }));
+    const cards = candidates.filter((project): project is GalleryProject => Boolean(project)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
+    const html = await renderGallery(cards);
+    const tempDir = safeChild(config.publishRoot, GALLERY_DIR);
+    await fs.mkdir(tempDir, { recursive: true });
+    const temp = path.join(tempDir, `index-${crypto.randomUUID()}.tmp`);
+    try {
+      await fs.writeFile(temp, html, "utf8");
+      await fs.rename(temp, safeChild(config.publishRoot, "index.html"));
+    } finally { await fs.rm(temp, { force: true }).catch(() => undefined); }
+  });
+  galleryPublishTail = next;
+  await next;
 }
