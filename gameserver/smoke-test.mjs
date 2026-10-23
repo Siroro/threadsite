@@ -1,8 +1,9 @@
 // Protocol v4 relay conformance tests. Run with the relay already listening.
 import assert from "node:assert/strict";
 
-const WS_URL = "ws://127.0.0.1:8090/ws";
-const HTTP_URL = "http://127.0.0.1:8090";
+const PORT = process.env.GAMESERVER_TEST_PORT || "8090";
+const WS_URL = `ws://127.0.0.1:${PORT}/ws`;
+const HTTP_URL = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function connect() {

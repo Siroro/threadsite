@@ -2,7 +2,7 @@
 
 Games default to **shared-arena multiplayer** (or invite-code **rooms**, or none at all — chosen at `/makegam` and switchable with `/site multiplayer`). Networked games share one `gameserver` container for the whole deployment; there is no per-game instance, process, or provisioning step. Multi-tenancy is addressed by two ids the harness controls:
 
-- **game id** — the published site slug, injected into each game as its tenant key;
+- **game id** — the stable harness tenant key, initially derived from the published site slug and retained across renames;
 - **room code** — a short code (for example `AB3CK`) namespaced per game, so the same code in two games is two different rooms.
 
 A single relay therefore serves any number of games and rooms per game, bounded only by configured caps.
@@ -46,6 +46,8 @@ GAMESERVER_PERMESSAGE_DEFLATE=1
 GAMESERVER_ALLOWED_ORIGINS=
 GAMESERVER_STATE_DIR=/data/threadsite-relay
 GAMESERVER_PERSIST_INTERVAL_MS=1000
+GAMESERVER_MAX_SAVED_PLAYERS_PER_GAME=10000
+GAMESERVER_MAX_SAVE_BYTES_PER_GAME=16777216
 ```
 
 - The bundled/local default `ws://localhost:8090/ws` works out of the box next to the bundled static Apache profile.
@@ -58,6 +60,48 @@ GAMESERVER_PERSIST_INTERVAL_MS=1000
 ## Durability: arenas persist, rooms do not
 
 The relay periodically snapshots the latest authoritative world of each game's single-mode arena (one small JSON file per game under `GAMESERVER_STATE_DIR`, written atomically via temp-file + rename) and replays it to the first joiner after the room empties or the relay restarts. Only the opaque game snapshot is kept — peer ids, authority epochs, generations and sequences die with the session that created them, so stale pre-restart frames never validate. The compose file binds `./data/gameserver` so arena worlds survive container recreation. Room-code sessions stay in-memory only and recover through the client's auto-reconnect plus snapshot resync, or fall back to solo play.
+
+## Personal saves and leaderboards
+
+Both networked modes support personal JSON save slots and public best-score leaderboards through the existing WebSocket client. They are independent of room codes, arena world snapshots and host authority. Generated projects stay static; the harness owns all storage. Singleplayer-only projects keep their no-relay contract and use local saves instead.
+
+```ts
+import { ThreadSiteNet } from "../net/threadsite-net.js";
+import { NET_CONFIG } from "../net/net-config.js";
+
+const net = await ThreadSiteNet.connect({ ...NET_CONFIG, mode: "single", name: "Player" });
+const checkpoint = await net.saves.get<{ schemaVersion: number; level: number }>("progress-v1");
+// Validate the loaded shape/schema before applying it to game state.
+const saved = await net.saves.set("progress-v1", { schemaVersion: 1, level: 3 }, checkpoint.revision);
+// await net.saves.delete("progress-v1", saved.revision);
+await net.leaderboards.submit("points-v1", 250); // higher is better
+await net.leaderboards.submit("time-ms-v1", 32150, { order: "asc" }); // lower is better
+const top = await net.leaderboards.list("points-v1", { limit: 10 });
+// top = { order: "desc", entries: [{ playerId, name, score, updatedAt }] }
+```
+
+The example omits UI/error handling; generated games must catch failures and continue solo. Save at checkpoints, never per simulation frame. `net.saves.available` indicates support and current connectivity. The storage extension advertises `welcome.persistence.version = 1` on protocol v4; older clients still play, and newer clients detect older relays without attempting unsupported storage frames.
+
+**Identity and privacy.** The client creates a cryptographically random 256-bit private token and retains it in localStorage under the stable game ID. The relay derives a game-scoped one-way public `playerId` from that token; it never echoes the credential or broadcasts saves. Live peer IDs and public `cid` metadata grant no save access. Reconnecting, changing rooms and returning in the same browser preserve progress. Storage denial falls back to a page-lifetime token (`net.saves.identityPersistent === false`); lack of secure randomness disables storage without preventing multiplayer. Clearing browser storage loses the anonymous identity; there is no Discord login or cross-device account recovery. Browser storage belongs to the origin: generated sites on the same origin share that trust boundary. Store game progress, not secrets or sensitive user records. A caller may supply `playerToken` to manage its own credential, but must keep it private and arrange persistence itself.
+
+**Conflicts and delivery.** `saves.get()` returns `{ value, revision, updatedAt }`; a never-used slot has null value/time and revision 0. Set/delete requires that revision. A successful mutation increments it; deletion retains a tombstone so an old tab cannot recreate a deleted save using an obsolete revision. On `save_conflict`, re-read and deliberately reconcile the change. Requests are bounded to 16 in flight per client and time out after 10 seconds. They are not queued or replayed after disconnect. A `storage_uncertain` error means a write may have committed: re-read after reconnect before retrying. Offline progress can remain local, with an explicit merge when connectivity returns.
+
+**Rankings.** Each game has up to 16 named boards, with one personal best per persistent player on each board. The first successful submission fixes descending or ascending order; conflicting order returns `board_order_conflict`. Use a new versioned board key when scoring rules change. Equal/worse submissions leave the entry untouched; ties sort by earliest best-score timestamp, then player ID. Names come from sanitized connection names and change only with an improved score. List returns 1–100 entries (default 10). Treat names as text in UI. Scores are client-reported: the relay validates shape, isolation and bounds, not gameplay legitimacy or anti-cheat rules.
+
+**Storage and limits.** `players.sqlite` is created lazily inside `GAMESERVER_STATE_DIR`. SQLite WAL transactions use full synchronization and commit before acknowledgement, independently of the arena flush interval. Existing `<game>.json` worlds remain compatible and room world snapshots remain ephemeral. Preserve the whole state directory, including SQLite WAL files, when copying stopped state; use a consistent SQLite backup for live copies. Project deletion removes its saves, boards and scores as well as its world, and retains the existing deletion tombstone to block stale clients. Admin inventory includes storage-only tenants after restarts.
+
+| Limit | Default |
+| --- | --- |
+| Save slot value | 64 KiB serialized JSON |
+| Slot names per player | 16, including deleted names |
+| Persistent players per game | 10,000 (`GAMESERVER_MAX_SAVED_PLAYERS_PER_GAME`) |
+| Total live save JSON per game | 16 MiB (`GAMESERVER_MAX_SAVE_BYTES_PER_GAME`) |
+| Leaderboards per game | 16 |
+| Requests per connection | 5/s, burst 10, also subject to the ordinary frame limiter |
+
+Slot and board keys use 1–48 ASCII alphanumeric/underscore/hyphen characters, starting with an alphanumeric character. Save data must be JSON and scores must be finite numbers. Capacity, invalid input, rate and storage failures return correlated errors; rejected mutations leave existing data intact. Public clients can create anonymous identities, so the player cap bounds records rather than guaranteeing one identity per person.
+
+Build the relay and client before verification (`npm run build` in `gameserver/`, `npm run build:net` in `bot/`). From `gameserver/`, `npm run test:storage` exercises save conflicts, quotas, rankings and tenant cleanup; `npm run test:persistence` launches an isolated relay and checks browser identity, private access, disk failure recovery, crash durability and deletion. Neither uses live relay state.
 
 ## Proxying the relay
 

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { NET_STATUS, ThreadSiteNet, ThreadSiteNetError } from "../bot/assets/threadsite-net.js";
 
-const URL = "ws://127.0.0.1:8090/ws";
+const URL = `ws://127.0.0.1:${process.env.GAMESERVER_TEST_PORT || "8090"}/ws`;
 const GAME = "client-v4-test";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

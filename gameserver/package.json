@@ -11,7 +11,9 @@
     "test:restart": "node restart-test.mjs",
     "test:durable": "node durability-test.mjs",
     "test:stall": "node host-stall-test.mjs",
-    "test:delete": "node deletion-test.mjs"
+    "test:delete": "node deletion-test.mjs",
+    "test:storage": "node --test test/player-store.test.mjs",
+    "test:persistence": "node persistence-test.mjs"
   },
   "dependencies": {
     "ws": "8.22.0"

@@ -68,6 +68,22 @@ export interface NetPresenceEntry<T = any> {
     cid: string | null;
     state: T;
 }
+export interface NetSave<T = unknown> {
+    value: T | null;
+    revision: number;
+    updatedAt: number | null;
+}
+export interface NetScore {
+    playerId: string;
+    name: string;
+    score: number;
+    updatedAt: number;
+}
+export type NetScoreOrder = "asc" | "desc";
+export interface NetLeaderboard {
+    order: NetScoreOrder | null;
+    entries: NetScore[];
+}
 /** Engine-neutral 2D/3D transform. Extra game fields pass through unchanged. */
 export interface NetTransform {
     x: number;
@@ -208,6 +224,10 @@ export interface ThreadSiteNetOptions {
     /** Create a fresh code-addressed room. */
     createRoom?: boolean;
     name?: string;
+    /** Private 256-bit lowercase hex credential. Normally generated and stored in localStorage.
+     * Never put it in shared state, URLs, presence, or events. Not a Discord identity.
+     */
+    playerToken?: string;
     autoReconnect?: boolean;
     connectTimeoutMs?: number;
     /** Coalesced transform/player-state rate, 1-60 Hz. Default 25. */
@@ -253,6 +273,11 @@ export declare class ThreadSiteNet {
     readonly presence: NetPresence;
     readonly entities: NetEntities;
     readonly run: NetRun;
+    readonly saves: NetSaves;
+    readonly leaderboards: NetLeaderboards;
+    private readonly playerIdentity;
+    private storagePlayerId;
+    private readonly storageRequests;
     id: string | null;
     cid: string | null;
     room: string | null;
@@ -308,6 +333,9 @@ export declare class ThreadSiteNet {
     private yieldPending;
     constructor(options?: ThreadSiteNetOptions);
     get status(): NetStatus;
+    /** Public leaderboard identity; separate from live peer IDs and never a credential. */
+    get playerId(): string | null;
+    private rejectStorageRequests;
     /**
      * Live link diagnostics for HUD display: round-trip, transit jitter, peer
      * count, measured complete-world cadence, last world-frame size, and
@@ -355,6 +383,28 @@ export declare class ThreadSiteNet {
     private setStatus;
     private failOrRetry;
     private scheduleReconnect;
+}
+/** Personal JSON checkpoint slots. CAS revisions prevent stale tabs overwriting newer progress. */
+export declare class NetSaves {
+    private readonly net;
+    constructor(net: ThreadSiteNet);
+    get available(): boolean;
+    /** False if storage is blocked or a caller supplies its own credential. */
+    get identityPersistent(): boolean;
+    get<T = unknown>(slot: string): Promise<NetSave<T>>;
+    set<T>(slot: string, value: T, revision: number): Promise<NetSave<T>>;
+    delete(slot: string, revision: number): Promise<NetSave<null>>;
+}
+/** Public per-game personal bests. Scores are client-reported, not cheat-proof. */
+export declare class NetLeaderboards {
+    private readonly net;
+    constructor(net: ThreadSiteNet);
+    submit(board: string, score: number, options?: {
+        order?: NetScoreOrder;
+    }): Promise<NetScore>;
+    list(board: string, options?: {
+        limit?: number;
+    }): Promise<NetLeaderboard>;
 }
 /**
  * Local transform publication plus remote transform reads.

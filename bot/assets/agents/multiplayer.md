@@ -14,6 +14,7 @@ Read `NETWORKING.md` before implementing networking or debugging sync; consult `
 - Capture one complete JSON world `{ runId, tick, state }`. Restore replaces shared state before authority starts; present only updates guest visuals. Start/stop shared simulation with authority changes, including background-tab handoff; never cache startup host status.
 - New runs need fresh `runId` values and monotonic ticks; snapshot shape changes need a `schemaVersion` bump. Durable arenas resume paused: persist durations, not wall-clock deadlines, and never publish fresh state over a restored world.
 - Use smooth `entities.syncCollection()` for snapshot entity views. Reliable events carry discrete results; ephemeral events are replaceable cosmetics. Durable outcomes belong in snapshots; scope run-specific reliable events to `net.run`.
+- For personal progression use `net.saves.get/set/delete`; for public personal bests use `net.leaderboards.submit/list`. Read the persistence section in `NETWORKING.md` first. Keep saves separate from shared world state, save at checkpoints, handle revision conflicts and offline play, and never broadcast the private player credential. Scores are client-reported, not verified by the relay.
 
 ### Rates and checks
 

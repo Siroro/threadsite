@@ -31,7 +31,7 @@ async function startRelay() {
       GAMESERVER_HOST: "127.0.0.1",
       GAMESERVER_PORT: String(PORT),
       GAMESERVER_HOST_STALL_MS: String(STALL_MS),
-      GAMESERVER_STATE_DIR: "./data/stall-test-state",
+      GAMESERVER_STATE_DIR: process.env.GAMESERVER_STATE_DIR || "./data/stall-test-state",
     },
     stdio: ["ignore", "ignore", "inherit"],
   });

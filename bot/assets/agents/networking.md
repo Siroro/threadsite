@@ -20,6 +20,32 @@ The client is `site/net/threadsite-net.js` (typed by `threadsite-net.d.ts`); ide
 * The relay re-elects a **stalled host**: a host that publishes no world for **15 s** (`GAMESERVER_HOST_STALL_MS`) while another peer is connected is demoted to guest and authority moves to that peer. Healthy hosts publish at 1 Hz minimum, so this never fires in normal play; a lone silent host (nobody waiting) is left alone.
 * `close()` is permanent. Other connection loss automatically reconnects and re-runs the bootstrap gate.
 
+## Personal saves and leaderboards
+
+The relay also persists personal checkpoints and public personal bests for both arena and room games. These are separate from world snapshots and room lifetimes. Use them when the requested game needs progression or rankings; do not add a backend or invent endpoints.
+
+```ts
+type Progress = { schemaVersion: 1; unlockedLevel: number };
+const checkpoint = await net.saves.get<Progress>("progress-v1");
+// Validate saved shape/schema before restoring; null means no live save.
+const progress = checkpoint.value ?? { schemaVersion: 1, unlockedLevel: 1 };
+const saved = await net.saves.set("progress-v1", progress, checkpoint.revision);
+// Keep saved.revision for the next write. Deletion also needs that revision:
+// const deleted = await net.saves.delete("progress-v1", saved.revision);
+await net.leaderboards.submit("points-v1", 250); // descending, personal best only
+await net.leaderboards.submit("time-ms-v1", 32150, { order: "asc" });
+const top = await net.leaderboards.list("points-v1", { limit: 10 });
+// Render names via textContent; top.entries = [{ playerId, name, score, updatedAt }].
+```
+
+- Read once after connecting, then save at checkpoints/end of run; never save per frame. Catch every persistence rejection and keep the game playable. `net.saves.available` reports current support/connectivity. Persistence is an additive v4 capability; older relays return `storage_unsupported` locally.
+- Save slots hold up to 64 KiB JSON, with 16 distinct slot names per player (deleted names still count so their revisions stay safe). Missing saves return `{ value: null, revision: 0, updatedAt: null }`. Delete keeps a tombstone and increments revision. Put a schema version in your data and validate it before use; use stable versioned slot keys for incompatible migrations.
+- Every set/delete needs the last returned revision. `save_conflict` means another tab/session won: re-read and deliberately merge or ask which progress to keep. Do not blindly overwrite. Serialize a client's own checkpoint writes, and retain the newly returned revision.
+- Requests require an online connection, time out after 10 s, and are never queued/replayed automatically. `storage_uncertain` means a write may have committed: read again after reconnect before deciding whether to retry. Keep any offline progress locally and merge it deliberately; do not erase it when a cloud read fails. Show whether a checkpoint was actually saved.
+- Anonymous identity uses a private cryptographically random credential in localStorage, scoped by the stable game ID. `net.playerId` is the public leaderboard identity; it is separate from `peer.id`/`cid` and cannot authenticate a save. Never put `playerToken` in world state, events, presence, URLs, or logs. `net.saves.identityPersistent === false` means browser storage is blocked (page-lifetime identity) or the caller supplied its own credential. Clearing storage loses access; there is no account or cross-device recovery. These are game checkpoints, never sensitive personal data; projects sharing a browser origin share its storage trust boundary.
+- Leaderboards keep one best score per anonymous player per board, with names taken from the connection's sanitized `name`. First submission fixes ascending/descending order. Change the board key for new scoring rules. Equal scores keep their original timestamp; ties sort by timestamp then player ID. List returns up to 100 entries. Both the scores and names are untrusted client input: render names as text and do not claim cheat-proof rankings.
+- Storage allows 5 requests/s per connection (burst 10), within the ordinary frame budget. Defaults: 10,000 persistent players, 16 boards and 16 MiB total save JSON per game. Capacity/rate/disk failures are explicit errors; keep solo play available and offer a later retry.
+
 ## Choosing rates and the latency budget
 
 Rates are a feel decision, not a default to keep. What a guest sees behind reality is the sum of four terms:
