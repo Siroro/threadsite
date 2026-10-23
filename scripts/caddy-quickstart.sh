@@ -32,8 +32,8 @@ usage() {
   cat <<'HELP'
 Usage: scripts/caddy-quickstart.sh [options]
 
-Missing values are prompted for, including when run through curl | bash.
-Reruns reuse .env values. Secrets are read without echoing them.
+Run with no options for guided setup, including through curl | bash.
+Press Enter to keep saved settings. Secrets are read without echoing them.
 
   --domain DOMAIN          Use sites.DOMAIN and git.DOMAIN
   --sites-domain HOST      Public hostname for generated sites
@@ -129,6 +129,13 @@ ensure_tools() {
   fi
 }
 
+if [[ -n "$PROMPT_FD" ]]; then
+  say "ThreadSite setup"
+  printf 'I will ask for your hostnames, Discord bot and AI model settings.\n'
+  printf 'Press Enter to keep a value shown in brackets. Secret input is hidden.\n'
+  printf 'Point your chosen hostnames at this server and allow ports 80 and 443.\n'
+fi
+
 # Locate the checkout without replacing existing edits or passing secrets to a
 # second process's command line. An existing standalone install is reused.
 script_file="${BASH_SOURCE[0]:-}"
@@ -186,17 +193,23 @@ if [[ -n "$BASE_DOMAIN" ]]; then
   (( SITES_EXPLICIT )) || SITES_DOMAIN="sites.$BASE_DOMAIN"
   (( GIT_EXPLICIT )) || GIT_DOMAIN="git.$BASE_DOMAIN"
 fi
-if [[ -z "$SITES_DOMAIN" ]]; then
-  ask BASE_DOMAIN "Base domain (example.com creates sites.example.com and git.example.com)"
-  if [[ -n "$BASE_DOMAIN" ]]; then
-    SITES_DOMAIN="sites.$BASE_DOMAIN"
-    GIT_DOMAIN="${GIT_DOMAIN:-git.$BASE_DOMAIN}"
-  fi
+if (( ! SITES_EXPLICIT )) && [[ -z "$BASE_DOMAIN" ]]; then
+  ask SITES_DOMAIN "Sites hostname (for example lab.example.com)"
 fi
 [[ -n "$SITES_DOMAIN" ]] || die "Provide --domain or --sites-domain (DNS must point at this server)"
 if (( ! SKIP_BOT )); then
-  [[ -n "$GIT_DOMAIN" ]] || ask GIT_DOMAIN "Hostname for source repositories"
+  if (( ! GIT_EXPLICIT )) && [[ -z "$BASE_DOMAIN" ]]; then
+    ask GIT_DOMAIN "Git hostname (for example git.example.com)"
+  fi
   [[ -n "$GIT_DOMAIN" ]] || die "Provide --git-domain for source repositories, or use --domain"
+  if (( ! GAMES_EXPLICIT )); then
+    if [[ -n "$GAMES_DOMAIN" ]]; then
+      ask GAMES_DOMAIN "Games hostname (Enter keeps the saved host; - shares the sites hostname)"
+    else
+      ask GAMES_DOMAIN "Games hostname (optional; Enter shares the sites hostname)"
+    fi
+    [[ "$GAMES_DOMAIN" != - ]] || GAMES_DOMAIN=""
+  fi
 fi
 valid_domain() {
   local label labels=()
@@ -219,6 +232,11 @@ GAMES_DOMAIN="${GAMES_DOMAIN,,}"
 
 INVITE_URL=""
 if (( ! SKIP_BOT )); then
+  if [[ -z "$DISCORD_TOKEN" && -n "$PROMPT_FD" ]]; then
+    say "Connect your Discord bot"
+    printf 'Create a bot at https://discord.com/developers/applications\n'
+    printf 'On its Bot page, enable Message Content Intent and copy the bot token.\n'
+  fi
   [[ -n "$DISCORD_TOKEN" ]] || ask DISCORD_TOKEN "Discord bot token (Developer Portal > Bot > Reset Token)" 1
   [[ -n "$DISCORD_TOKEN" && "$DISCORD_TOKEN" =~ ^[a-zA-Z0-9._-]+$ ]] || die "A raw Discord bot token is required (without a Bot prefix)"
   discord_get() {
