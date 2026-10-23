@@ -36,6 +36,7 @@ export function textPages(text: string, limit = 2800): string[] {
 }
 
 export function renderDetailPanel(title: string, resource: string, scope: PanelScope, sections: PanelSection[], selected?: string, page = 0): CardMessage {
+  if (!sections.length) sections = [{ key: "empty", label: "Details", text: "No information was recorded for this view." }];
   const section = sections.find((entry) => entry.key === selected) ?? sections[0];
   const pages = textPages(section.text);
   page = Math.min(pages.length - 1, Math.max(0, Number.isSafeInteger(page) ? page : 0));

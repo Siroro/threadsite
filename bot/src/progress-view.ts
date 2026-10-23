@@ -15,7 +15,7 @@ export type ProgressPhase = "queued" | "preparing" | "working" | "checking" | "p
 export interface ProgressContext { request?: string; siteUrl?: string; repoUrl?: string }
 export interface ProgressPlanItem { content: string; status: "pending" | "in_progress" | "completed" | "cancelled" }
 export interface ProgressTool { id: string; name: string; status: "running" | "completed" | "error" }
-/** One live child session behind the "Active subagents" lines. */
+/** One child session behind the subagent lines and the turn's saved details. */
 export interface ProgressSubagent {
   /** OpenCode session id of the child. */
   id: string;
@@ -23,10 +23,14 @@ export interface ProgressSubagent {
   agent: string;
   /** Completed model steps, deduped across retries. */
   steps: number;
+  /** Running children drive the live card; finished ones stay in turn details. */
+  status?: "running" | "finished";
   /** Newest known tool label, e.g. "📚 Reading · site/src/arena.ts". */
   activity?: string;
   /** When that activity was seen; ages the line when the child has gone quiet. */
   activityAt?: number;
+  /** When the child session was first observed. */
+  startedAt?: number;
 }
 export interface ProgressMetrics {
   contextTokens?: number;
@@ -72,6 +76,8 @@ export interface ProgressSnapshot {
   activeSubagents?: number;
   /** Per-child detail for the active sessions; omitted by older saved cards. */
   subagents?: ProgressSubagent[];
+  /** Every child seen during the turn, including finished ones; kept for turn details. */
+  subagentHistory?: ProgressSubagent[];
   toolErrors: number;
   waiting?: boolean;
   /** Last OpenCode session-status poll reported a running or retrying turn. */
@@ -321,22 +327,92 @@ export function progressDetailSections(state: ProgressSnapshot): PanelSection[] 
   const overview = renderProgressOverview(state).components[0].components
     .filter((component): component is TextDisplayBuilder => component instanceof TextDisplayBuilder).map((component) => component.data.content).join("\n\n");
   const metrics = state.metrics;
-  return [
+  const updates = state.narration?.length ? state.narration : state.thought ? [{ text: state.thought, at: state.now }] : [];
+  const subagents = subagentHistory(state);
+  const sections: Array<PanelSection | undefined> = [
     { key: "overview", label: "Overview", text: overview },
-    { key: "plan", label: "Complete plan", text: state.plan.map((item, index) => `${PLAN_MARKS[item.status]} ${index + 1}. ${item.content}`).join("\n\n") },
-    { key: "files", label: "Changed files", text: [
-      state.files ? `**${state.files.files} file${state.files.files === 1 ? "" : "s"}** · ${state.files.added} added · ${state.files.modified} modified · ${state.files.deleted} removed · **+${state.files.additions} / −${state.files.deletions}** lines` : "",
-      ...(state.files?.paths ?? []).map((file) => `- \`${file.replaceAll("`", "")}\``),
-      state.changes ?? "",
-    ].filter(Boolean).join("\n") },
-    { key: "usage", label: "Usage & context", text: [metrics ? usageDetailText(metrics) : "Provider counts unavailable.", state.stats ?? ""].filter(Boolean).join("\n\n") },
-    { key: "updates", label: "Agent update history", text: (state.narration?.length ? state.narration : state.thought ? [{ text: state.thought, at: state.now }] : []).map((item) => `**${elapsed(item.at - state.startedAt)}**\n${item.text}`).join("\n\n") },
-    ...(state.reasoning?.length ? [{ key: "thinking", label: "Thinking trace", text: state.reasoning.map((item) => `**${elapsed(item.at - state.startedAt)}**\n${item.text}`).join("\n\n") }] : []),
-    { key: "activity", label: "Activity history", text: [...state.history, state.latest].map((item) => `${elapsed(item.at - state.startedAt)} · ${item.text}${item.detail ? `\n${item.detail}` : ""}`).join("\n\n") },
-    { key: "questions", label: "Questions & decisions", text: [state.questionPin ? `${state.questionPin.question}\n${state.questionPin.resolution ?? ""}` : "", ...(state.questions ?? []).map((question) => `${question.question}\n${question.options.map((option) => `${option.label}${option.description ? ` — ${option.description}` : ""}`).join("\n")}`)].filter(Boolean).join("\n\n") },
-    { key: "request", label: "Merged requests", text: state.context.request ?? "This turn's request is shown in the original thread message." },
+    detailSections.plan(state),
+    detailSections.files(state),
+    detailSections.usage(metrics, state.stats),
+    detailSections.updates(updates, state.startedAt),
+    state.reasoning?.length ? { key: "thinking", label: "Thinking trace", text: state.reasoning.map((item) => `**${elapsed(item.at - state.startedAt)}**\n${item.text}`).join("\n\n") } : undefined,
+    { key: "activity", label: "Activity history", text: [...state.history, state.latest].filter((item) => item.text.trim()).map((item) => `${elapsed(item.at - state.startedAt)} · ${item.text}${item.detail ? `\n${item.detail}` : ""}`).join("\n\n") },
+    detailSections.questions(state),
+    subagents.length ? { key: "subagents", label: "Subagents", text: subagentDetailText(subagents, state.now) } : undefined,
+    state.context.request ? { key: "request", label: "Merged requests", text: state.context.request } : undefined,
   ];
+  // A dropdown entry with nothing behind it makes the reader open a dead page.
+  return sections.filter((entry): entry is PanelSection => Boolean(entry?.text.trim()));
 }
+
+/** Every child this turn used, preferring the durable roster over the live subset. */
+export function subagentHistory(state: ProgressSnapshot): ProgressSubagent[] {
+  if (state.subagentHistory?.length) return state.subagentHistory;
+  return state.subagents ?? [];
+}
+
+/** Full subagent roster for the private details page: what ran, how far, and its last action. */
+export function subagentDetailText(subagents: ProgressSubagent[], now?: number): string {
+  return subagents.map((sub) => {
+    const status = sub.status === "running" ? "running now" : sub.status === "finished" ? "finished" : "";
+    const facts = [`${sub.steps} step${sub.steps === 1 ? "" : "s"}`, status, subagentSpan(sub, now)].filter(Boolean).join(" · ");
+    return [
+      `🤖 **${plain(sub.agent, 40)}** · ${facts}`,
+      sub.activity ? `Last action: ${plain(sub.activity, 180)}` : "",
+    ].filter(Boolean).join("\n");
+  }).join("\n\n");
+}
+
+/** How long a child ran, anchored to its first observed activity. */
+function subagentSpan(sub: ProgressSubagent, now?: number): string {
+  if (!sub.startedAt || !Number.isFinite(sub.startedAt)) return "";
+  const end = sub.status === "running" ? now : sub.activityAt;
+  if (!end || end <= sub.startedAt) return "";
+  return elapsed(end - sub.startedAt);
+}
+
+/** A compact roster for the public technical card. */
+export function subagentSummaryLines(subagents: ProgressSubagent[], limit = 4): string {
+  return [...subagents.slice(0, limit).map((sub) => `🤖 **${plain(sub.agent, 24)}** · ${sub.steps} step${sub.steps === 1 ? "" : "s"}${sub.activity ? ` · ${plain(sub.activity, 90)}` : ""}`),
+    ...(subagents.length > limit ? [`+${subagents.length - limit} more`] : [])].join("\n");
+}
+
+/** A metric object can exist while every provider count is still missing. */
+export function hasUsageData(metrics: ProgressMetrics | undefined): boolean {
+  if (!metrics) return false;
+  return Boolean(metrics.inputTokens || metrics.outputTokens || metrics.cacheTokens || metrics.contextTokens
+    || metrics.steps || metrics.compactions || metrics.liveTokensPerSecond || metrics.outputTokensPerSecond);
+}
+
+const detailSections = {
+  plan(state: ProgressSnapshot): PanelSection | undefined {
+    const items = state.plan.filter((item) => item.content.trim());
+    return items.length ? { key: "plan", label: "Complete plan", text: items.map((item, index) => `${PLAN_MARKS[item.status]} ${index + 1}. ${item.content}`).join("\n\n") } : undefined;
+  },
+  files(state: ProgressSnapshot): PanelSection | undefined {
+    const files = state.files;
+    const text = [
+      files ? `**${files.files} file${files.files === 1 ? "" : "s"}** · ${files.added} added · ${files.modified} modified · ${files.deleted} removed · **+${files.additions} / −${files.deletions}** lines` : "",
+      ...(files?.paths ?? []).map((file) => `- \`${file.replaceAll("`", "")}\``),
+      state.changes ?? "",
+    ].filter(Boolean).join("\n");
+    return text.trim() ? { key: "files", label: "Changed files", text } : undefined;
+  },
+  usage(metrics: ProgressMetrics | undefined, stats: string | undefined): PanelSection | undefined {
+    const text = [hasUsageData(metrics) && metrics ? usageDetailText(metrics) : "", stats ?? ""].filter(Boolean).join("\n\n");
+    return text.trim() ? { key: "usage", label: "Usage & context", text } : undefined;
+  },
+  updates(updates: Array<{ text: string; at: number }>, startedAt: number): PanelSection | undefined {
+    const text = updates.filter((item) => item.text.trim()).map((item) => `**${elapsed(item.at - startedAt)}**\n${item.text}`).join("\n\n");
+    return text.trim() ? { key: "updates", label: "Agent update history", text } : undefined;
+  },
+  questions(state: ProgressSnapshot): PanelSection | undefined {
+    const text = [state.questionPin ? `${state.questionPin.question}\n${state.questionPin.resolution ?? ""}` : "",
+      ...(state.questions ?? []).map((question) => `${question.question}\n${question.options.map((option) => `${option.label}${option.description ? ` — ${option.description}` : ""}`).join("\n")}`),
+    ].filter(Boolean).join("\n\n");
+    return text.trim() ? { key: "questions", label: "Questions & decisions", text } : undefined;
+  },
+};
 
 function activity(item: ProgressActivity, max: number): string {
   return `${plain(item.text, max)}${item.detail ? ` · ${plain(item.detail, Math.max(30, max - clean(item.text, max).length))}` : ""}`;

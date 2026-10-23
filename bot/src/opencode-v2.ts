@@ -94,7 +94,7 @@ interface Watch {
   children: Set<string>;
   activeChildren: Set<string>;
   /** Per-child detail for the card's subagent lines; keyed by child session id. */
-  subagents: Map<string, { agent: string; steps: Set<string>; activity?: { text: string; at: number } }>;
+  subagents: Map<string, { agent: string; steps: Set<string>; startedAt?: number; activity?: { text: string; at: number } }>;
   callback?: ProgressCallback;
   browserQaChildren: Set<string>;
   lastProgress: number;
@@ -735,7 +735,7 @@ export class OpenCodeV2Harness {
               watch.children.add(child.id); changed = true;
               if (child.agent === "browser-qa") watch.browserQaChildren.add(child.id);
               const info = watch.subagents.get(child.id);
-              if (!info) watch.subagents.set(child.id, { agent: child.agent || "subagent", steps: new Set() });
+              if (!info) watch.subagents.set(child.id, { agent: child.agent || "subagent", steps: new Set(), startedAt: Date.now() });
               else if (child.agent) info.agent = child.agent;
             }
           } while (changed);
@@ -777,11 +777,15 @@ export class OpenCodeV2Harness {
   }
 
   private publishSubagents(watch: Watch): void {
+    // The live card only needs running children; the durable roster keeps every
+    // child so turn details can still name a finished subagent and what it did.
+    const history = [...watch.subagents].map(([id, info]): ProgressSubagent => ({
+      id, agent: info.agent, steps: info.steps.size, startedAt: info.startedAt,
+      status: watch.activeChildren.has(id) ? "running" : "finished",
+      activity: info.activity?.text, activityAt: info.activity?.at,
+    }));
     this.publish(watch, "subagents", { kind: "heartbeat", text: "", activeSubagents: watch.activeChildren.size,
-      subagents: [...watch.activeChildren].map((id): ProgressSubagent => {
-        const info = watch.subagents.get(id);
-        return { id, agent: info?.agent ?? "subagent", steps: info?.steps.size ?? 0, activity: info?.activity?.text, activityAt: info?.activity?.at };
-      }) }, watch.callback);
+      subagents: history.filter((entry) => entry.status === "running"), subagentHistory: history }, watch.callback);
   }
 
   private restoreSubagents(watch: Watch, active: Record<string, unknown>): void {
@@ -886,6 +890,7 @@ export class OpenCodeV2Harness {
   private rehydrateSubagent(watch: Watch, sessionID: string, directory: string, history: SessionMessageInfo[]): void {
     const info = watch.subagents.get(sessionID) ?? { agent: "subagent", steps: new Set<string>() };
     watch.subagents.set(sessionID, info);
+    info.startedAt ??= history[0]?.time.created;
     for (const message of history) {
       if (message.type !== "assistant") continue;
       if (message.time.completed !== undefined) info.steps.add(message.id);
@@ -914,7 +919,7 @@ export class OpenCodeV2Harness {
     if (event.type === "session.created" && (event.data.parentID === sessionID || watch.children.has(event.data.parentID ?? ""))) {
       watch.children.add(event.data.sessionID);
       const info = watch.subagents.get(event.data.sessionID);
-      if (!info) watch.subagents.set(event.data.sessionID, { agent: event.data.agent || "subagent", steps: new Set() });
+      if (!info) watch.subagents.set(event.data.sessionID, { agent: event.data.agent || "subagent", steps: new Set(), startedAt: event.created });
       else if (event.data.agent) info.agent = event.data.agent;
       if (event.data.agent === "browser-qa") watch.browserQaChildren.add(event.data.sessionID);
       return;

@@ -2103,10 +2103,16 @@ async function applyAiThreadTitle(thread: ThreadChannel, title: string): Promise
 async function setTurnCards(status: Message, result: MutationResult, note?: string): Promise<void> {
   // The cards replace the live status: any pending agent-question buttons on
   // it are gone, so stop routing clicks for this message.
-  await liveProgress.get(status.id)?.close();
+  const progress = liveProgress.get(status.id);
+  // Read the turn's final view before closing: the saved roster of child
+  // sessions and file detail outlives the live card as turn details.
+  const snapshot = progress?.readSnapshot();
+  await progress?.close();
   unregisterQuestionButtons(status.id);
   const state = turnCardState(result, note);
   state.resource = status.id;
+  state.subagents = snapshot?.subagentHistory;
+  state.hasFileDetails = Boolean(snapshot?.files);
   const { screenshot: _screenshot, ...savedResult } = state;
   const [description, changelog] = await Promise.all([
     readProjectCardDocument(result.project.workspacePath, "description").catch(() => undefined),

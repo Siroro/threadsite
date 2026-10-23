@@ -211,6 +211,22 @@ test("a resumed turn's stall clock starts at supervision attach, not the origina
   }
 });
 
+test("a closed turn drops live subagent lines but keeps the recorded roster for details", async () => {
+  const progress = new DiscordProgress({ id: "roster", edit: async () => {} } as unknown as Message, "Updating");
+  try {
+    progress.callback({ kind: "heartbeat", text: "", activeSubagents: 1, subagents: [{ id: "ses_child", agent: "explore", steps: 3, status: "running" }],
+      subagentHistory: [{ id: "ses_child", agent: "explore", steps: 3, status: "running" }] });
+    const running = progress.readSnapshot();
+    assert.equal(running.subagents?.length, 1);
+    assert.equal(running.subagentHistory?.length, 1);
+    await progress.close();
+    const closed = progress.readSnapshot();
+    assert.equal(closed.activeSubagents, 0);
+    assert.equal(closed.subagents, undefined, "no child is live after the turn closes");
+    assert.equal(closed.subagentHistory?.length, 1, "the finished roster stays stored for turn details");
+  } finally { await progress.close(); }
+});
+
 test("the admin-set failover list overrides the configured one", async () => {
   const harness = new OpenCodeHarness();
   const error = new Error("provider request failed: 503 bad gateway") as Error & { providerBlip: boolean };
