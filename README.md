@@ -2,7 +2,7 @@
 
 ThreadSite is a small Discord harness for an AI coding agent. One Discord thread maps to one persistent static website **or static web game** and one public Forgejo repository.
 
-Live turn cards show an active-subagent count while delegated work is running; child actions and reports stay out of the activity feed.
+Live turn cards show active subagents while delegated work is running, and the private turn-details panel keeps each child's agent, steps and last action after it finishes. Child actions and reports stay out of the public activity feed.
 
 Projects default to **anyone can edit**. The human thread owner can use **Collaboration** on the pinned card or `/site collaboration` to select contributors or require approval of outside requests. Approval requests and their attachments survive restarts without starting agent work. See [collaboration settings](docs/commands.md#project-collaboration).
 

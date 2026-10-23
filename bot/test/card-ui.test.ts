@@ -16,6 +16,7 @@ import { assertV2, cardComponents, cardView } from "./fixtures/cards.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { DiscordProgress } = await import("../src/progress.js");
+const { turnPanelSections } = await import("../src/card-interactions.js");
 
 test("the Discord wire payload clears legacy content and embeds when a status becomes V2", () => {
   const client = new Client({ intents: [] });
@@ -130,6 +131,45 @@ test("the compact live card shows recent public narration; the private panel kee
   assert.equal(plan.text.split("\n\n").length, state.plan.length, "the complete plan stays reachable");
   assert.equal(cardComponents(message).length <= 40, true);
 });
+
+test("detail sections without recorded information stay out of the dropdown and subagents survive their finish", () => {
+  const state = buildingSnapshot();
+  state.plan = [];
+  state.files = undefined;
+  state.metrics = undefined;
+  state.thought = undefined;
+  state.narration = [];
+  state.history = [];
+  state.latest = { text: "", at: state.now };
+  state.context = {};
+  state.subagentHistory = [
+    { id: "ses_child", agent: "explore", steps: 3, status: "finished", activity: "📚 Reading · site/src/arena.ts", activityAt: state.now - 5_000 },
+  ];
+  const sections = progressDetailSections(state);
+  assert.deepEqual(sections.map((section) => section.key), ["overview", "subagents"],
+    "empty plan, files, usage, updates, questions and request pages are not offered");
+  const subagents = sections.find((section) => section.key === "subagents")!;
+  assert.match(subagents.text, /\*\*explore\*\* · 3 steps · finished/);
+  assert.match(subagents.text, /Last action: 📚 Reading · site\/src\/arena\.ts/);
+});
+
+test("finished turns only list pages the turn actually recorded", () => {
+  const result = {
+    name: "Koi Pond Arcade", kind: "site" as const, published: false, commitFiles: 0, additions: 0, deletions: 0,
+    durationMs: 90_000, usage: { inputTokens: 0, outputTokens: 0, cacheTokens: 0, contextTokens: 0, compactions: 0, steps: 0, cost: 0 },
+    siteUrl: "https://sites.example.invalid/koi/", repoUrl: "https://git.example.invalid/site-koi",
+    subagents: [{ id: "ses_child", agent: "general", steps: 4, status: "finished" as const }],
+  };
+  const sections = turnPanelSections({ result }, undefined, "turn");
+  assert.deepEqual(sections.map((section) => section.key), ["outcome", "subagents"],
+    "no report, findings, documents, file paths or counts become dead dropdown entries");
+  const docs = turnPanelSections({ result }, undefined, "doc");
+  assert.deepEqual(docs.map((section) => section.key), ["description"], "a doc view without documents falls back to one honest page");
+  const panel = renderDetailPanel("Turn details", "turn", "turn", sections, "subagents");
+  assertV2(panel);
+  assert.match(cardView(panel).text, /general/);
+});
+
 
 test("detail panels paginate every character and keep section choice stable", () => {
   const sections = [

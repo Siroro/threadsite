@@ -60,6 +60,26 @@ test("the technical card keeps the agent's whole report", () => {
   assert.ok(card.description!.includes(report), "a long report is not cut for the card");
 });
 
+test("the technical card lists the turn's subagents and only offers shortcuts with details behind them", () => {
+  const subagents = [
+    { id: "ses_child", agent: "explore", steps: 4, status: "finished" as const, activity: "📚 Reading · site/src/arena.ts" },
+    { id: "ses_qa", agent: "browser-qa", steps: 2, status: "finished" as const },
+  ];
+  const populated = cardView(renderTechnicalCard(state({ subagents, hasFileDetails: true, findings: ["advisory finding"] })));
+  const roster = populated.fields!.find((field) => field.name === "Subagents")!;
+  assert.match(roster.value, /\*\*explore\*\* · 4 steps/);
+  assert.match(roster.value, /\*\*browser-qa\*\* · 2 steps/);
+  for (const label of ["Changed files", "Browser findings", "Subagents"]) {
+    assert.ok(populated.buttons.some((button) => button.label === label), `${label} stays one click away`);
+  }
+  const bare = cardView(renderTechnicalCard(state({ findings: [], hasFileDetails: undefined })));
+  assert.equal(bare.fields!.some((field) => field.name === "Subagents"), false);
+  for (const label of ["Changed files", "Browser findings", "Subagents"]) {
+    assert.equal(bare.buttons.some((button) => button.label === label), false, `${label} has no recorded detail to show`);
+  }
+  assert.ok(bare.buttons.some((button) => button.label === "Turn details"), "the general details view always remains");
+});
+
 test("the new message carries the playable card, the screenshot and the play link", () => {
   const message = renderPlayCard(state());
   assert.equal(message.flags & MessageFlags.IsComponentsV2, MessageFlags.IsComponentsV2, "the playable card is a Components V2 message");

@@ -48,6 +48,8 @@ export interface ProgressUpdate {
   activeSubagents?: number;
   /** Detail for those child sessions: agent name, steps used, current tool. Rides the same update as the count. */
   subagents?: ProgressSubagent[];
+  /** Every child seen this turn, including ones that already finished. Stored for turn details. */
+  subagentHistory?: ProgressSubagent[];
   /** Stable public assistant text part; updates replace its streamed draft instead of duplicating it. */
   narrationId?: string;
 }
@@ -85,6 +87,8 @@ export class DiscordProgress {
   private agentReportedActive = false;
   private activeSubagents = 0;
   private subagents: ProgressSubagent[] = [];
+  /** Finished children stay here: the live card drops them, turn details keep them. */
+  private subagentHistory: ProgressSubagent[] = [];
   private readonly tools = new Map<string, ProgressTool>();
   private inFlight?: Promise<void>;
   private dirty = false;
@@ -149,6 +153,15 @@ export class DiscordProgress {
     if (update.subagents !== undefined && update.subagents !== this.subagents) {
       this.subagents = update.subagents;
       this.schedule();
+    }
+    if (update.subagentHistory !== undefined && update.subagentHistory !== this.subagentHistory) {
+      const history = update.subagentHistory;
+      const previous = this.subagentHistory;
+      this.subagentHistory = history;
+      // A new child or a completion changes what a details reader sees; a
+      // child's routine tool label is covered by the active-subagent schedule.
+      if (previous.length !== history.length
+        || previous.some((entry, index) => entry.status !== history[index]?.status)) this.schedule();
     }
     if (update.tool) {
       const previous = this.tools.get(update.tool.id);
@@ -243,6 +256,7 @@ export class DiscordProgress {
       this.files = persistence.load.files;
       this.context = persistence.load.context;
       this.metrics = persistence.load.metrics;
+      this.subagentHistory = persistence.load.subagentHistory ?? [];
       this.questionPin = persistence.load.questionPin ? { ...persistence.load.questionPin, requestID: persistence.load.questionPin.requestID ?? "restored" } : undefined;
       this.questionStatus = persistence.load.questionStatus;
     }
@@ -377,6 +391,7 @@ export class DiscordProgress {
       actions: tools.length, activeTools: tools.filter((tool) => tool.status === "running").length,
       activeSubagents: this.closed ? 0 : this.activeSubagents,
       subagents: this.closed || !this.subagents.length ? undefined : this.subagents,
+      subagentHistory: this.subagentHistory.length ? this.subagentHistory : undefined,
       toolErrors: tools.filter((tool) => tool.status === "error").length, questionPin: this.questionPin,
       waiting: latestToolFailed || serviceWaiting,
       agentReportedActive: this.agentReportedActive,

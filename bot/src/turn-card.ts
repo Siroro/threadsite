@@ -12,7 +12,9 @@ import {
 } from "discord.js";
 import { addCardDivider, addCardField, addCardHeader, addCardTitle, addCardLinks, cardLink, cardMessage, cardTextLength, CARD_TEXT_LIMIT, KIND_COLORS, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
+import { subagentSummaryLines } from "./progress-view.js";
 import type { TurnUsage } from "./opencode.js";
+import type { ProgressSubagent } from "./progress.js";
 import type { ProjectKind } from "./types.js";
 import { formatShortDuration, formatTokens, stripSummaryPreamble, truncate } from "./util.js";
 
@@ -48,12 +50,16 @@ export interface TurnCardState {
   durationMs: number;
   /** Token/context usage of the turn, when the agent service reported it. */
   usage?: TurnUsage;
+  /** Recorded child-session details, when supplied by the turn tracker. */
+  subagents?: ProgressSubagent[];
   /** The agent's own account of the turn (OpenCode's summary). */
   summary?: string;
   /** A note worth showing under the technical card (e.g. how the thread works). */
   note?: string;
   /** Confirmed browser-QA findings; advisory, never blocking. */
   findings?: string[];
+  /** Whether the turn recorded file-level detail worth a Changed files shortcut. */
+  hasFileDetails?: boolean;
   /** The project's own description (DESCRIPTION.md): the pitch and how to play. */
   description?: { pitch?: string; play?: string };
   /** The newest changelog entry (CHANGELOG.md): what this turn added. */
@@ -197,6 +203,10 @@ function technicalCard(state: TurnCardState): ContainerBuilder {
     addCardField(card, "Usage", "Token counts unavailable");
   }
 
+  if (state.subagents?.length) {
+    addCardField(card, "Subagents", subagentSummaryLines(state.subagents));
+  }
+
   if (state.findings?.length) {
     addCardField(card, "Browser QA", `Advisory · ${state.findings.length} finding${state.findings.length === 1 ? "" : "s"} — ${truncate(state.findings[0], 220)}`);
   }
@@ -207,12 +217,19 @@ function technicalCard(state: TurnCardState): ContainerBuilder {
     cardLink("Source", state.repoUrl),
     state.commit ? cardLink("View commit", `${state.repoUrl.replace(/\/$/, "")}/commit/${encodeURIComponent(state.commit)}`) : undefined,
   ]);
-  if (state.resource) addCardLinks(card, [
-    new ButtonBuilder().setCustomId(cardId("details", state.resource)).setLabel("Turn details").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(cardId("details", state.resource, "files")).setLabel("Changed files").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(cardId("details", state.resource, "qa")).setLabel("Browser findings").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(cardId("change", state.resource)).setLabel("Follow up").setStyle(ButtonStyle.Primary),
-  ]);
+  if (state.resource) {
+    // Shortcuts only exist where the turn recorded the matching detail: a
+    // button whose page says "none recorded" is a dead control.
+    const detailButtons: ButtonBuilder[] = [
+      new ButtonBuilder().setCustomId(cardId("details", state.resource)).setLabel("Turn details").setStyle(ButtonStyle.Secondary),
+      state.hasFileDetails ? new ButtonBuilder().setCustomId(cardId("details", state.resource, "files")).setLabel("Changed files").setStyle(ButtonStyle.Secondary) : undefined,
+      state.findings?.length ? new ButtonBuilder().setCustomId(cardId("details", state.resource, "qa")).setLabel("Browser findings").setStyle(ButtonStyle.Secondary) : undefined,
+      state.subagents?.length ? new ButtonBuilder().setCustomId(cardId("details", state.resource, "subagents")).setLabel("Subagents").setStyle(ButtonStyle.Secondary) : undefined,
+    ].filter((button): button is ButtonBuilder => Boolean(button));
+    addCardLinks(card, [...detailButtons,
+      new ButtonBuilder().setCustomId(cardId("change", state.resource)).setLabel("Follow up").setStyle(ButtonStyle.Primary),
+    ]);
+  }
   return card;
 }
 

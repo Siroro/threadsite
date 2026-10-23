@@ -594,7 +594,7 @@ test("the subagent lines name each child, its steps and its current tool", async
   const f = fixture();
   f.setActive(true);
   const { DiscordProgress } = await import("../src/progress.js");
-  const { renderProgressCard } = await import("../src/progress-view.js");
+  const { renderProgressCard, progressDetailSections } = await import("../src/progress-view.js");
   const { cardView } = await import("./fixtures/cards.js");
   const progress = new DiscordProgress({ id: "subdetail", edit: async () => {} } as any, "Updating");
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress.callback);
@@ -617,6 +617,14 @@ test("the subagent lines name each child, its steps and its current tool", async
     send("ses_child", "session.execution.succeeded");
     assert.equal(cardView(renderProgressCard(progress.readSnapshot())).fields.some((item) => item.name === "Active subagents"), false,
       "the section leaves when the child finishes");
+    // The finished child stays recorded for the turn's details panel.
+    const roster = progress.readSnapshot().subagentHistory!;
+    assert.equal(roster.length, 1);
+    assert.equal(roster[0].status, "finished");
+    assert.equal(roster[0].steps, 2);
+    const detail = progressDetailSections(progress.readSnapshot()).find((section) => section.key === "subagents");
+    assert.match(detail!.text, /\*\*explore\*\* · 2 steps · finished/);
+    assert.match(detail!.text, /Last action: 📚 Reading · site\/src\/arena\.ts/);
   } finally { await stop(); await progress.close(); }
 });
 
