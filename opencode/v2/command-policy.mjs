@@ -21,7 +21,7 @@ export async function checkExpandedCommand(command, directory, workdir = directo
     const resolved = path.resolve(cwd, argument);
     const segments = path.relative(root, resolved).split(path.sep);
     if (!["site", "scratch"].includes(segments[0]) || segments.length < 2 || segments.some((item) => !item || item.startsWith("."))
-      || (segments[0] === "site" && ["net", "js"].includes(segments[1]))
+      || (segments[0] === "site" && ["net", "leaderboards", "js"].includes(segments[1]))
       || segments.some((item) => /^(?:package(?:-lock)?\.json|tsconfig\.json|node_modules)$/i.test(item))) {
       throw new Error("rm must stay inside editable site/ or scratch/ files");
     }

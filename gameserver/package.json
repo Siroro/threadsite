@@ -13,7 +13,8 @@
     "test:stall": "node host-stall-test.mjs",
     "test:delete": "node deletion-test.mjs",
     "test:storage": "node --test test/player-store.test.mjs",
-    "test:persistence": "node persistence-test.mjs"
+    "test:persistence": "node persistence-test.mjs",
+    "test:leaderboards": "node leaderboards-test.mjs"
   },
   "dependencies": {
     "ws": "8.22.0"

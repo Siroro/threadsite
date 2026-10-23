@@ -2,12 +2,16 @@
 
 ThreadSite is a small Discord harness for an AI coding agent. One Discord thread maps to one persistent static website **or static web game** and one public Forgejo repository.
 
+Each project gets a separate `README.agent.md`, seeded with writing guidance and editable by the agent. The harness constructs `README.md` from the original request and submitter, followed by that agent-maintained content. See [project documents](docs/commands.md#the-final-post-of-a-turn).
+
+Games in both singleplayer and multiplayer modes can use global leaderboards through a small dedicated score client, independent of gameplay networking. Rankings share the game's stable identity and remain optional during offline play. See [global leaderboards](docs/multiplayer.md#global-leaderboards-in-every-gameplay-mode).
+
 Live turn cards show active subagents while delegated work is running, and the private turn-details panel keeps each child's agent, steps and last action after it finishes. Child actions and reports stay out of the public activity feed.
 
 Projects default to **anyone can edit**. The human thread owner can use **Collaboration** on the pinned card or `/site collaboration` to select contributors or require approval of outside requests. Approval requests and their attachments survive restarts without starting agent work. See [collaboration settings](docs/commands.md#project-collaboration).
 
 - `/site start prompt:"..."` creates a Discord thread, a workspace, an agent session, a public Forgejo repository, the first git commit, and a live static site.
-- `/makegam dimension:<2d|3d> multiplayer:<arena|rooms|singleplayer> prompt:"..."` does the same for a **static browser game**. Games default to a shared-arena architecture; `rooms` builds invite-code rooms; `singleplayer` provisions no networking. `/site multiplayer` switches an existing game between the three live.
+- `/makegam dimension:<2d|3d> multiplayer:<arena|rooms|singleplayer> prompt:"..."` does the same for a **static browser game**. Games default to a shared-arena architecture; `rooms` builds invite-code rooms; `singleplayer` omits gameplay networking while retaining the dedicated global leaderboard client. `/site multiplayer` switches an existing game between the three live.
 
 ## How it works
 

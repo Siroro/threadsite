@@ -12,7 +12,7 @@ test("expanded commands permit useful local cleanup and searches without externa
     await checkExpandedCommand(command, root);
   }
   for (const command of ["rm -rf site", "rm -rf /workspace", "rm site/../AGENTS.md", "rm site/.env", "rm site/net/client.js", "rm site/js/main.js",
-    "rm site/package.json", "rm site/assets/*", "rm site/assets/old.zip; git reset --hard", "rm site/assets/old.zip $(pwd)",
+    "rm site/leaderboards/threadsite-leaderboards.js", "rm site/package.json", "rm site/assets/*", "rm site/assets/old.zip; git reset --hard", "rm site/assets/old.zip $(pwd)",
     "find site -exec rm {} ;", "find site -delete", "find site/../ -type f", "rg --pre node site"]) {
     await assert.rejects(checkExpandedCommand(command, root), undefined, command);
   }

@@ -170,4 +170,7 @@ test("the agent README is empty until written and is bounded before it reaches R
   assert.ok(bounded);
   assert.ok(Buffer.byteLength(bounded, "utf8") <= README_SECTION_MAX_BYTES + 200, "the appended section stays well under Forgejo's 64 KiB README limit");
   assert.match(bounded, /truncated/);
+  const limited = await readProjectReadmeSection(root, 500);
+  assert.ok(limited && Buffer.byteLength(limited, "utf8") <= 500, "the caller's remaining README budget includes the shortening notice");
+  assert.equal(await readProjectReadmeSection(root, 0), undefined);
 });

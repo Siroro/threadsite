@@ -22,9 +22,12 @@ The client is `site/net/threadsite-net.js` (typed by `threadsite-net.d.ts`); ide
 
 ## Personal saves and leaderboards
 
-The relay also persists personal checkpoints and public personal bests for both arena and room games. These are separate from world snapshots and room lifetimes. Use them when the requested game needs progression or rankings; do not add a backend or invent endpoints.
+The relay persists personal checkpoints separately from world snapshots and room lifetimes. For rankings in both multiplayer and singleplayer use the dedicated score-only client described in `LEADERBOARDS.md`, rather than tying a board to a gameplay connection. Do not add a backend or invent endpoints.
 
 ```ts
+import { ThreadSiteLeaderboards } from "../leaderboards/threadsite-leaderboards.js";
+import { LEADERBOARDS_CONFIG } from "../leaderboards/leaderboards-config.js";
+const boards = new ThreadSiteLeaderboards({ ...LEADERBOARDS_CONFIG, name: chosenPlayerName });
 type Progress = { schemaVersion: 1; unlockedLevel: number };
 const checkpoint = await net.saves.get<Progress>("progress-v1");
 // Validate saved shape/schema before restoring; null means no live save.
@@ -32,9 +35,9 @@ const progress = checkpoint.value ?? { schemaVersion: 1, unlockedLevel: 1 };
 const saved = await net.saves.set("progress-v1", progress, checkpoint.revision);
 // Keep saved.revision for the next write. Deletion also needs that revision:
 // const deleted = await net.saves.delete("progress-v1", saved.revision);
-await net.leaderboards.submit("points-v1", 250); // descending, personal best only
-await net.leaderboards.submit("time-ms-v1", 32150, { order: "asc" });
-const top = await net.leaderboards.list("points-v1", { limit: 10 });
+await boards.submit("points-v1", 250); // descending, personal best only
+await boards.submit("time-ms-v1", 32150, { order: "asc" });
+const top = await boards.list("points-v1", { limit: 10 });
 // Render names via textContent; top.entries = [{ playerId, name, score, updatedAt }].
 ```
 
@@ -50,8 +53,8 @@ const top = await net.leaderboards.list("points-v1", { limit: 10 });
 - Use one board for a single comparable competition (`best-run-v1`, `fastest-clear-v1`) or a tabbed set for levels/operations/modes (`level-01-v1`, `career-v1`). A career aggregate gets its own career board and tab; never merge it with level boards or run history. Never concatenate boards into one table — that repeats players and compares incomparable scores.
 - Keep the set within the 16-board cap, hide empty boards, show one board at a time with a clear title, and default to the most useful/populated board. Rotating challenges use a period key (`daily-2026-10-23`).
 - Board keys identify the competition and its scoring rules, not a player's progress: use stable descriptive keys and a new version when rules change; never derive keys from run IDs, player names or current level progress. Keep the injected game ID stable for every level/mode — separate board keys, never separate game identities, or the same browser becomes a different player.
-- Names come from the connection's sanitized `name` and are not unique; never dedupe or merge by name. First submission fixes ascending/descending order. Equal scores keep their original timestamp; ties sort by timestamp then player ID. An equal or worse submission leaves the stored name untouched, so a rename takes effect only on the next improved score. List returns up to 100 entries. Both the scores and names are untrusted client input: render names as text and do not claim cheat-proof rankings.
-- Storage allows 5 requests/s per connection (burst 10), within the ordinary frame budget. Defaults: 10,000 persistent players, 16 boards and 16 MiB total save JSON per game. Capacity/rate/disk failures are explicit errors; keep solo play available and offer a later retry.
+- Names come from the dedicated score client's `setName()` and are sanitized, capped at 32 characters and not unique; never dedupe or merge by name. First submission fixes ascending/descending order. Equal scores keep their original timestamp; ties sort by timestamp then player ID. An equal or worse submission leaves the stored name untouched, so a rename takes effect only on the next improved score. List returns up to 100 entries. Both the scores and names are untrusted client input: render names as text and do not claim cheat-proof rankings.
+- Gameplay-connection storage allows 5 requests/s per connection (burst 10); the dedicated score API has the same budget per persistent player and game across short connections. Defaults: 10,000 persistent players, 16 boards and 16 MiB total save JSON per game. Capacity/rate/disk failures are explicit errors; keep solo play available and offer a later retry.
 
 ## Choosing rates and the latency budget
 

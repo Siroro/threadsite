@@ -50,7 +50,7 @@ The generated `AGENTS.md` is committed to the public repository but sits outside
 
 ## The multiplayer exception
 
-The one runtime exception to static-only is the harness-owned multiplayer relay: the model never writes server code, it only uses the vendored browser client (`site/net/threadsite-net.js`) pointed at the shared relay whose URL and game id the harness injects. Games must stay fully playable solo when the relay is unreachable. See [multiplayer.md](multiplayer.md).
+The runtime exception to static-only is the harness-owned game service: the model never writes server code. Multiplayer gameplay uses the vendored `site/net/threadsite-net.js`; global rankings in both multiplayer and singleplayer use the small, independent `site/leaderboards/threadsite-leaderboards.js`. The harness injects their shared stable game identity and service URL. Score requests never join multiplayer rooms, and games stay fully playable offline when the service is unreachable. See [multiplayer.md](multiplayer.md).
 
 ## Preview and browser QA
 

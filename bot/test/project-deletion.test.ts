@@ -168,9 +168,9 @@ test("deletion during initial setup has a durable registration and waits for pro
   assert.ok(f.calls.includes(`repo:${record.repoName}`));
 });
 
-test("games that were always singleplayer do not need a relay cleanup request", async () => {
+test("games that were always singleplayer also clean up global leaderboard data", async () => {
   const f = await fixture("1009");
   await f.store.patchProject(f.project.threadId, { multiplayerGameId: undefined, multiplayerMode: "singleplayer" });
   await f.service.forceDeleteProject(f.project.threadId);
-  assert.ok(!f.calls.some((call) => call.startsWith("game:")));
+  assert.ok(f.calls.includes(`game:${f.project.siteSlug}`));
 });

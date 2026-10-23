@@ -99,6 +99,38 @@ class RateLimiter {
   }
 }
 
+// Score requests do not join rooms. Keep the budget across their short-lived
+// connections so opening another socket cannot reset a player's allowance.
+const leaderboardLimits = new Map<string, { limiter: RateLimiter; seen: number }>();
+function handleLeaderboard(peer: Peer, msg: Frame): void {
+  const id = typeof msg.id === "string" && EVENT_ID_PATTERN.test(msg.id) ? msg.id : null;
+  const fail = (code: string, message: string) => send(peer, { t: "leaderboard-result", id, ok: false, code, message });
+  if (!id || msg.v !== 1 || peer.room) { fail("bad_request", "Use a version 1 score-only request with a bounded id."); return; }
+  const game = typeof msg.game === "string" ? msg.game : "";
+  if (!GAME_ID_PATTERN.test(game)) { fail("bad_game", "Invalid game ID."); return; }
+  if (deletedGames.has(game)) { fail("project_deleted", "This project was deleted."); return; }
+  if (msg.op !== "board.list" && msg.op !== "board.submit") { fail("bad_operation", "Score-only requests support board.list and board.submit."); return; }
+  if (typeof msg.playerToken !== "string" || !/^[a-f0-9]{64}$/.test(msg.playerToken)) { fail("identity_unavailable", "A private player token is required."); return; }
+  if (msg.op === "board.submit" && (typeof msg.name !== "string" || !msg.name.replace(/[\u0000-\u001f\u007f]/g, "").trim())) { fail("name_required", "A player name is required."); return; }
+  const player = crypto.createHash("sha256").update(`${game}:${msg.playerToken}`).digest("hex");
+  const key = `${game}:${player}`;
+  let budget = leaderboardLimits.get(key);
+  if (!budget) {
+    if (leaderboardLimits.size >= 10_000) { fail("storage_rate_limited", "Rankings are busy; try again later."); return; }
+    budget = { limiter: new RateLimiter(5, 10), seen: Date.now() };
+    leaderboardLimits.set(key, budget);
+  }
+  budget.seen = Date.now();
+  if (!budget.limiter.allow()) { fail("storage_rate_limited", "Rankings allow 5 requests/s with a burst of 10."); return; }
+  try {
+    const result = playerStore.execute(game, player, cleanName(msg.name), msg);
+    send(peer, { t: "leaderboard-result", id, ok: true, playerId: player, result });
+  } catch (error) {
+    if (error instanceof StorageError) fail(error.code, error.message);
+    else fail("storage_unavailable", "Rankings are temporarily unavailable. Check the board before retrying a submission.");
+  }
+}
+
 class Room {
   readonly generation = crypto.randomUUID();
   readonly peers = new Map<string, Peer>();
@@ -359,6 +391,7 @@ function handleJoin(peer: Peer, msg: Frame): void {
 function handleFrame(peer: Peer, msg: Frame): void {
   const room = peer.room;
   switch (msg.t) {
+    case "leaderboard": handleLeaderboard(peer, msg); return;
     case "storage": {
       const id = typeof msg.id === "string" && EVENT_ID_PATTERN.test(msg.id) ? msg.id : null;
       const fail = (code: string, message: string) => send(peer, { t: "storage-result", id, ok: false, code, message });
@@ -493,6 +526,7 @@ function statsPayload(): Record<string, unknown> {
 
 async function deleteGame(gameId: string): Promise<void> {
   deletedGames.add(gameId);
+  for (const key of leaderboardLimits.keys()) if (key.startsWith(`${gameId}:`)) leaderboardLimits.delete(key);
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.writeFile(path.join(STATE_DIR, `${gameId}.deleted`), "");
   for (const room of games.get(gameId)?.values() ?? []) {
@@ -650,6 +684,7 @@ const heartbeat = setInterval(() => {
 heartbeat.unref();
 
 const sweeper = setInterval(() => {
+  for (const [key, budget] of leaderboardLimits) if (Date.now() - budget.seen > 60_000) leaderboardLimits.delete(key);
   for (const [gameId, rooms] of games) {
     for (const [key, room] of rooms) if (!room.peers.size && Date.now() - room.lastActivity >= ROOM_TTL_MS) rooms.delete(key);
     if (!rooms.size) games.delete(gameId);

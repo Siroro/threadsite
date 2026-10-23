@@ -5,6 +5,7 @@ import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
 import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, turnRevertTarget, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
 import { ensureMultiplayerFiles, multiplayerContext, removeMultiplayerFiles } from "./multiplayer.js";
+import { ensureLeaderboardFiles } from "./leaderboards.js";
 import { OpenCodeHarness, addUsage, errorUsage, isTerminalAssistant, reconcileUsage, usageFromMessages, type PromptImage, type PromptResult, type TurnUsage } from "./opencode.js";
 import { moveGalleryPreview, publishIndex, publishSite, publishSiteRedirects, saveGalleryPreview, siteUrl, validateSite } from "./publish.js";
 import { buildSite, GENERATED_GITIGNORE } from "./build.js";
@@ -13,7 +14,7 @@ import { ensureSkillFiles, skillNames } from "./skills.js";
 import { Store, pendingTurnMatches } from "./store.js";
 import { initialProjectInstruction, multiplayerModeLabel, multiplayerSwapInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, repairInstruction } from "./templates.js";
 import { starterHtml, starterSource } from "./starter.js";
-import { ensureProjectDocuments, readProjectChangelog, readProjectDescription, readProjectReadmeSection, type ProjectChangelog, type ProjectDescription } from "./project-docs.js";
+import { ensureProjectDocuments, readProjectChangelog, readProjectDescription, readProjectReadmeSection, README_MAX_BYTES, type ProjectChangelog, type ProjectDescription } from "./project-docs.js";
 import type { CommitAuthor, MultiplayerContext, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog } from "./usage.js";
 import type { ProgressCallback, ProgressPhase } from "./progress.js";
@@ -251,8 +252,18 @@ export class ProjectService {
   /** Recreate ignored harness build inputs after a checkout/clean or on a fresh host. */
   private async ensureHarnessBuildInputs(project: ProjectRecord): Promise<void> {
     await ensureEnginePackages(project.workspacePath, project.projectKind ?? "site");
+    await this.ensureLeaderboardInputs(project);
     const multiplayer = multiplayerContext(project.projectKind ?? "site", project.multiplayerGameId ?? project.siteSlug, project.multiplayerMode);
     if (multiplayer) await ensureMultiplayerFiles(project.workspacePath, multiplayer, project.projectKind ?? "site");
+  }
+
+  /** Pin the game's identity before its first leaderboard request or rename. */
+  private async ensureLeaderboardInputs(project: ProjectRecord): Promise<ProjectRecord> {
+    const kind = project.projectKind;
+    if (!kind || kind === "site") return project;
+    if (!project.multiplayerGameId) project = await this.store.patchProject(project.threadId, { multiplayerGameId: project.siteSlug });
+    await ensureLeaderboardFiles(project.workspacePath, kind, project.multiplayerGameId!);
+    return project;
   }
 
   /** Webhooks accelerate push detection; their failure must not block a build or rename. */
@@ -376,13 +387,13 @@ export class ProjectService {
       createdAt: now,
       updatedAt: now,
       // Keep the original request after pendingTurn is cleared.
-      initialPrompt: truncate(input.initialPrompt, 2_000),
+      initialPrompt: input.initialPrompt,
       // The thread's founder, linked on the pinned card for the project's life.
       ...(input.initiatorUserId ? { starterId: input.initiatorUserId } : {}),
       ...(input.initiator?.name ? { starterName: input.initiator.name } : {}),
       ...(input.ownerUserId ? { ownerId: input.ownerUserId } : {}),
       pendingNaming: { request: input.initialPrompt, ...(input.renameable ? {} : { name: input.displayName }) },
-      ...(projectKind !== "site" ? { multiplayerMode } : {}),
+      ...(projectKind !== "site" ? { multiplayerMode, multiplayerGameId: siteSlug } : {}),
       infoMessageId: input.infoMessageId,
     };
     await this.store.putProject(project);
@@ -397,6 +408,7 @@ export class ProjectService {
     // each turn (for the play card), plus the long-form README content. The
     // agent keeps them current; the harness composes README.md from the last.
     await ensureProjectDocuments(workspacePath, input.displayName);
+    await this.ensureLeaderboardInputs(project);
     // Authored source plus the vendored net client (site/net/) is the Git
     // record. Harness build inputs and generated bundles are recreated locally
     // and never enter Forgejo.
@@ -485,9 +497,7 @@ export class ProjectService {
         const target = await this.forgejo.repositoryInfo(repoName);
         if (target && target.id !== source.id) continue;
         await this.store.patchProject(threadId, {
-          multiplayerGameId: project.multiplayerMode === "singleplayer"
-            ? project.multiplayerGameId
-            : project.multiplayerGameId ?? project.siteSlug,
+          multiplayerGameId: project.multiplayerGameId ?? project.siteSlug,
           ...(project.pendingNaming ? { pendingNaming: { ...project.pendingNaming, name: displayName } } : {}),
           pendingRename: { displayName, siteSlug, repoName, fromSiteSlug: project.siteSlug, fromRepoName: project.repoName, repoId: source.id,
             ...(!clean || project.status !== "ready" ? { preserveWorktree: true } : {}) },
@@ -605,6 +615,7 @@ export class ProjectService {
       } });
       let agentSummary: string;
       const projectKind = project.projectKind ?? "site";
+      project = await this.ensureLeaderboardInputs(project);
       // The workspace path never changes across patchProject updates below.
       const workspacePath = project.workspacePath;
       // Repair harness-owned multiplayer files (vendored client, net config,
@@ -824,6 +835,7 @@ export class ProjectService {
       let restored = false;
       if (await ensureEnginePackages(workspacePath, input.projectKind)) restored = true;
       if (await ensureSkillFiles(workspacePath, input.projectKind)) restored = true;
+      await this.ensureLeaderboardInputs(project);
       if (input.multiplayer && await ensureMultiplayerFiles(workspacePath, input.multiplayer, input.projectKind)) restored = true;
       if (restored) emit(input.onProgress, "🗂️ Restored harness-owned files (engine package, game skills, multiplayer client)");
     };
@@ -1703,7 +1715,7 @@ export class ProjectService {
         await this.opencode.deleteSessionsInDirectory(project.workspacePath, project.sessionId);
         project = await this.store.patchProject(threadId, { pendingDeletion: { ...project.pendingDeletion!, agentsDeleted: true } });
       }
-      if (project.multiplayerGameId || (project.projectKind?.startsWith("game-") && project.multiplayerMode !== "singleplayer")) {
+      if (project.multiplayerGameId || project.projectKind?.startsWith("game-")) {
         await this.deleteRelayGame(project.multiplayerGameId ?? project.siteSlug);
       }
       for (const repo of projectRepos(project)) await this.forgejo.deleteRepository(repo);
@@ -2216,13 +2228,19 @@ export class ProjectService {
   }
 
   private async writeReadme(project: ProjectRecord): Promise<void> {
-    const section = await readProjectReadmeSection(project.workspacePath);
-    const request = truncate(project.initialPrompt?.replace(/\r\n?/g, "\n").trim() ?? "", 2_000).trim();
+    const request = project.initialPrompt?.replace(/\r\n?/g, "\n").trim() ?? "";
     const requester = project.starterName?.replace(/\s+/g, " ").trim();
+    const label = requester?.replace(/[\\`*_[\]<>]/g, "\\$&");
+    const attribution = project.starterId && /^\d+$/.test(project.starterId)
+      ? `Requested by [${label || `Discord user ${project.starterId}`}](https://discord.com/users/${project.starterId}).`
+      : label ? `Requested by ${label}.` : "Requested in Discord.";
+    const header = `# ${project.displayName}\n\nThis is a ${projectKindLabel(project.projectKind)} maintained by the ThreadSite harness.\n\n- Live site: ${this.siteLink(project)}\n\nForgejo contains the authored source. Every accepted mutation is committed, then the harness builds a minified runtime-only deployment; generated bundles and harness networking inputs are not committed.`;
     const requestBlock = request
-      ? `\n\n## Original request\n\n${requester ? `Requested by ${requester}.` : "Requested in Discord."}\n\n${markdownCodeBlock(request)}`
+      ? readmeRequestBlock(request, attribution, README_MAX_BYTES - Buffer.byteLength(header, "utf8") - 1024)
       : "";
-    const readme = `# ${project.displayName}\n\nThis is a ${projectKindLabel(project.projectKind)} maintained by the ThreadSite harness.\n\n- Live site: ${this.siteLink(project)}\n\nForgejo contains the authored source. Every accepted mutation is committed, then the harness builds a minified runtime-only deployment; generated bundles and harness networking inputs are not committed.${requestBlock}${section ? `\n\n---\n\n${section}` : ""}\n`;
+    const prefix = header + requestBlock;
+    const section = await readProjectReadmeSection(project.workspacePath, README_MAX_BYTES - Buffer.byteLength(prefix, "utf8") - 8);
+    const readme = `${prefix}${section ? `\n\n---\n\n${section}` : ""}\n`;
     const readmePath = safeChild(project.workspacePath, "README.md");
     const existing = await fs.lstat(readmePath).catch(() => undefined);
     if (existing && !existing.isFile()) {
@@ -2233,6 +2251,22 @@ export class ProjectService {
     }
     await fs.writeFile(readmePath, readme, "utf8");
   }
+}
+
+/** Keep oversized requests readable without losing the full prompt in durable state. */
+function readmeRequestBlock(request: string, attribution: string, maxBytes: number): string {
+  const render = (text: string, truncated = false) => `\n\n## Original request\n\n${attribution}\n\n${markdownCodeBlock(text)}${truncated ? "\n\n_Original request truncated to fit the repository limit._" : ""}`;
+  const full = render(request);
+  if (Buffer.byteLength(full, "utf8") <= maxBytes) return full;
+  const characters = Array.from(request);
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(render(characters.slice(0, middle).join(""), true), "utf8") <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  return render(characters.slice(0, low).join(""), true);
 }
 
 /** Wrap arbitrary user text in a fence longer than any backtick run inside it. */

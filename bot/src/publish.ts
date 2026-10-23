@@ -378,6 +378,10 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
     for (const name of [
       "net/threadsite-net.js", "net/threadsite-net.d.ts",
       "net/net-config.js", "net/net-config.d.ts",
+      "net/threadsite-player.js", "net/threadsite-player.d.ts",
+      "leaderboards/threadsite-leaderboards.js", "leaderboards/threadsite-leaderboards.d.ts",
+      "leaderboards/threadsite-player.js", "leaderboards/threadsite-player.d.ts",
+      "leaderboards/leaderboards-config.js", "leaderboards/leaderboards-config.d.ts",
     ]) {
       const content = await fs.readFile(safeChild(root, ...name.split("/")), "utf8").catch(() => undefined);
       if (content === undefined) continue;
@@ -663,7 +667,7 @@ export async function publishSite(siteDir: string, siteSlug: string): Promise<vo
         const relative = path.relative(siteDir, source);
         if (!relative) return true;
         const root = relative.split(path.sep)[0];
-        return root !== "src" && root !== "net";
+        return root !== "src" && root !== "net" && root !== "leaderboards";
       },
     });
     await stampDeployVersion(staging, await workspaceCommit(siteDir));

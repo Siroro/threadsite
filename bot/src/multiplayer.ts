@@ -54,6 +54,9 @@ export async function ensureMultiplayerFiles(
   changed = (await writeIfChanged(safeChild(netDir, NET_CLIENT_STEM), `${client.trimEnd()}\n`)) || changed;
   const clientTypes = await fs.readFile(path.join(ASSETS_DIR, NET_CLIENT_TYPES_STEM), "utf8");
   changed = (await writeIfChanged(safeChild(netDir, NET_CLIENT_TYPES_STEM), `${clientTypes.trimEnd()}\n`)) || changed;
+  for (const name of ["threadsite-player.js", "threadsite-player.d.ts"]) {
+    changed = (await writeIfChanged(safeChild(netDir, name), await fs.readFile(path.join(ASSETS_DIR, name), "utf8"))) || changed;
+  }
 
   const netConfig = [
     "// Harness-owned multiplayer configuration for this game.",

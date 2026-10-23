@@ -62,7 +62,7 @@ const ROOMS_GUIDANCE =
 
 function singleplayerAgents(): string {
   return "## Singleplayer only\n\n"
-    + "Keep all state local and the game playable offline. Do not add networking, relay clients or multiplayer SDKs.";
+    + "Keep gameplay state local and the game playable offline. Do not add gameplay networking, rooms or the multiplayer client. Global leaderboards use the separate score-only client under site/leaderboards/; read LEADERBOARDS.md and handle unavailable rankings without blocking play.";
 }
 
 /** Durable project memory injected into every turn; empty when no notes exist yet. */
@@ -84,7 +84,7 @@ const planningInstruction = "For any request that needs multiple steps or change
 
 /** How the game connects, phrased for the initial-build instruction. */
 function multiplayerPhrase(mode: MultiplayerMode): string {
-  if (mode === "singleplayer") return "singleplayer only — no networking at all";
+  if (mode === "singleplayer") return "singleplayer gameplay with optional global leaderboards through the dedicated score-only client; no gameplay networking";
   if (mode === "rooms") return "room-based multiplayer through the harness relay (invite-code rooms), solo fallback";
   return "multiplayer-first through the harness relay, solo fallback";
 }
@@ -106,7 +106,7 @@ export function mutationInstruction(kind: ProjectKind, userPrompt: string, notes
   const multiplayerClause = kind === "site"
     ? ""
     : mode === "singleplayer"
-      ? " This game is singleplayer-only: keep it fully playable offline, and do not add networking of any kind."
+      ? " This game is singleplayer-only: keep gameplay local and fully playable offline. Global leaderboards use the dedicated score-only client; do not add gameplay networking or rooms."
       : mode === "rooms"
         ? " Preserve working room-based multiplayer (invite-code rooms, room isolation, sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client."
         : " Preserve working multiplayer (arena sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client.";
@@ -123,7 +123,7 @@ export function multiplayerModeLabel(mode: MultiplayerMode): string {
 /** One-line summary of what the agent must build under each mode. */
 function modeTarget(mode: MultiplayerMode): string {
   if (mode === "singleplayer") {
-    return "no networking at all: every module runs locally, the game is fully playable offline, and nothing imports site/net/";
+    return "local singleplayer gameplay, fully playable offline, with no imports from site/net/; preserve global leaderboards through the separate site/leaderboards/ client";
   }
   if (mode === "rooms") {
     return "invite-code rooms (`mode: \"rooms\"` with `createRoom`/`room`, `ThreadSiteNet.roomFromUrl()` for invite links), a minimal lobby for creating/sharing/joining codes, and each room an isolated world with its own host";
@@ -147,7 +147,7 @@ export function multiplayerSwapInstruction(from: MultiplayerMode, to: Multiplaye
     : "";
   return `The multiplayer architecture of this game is being switched from ${multiplayerModeLabel(from)} to ${multiplayerModeLabel(to)}. The project instructions and harness-owned net files under site/net/ already reflect the new architecture — read NETWORKING.md at the project root, when it exists, before editing. ${investigating}\n\n`
     + `Then, from what you found, work out where this transition is genuinely difficult or ambiguous for THIS game: the seams the old architecture is baked into, state whose owner changes, flows that appear or disappear, and anything where a wrong guess would ship the wrong game. You MUST call the question tool and put exactly those difficulties to the user — one question per real decision point, each with 2–4 concrete options — and wait for the answers. Ask only about real difficulties; do not ask what the code, project instructions, the original request, or your note below already answers, and do not guess your way past a decision the user should make.${note}\n\n`
-    + `After the answers, rewrite the networking so the game runs as ${multiplayerModeLabel(to)}: ${modeTarget(to)}. Keep gameplay, presentation, and audio modules untouched where possible; change only the session/state/networking seams. ${to === "singleplayer" ? "Remove every import of ../net/* and all host/guest/relay branches; leave no dead netcode behind." : "Keep the solo fallback working (one player must be able to play alone), preserve as much existing gameplay logic as possible, and leave no room/arena remnants of the old architecture."} Use todowrite to plan the rewrite, mark steps as you finish them, and leave a complete buildable deliverable.`;
+    + `After the answers, rewrite the networking so the game runs as ${multiplayerModeLabel(to)}: ${modeTarget(to)}. Keep gameplay, presentation, and audio modules untouched where possible; change only the session/state/networking seams. ${to === "singleplayer" ? "Remove every import of ../net/* and all gameplay host/guest/relay branches; preserve rankings using the dedicated site/leaderboards/ client and the same injected game identity." : "Keep the solo fallback working (one player must be able to play alone), preserve as much existing gameplay logic as possible, and leave no room/arena remnants of the old architecture."} Use todowrite to plan the rewrite, mark steps as you finish them, and leave a complete buildable deliverable.`;
 }
 
 /**

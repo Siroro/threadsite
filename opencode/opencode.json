@@ -16,6 +16,8 @@
     { "action": "edit", "resource": "*/site/**", "effect": "allow" },
     { "action": "edit", "resource": "scratch/**", "effect": "allow" },
     { "action": "edit", "resource": "*/scratch/**", "effect": "allow" },
+    { "action": "edit", "resource": "site/leaderboards/**", "effect": "deny" },
+    { "action": "edit", "resource": "*/site/leaderboards/**", "effect": "deny" },
     { "action": "edit", "resource": "DESCRIPTION.md", "effect": "allow" },
     { "action": "edit", "resource": "*/DESCRIPTION.md", "effect": "allow" },
     { "action": "edit", "resource": "CHANGELOG.md", "effect": "allow" },
