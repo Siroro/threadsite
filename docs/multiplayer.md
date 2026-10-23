@@ -124,7 +124,9 @@ The relay container is published on `127.0.0.1:8090` only, so browsers reach it 
 
 ### Caddy
 
-With the optional `caddy` Compose profile, copy `caddy/vhosts/games.caddy.example` to `caddy/vhosts/games.caddy`, edit the hostname, and set the same two `.env` keys as below (the [Caddy quickstart](deployment.md#caddy-quickstart) does all of it from `--games-domain`). Only `/ws` is exposed; TLS is automatic.
+With the `caddy` Compose profile, multiplayer can share the sites hostname: set `GAMESERVER_PUBLIC_URL=wss://sites.example.com/ws` and `GAMESERVER_ALLOWED_ORIGINS=https://sites.example.com`. The [Caddy quickstart](deployment.md#caddy-quickstart) sets this up by default. Only the exact `/ws` path reaches the relay; health, stats and admin endpoints stay internal.
+
+A separate games hostname is optional. Pass `--games-domain games.example.com` to the installer, or copy `caddy/vhosts/games.caddy.example` to `caddy/vhosts/games.caddy`, edit the hostname and set the same two `.env` keys as below. TLS is automatic. Existing games hosts are kept on installer reruns; `--games-on-sites` switches back to the shared sites hostname.
 
 ### Apache / Virtualmin
 

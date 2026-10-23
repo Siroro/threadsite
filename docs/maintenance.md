@@ -82,7 +82,7 @@ The script uses `STATE_DB_FILE` from the container, or an explicit `--db FILE`. 
 
 GitHub Actions runs on pushes to `main`, pull requests, and manual dispatch:
 
-- [CI](../.github/workflows/ci.yml) builds the bot and OpenCode tools, runs the bot/OpenCode/preview test suites, and checks the gallery in Chromium.
+- [CI](../.github/workflows/ci.yml) builds the bot and OpenCode tools, runs the bot/OpenCode/preview test suites, checks the gallery in Chromium, and checks Caddy's WebSocket routing and cache headers in Docker.
 - [Multiplayer](../.github/workflows/multiplayer.yml) builds the networking client and relay, then checks relay/client behavior, restarts, durability, stalled hosts, deletion, player storage, saves, and leaderboards.
 
 Both workflows use Node 24 and need no Discord or model credentials. Relay checks use temporary state. Docker preview integration and the opt-in real-language-server check remain separate checks described below and in [OpenCode](opencode-v2.md).
@@ -125,5 +125,7 @@ It builds the production bot, OpenCode and preview images through the real Compo
 Preview and bot esbuild versions must match; the unit suite checks this to prevent compiler drift.
 
 ## Compose validation
+
+From `caddy/`, run `node test-proxy.mjs` for isolated Docker checks of shared and dedicated WebSocket hosts, static files, cache headers and private relay routes.
 
 After changing `docker-compose.yml`, run `docker compose config --quiet` from the repository root.

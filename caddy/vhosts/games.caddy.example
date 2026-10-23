@@ -4,6 +4,7 @@
 # This file is a template. Deployed copies live at caddy/vhosts/games.caddy
 # (untracked): copy and edit it, or let scripts/caddy-quickstart.sh write it
 # from --games-domain.
+# A separate games hostname is optional; the sites host also serves /ws.
 #
 # In .env also set (the quickstart script does this for you):
 #   GAMESERVER_PUBLIC_URL=wss://games.example.com/ws
@@ -14,7 +15,7 @@
 # matching apache/gameserver-vhost.conf.example.
 
 games.example.com {
-	handle /ws* {
+	handle /ws {
 		reverse_proxy gameserver:8090
 	}
 	# Everything else is denied, mirroring the Apache vhost example.

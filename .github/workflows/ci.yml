@@ -44,6 +44,21 @@ jobs:
         run: npm run build
       - run: npm test
 
+  caddy:
+    name: Caddy proxy checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: node test-proxy.mjs
+        working-directory: caddy
+
   gallery:
     name: Gallery browser checks
     runs-on: ubuntu-latest
