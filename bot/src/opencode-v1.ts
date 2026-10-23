@@ -2295,6 +2295,10 @@ export function describeTool(tool: string, input: any, status: string, title?: s
     const destination = typeof input?.destination === "string" ? path.basename(input.destination) : undefined;
     return { text: status === "running" ? "📥 Downloading a media asset" : "📦 Asset saved locally", detail: destination };
   }
+  if (normalized === "asset_import") {
+    const destination = typeof input?.destination === "string" ? path.basename(input.destination) : undefined;
+    return { text: status === "running" ? "📤 Installing an uploaded file" : "📦 Upload installed into the site", detail: destination };
+  }
   if (["edit", "write", "apply_patch"].includes(normalized)) {
     const target = input?.filePath ?? input?.file_path ?? input?.path ?? input?.file;
     const detail = typeof target === "string" ? projectFileLabel(target, directory) : undefined;

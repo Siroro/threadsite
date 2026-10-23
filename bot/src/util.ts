@@ -113,6 +113,16 @@ export function formatShortDuration(ms: number): string {
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
+/** Compact file sizes for Discord: 512 -> "512 B", 160000 -> "156.2 KB", 8388608 -> "8 MB". */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 1024) return `${Math.max(0, Math.round(bytes))} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${value >= 100 ? Math.round(value) : value.toFixed(1).replace(/\.0$/, "")} ${units[unit]}`;
+}
+
 /** Clock time for reset/deadline display, e.g. epoch ms -> "23:59 UTC". */
 export function formatUtcClock(ms: number): string {
   return `${new Date(ms).toISOString().slice(11, 16)} UTC`;

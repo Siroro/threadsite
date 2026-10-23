@@ -67,3 +67,5 @@ Write paragraphs on single lines. These files supply the public project card:
 Use documentation/search when it improves the result. Context7 queries must concern public APIs; installed types/compiler results take precedence over mismatched documentation. Continue with local references if research tools are unavailable.
 
 Download reusable media with `asset_download` into `site/assets/`; avoid hotlinks/base64 and invented licenses or facts. Supply provenance/license notes when known. Extract archives in place and remove the archive; keep assets within the project's size budget.
+
+Files the user attached in Discord arrive under `scratch/uploads/`, named in the request. That directory never publishes: read reference material in place, and install files the project should use (sprites, audio, fonts, data) into `site/assets/` with `asset_import`. Remove consumed uploads from `scratch/uploads/` when the files are installed or the reference is no longer needed.

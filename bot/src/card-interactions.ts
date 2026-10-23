@@ -22,7 +22,7 @@ export interface CardInteractionServices {
   projectSections(project: ProjectRecord): Promise<PanelSection[]>;
   queue(threadId: string): { requests: QueuedRequest[]; preparing: number };
   cancel(threadId: string, statusId: string): Promise<string>;
-  submit(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, images: Attachment[]): Promise<string>;
+  submit(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, attachments: Attachment[]): Promise<string>;
   stop(threadId: string, statusMessageId: string): Promise<string>;
   rollback(threadId: string, expectedVersion: string): Promise<void>;
   busy(threadId: string): Promise<boolean>;
@@ -104,15 +104,14 @@ export class CardInteractions {
       await this.begin(interaction);
       if (form.status !== "ready") { await this.respond(interaction, renderStatusCard(form.status === "accepted" ? "✅ This request was already saved." : "⏳ This request is already being submitted.")); return; }
       const prompt = interaction.fields.getTextInputValue("prompt").trim();
-      const images = [...(interaction.fields.getUploadedFiles("images")?.values() ?? [])];
+      const attachments = [...(interaction.fields.getUploadedFiles("images")?.values() ?? [])];
       if (!prompt) throw new CardUserError("Describe the change you want before submitting.");
-      if (images.some((file) => !file.contentType?.startsWith("image/"))) throw new CardUserError("Reference attachments must be images.");
       if (!this.services.store.claimCardAction(threadId, `request:${nonce}`, { ...form, prompt, status: "submitting" })) {
         await this.respond(interaction, renderStatusCard("⏳ This request is already being submitted."));
         return;
       }
       try {
-        const text = await this.services.submit(interaction, project, form, nonce, prompt, images);
+        const text = await this.services.submit(interaction, project, form, nonce, prompt, attachments);
         this.services.store.patchCardState<RequestFormState>(threadId, `request:${nonce}`, { status: "accepted" });
         await this.respond(interaction, renderStatusCard(text));
       } catch (error) {

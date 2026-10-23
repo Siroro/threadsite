@@ -203,7 +203,7 @@ try {
   assert.ok(result.usage.steps >= 2);
   assert.ok(result.usage.inputTokens > 0);
   assert.match(await fs.readFile(path.join(workspace, "PROJECT_NOTES.md"), "utf8"), /Preserve the smoke/);
-  for (const name of ["todowrite", "todoread", "project_notes", "js_syntax_check", "asset_download"]) assert.ok(toolNames.has(name), `Missing production tool ${name}`);
+  for (const name of ["todowrite", "todoread", "project_notes", "js_syntax_check", "asset_download", "asset_import"]) assert.ok(toolNames.has(name), `Missing production tool ${name}`);
   assert.ok(![...toolNames].some((name) => name.startsWith("playwright")));
   if (!docsOffline) {
     await harness.prompt(workspace, sessionID, "Documentation smoke", "threadsite-test/text");

@@ -63,7 +63,7 @@ export function requestModal(resource: string, nonce: string, steer = false): Mo
       new LabelBuilder().setLabel(steer ? "What should the agent change?" : "What would you like to change?")
         .setDescription(steer ? "If this turn has finished, your request will be queued." : "Your request uses this project's normal update queue.")
         .setTextInputComponent(new TextInputBuilder().setCustomId("prompt").setStyle(TextInputStyle.Paragraph).setMaxLength(4000).setRequired(true)),
-      new LabelBuilder().setLabel("Reference images (optional)").setDescription("Images are sent only when the project's model supports them.")
+      new LabelBuilder().setLabel("Attachments (optional)").setDescription("Images reach the model when it supports them; other files are saved into the project workspace.")
         .setFileUploadComponent(new FileUploadBuilder().setCustomId("images").setMinValues(0).setMaxValues(4).setRequired(false)),
     );
 }
@@ -76,8 +76,12 @@ export function renderQueuePanel(resource: string, queue: QueuedRequest[], prepa
   const listed = queue.slice(page * 5, page * 5 + 5);
   if (!listed.length) card.addTextDisplayComponents(new TextDisplayBuilder().setContent("Nothing else is queued. Requests already being prepared can be interrupted with Stop."));
   for (const [index, request] of listed.entries()) {
+    const attached = [
+      request.images?.length ? `${request.images.length} image${request.images.length === 1 ? "" : "s"}` : "",
+      request.files?.length ? `${request.files.length} file${request.files.length === 1 ? "" : "s"}` : "",
+    ].filter(Boolean).join(" + ");
     addCardDivider(card);
-    card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`**${page * 5 + index + 1}. ${plain(request.author?.name ?? "Saved request", 60)}**${request.images?.length ? ` · ${request.images.length} image(s)` : ""}\n${plain(request.prompt, 420)}`));
+    card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`**${page * 5 + index + 1}. ${plain(request.author?.name ?? "Saved request", 60)}**${attached ? ` · ${attached}` : ""}\n${plain(request.prompt, 420)}`));
     card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId(cardId("cancel", resource, request.statusMessageId)).setLabel(`Cancel request ${page * 5 + index + 1}`).setStyle(ButtonStyle.Secondary),
     ));

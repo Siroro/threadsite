@@ -27,6 +27,12 @@ export interface QueuedRequest {
   /** Discord user who sent the request, so a pending agent question can ping them. */
   requesterId?: string;
   images?: Array<{ mime: string; filename?: string; dataUrl: string }>;
+  /**
+   * Non-image attachments saved into the workspace at message receipt (bytes
+   * on disk under scratch/uploads; the prompt names the paths). Metadata only —
+   * used for queue display, not delivery.
+   */
+  files?: Array<{ name: string; path: string; bytes: number; mime?: string }>;
 }
 
 /** The kinds of user contribution counted on the pinned project card. */

@@ -26,6 +26,7 @@
     "websearch": "allow",
     "webfetch": "allow",
     "asset_download": "allow",
+    "asset_import": "allow",
     "js_syntax_check": "allow",
     "project_notes": "allow",
     "playwright_*": "allow",
