@@ -1,7 +1,7 @@
 # ThreadSite edge configuration for the optional `caddy` Compose profile.
 #
 # The sites vhost serves the same publish root (SITES_HOST_PATH, mounted
-# read-only at /srv/sites) that the host-Apache default path and the
+# read-only at /srv/sites) that an existing host web server and the
 # bundled-static profile use, with the same cache policy as
 # apache/threadsite-vhost.conf.example.
 #

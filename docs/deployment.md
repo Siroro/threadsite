@@ -1,18 +1,115 @@
 # Deployment
 
+For a new server, use the [Caddy quickstart](#caddy-quickstart). If you already run a web server or hosting panel, see [existing server setup](#existing-server-setup).
+
 ## Prerequisites
 
-- Docker and Docker Compose
-- Node 24 (service images use it; local test runs should match)
-- A Discord application/bot token
-- One of: an existing host Apache (or Virtualmin) serving a static directory (the default path), the bundled `httpd:2.4-alpine` profile, or the optional Caddy edge profile (one-command fresh-server path, below)
+- A Linux server
+- Domain names pointing at the server for public hosting
+- A Discord bot token and application ID
+- Docker and Docker Compose (the quickstart can install these)
 
-## Quick start
+You only need Node 24 on the host for local development. The containers include it.
 
-On a **fresh server**, the one-command Caddy path in the next section handles all of this for you. On an existing server, step through it manually:
+## Caddy quickstart
+
+**Recommended for new servers.** The installer collects your settings, builds the services, sets up HTTPS and waits for the bot to connect to Discord.
+
+First, [create a Discord bot](discord.md) and enable Message Content Intent. Point `sites.example.com`, `git.example.com` and `games.example.com` at your server, and make ports 80 and 443 reachable. Replace `example.com` below with your domain:
 
 ```bash
-git clone <this repository>
+curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh | bash -s -- \
+  --domain example.com \
+  --install-docker
+```
+
+The prompts work even when the script is piped into Bash. You can also download it and run it directly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh -o threadsite-setup.sh
+bash threadsite-setup.sh --domain example.com --install-docker
+```
+
+It asks for:
+
+- Your Discord bot token. Input is hidden, and the application ID is discovered automatically.
+- A server ID for commands in one server, or a blank value for global commands. It prints an invite link and checks that the bot has joined a server.
+- Optional extra admin user IDs. People with Manage Server already have admin access.
+- The builder model and its provider key. The default comes from `.env.example`; anonymous OpenCode free models can be used without a key when available.
+
+For OpenCode, OpenAI, Anthropic, OpenRouter and Google, the key is saved to the matching setting in `.env`. Surplus credentials are saved in the private `opencode/host/providers.json`, preserving other provider settings. Custom providers can be configured there before running the installer.
+
+Secrets are stored in private files, and the internal OpenCode password is generated on first setup. The installer checks Discord credentials and intents before starting services, bootstraps Forgejo, checks that the selected model is available, then starts the bot and waits for `discord.ready`. The model check does not send an inference request or verify provider billing and quota.
+
+The installer uses `scripts/bootstrap-forgejo.sh --no-restart-bot` so the bot starts after these checks. Running that script without the flag keeps its usual behavior of restarting an existing bot after refreshing its repository credentials.
+
+### Running it again
+
+Saved settings are reused, including credentials. The script rebuilds the services and recreates the bot so configuration changes take effect. It keeps existing projects, provider settings, volumes and private files. An existing checkout is reused without fetching or resetting Git; use `./start.sh` when you want to update the code.
+
+A failed credential check stops before services start. If a later startup check fails, the saved configuration stays available for a retry. Use `--skip-bot` only when you deliberately want infrastructure without a working Discord bot.
+
+### Unattended setup
+
+Supply secrets through environment variables or private files to keep them out of shell history. The bot must already be invited and Message Content Intent must be enabled:
+
+```bash
+bash scripts/caddy-quickstart.sh \
+  --domain example.com \
+  --discord-token-file /path/to/discord-token \
+  --guild-id 123456789012345678 \
+  --model provider/model-id \
+  --api-key-file /path/to/provider-key \
+  --install-docker \
+  --non-interactive
+```
+
+| Option | Purpose |
+| --- | --- |
+| `--domain` | Sets up `sites.`, `git.` and `games.` under this domain |
+| `--sites-domain`, `--git-domain`, `--games-domain` | Choose individual hostnames instead; all three are needed for a public bot install |
+| `--discord-token`, `--discord-token-file` | Bot token; also accepts `DISCORD_BOT_TOKEN` |
+| `--app-id` | Optional application ID; checked against the token when provided |
+| `--guild-id` | Optional Discord server ID for server-specific commands |
+| `--admin-ids` | Optional comma-separated user IDs for extra admins |
+| `--model` | Builder model in `provider/model-id` format |
+| `--api-key`, `--api-key-file` | Provider key; also accepts `THREADSITE_API_KEY` or the provider's standard environment variable |
+| `--install-docker` | Install Docker and missing Git, curl and jq tools |
+| `--non-interactive` | Fail on missing settings instead of prompting |
+| `--wait-seconds` | Service and Discord readiness timeout; default 180 seconds |
+| `--skip-bot` | Infrastructure only; skips Discord and model checks |
+
+### Manual Caddy setup
+
+```bash
+# .env
+COMPOSE_PROFILES=caddy
+SITES_DOMAIN=sites.example.com
+PUBLIC_SITES_BASE_URL=https://sites.example.com
+
+# Optional vhosts: copy and edit the tracked templates
+cp caddy/vhosts/forgejo.caddy.example caddy/vhosts/forgejo.caddy
+cp caddy/vhosts/games.caddy.example   caddy/vhosts/games.caddy
+
+docker compose up -d forgejo opencode preview gameserver caddy
+./scripts/bootstrap-forgejo.sh
+docker compose up -d bot
+```
+
+How it fits together:
+
+- `caddy/Caddyfile` (tracked) serves the publish root read-only with the same cache policy as [the Apache vhost](#serving-generated-sites-from-your-own-apache): versioned (`?v=`) assets immutable, everything else revalidating, `threadsite-version.json` never cached.
+- `caddy/vhosts/*.caddy` (untracked, generated) add the optional Forgejo and relay vhosts; empty `vhosts/` is valid.
+- Certificates live in the `caddy-data` volume and survive restarts; `CADDY_HTTP_PORT`/`CADDY_HTTPS_PORT` move the host ports, though 80/443 are required for certificate issuance.
+- `SITES_DOMAIN=localhost` (the default) uses Caddy's internal certificate. `https://localhost` works locally with an expected browser warning.
+- Day-2 operations are unchanged: `./start.sh` picks the profile up from `COMPOSE_PROFILES` in `.env`.
+
+## Existing server setup
+
+Use this route if you already have a web server or hosting panel and want to configure ThreadSite yourself:
+
+```bash
+git clone https://github.com/Siroro/threadsite.git
 cd threadsite
 ./scripts/setup.sh
 $EDITOR .env
@@ -20,19 +117,7 @@ $EDITOR .env
 
 ### 1. Discord app setup
 
-Create a Discord application/bot and invite it with permissions to:
-
-- View channels
-- Send messages
-- Create public threads
-- Send messages in threads
-- Embed Links (recommended for live progress cards; a text fallback is automatic)
-- Read message history
-- Use application commands
-
-Enable the **Message Content Intent** in the Discord developer portal — ordinary replies inside a registered thread are the edit prompts.
-
-Copy the bot token and application/client ID into `.env`. For development, set `DISCORD_GUILD_ID` so slash-command changes appear immediately in that guild; leave it blank for global commands.
+Follow the [Discord setup guide](discord.md) to create the bot, enable Message Content Intent and invite it with the right permissions. Put its token in `DISCORD_BOT_TOKEN` and its application ID in `DISCORD_APPLICATION_ID` in `.env`. The guide also explains the optional server ID and how to check the connection.
 
 ### 2. Start the agent service, Forgejo, and the relay
 
@@ -174,63 +259,6 @@ When the agent container starts, its startup script calls the public Surplus `GE
 
 Surplus environment settings are no longer read. Move existing credentials into `providers.surplus.settings.apiKey` (or use a `{file:...}` reference), endpoint overrides into `settings.baseURL`, extra model IDs into `models`, and the context ceiling into `contextCaps.surplus`. The ceiling defaults to 100000 tokens; `0` disables it. Host JSON overrides take precedence over bundled JSON defaults. Catalog pricing is imported when advertised, and host model costs can supply missing prices.
 
-## Caddy quickstart
-
-The optional `caddy` Compose profile runs a single [Caddy](https://caddyserver.com/) container as the edge: it serves the generated sites, obtains and renews Let's Encrypt certificates automatically, and can reverse-proxy Forgejo and the multiplayer relay. It is the one-command path for a fresh server; host Apache (or Virtualmin) remains the default path everywhere else, and the two are never both bound to 80/443.
-
-Requirements: a server with ports 80 and 443 reachable, and DNS for every hostname already pointing at it.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh | bash -s -- \
-  --sites-domain sites.example.com \
-  --git-domain git.example.com \
-  --games-domain games.example.com \
-  --install-docker
-```
-
-The script is safe to re-run — it only touches the `.env` keys it manages, plus `caddy/vhosts/*.caddy` (both untracked). It:
-
-1. installs Docker via `get.docker.com` when `--install-docker` is given (or confirms interactively),
-2. clones this repository (re-running updates the checkout to `origin/main`) when not already inside one,
-3. prepares directories and `.env`, and prompts for the Discord token/application ID when run interactively,
-4. writes `COMPOSE_PROFILES=caddy`, `SITES_DOMAIN`, `PUBLIC_SITES_BASE_URL`, and — when the matching hostname is given — the Forgejo and relay public URLs, plus `GAMESERVER_ALLOWED_ORIGINS`,
-5. generates `caddy/vhosts/forgejo.caddy` and `caddy/vhosts/games.caddy` from the tracked templates,
-6. brings up `forgejo`, `opencode`, `preview`, `gameserver`, and `caddy`, bootstraps Forgejo, and starts the bot when credentials are known.
-
-| Flag | Purpose |
-| --- | --- |
-| `--sites-domain` | Public hostname for the generated sites (required interactively; the only required flag) |
-| `--git-domain` | Hostname for Forgejo; omit to keep it loopback-only |
-| `--games-domain` | Hostname for the multiplayer relay (`wss://…/ws`); omit to keep the default localhost URL |
-| `--discord-token` / `--app-id` | Discord credentials; prompted interactively when omitted |
-| `--install-docker` | Install Docker via `get.docker.com` when missing (otherwise prompted/required) |
-| `--skip-bot` | Deploy everything except the bot |
-
-### Manual Caddy setup
-
-```bash
-# .env
-COMPOSE_PROFILES=caddy
-SITES_DOMAIN=sites.example.com
-PUBLIC_SITES_BASE_URL=https://sites.example.com
-
-# optional vhosts — copy and edit the tracked templates
-cp caddy/vhosts/forgejo.caddy.example caddy/vhosts/forgejo.caddy
-cp caddy/vhosts/games.caddy.example   caddy/vhosts/games.caddy
-
-docker compose up -d forgejo opencode preview gameserver caddy
-./scripts/bootstrap-forgejo.sh
-docker compose up -d bot
-```
-
-How it fits together:
-
-- `caddy/Caddyfile` (tracked) serves the publish root read-only with the same cache policy as [the Apache vhost](#serving-generated-sites-from-your-own-apache): versioned (`?v=`) assets immutable, everything else revalidating, `threadsite-version.json` never cached.
-- `caddy/vhosts/*.caddy` (untracked, generated) add the optional Forgejo and relay vhosts; empty `vhosts/` is valid.
-- Certificates live in the `caddy-data` volume and survive restarts; `CADDY_HTTP_PORT`/`CADDY_HTTPS_PORT` move the host ports, though 80/443 are required for certificate issuance.
-- `SITES_DOMAIN=localhost` (the default) uses Caddy's internal certificate — `https://localhost` works locally with an expected browser warning.
-- Day-2 operations are unchanged: `./start.sh` picks the profile up from `COMPOSE_PROFILES` in `.env`.
-
 ## Serving generated sites from your own Apache
 
 A minimal separate-origin vhost is included at `apache/threadsite-vhost.conf.example`:
@@ -269,9 +297,9 @@ Add cache headers so republished sites reach returning visitors immediately (ful
 </FilesMatch>
 ```
 
-Every publish stamps a `threadsite-version.json` deploy marker into the site root and appends a tiny update-checker to every published page: the checker re-fetches the marker every 30 seconds (and on tab focus), and when the live deploy id differs from the one the page was served with, the page reloads itself — hidden tabs immediately, visible tabs behind a one-second "New version available — updating…" notice. Republishing an unchanged site produces the same id, so nobody is reloaded for nothing.
+Every publish stamps a `threadsite-version.json` deploy marker into the site root and appends a tiny update-checker to every published page: the checker re-fetches the marker every 30 seconds (and on tab focus), and when the live deploy id differs from the one the page was served with, the page reloads itself. Hidden tabs reload immediately; visible tabs show an update notice for one second first. Republishing an unchanged site produces the same id, so nobody is reloaded for nothing.
 
-If Cloudflare or another CDN fronts the sites hostname, set its **Browser Cache TTL** to **Respect Existing Headers** — a fixed CDN default overrides the origin's revalidation policy and visitors keep stale assets for hours after a republish.
+If Cloudflare or another CDN fronts the sites hostname, set its **Browser Cache TTL** to **Respect Existing Headers**. A fixed CDN default overrides the origin's revalidation policy and visitors keep stale assets for hours after a republish.
 
 If Apache runs as a non-root user, it only needs read access to generated files. The bot container writes the bind-mounted directory; published files use ordinary readable modes.
 
@@ -319,7 +347,7 @@ Browser/source links use `FORGEJO_PUBLIC_URL`; API calls and git pushes from the
 
 ## Day-2 operations with start.sh
 
-The root-level `start.sh` pulls the latest code, safely resets tracked files (`.env`, `secrets/`, and `data/` are untracked and untouched — never run `git clean` in this repo), rebuilds only the images whose inputs changed — the code commit, `docker-compose.yml`, or `.env` build args differing from the last successful build, stamped under `data/` — brings the stack up, prunes the dangling images a rebuild strands, and waits for services to report healthy. A failed or interrupted build leaves no stamp, so the next start rebuilds it instead of reusing a stale image; the same applies after a manual `git pull`. `--no-update` skips Git but always checks builds through Docker's layer cache (an unchanged service is a cached no-op, never a rebuild); `restart` only restarts existing containers.
+The root-level `start.sh` pulls the latest code, safely resets tracked files (`.env`, `secrets/`, and `data/` are untracked and untouched; never run `git clean` in this repo), rebuilds images when the code commit, `docker-compose.yml` or `.env` build args differ from the last successful build recorded under `data/`, brings the stack up, prunes the dangling images a rebuild strands, and waits for services to report healthy. A failed or interrupted build leaves no stamp, so the next start rebuilds it instead of reusing a stale image; the same applies after a manual `git pull`. `--no-update` skips Git but always checks builds through Docker's layer cache (an unchanged service is a cached no-op, never a rebuild); `restart` only restarts existing containers.
 
 ```bash
 ./start.sh                 # update to latest main, rebuild, up, wait healthy
@@ -347,14 +375,14 @@ docker compose up -d opencode bot
 
 The multiplayer relay pins `ws` in `gameserver/package.json`; rebuild it with `docker compose build --pull gameserver` when bumping. Forgejo is pinned to the `15-rootless` LTS major tag by default; override `FORGEJO_IMAGE` to follow the current short-lived stable line.
 
-For a bot-only change with dependencies already running: `docker compose up -d --build --no-deps bot`. Rebuild other affected services when shared configuration or dependencies change. Preserve `data/`, secrets, persistent volumes, and live project workspaces — never use volume deletion or destructive resets as routine troubleshooting.
+For a bot-only change with dependencies already running: `docker compose up -d --build --no-deps bot`. Rebuild other affected services when shared configuration or dependencies change. Preserve `data/`, secrets, persistent volumes, and live project workspaces. Never use volume deletion or destructive resets as routine troubleshooting.
 
 ## Security notes
 
 This is suitable for a private/friends Discord or a carefully permissioned server. It is not a hardened multi-tenant website builder.
 
 - Generated browser JS is untrusted content. Use a dedicated origin/domain.
-- The multiplayer relay is a shared, unauthenticated relay: any browser that can reach it can join any room code in any game. It rate-limits and size-caps every connection, but treat rooms as public spaces — generated games are told to treat all received events as untrusted input. Use `GAMESERVER_ALLOWED_ORIGINS` on hostile networks and never put secrets into game traffic.
+- The multiplayer relay is a shared, unauthenticated relay: any browser that can reach it can join any room code in any game. It rate-limits and size-caps every connection, but treat rooms as public spaces. Generated games are told to treat all received events as untrusted input. Use `GAMESERVER_ALLOWED_ORIGINS` on hostile networks and never put secrets into game traffic.
 - Do not mount Docker's socket into the bot or agent containers.
 - Do not mount your whole Apache config or document tree if only one generated-sites directory is needed.
 - The agent service is intentionally not published as a host port in Compose and has HTTP basic auth even on the internal Docker network.

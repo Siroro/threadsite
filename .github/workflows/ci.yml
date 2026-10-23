@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  components:
+    name: ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [bot, opencode, preview]
+    defaults:
+      run:
+        working-directory: ${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ${{ matrix.component }}/package-lock.json
+      - run: npm ci
+      - if: matrix.component == 'bot'
+        name: Install shell test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+      - if: matrix.component != 'preview'
+        run: npm run build
+      - run: npm test
+
+  gallery:
+    name: Gallery browser checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            bot/package-lock.json
+            preview/package-lock.json
+      - run: npm ci
+        working-directory: bot
+      - run: npm ci
+        working-directory: preview
+      - run: npx playwright install --with-deps chromium
+        working-directory: preview
+      - run: npm run test:gallery
+        working-directory: bot

@@ -1,152 +1,93 @@
-# ThreadSite — Discord threads that become persistent websites & multiplayer games
+# ThreadSite
 
-ThreadSite is a small Discord harness for an AI coding agent. One Discord thread maps to one persistent static website **or static web game** and one public Forgejo repository.
+Build websites and browser games from Discord.
 
-Each project gets a separate `README.agent.md`, seeded with writing guidance and editable by the agent. The harness constructs `README.md` from the original request and submitter, followed by that agent-maintained content. See [project documents](docs/commands.md#the-final-post-of-a-turn).
+[![CI](https://github.com/Siroro/threadsite/actions/workflows/ci.yml/badge.svg)](https://github.com/Siroro/threadsite/actions/workflows/ci.yml)
+[![Multiplayer checks](https://github.com/Siroro/threadsite/actions/workflows/multiplayer.yml/badge.svg)](https://github.com/Siroro/threadsite/actions/workflows/multiplayer.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Games in both singleplayer and multiplayer modes can use global leaderboards through a small dedicated score client, independent of gameplay networking. Rankings share the game's stable identity and remain optional during offline play. See [global leaderboards](docs/multiplayer.md#global-leaderboards-in-every-gameplay-mode).
+Start a project with a slash command, then reply in its thread to make changes. The bot builds and publishes your site or game, with a live link and a source repository for every project.
 
-Live turn cards show active subagents while delegated work is running, and the private turn-details panel keeps each child's agent, steps and last action after it finishes. Child actions and reports stay out of the public activity feed.
+![A ThreadSite project thread in Discord, with a request and live build progress](docs/screenshots/discord-thread.png)
 
-Projects default to **anyone can edit**. The human thread owner can use **Collaboration** on the pinned card or `/site collaboration` to select contributors or require approval of outside requests. Approval requests and their attachments survive restarts without starting agent work. See [collaboration settings](docs/commands.md#project-collaboration).
+## Install
 
-- `/site start prompt:"..."` creates a Discord thread, a workspace, an agent session, a public Forgejo repository, the first git commit, and a live static site.
-- `/makegam dimension:<2d|3d> multiplayer:<arena|rooms|singleplayer> prompt:"..."` does the same for a **static browser game**. Games default to a shared-arena architecture; `rooms` builds invite-code rooms; `singleplayer` omits gameplay networking while retaining the dedicated global leaderboard client. `/site multiplayer` switches an existing game between the three live.
+You'll need a Linux server, a domain and a [Discord bot token](docs/discord.md). Enable **Message Content Intent** when creating the bot.
 
-## How it works
-
-The one deliberate runtime exception is the **harness-owned multiplayer relay**: the model never writes server code, it only uses a vendored browser client pointed at a shared multi-tenant WebSocket relay. Games stay fully playable solo when the relay is unreachable.
-
-Networked games can also use harness-managed personal save slots and public best-score leaderboards through `net.saves` and `net.leaderboards`. Anonymous player progress survives browser sessions and relay restarts; saves use revision checks to prevent stale tabs overwriting newer progress. Scores are client-reported. See [player persistence](docs/multiplayer.md#personal-saves-and-leaderboards).
-
-See [docs/architecture.md](docs/architecture.md) for the full pipeline, agent sandboxing, transport recovery, and persistence model.
-
-## Public gallery
-
-The static gallery includes search, 2D/3D/website and multiplayer filters, sorting, grid/list layouts, saved favourites, recently opened projects, shareable project details, play instructions and recent changes. It supports light/dark themes, keyboard navigation and a random-project picker. Favourites and history stay in the visitor's browser; direct project links also work without JavaScript. See [gallery behaviour and checks](docs/gallery.md).
-
-## Stack
-
-- Node 24 + discord.js bot
-- Native OpenCode v2 + `@opencode/client`
-- One shared Node 24 + `ws` multiplayer relay for all games (multi-tenant, with arena snapshots and SQLite player storage)
-- Forgejo 15 LTS (SQLite, no separate database needed)
-- Your existing Apache static directory (the default), an optional bundled `httpd:2.4-alpine` profile, or an optional Caddy edge with automatic HTTPS
-- Playwright MCP preview service (CPU-rendered Chromium, no GPU required)
-
-### Fresh server
-
-Point DNS for your hostnames at the server, then:
+Point `sites.example.com`, `git.example.com` and `games.example.com` at your server, and open ports **80 and 443**. Then run this on the server, replacing `example.com` with your domain:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh | bash -s -- \
-  --sites-domain sites.example.com \
-  --git-domain git.example.com \
-  --games-domain games.example.com \
-  --install-docker
+  --domain example.com --install-docker
 ```
 
-That installs Docker on request, clones this repository, writes `.env` (prompting for the Discord token/application ID when run interactively), creates the Caddy vhosts, brings the stack up behind Caddy with automatic HTTPS, and bootstraps Forgejo. Re-running is safe. All flags: [docs/deployment.md](docs/deployment.md#caddy-quickstart).
+Follow the prompts for your bot token and AI model settings. The installer prints a Discord invite link, installs anything missing, sets up HTTPS with Caddy and waits for the bot to connect. Tokens are entered privately. When it's done, try `/site start` in your Discord server.
 
-Running operations go through the root `start.sh` (update/rebuild/health/logs), which also exposes the project cleanup menu. Startup rebuilds only when image inputs changed since the last successful build (code, compose file, or `.env`) and prunes the dangling images a rebuild strands; `--no-update` always re-checks builds through Docker's layer cache. Proxying recipes for host Apache/Virtualmin and Cloudflare (sites vhost, cache headers, Forgejo, relay) are in [docs/deployment.md](docs/deployment.md) and [docs/multiplayer.md](docs/multiplayer.md).
+See the [install guide](docs/deployment.md#caddy-quickstart) for custom domains, unattended installs and reruns. If you already run a web server or hosting panel, use the [existing server setup](docs/deployment.md#existing-server-setup).
 
-## Configuration
+## Usage
 
-Deployment settings live in `.env` (see `.env.example`). OpenCode also accepts a private host provider file and optional extra provider environment file, described below.
+Create a website:
 
-### Discord
+```text
+/site start prompt: make a cosy recipe book for our server name: Server Cookbook
+```
 
-| Setting | Purpose |
-| --- | --- |
-| `DISCORD_BOT_TOKEN` / `DISCORD_APPLICATION_ID` | Bot credentials |
-| `DISCORD_GUILD_ID` | Register commands in one guild (dev); blank = global |
-| `DISCORD_ADMIN_USER_IDS` | Extra admin user IDs (Manage Server is the default gate) |
-| `DISCORD_ERROR_REPORT_USER_IDS` | Recipients of private error DMs |
-| `PROGRESS_UPDATE_MS` | Minimum interval between live progress-card edits |
-| `TURN_STALL_WARN_MS` | No-agent-activity duration before the card shows a stall warning |
+Or a game:
 
-### OpenCode
+```text
+/makegam dimension:2d prompt: make a top-down racing game for four players name: Tiny Racers
+```
 
-| Setting | Purpose |
-| --- | --- |
-| `OPENCODE_URL` / `OPENCODE_SERVER_PASSWORD` | Internal agent service endpoint and basic auth password (username `opencode`) |
-| `OPENCODE_DEFAULT_MODEL` | Model for new sessions (`provider/model-id`); changeable live via `/site-admin model` |
-| `OPENCODE_SUBAGENT_MODEL` | V2 model for both general and explore subagents (`provider/model-id`); blank keeps `opencode/mimo-v2.6-flash-free`. Recreate opencode after changes. |
-| `OPENCODE_BROWSER_QA_MODEL` | Dedicated v2 `browser-qa` vision model (`provider/model-id`); blank disables it. Browser-only, advisory inspection; supports background work while the builder continues. Independent of builder/general/explore models. |
-| `OPENCODE_MAX_STEPS` | Builder step budget per turn (default 200); mandatory finish-up steer at 90%. Recreate bot and opencode after changes. |
-| `CONTEXT7_ENABLED` / `CONTEXT7_API_KEY` | V2 library documentation MCP: enabled by default (`1`); set `0` to disable. Optional API key raises rate limits. Recreate opencode after changes. |
-| `OPENCODE_RECONCILE_TIMEOUT_MS` / `OPENCODE_RECONCILE_POLL_MS` | Transport-failure recovery window and poll interval |
-| `OPENCODE_QUOTA_BLOCK_MIN_RETRY_MS` | Retry delay that classifies as exhausted quota instead of backoff |
-| `OPENCODE_FAILOVER_MODELS` | Backup models for quota blocks and persistent upstream errors; turns retry once on the first healthy entry. Changeable live via `/site-admin failover` |
-| `OPENCODE_BLIP_NUDGES` | Quick same-model retries for transient upstream errors (5xx/overloaded/429) before failing or failing over (default 2; 0 disables) |
-| `SESSION_IDLE_RESET_MS` / `SESSION_CONTEXT_COMPACT_THRESHOLD` | Fresh session after idle; auto-compaction threshold |
-| `OPENCODE_API_KEY` and other provider keys | Provider credentials (or store later via `/site-admin token`) |
-| `OPENCODE_HOST_CONFIG_DIR` | Read-only host config directory (default `./opencode/host`); optional `providers.json` adds/overrides native providers, endpoints, models, capabilities and prices |
-| `OPENCODE_ENV_FILE` | Optional extra environment file for custom provider credentials (default `.env.opencode`); standard keys above still come from `.env` |
+```text
+/makegam dimension:3d prompt: make a hovercraft course with checkpoints name: Hover Yard
+```
 
-Copy `opencode/host/providers.example.json` to `opencode/host/providers.json` and edit the native `providers` map for your host. Copy `.env.opencode.example` to `.env.opencode` for additional provider-specific variables. Both local files are Git-ignored. Provider configuration is separate from generated workspaces and cannot replace ThreadSite's agent/tool policy. Restart OpenCode after provider-file changes; recreate it after environment changes. See [provider setup and pricing](docs/deployment.md#opencode-providers-and-credentials).
+The bot opens a thread and shows its progress. When it's done, click **Open site** or **Play game**. Anyone with the link can open it in their browser.
 
-Token, cache, per-model and failed-turn usage continue through OpenCode into `/site-admin usage`. Built-in catalog prices and custom model `cost` values use USD per million tokens. Optional compatible catalog discovery imports advertised prices; missing prices remain unknown, so a $0 report alone does not establish that a model is free.
+To make changes, just reply:
 
-Set `contextCaps` in the host JSON to cap any paid or free provider/model, including OpenCode's built-in catalog: `{"contextCaps":{"openai":100000,"surplus/deepseek-v4.1-flash":64000}}`. Model entries override provider entries; `0` removes that host cap. Caps affect compaction and the bot's context meter, retain smaller native limits, and do not require catalog discovery. Unlisted providers keep their native limits. Surplus defaults to 100000 tokens.
+> Add a night mode and make the text bigger.
+>
+> Give the hovercraft a boost button.
 
-#### Surplus model availability
+Attach images or files for reference, or reply while the bot is working to give it more instructions. The pinned card has the latest link, source code and project controls.
 
-The custom Surplus `/v1/models` fetcher remains enabled at startup, including with credentials stored through `/site-admin token`. It uses the shared OpenCode provider loader for capabilities, prices, limits and reasoning variants. Defaults live in `opencode/providers.json`; configure Surplus entirely in the private `opencode/host/providers.json`, with no Surplus environment variables required.
+### Working together
 
-| Setting | Purpose |
-| --- | --- |
-| `providers.surplus.settings.apiKey` / `baseURL` | Buyer key and API base (`https://api.surplusintelligence.ai/v1`); omit the key to use stored credentials |
-| `providers.surplus.models` | Fallback/extra model map merged with live discovery |
-| `contextCaps.surplus` | Advertised context ceiling (default 100000, `0` disables); model entries such as `surplus/deepseek-v4.1-flash` override it |
+Thread members can make changes by default. Use **Collaboration** on the pinned card to limit editing to chosen people or approve requests first.
 
-### Forgejo
+**Queue** shows waiting requests. Use `/site stop` to stop the current work or `/site revert` to undo the last accepted update. See the [command guide](docs/commands.md) for all controls.
 
-| Setting | Purpose |
-| --- | --- |
-| `FORGEJO_PUBLIC_URL` / `FORGEJO_DOMAIN` | Public browser/source URL |
-| `FORGEJO_INTERNAL_URL` / `FORGEJO_PORT` | URL used by containers and the bot |
-| `FORGEJO_OWNER` / `FORGEJO_ADMIN_USER` / `FORGEJO_ADMIN_PASSWORD` | Service account and admin bootstrap |
-| `FORGEJO_WEBHOOK_ALLOWED_HOSTS` | Hosts Forgejo may call for push webhooks (default `bot`) |
-| `EXTERNAL_PUSH_POLL_MS` / `WEBHOOK_ENABLED` | External-push detection fallback polling |
+![A Discord game server with project threads and a pinned game card](docs/screenshots/discord-games.png)
 
-### Sites and publication
+## Multiplayer
 
-| Setting | Purpose |
-| --- | --- |
-| `SITES_HOST_PATH` | Host directory served by Apache, bind-mounted into the bot |
-| `PUBLIC_SITES_BASE_URL` | Public base URL of the generated sites |
-| `COMPOSE_PROFILES` / `SITES_DOMAIN` | Activate the optional Caddy edge (`caddy`) and its public hostname with automatic HTTPS |
-| `MAX_SITE_BYTES` / `MAX_SITE_FILES` / `MAX_PROMPT_CHARS` | Publication and prompt limits |
-| `COMMIT_BOT_NAME` / `COMMIT_BOT_EMAIL` | Committer identity for harness-made commits |
+Games can use a shared arena, invite-code rooms or singleplayer mode. For example:
 
-### Multiplayer relay
+```text
+/makegam dimension:2d multiplayer:rooms prompt: make a co-op dungeon crawler
+```
 
-| Setting | Purpose |
-| --- | --- |
-| `MULTIPLAYER_ENABLED` | Provision netcode into new game projects |
-| `GAMESERVER_PUBLIC_URL` / `GAMESERVER_INTERNAL_URL` / `GAMESERVER_PORT` | Relay endpoints |
-| `GAMESERVER_ALLOWED_ORIGINS` | Browser origin allowlist (blank = any) |
-| `GAMESERVER_MAX_PEERS_PER_ROOM` / `GAMESERVER_MAX_ROOMS_PER_GAME` | Tenancy caps |
-| `GAMESERVER_RATE_PER_SECOND` / `GAMESERVER_RATE_BURST` | Per-connection rate limits |
-| `GAMESERVER_ROOM_TTL_MS` / `GAMESERVER_HOST_STALL_MS` | Empty-room GC and host-stall authority loss |
-| `GAMESERVER_STATE_DIR` / `GAMESERVER_PERSIST_INTERVAL_MS` | Arena snapshot persistence |
-| `GAMESERVER_MAX_SAVED_PLAYERS_PER_GAME` / `GAMESERVER_MAX_SAVE_BYTES_PER_GAME` | Personal save and leaderboard capacity; stored under `GAMESERVER_STATE_DIR` |
+ThreadSite includes the multiplayer server. Games can also use saved progress and global leaderboards, and fall back to solo play if multiplayer is unavailable. Change an existing game's mode with `/site multiplayer`.
 
-### Preview service
+See [multiplayer](docs/multiplayer.md) for modes, saves and hosting.
 
-| Setting | Purpose |
-| --- | --- |
-| `PREVIEW_CPUS` / `PREVIEW_MEMORY` | CPU render throughput and memory (main perf knobs) |
-| `PREVIEW_BUILD_CONCURRENCY` / `PREVIEW_SNAPSHOT_CACHE` | Concurrent in-memory builds / cached builds |
-| `BROWSER_QA_ENABLED` / `BROWSER_QA_TIMEOUT_MS` | Disable or bound the post-build browser QA pass |
+## Gallery
 
-## Documentation
+Published projects appear in a shared gallery. Search, filter by game type, save favourites or pick something at random.
 
-- [docs/commands.md](docs/commands.md) — Discord workflow, all `/site`, `/makegam`, and `/site-admin` commands, live progress cards, repo push keys
-- [docs/architecture.md](docs/architecture.md) — pipeline, static-only boundary, harness build, preview/browser QA, transport recovery, persistence
-- [docs/multiplayer.md](docs/multiplayer.md) — relay architecture, multiplayer protocol, relay configuration and proxying
-- [docs/gallery.md](docs/gallery.md) — gallery discovery, public metadata, local collections and browser checks
-- [docs/deployment.md](docs/deployment.md) — full deployment walkthrough, one-command Caddy quickstart, Apache/Cloudflare proxying, cache headers, `start.sh`, security notes
-- [docs/maintenance.md](docs/maintenance.md) — project cleanup, regression checks, integration tests
-- [docs/opencode-v2.md](docs/opencode-v2.md) — v2 runtime, scripted integration checks and a live free-model throughput test
+![ThreadSite's project gallery with browser games, websites, search, and filters](docs/screenshots/threadsite-gallery-desktop.png)
+
+## Docs
+
+- [Discord setup](docs/discord.md): bot token, permissions and server invite
+- [Commands](docs/commands.md): project controls, collaboration and admin commands
+- [Multiplayer](docs/multiplayer.md): game modes, saves and leaderboards
+- [Gallery](docs/gallery.md): browsing and sharing projects
+- [Maintenance](docs/maintenance.md): updates, cleanup and tests
+- [Architecture](docs/architecture.md) and [OpenCode](docs/opencode-v2.md): how it works
+
+For local development, use Node 24 and run the [checks](docs/maintenance.md#local-regression-checks) in the component you're changing. GitHub Actions runs the main checks on pushes and pull requests.
+
+ThreadSite is [MIT licensed](LICENSE).

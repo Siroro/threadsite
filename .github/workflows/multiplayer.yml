@@ -1,0 +1,76 @@
+name: Multiplayer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  relay:
+    name: Relay, client, and persistence
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: gameserver
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            bot/package-lock.json
+            gameserver/package-lock.json
+      - run: npm ci
+        working-directory: bot
+      - run: npm run build:net
+        working-directory: bot
+      - run: npm ci
+      - run: npm run build
+      - name: Test relay and browser client
+        shell: bash
+        env:
+          GAMESERVER_HOST: 127.0.0.1
+          GAMESERVER_PORT: '8090'
+          GAMESERVER_STATE_DIR: ${{ runner.temp }}/threadsite-relay
+        run: |
+          node dist/server.js > "$RUNNER_TEMP/threadsite-relay.log" 2>&1 &
+          relay_pid=$!
+          trap 'kill "$relay_pid" 2>/dev/null || true; wait "$relay_pid" 2>/dev/null || true; cat "$RUNNER_TEMP/threadsite-relay.log"' EXIT
+          ready=false
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:8090/health > /dev/null; then
+              ready=true
+              break
+            fi
+            kill -0 "$relay_pid"
+            sleep 0.5
+          done
+          if [[ "$ready" != true ]]; then
+            echo "Test relay did not become healthy after $attempt attempts" >&2
+            exit 1
+          fi
+          npm run test:relay
+          npm run test:client
+      - name: Test recovery and saved state
+        env:
+          GAMESERVER_STATE_DIR: ${{ runner.temp }}/threadsite-recovery
+        run: |
+          npm run test:storage
+          npm run test:restart
+          npm run test:durable
+          npm run test:stall
+          npm run test:delete
+          npm run test:persistence
+          npm run test:leaderboards
