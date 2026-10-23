@@ -14,16 +14,15 @@ Start a project with a slash command, then reply in its thread to make changes. 
 
 You'll need a Linux server, a domain and a [Discord bot token](docs/discord.md). Enable **Message Content Intent** when creating the bot.
 
-Point `sites.example.com` and `git.example.com` at your server, and open ports **80 and 443**. Then run this on the server, replacing `example.com` with your domain:
+Point your sites and Git hostnames at your server, and open ports **80 and 443**. Then run the interactive installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh | bash -s -- \
-  --domain example.com --install-docker
+curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh | bash
 ```
 
-Follow the prompts for your bot token and AI model settings. The installer prints a Discord invite link, installs anything missing, sets up HTTPS with Caddy and waits for the bot to connect. Tokens are entered privately. When it's done, try `/site start` in your Discord server.
+It asks for your exact sites and Git hostnames, such as `lab.example.com` and `git.example.com`, an optional games hostname, your Discord token and AI model settings. Leave the games hostname blank to share the sites address. Tokens are entered privately.
 
-Have different hostnames? Use `--sites-domain lab.example.com --git-domain git.example.com` instead of `--domain example.com`. Multiplayer shares the sites address; `--games-domain` is optional.
+The installer offers to install missing tools and Docker, prints a Discord invite link, sets up HTTPS with Caddy and waits for the bot to connect. When it's done, try `/site start` in your Discord server. On reruns, press Enter to keep saved hostnames or enter `-` at the games prompt to share the sites address again.
 
 See the [install guide](docs/deployment.md#caddy-quickstart) for custom domains, unattended installs and reruns. If you already run a web server or hosting panel, use the [existing server setup](docs/deployment.md#existing-server-setup).
 

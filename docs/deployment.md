@@ -6,7 +6,7 @@ For a new server, use the [Caddy quickstart](#caddy-quickstart). If you already 
 
 - A Linux server
 - Domain names pointing at the server for public hosting
-- A Discord bot token and application ID
+- A Discord bot token (the installer discovers the application ID)
 - Docker and Docker Compose (the quickstart can install these)
 
 You only need Node 24 on the host for local development. The containers include it.
@@ -15,25 +15,26 @@ You only need Node 24 on the host for local development. The containers include 
 
 **Recommended for new servers.** The installer collects your settings, builds the services, sets up HTTPS and waits for the bot to connect to Discord.
 
-First, [create a Discord bot](discord.md) and enable Message Content Intent. Point `sites.example.com` and `git.example.com` at your server, and make ports 80 and 443 reachable. Replace `example.com` below with your domain:
+First, [create a Discord bot](discord.md) and enable Message Content Intent. Point your sites and Git hostnames at your server and make ports 80 and 443 reachable. Run the installer and answer its prompts:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh | bash -s -- \
-  --domain example.com \
-  --install-docker
+curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh | bash
 ```
 
 The prompts work even when the script is piped into Bash. You can also download it and run it directly:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh -o threadsite-setup.sh
-bash threadsite-setup.sh --domain example.com --install-docker
+bash threadsite-setup.sh
 ```
 
-For existing hostnames, use `--sites-domain lab.example.com --git-domain git.example.com` instead of `--domain example.com`. Multiplayer and leaderboards use `wss://lab.example.com/ws` on the same sites hostname. You do not need a games subdomain. Add `--games-domain games.example.com` if you want a separate one.
+Enter the full hostnames you want, such as `lab.example.com` for sites and `git.example.com` for source repositories. At the games prompt, press Enter to share the sites hostname, or enter a separate games hostname. Multiplayer and leaderboards use `wss://lab.example.com/ws` when sharing.
+
+You can also supply options to skip those prompts: `--sites-domain lab.example.com --git-domain git.example.com`, or `--domain example.com` to use `sites.example.com` and `git.example.com`. Add `--games-domain games.example.com` for a separate games host or `--games-on-sites` to share the sites host. `--install-docker` approves installing missing dependencies without prompting.
 
 It asks for:
 
+- Sites and Git hostnames, and an optional games hostname. Explicit hostname options skip the matching prompts.
 - Your Discord bot token. Input is hidden, and the application ID is discovered automatically.
 - A server ID for commands in one server, or a blank value for global commands. It prints an invite link and checks that the bot has joined a server.
 - Optional extra admin user IDs. People with Manage Server already have admin access.
@@ -49,7 +50,7 @@ The installer uses `scripts/bootstrap-forgejo.sh --no-restart-bot` so the bot st
 
 Saved settings are reused, including credentials. The script rebuilds the services and recreates the bot so configuration changes take effect. It keeps existing projects, provider settings, volumes and private files. An existing checkout is reused without fetching or resetting Git; use `./start.sh` when you want to update the code.
 
-An existing dedicated games hostname is preserved on reruns. Pass `--games-on-sites` to switch back to the sites hostname and remove the installer-managed games vhost.
+Hostnames appear as defaults on interactive reruns. Press Enter to keep them or type replacements. At the games prompt, enter `-` to share the sites hostname again and remove the installer-managed games vhost. For unattended reruns, pass `--games-on-sites`; otherwise the saved games host is kept.
 
 A failed credential check stops before services start. If a later startup check fails, the saved configuration stays available for a retry. Use `--skip-bot` only when you deliberately want infrastructure without a working Discord bot.
 

@@ -232,27 +232,9 @@ exec "$PWD/bin/docker-original" "$@"
   assert.equal((await f.calls()).match(/compose restart bot/g)?.length, 1);
 });
 
-test("piped installation reads prompts from the terminal and hides the token", { skip: process.platform === "win32", timeout: 45_000 }, async (t) => {
-  const f = await fixture(t);
-  // Simulate a missing dependency. The package-manager stub proves that the
-  // answer reaches the installer without changing the test host's packages.
-  await fs.writeFile(path.join(f.root, "shell-env"), `command() {
-    if [[ "$*" == '-v jq' && ! -f "$PWD/jq-installed" ]]; then return 1; fi
-    builtin command "$@"
-  }\n`);
-  await fs.writeFile(path.join(f.root, "bin/apt-get"), '#!/usr/bin/env bash\nprintf installed > jq-installed\n', { mode: 0o755 });
-  await fs.writeFile(path.join(f.root, "bin/sudo"), '#!/usr/bin/env bash\nexec "$@"\n', { mode: 0o755 });
-  const command = 'export PATH="$PWD/bin:$PATH"; cat scripts/caddy-quickstart.sh | bash -s -- --domain example.com';
-  const child = spawn("script", ["-qefc", command, "/dev/null"], { cwd: f.root, env: { ...f.baseEnv, BASH_ENV: path.join(f.root, "shell-env") }, stdio: ["pipe", "pipe", "pipe"] });
+async function runInteractive(t: TestContext, f: Awaited<ReturnType<typeof fixture>>, responses: [string, string][], command = 'export PATH="$PWD/bin:$PATH"; cat scripts/caddy-quickstart.sh | bash', env: NodeJS.ProcessEnv = {}) {
+  const child = spawn("script", ["-qefc", command, "/dev/null"], { cwd: f.root, env: { ...f.baseEnv, ...env }, stdio: ["pipe", "pipe", "pipe"] });
   t.after(() => { child.kill(); });
-  const responses = [
-    ["Install missing tools (jq)", "y"],
-    ["Discord bot token (", token],
-    ["Discord server ID (", "223456789012345678"],
-    ["Extra admin user IDs,", ""],
-    ["Builder model (", ""],
-    ["API key for opencode (", ""],
-  ];
   let output = "";
   let index = 0;
   const accept = (chunk: Buffer) => {
@@ -268,9 +250,79 @@ test("piped installation reads prompts from the terminal and hides the token", {
   const code = await new Promise<number | null>((resolve, reject) => { child.on("error", reject); child.on("exit", resolve); });
   assert.equal(code, 0, output);
   assert.equal(index, responses.length);
+  return output;
+}
+
+test("piped installation reads prompts from the terminal and hides the token", { skip: process.platform === "win32", timeout: 45_000 }, async (t) => {
+  const f = await fixture(t);
+  // Simulate a missing dependency. The package-manager stub proves that the
+  // answer reaches the installer without changing the test host's packages.
+  await fs.writeFile(path.join(f.root, "shell-env"), `command() {
+    if [[ "$*" == '-v jq' && ! -f "$PWD/jq-installed" ]]; then return 1; fi
+    builtin command "$@"
+  }\n`);
+  await fs.writeFile(path.join(f.root, "bin/apt-get"), '#!/usr/bin/env bash\nprintf installed > jq-installed\n', { mode: 0o755 });
+  await fs.writeFile(path.join(f.root, "bin/sudo"), '#!/usr/bin/env bash\nexec "$@"\n', { mode: 0o755 });
+  const responses: [string, string][] = [
+    ["Install missing tools (jq)", "y"],
+    ["Games hostname (", ""],
+    ["Discord bot token (", token],
+    ["Discord server ID (", "223456789012345678"],
+    ["Extra admin user IDs,", ""],
+    ["Builder model (", ""],
+    ["API key for opencode (", ""],
+  ];
+  const output = await runInteractive(t, f, responses, 'export PATH="$PWD/bin:$PATH"; cat scripts/caddy-quickstart.sh | bash -s -- --domain example.com', { BASH_ENV: path.join(f.root, "shell-env") });
   assert.ok(!output.includes(token), "terminal must not echo the bot token");
   assert.equal(await f.setting("DISCORD_BOT_TOKEN"), token);
   assert.equal(await f.setting("DISCORD_GUILD_ID"), "223456789012345678");
   assert.equal(await f.read("jq-installed"), "installed");
   assert.ok((await f.calls()).includes("compose logs --no-color bot"));
+});
+
+test("interactive setup needs no flags for custom hostnames, optional games hosting and private provider credentials", { skip: process.platform === "win32", timeout: 45_000 }, async (t) => {
+  for (const gamesHost of ["", "games.example.net"]) {
+    const f = await fixture(t);
+    const key = "private-interactive-provider-key";
+    const command = gamesHost
+      ? 'export PATH="$PWD/bin:$PATH"; cat scripts/caddy-quickstart.sh | bash'
+      : 'export PATH="$PWD/bin:$PATH"; bash scripts/caddy-quickstart.sh';
+    const output = await runInteractive(t, f, [
+      ["Sites hostname (", "lab.siroro.co.uk"],
+      ["Git hostname (", "git.siroro.co.uk"],
+      ["Games hostname (", gamesHost],
+      ["Discord bot token (", token],
+      ["Discord server ID (", "223456789012345678"],
+      ["Extra admin user IDs,", "323456789012345678"],
+      ["Builder model (", "openai/coder"],
+      ["API key for openai (", key],
+    ], command);
+    assert.equal(await f.setting("PUBLIC_SITES_BASE_URL"), "https://lab.siroro.co.uk");
+    assert.equal(await f.setting("FORGEJO_PUBLIC_URL"), "https://git.siroro.co.uk");
+    assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), `wss://${gamesHost || "lab.siroro.co.uk"}/ws`);
+    assert.equal(await f.setting("DISCORD_ADMIN_USER_IDS"), "323456789012345678");
+    assert.equal(await f.setting("OPENCODE_DEFAULT_MODEL"), "openai/coder");
+    assert.equal(await f.setting("OPENAI_API_KEY"), key);
+    assert.ok(!output.includes(token) && !output.includes(key));
+    assert.ok((await f.calls()).includes("compose logs --no-color bot"));
+  }
+});
+
+test("interactive reruns retain saved settings and allow switching games back to the sites hostname", { skip: process.platform === "win32", timeout: 45_000 }, async (t) => {
+  const f = await fixture(t);
+  await f.run([...f.args, "--games-domain", "games.example.com"]);
+  await runInteractive(t, f, [
+    ["Sites hostname (", ""],
+    ["Git hostname (", ""],
+    ["Games hostname (", "-"],
+    ["Discord server ID (", ""],
+    ["Extra admin user IDs,", ""],
+    ["Builder model (", ""],
+    ["API key for opencode (", ""],
+  ]);
+  assert.equal(await f.setting("DISCORD_BOT_TOKEN"), token);
+  assert.equal(await f.setting("PUBLIC_SITES_BASE_URL"), "https://sites.example.com");
+  assert.equal(await f.setting("FORGEJO_PUBLIC_URL"), "https://git.example.com");
+  assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), "wss://sites.example.com/ws");
+  await assert.rejects(fs.access(path.join(f.root, "caddy/vhosts/games.caddy")), { code: "ENOENT" });
 });
