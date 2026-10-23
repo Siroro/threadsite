@@ -12,7 +12,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 COPY --from=build /app/dist ./dist
 ENV NODE_ENV=production
-# ARENA (single-mode) worlds persist here; mount a volume at /data to keep
+# Arena worlds, personal saves and leaderboards persist here; mount /data to keep
 # them across container recreation.
 ENV GAMESERVER_STATE_DIR=/data/threadsite-relay
 EXPOSE 8090

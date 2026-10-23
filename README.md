@@ -13,13 +13,15 @@ Projects default to **anyone can edit**. The human thread owner can use **Collab
 
 The one deliberate runtime exception is the **harness-owned multiplayer relay**: the model never writes server code, it only uses a vendored browser client pointed at a shared multi-tenant WebSocket relay. Games stay fully playable solo when the relay is unreachable.
 
+Networked games can also use harness-managed personal save slots and public best-score leaderboards through `net.saves` and `net.leaderboards`. Anonymous player progress survives browser sessions and relay restarts; saves use revision checks to prevent stale tabs overwriting newer progress. Scores are client-reported. See [player persistence](docs/multiplayer.md#personal-saves-and-leaderboards).
+
 See [docs/architecture.md](docs/architecture.md) for the full pipeline, agent sandboxing, transport recovery, and persistence model.
 
 ## Stack
 
 - Node 24 + discord.js bot
 - Native OpenCode v2 + `@opencode/client`
-- One shared Node 24 + `ws` multiplayer relay for all games (multi-tenant, in-memory)
+- One shared Node 24 + `ws` multiplayer relay for all games (multi-tenant, with arena snapshots and SQLite player storage)
 - Forgejo 15 LTS (SQLite, no separate database needed)
 - Your existing Apache static directory (the default), an optional bundled `httpd:2.4-alpine` profile, or an optional Caddy edge with automatic HTTPS
 - Playwright MCP preview service (CPU-rendered Chromium, no GPU required)
@@ -112,6 +114,7 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 | `GAMESERVER_RATE_PER_SECOND` / `GAMESERVER_RATE_BURST` | Per-connection rate limits |
 | `GAMESERVER_ROOM_TTL_MS` / `GAMESERVER_HOST_STALL_MS` | Empty-room GC and host-stall authority loss |
 | `GAMESERVER_STATE_DIR` / `GAMESERVER_PERSIST_INTERVAL_MS` | Arena snapshot persistence |
+| `GAMESERVER_MAX_SAVED_PLAYERS_PER_GAME` / `GAMESERVER_MAX_SAVE_BYTES_PER_GAME` | Personal save and leaderboard capacity; stored under `GAMESERVER_STATE_DIR` |
 
 ### Preview service
 

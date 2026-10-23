@@ -109,7 +109,7 @@ Every accepted thread update is saved before it is marked queued, including its 
 - Published sites: `SITES_HOST_PATH`.
 - Agent auth/session state: the `opencode-data` Docker volume.
 - Forgejo data: the `forgejo-data` Docker volume.
-- Multiplayer rooms are intentionally not persisted (see [multiplayer.md](multiplayer.md)).
+- Arena worlds persist as JSON snapshots; room-code worlds remain ephemeral. Personal save slots and leaderboards for both networked modes persist separately in `players.sqlite` under `GAMESERVER_STATE_DIR` (see [multiplayer.md](multiplayer.md#personal-saves-and-leaderboards)).
 
 If a session ID disappears but the workspace remains, the bot creates a new agent session against the same files, updates its mapping, and retries the message. Site state lives primarily in the files/git history, not in model conversation memory.
 

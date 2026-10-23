@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import zlib from "node:zlib";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
+import { PlayerStore, StorageError } from "./player-store.js";
 
 const PROTOCOL_VERSION = 4;
 const SINGLE_ROOM_KEY = "@single";
@@ -52,6 +53,10 @@ const PERSIST_INTERVAL_MS = intEnv("GAMESERVER_PERSIST_INTERVAL_MS", 1000);
 const SHUTDOWN_FLUSH_TIMEOUT_MS = intEnv("GAMESERVER_SHUTDOWN_FLUSH_TIMEOUT_MS", 1000);
 const ALLOWED_ORIGINS = env("GAMESERVER_ALLOWED_ORIGINS").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
 const ADMIN_TOKEN_FILE = env("GAMESERVER_ADMIN_TOKEN_FILE", "/run/threadsite-control/cleanup-token");
+const playerStore = new PlayerStore(path.join(STATE_DIR, "players.sqlite"), {
+  players: intEnv("GAMESERVER_MAX_SAVED_PLAYERS_PER_GAME", 10_000),
+  gameBytes: intEnv("GAMESERVER_MAX_SAVE_BYTES_PER_GAME", 16 * 1024 * 1024),
+});
 
 type Frame = { t: string; [key: string]: unknown };
 type PlayerState = { from: string; cid: string | null; s: unknown; ts: number; pt?: number; pr?: boolean };
@@ -70,6 +75,8 @@ interface Peer {
   game: string | null;
   room: Room | null;
   limiter: RateLimiter;
+  storageLimiter: RateLimiter;
+  playerId: string | null;
 }
 
 class RateLimiter {
@@ -321,6 +328,10 @@ function handleJoin(peer: Peer, msg: Frame): void {
   peer.room = room;
   peer.name = cleanName(msg.name);
   peer.cid = cleanCid(msg.cid) ?? `cid-${crypto.randomUUID()}`;
+  // Public cid/peer IDs are never credentials. The secret is game-scoped and
+  // stays on this connection; only its one-way identifier may enter a board.
+  peer.playerId = typeof msg.playerToken === "string" && /^[a-f0-9]{64}$/.test(msg.playerToken)
+    ? crypto.createHash("sha256").update(`${gameId}:${msg.playerToken}`).digest("hex") : null;
   room.peers.set(peer.id, peer);
   room.touch();
   if (room.hostId === null) setAuthority(room, peer.id);
@@ -340,6 +351,7 @@ function handleJoin(peer: Peer, msg: Frame): void {
       presenceTs: room.presences.get(other.id)?.ts ?? null,
     })),
     world: worldFrame(room.world), serverTs: Date.now(),
+    persistence: { version: 1, playerId: peer.playerId },
   });
   broadcast(room, { t: "peer-join", peer: { id: peer.id, name: peer.name, cid: peer.cid } }, peer.id);
 }
@@ -347,6 +359,25 @@ function handleJoin(peer: Peer, msg: Frame): void {
 function handleFrame(peer: Peer, msg: Frame): void {
   const room = peer.room;
   switch (msg.t) {
+    case "storage": {
+      const id = typeof msg.id === "string" && EVENT_ID_PATTERN.test(msg.id) ? msg.id : null;
+      const fail = (code: string, message: string) => send(peer, { t: "storage-result", id, ok: false, code, message });
+      if (!id) { fail("bad_request", "Persistence requests require a bounded request id."); return; }
+      if (!peer.game || !room || deletedGames.has(peer.game)) { fail("not_joined", "Join before using persistence."); return; }
+      if (!peer.playerId) { fail("identity_unavailable", "A private player token is required for persistence."); return; }
+      if (!peer.storageLimiter.allow()) { fail("storage_rate_limited", "Persistence allows 5 requests/s with a burst of 10; save at checkpoints."); return; }
+      try {
+        const result = playerStore.execute(peer.game, peer.playerId, peer.name, msg);
+        send(peer, { t: "storage-result", id, ok: true, result });
+      } catch (error) {
+        if (error instanceof StorageError) fail(error.code, error.message);
+        else {
+          console.warn(`[threadsite-gameserver] player_storage failed game=${peer.game}: ${String((error as Error).message)}`);
+          fail("storage_unavailable", "Player storage is temporarily unavailable. Read the save again before retrying a write.");
+        }
+      }
+      return;
+    }
     case "event": {
       const type = typeof msg.e === "string" ? msg.e.slice(0, 64) : "";
       const id = typeof msg.id === "string" && EVENT_ID_PATTERN.test(msg.id) ? msg.id : "";
@@ -474,6 +505,7 @@ async function deleteGame(gameId: string): Promise<void> {
     room.peers.clear();
   }
   games.delete(gameId);
+  playerStore.deleteGame(gameId);
   await durableTails.get(gameId);
   await fs.rm(stateFile(gameId), { force: true });
   for (const name of await fs.readdir(STATE_DIR)) {
@@ -497,7 +529,7 @@ const server = http.createServer((req, res) => {
       }
       if (req.method === "GET") {
         const files = await fs.readdir(STATE_DIR).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
-        const gameIds = new Set([...durableWorlds.keys(), ...games.keys()]);
+        const gameIds = new Set([...durableWorlds.keys(), ...games.keys(), ...playerStore.games()]);
         for (const file of files) {
           const game = /^([a-z0-9][a-z0-9-]{2,63})\.json(?:\.\d+\.[a-f0-9]{8}\.tmp)?$/.exec(file)?.[1];
           if (game) gameIds.add(game);
@@ -559,6 +591,7 @@ wss.on("connection", (socket: LiveSocket) => {
   const peer: Peer = {
     id: `p-${++nextPeerSeq}`, cid: null, ws: socket, name: "player", game: null, room: null,
     limiter: new RateLimiter(RATE_PER_SECOND, RATE_BURST),
+    storageLimiter: new RateLimiter(5, 10), playerId: null,
   };
   const joinTimer = setTimeout(() => { if (!peer.room) socket.close(4000, "join timeout"); }, JOIN_TIMEOUT_MS);
   socket.on("pong", () => { socket.isAlive = true; });

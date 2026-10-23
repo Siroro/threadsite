@@ -27,6 +27,10 @@ export interface NetWorldSnapshot<T = any> {
 }
 export interface NetPlayerStateEntry<T = any> { id: string; cid: string | null; state: T }
 export interface NetPresenceEntry<T = any> { id: string; cid: string | null; state: T }
+export interface NetSave<T = unknown> { value: T | null; revision: number; updatedAt: number | null }
+export interface NetScore { playerId: string; name: string; score: number; updatedAt: number }
+export type NetScoreOrder = "asc" | "desc";
+export interface NetLeaderboard { order: NetScoreOrder | null; entries: NetScore[] }
 
 /** Engine-neutral 2D/3D transform. Extra game fields pass through unchanged. */
 export interface NetTransform {
@@ -140,6 +144,10 @@ export interface ThreadSiteNetOptions {
   /** Create a fresh code-addressed room. */
   createRoom?: boolean;
   name?: string;
+  /** Private 256-bit lowercase hex credential. Normally generated and stored in localStorage.
+   * Never put it in shared state, URLs, presence, or events. Not a Discord identity.
+   */
+  playerToken?: string;
   autoReconnect?: boolean;
   connectTimeoutMs?: number;
   /** Coalesced transform/player-state rate, 1-60 Hz. Default 25. */
@@ -192,6 +200,8 @@ const HEARTBEAT_TIMEOUT_MS = 30_000;
 const INTERPOLATED_KEYS = new Set(["x", "y", "z", "vx", "vy", "vz", "rotation", "angle", "facing"]);
 const CID_STORAGE_KEY = "threadsite-session-cid-v4";
 const RESUME_STORAGE_PREFIX = "threadsite-resume-room-v4:";
+const PLAYER_STORAGE_PREFIX = "threadsite-player-v1:";
+const temporaryPlayerTokens = new Map<string, string>();
 const encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
 
 export class ThreadSiteNetError extends Error {
@@ -249,6 +259,26 @@ function saveResumeRoom(game: string, room: string | null): void {
   } catch { /* storage is optional */ }
 }
 
+function playerIdentity(game: string, supplied?: string): { token: string | null; persistent: boolean } {
+  if (supplied !== undefined) {
+    if (!/^[a-f0-9]{64}$/.test(supplied)) throw new ThreadSiteNetError("playerToken must be 64 lowercase hex characters.", "bad_config");
+    return { token: supplied, persistent: false };
+  }
+  const key = `${PLAYER_STORAGE_PREFIX}${game}`;
+  try {
+    const saved = localStorage.getItem(key);
+    if (saved && /^[a-f0-9]{64}$/.test(saved)) return { token: saved, persistent: true };
+  } catch { /* unavailable storage uses a page-lifetime identity */ }
+  let token = temporaryPlayerTokens.get(game);
+  if (!token) {
+    try { token = Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join(""); }
+    catch { return { token: null, persistent: false }; }
+    temporaryPlayerTokens.set(game, token);
+  }
+  try { localStorage.setItem(key, token); return { token, persistent: true }; }
+  catch { return { token, persistent: false }; }
+}
+
 export class ThreadSiteNet {
   static roomFromUrl(): string | null {
     if (typeof location === "undefined") return null;
@@ -297,6 +327,11 @@ export class ThreadSiteNet {
   readonly presence: NetPresence;
   readonly entities: NetEntities;
   readonly run: NetRun;
+  readonly saves: NetSaves;
+  readonly leaderboards: NetLeaderboards;
+  private readonly playerIdentity: { token: string | null; persistent: boolean };
+  private storagePlayerId: string | null = null;
+  private readonly storageRequests = new Map<string, { resolve: (value: any) => void; reject: (error: ThreadSiteNetError) => void; timer: Timer }>();
 
   id: string | null = null;
   cid: string | null = loadCid();
@@ -364,6 +399,7 @@ export class ThreadSiteNet {
       throw new ThreadSiteNetError(`Invalid game id '${game}' — use NET_CONFIG.game unchanged.`, "bad_config");
     }
     this.game = game;
+    this.playerIdentity = playerIdentity(game, options.playerToken);
     if (options.protocol !== undefined && options.protocol !== PROTOCOL_VERSION) {
       throw new ThreadSiteNetError(`NET_CONFIG protocol ${options.protocol} does not match client v${PROTOCOL_VERSION}.`, "bad_config");
     }
@@ -416,12 +452,47 @@ export class ThreadSiteNet {
     this.presence = new NetPresence(this);
     this.entities = new NetEntities();
     this.run = new NetRun(this);
+    this.saves = new NetSaves(this);
+    this.leaderboards = new NetLeaderboards(this);
     this.worldSync = null;
     if (options.world) this.syncWorld(options.world);
     this.connectSocket();
   }
 
   get status(): NetStatus { return this.currentStatus; }
+  /** Public leaderboard identity; separate from live peer IDs and never a credential. */
+  get playerId(): string | null { return this.storagePlayerId; }
+  /** @internal */ get persistentIdentity(): boolean { return this.playerIdentity.persistent; }
+
+  /** @internal Online RPC only. Writes are never queued or replayed after an ambiguous failure. */
+  storageRequest<T>(request: Record<string, unknown>): Promise<T> {
+    if (this.manuallyClosed || this.status !== NET_STATUS.ONLINE || this.socket?.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new ThreadSiteNetError("Player storage requires an online relay. Keep solo play available.", "storage_offline"));
+    }
+    if (!this.storagePlayerId) return Promise.reject(new ThreadSiteNetError("This relay or browser does not support player persistence.", "storage_unsupported"));
+    if (this.storageRequests.size >= 16 || this.socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+      return Promise.reject(new ThreadSiteNetError("Too many outstanding requests or a busy connection.", "storage_busy"));
+    }
+    const id = `storage.${this.eventInstance}.${++this.eventCounter}`;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.storageRequests.delete(id);
+        reject(new ThreadSiteNetError("Storage acknowledgement timed out. Read the save before retrying a write.", "storage_uncertain"));
+      }, 10_000);
+      this.storageRequests.set(id, { resolve, reject, timer });
+      try { this.sendFrame({ ...request, t: "storage", id }, true); }
+      catch (error) { clearTimeout(timer); this.storageRequests.delete(id); reject(error); }
+    });
+  }
+
+  private rejectStorageRequests(): void {
+    for (const request of this.storageRequests.values()) {
+      clearTimeout(request.timer);
+      request.reject(new ThreadSiteNetError("Connection closed before acknowledgement. Read the save before retrying a write.", "storage_uncertain"));
+    }
+    this.storageRequests.clear();
+    this.storagePlayerId = null;
+  }
   /**
    * Live link diagnostics for HUD display: round-trip, transit jitter, peer
    * count, measured complete-world cadence, last world-frame size, and
@@ -628,6 +699,7 @@ export class ThreadSiteNet {
   }
   close(): void {
     this.manuallyClosed = true;
+    this.rejectStorageRequests();
     this.flushPlayerState();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
@@ -736,7 +808,7 @@ export class ThreadSiteNet {
       room: this.requestedRoom || null,
       create: this.createRoom || (!this.requestedRoom && this.mode === "rooms"),
       resume: this.hasJoined || this.resumeRequested,
-      name: this.name, cid: this.cid,
+      name: this.name, cid: this.cid, playerToken: this.playerIdentity.token,
     }, true);
     socket.onmessage = (event) => {
       try {
@@ -752,6 +824,7 @@ export class ThreadSiteNet {
     };
     socket.onclose = (event) => {
       clearTimeout(failTimer);
+      this.rejectStorageRequests();
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
         const wasOnline = this.id !== null;
         const lostAuthorityEpoch = this.isHost ? this.authorityEpoch : null;
@@ -769,6 +842,7 @@ export class ThreadSiteNet {
   private handleFrame(frame: WireFrame, failTimer: Timer): void {
     switch (frame.t) {
       case "welcome": {
+        this.storagePlayerId = frame.persistence?.version === 1 && typeof frame.persistence.playerId === "string" ? frame.persistence.playerId : null;
         this.id = String(frame.you); this.cid = typeof frame.cid === "string" ? frame.cid : this.cid;
         this.mode = frame.mode === "single" ? "single" : "rooms";
         this.room = this.mode === "rooms" && typeof frame.room === "string" ? frame.room : null;
@@ -838,7 +912,23 @@ export class ThreadSiteNet {
           if (finite(frame.serverTs)) this.serverTimeOffset = frame.serverTs + this.rtt / 2 - Date.now();
         }
         return;
-      case "error": this.handleError(frame); return;
+      case "storage-result": {
+        const request = this.storageRequests.get(frame.id);
+        if (!request) return;
+        clearTimeout(request.timer); this.storageRequests.delete(frame.id);
+        if (frame.ok === true) request.resolve(frame.result);
+        else request.reject(new ThreadSiteNetError(String(frame.message ?? "Persistence request failed."), String(frame.code ?? "storage_unavailable")));
+        return;
+      }
+      case "error": {
+        const request = this.storageRequests.get(frame.id);
+        if (request) {
+          clearTimeout(request.timer); this.storageRequests.delete(frame.id);
+          request.reject(new ThreadSiteNetError(String(frame.message), String(frame.code)));
+          return;
+        }
+        this.handleError(frame); return;
+      }
     }
   }
 
@@ -988,6 +1078,34 @@ export class ThreadSiteNet {
     this.attempt += 1;
     const backoff = Math.min(8000, 500 * 2 ** Math.min(this.attempt, 4));
     this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; this.connectSocket(); }, backoff * (0.7 + Math.random() * 0.6));
+  }
+}
+
+/** Personal JSON checkpoint slots. CAS revisions prevent stale tabs overwriting newer progress. */
+export class NetSaves {
+  constructor(private readonly net: ThreadSiteNet) {}
+  get available(): boolean { return this.net.status === NET_STATUS.ONLINE && this.net.playerId !== null; }
+  /** False if storage is blocked or a caller supplies its own credential. */
+  get identityPersistent(): boolean { return this.net.persistentIdentity; }
+  get<T = unknown>(slot: string): Promise<NetSave<T>> {
+    return this.net.storageRequest({ op: "save.get", slot });
+  }
+  set<T>(slot: string, value: T, revision: number): Promise<NetSave<T>> {
+    return this.net.storageRequest({ op: "save.set", slot, value, revision });
+  }
+  delete(slot: string, revision: number): Promise<NetSave<null>> {
+    return this.net.storageRequest({ op: "save.delete", slot, revision });
+  }
+}
+
+/** Public per-game personal bests. Scores are client-reported, not cheat-proof. */
+export class NetLeaderboards {
+  constructor(private readonly net: ThreadSiteNet) {}
+  submit(board: string, score: number, options: { order?: NetScoreOrder } = {}): Promise<NetScore> {
+    return this.net.storageRequest({ op: "board.submit", board, score, order: options.order ?? "desc" });
+  }
+  list(board: string, options: { limit?: number } = {}): Promise<NetLeaderboard> {
+    return this.net.storageRequest({ op: "board.list", board, limit: options.limit ?? 10 });
   }
 }
 
