@@ -30,6 +30,8 @@ import { renderQueuePanel, type PanelSection } from "./card-panels.js";
 import { readProjectCardDocument } from "./project-docs.js";
 import { AdminReporter } from "./admin-reporter.js";
 import { commandJson } from "./commands.js";
+import { authorizeCard, CollaborationError, contributionAccess, interactionActor, ownerId, requireContributor, requireManager, type ProjectActor } from "./collaboration.js";
+import { approvalCard, CollaborationService, installApprovedUploads } from "./collaboration-service.js";
 import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
 import { getLogFile, log, logError, recentIncidents, recordIncident, serializeError } from "./logger.js";
@@ -156,7 +158,37 @@ const questionService = new QuestionService({
   error: (error) => logError("discord.question_delivery_failed", error, {}),
 });
 
+const collaboration = new CollaborationService({
+  store,
+  serialize: (threadId, work) => projects.enqueue(threadId, work),
+  prepare: async (project, request) => {
+    if (shuttingDown) throw new CollaborationError("The bot is restarting. This request is still awaiting approval.");
+    const channel = await client.channels.fetch(project.threadId);
+    if (!channel?.isThread()) throw new CollaborationError("The project thread is unavailable. The request is still awaiting approval.");
+    const images: PromptImage[] = request.attachments.filter((attachment) => attachment.mime.startsWith("image/"))
+      .map((attachment) => ({ mime: attachment.mime, filename: attachment.name, dataUrl: attachment.dataUrl }));
+    if (images.length && await withTimeout(projects.modelAcceptsImages(project.threadId).catch(() => undefined), 3000) !== true) {
+      throw new CollaborationError("This project's model cannot currently accept these images. The request is still awaiting approval.");
+    }
+    const files = await installApprovedUploads(project.workspacePath, request);
+    const prompt = [request.prompt, uploadPromptNote(files)].filter(Boolean).join("\n\n");
+    if (prompt.length > config.maxPromptChars) throw new CollaborationError("This request exceeds the prompt limit. Reject it and ask for a shorter request.");
+    const status = await channel.messages.fetch(request.id).catch(() => undefined)
+      ?? await channel.send(renderStatusCard("⏳ Queuing the approved request…"));
+    if (shuttingDown) throw new CollaborationError("The bot is restarting. This request is still awaiting approval.");
+    return { request: { prompt, displayPrompt: request.prompt, images, files, author: request.author, requesterId: request.requesterId, statusMessageId: status.id },
+      accepted: () => enqueueUserRequest(project.threadId, status, prompt, images, request.author, request.requesterId, request.prompt, files, true),
+    };
+  },
+  rejected: async (threadId, id) => {
+    const channel = await client.channels.fetch(threadId).catch(() => undefined);
+    if (channel?.isTextBased()) await channel.messages.fetch(id).then((message) => setStatusMessage(message, "🚫 The thread owner rejected this request.")).catch(() => undefined);
+  },
+  changed: (threadId) => { void refreshProjectCard(threadId); },
+});
 const cardInteractions = new CardInteractions({
+  collaboration,
+  adminUser: (userId) => config.adminUserIds.has(userId),
   store, questions: questionService,
   liveSnapshot: (resource) => liveProgress.get(resource)?.readSnapshot(),
   projectSections: projectDetailSections,
@@ -168,7 +200,8 @@ const cardInteractions = new CardInteractions({
   submit: submitCardRequest,
   stop: async (threadId, statusMessageId) => stopOutcomeText(await projects.stopTurn(threadId, statusMessageId)),
   busy: (threadId) => projects.agentBusy(threadId),
-  rollback: (threadId, expectedVersion) => projects.enqueue(threadId, async () => {
+  rollback: (threadId, expectedVersion, actor) => projects.enqueue(threadId, async () => {
+    requireCurrentContributor(threadId, actor);
     // Serialized with turns: re-check the agent and the failure this rollback
     // belongs to now that this closure is actually running, so a turn accepted
     // after the click can never have its work discarded.
@@ -567,6 +600,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if ((interaction.isButton() || interaction.isAnySelectMenu() || interaction.isModalSubmit()) && await cardInteractions.handle(interaction)) return;
   if (interaction.isButton()) {
     try {
+      if (interaction.channel?.isThread()) {
+        const project = store.getProject(interaction.channel.id);
+        if (project) authorizeCard(project, interactionActor(interaction, config.adminUserIds.has(interaction.user.id)),
+          interaction.customId.startsWith("q:") || interaction.customId.startsWith("qskip:") ? "answer" : "stop");
+      }
       if (interaction.customId.startsWith("q:") || interaction.customId.startsWith("qskip:")) {
         await handleQuestionButton(interaction);
       } else if (interaction.customId === "threadsite:stop") {
@@ -695,13 +733,39 @@ client.on(Events.MessageCreate, async (message) => {
     !(attachment.contentType ?? "").startsWith("image/")
   );
   if (!content && !imageAttachments.length && !uploadAttachments.length) return;
+  const actor: ProjectActor = {
+    userId: message.author.id,
+    admin: config.adminUserIds.has(message.author.id) || (message.member?.permissions.has(PermissionFlagsBits.ManageGuild) ?? false),
+    canSend: message.channel.permissionsFor(message.author)?.has(PermissionFlagsBits.SendMessagesInThreads) ?? true,
+    ...(message.channel.ownerId && message.channel.ownerId !== client.user?.id ? { threadOwnerId: message.channel.ownerId } : {}),
+  };
+  const access = contributionAccess(project, actor);
+  if (access === "denied") {
+    await message.reply({ content: "This project's owner has restricted edits to selected contributors. Ask the owner to add you using Collaboration on the project card.", allowedMentions: { parse: [] } }).catch(() => undefined);
+    return;
+  }
 
   // Acknowledge first: the capability check below calls the agent service,
   // whose HTTP timeouts are disabled by design, so a wedged service would
   // otherwise leave the message with no reply at all.
-  const status = await message.reply("⏳ Saving your request…").catch(() => undefined);
+  const reviewerId = ownerId(project, actor);
+  const status = await message.reply(access === "approval" ? {
+    content: `⏳ ${reviewerId ? `<@${reviewerId}> · ` : ""}Saving a request for owner review…`,
+    allowedMentions: { parse: [], users: reviewerId ? [reviewerId] : [], repliedUser: false },
+  } : "⏳ Saving your request…").catch(() => undefined);
   if (!status) {
     log("warn", "discord.reply_failed", { threadId: message.channel.id });
+    return;
+  }
+  if (access === "approval") {
+    const author = commitAuthorIdentity({ displayName: message.member?.displayName, globalName: message.author.globalName, username: message.author.username, id: message.author.id });
+    try {
+      await collaboration.request(project.threadId, actor, status.id, content || "Use the attached reference material to update the project.", author, [...message.attachments.values()]);
+    } catch (error) {
+      await setStatusMessage(status, `🚫 ${error instanceof CollaborationError ? error.message : "Could not save this request for approval. Please try again."}`).catch(() => undefined);
+      return;
+    }
+    await status.edit({ ...cardEdit(approvalCard(project, status.id, ownerId(project, actor))), allowedMentions: { parse: [], users: ownerId(project, actor) ? [ownerId(project, actor)!] : [] } }).catch(() => undefined);
     return;
   }
 
@@ -752,6 +816,8 @@ client.on(Events.MessageCreate, async (message) => {
     await status.edit("🚫 There was nothing to send. Describe the change you want in text instead.").catch(() => undefined);
     return;
   }
+  try { requireCurrentContributor(project.threadId, actor); }
+  catch (error) { await setStatusMessage(status, `🚫 ${(error as Error).message}`).catch(() => undefined); return; }
 
   // Only an explicit Discord reply to the current turn's status can steer it.
   // Ordinary messages, replies to other messages, attachments and late replies
@@ -772,22 +838,23 @@ client.on(Events.MessageCreate, async (message) => {
     id: message.author.id,
   });
 
-  await enqueueUserRequest(message.channel.id, status, prompt, images, author, message.author.id, undefined, uploads);
+  await enqueueUserRequest(message.channel.id, status, prompt, images, author, message.author.id, undefined, uploads, actor);
 });
 
 /** Both normal messages and modal requests use the same durable queue and drain. */
-async function enqueueUserRequest(threadId: string, status: Message, prompt: string, images: PromptImage[], author: CommitAuthor | undefined, requesterId: string, displayPrompt?: string, files?: readonly UploadedFile[]): Promise<void> {
+async function enqueueUserRequest(threadId: string, status: Message, prompt: string, images: PromptImage[], author: CommitAuthor | undefined, requesterId: string, displayPrompt?: string, files?: readonly UploadedFile[], authorization?: ProjectActor | true): Promise<void> {
   try {
+    if (authorization !== true) requireCurrentContributor(threadId, authorization ?? { userId: requesterId, admin: config.adminUserIds.has(requesterId), canSend: true });
     await store.appendQueuedRequest(threadId, { prompt, displayPrompt, author, requesterId, statusMessageId: status.id,
       images: images.length ? images : undefined, files: files?.length ? [...files] : undefined });
   } catch (error) {
-    await setStatusMessage(status, "❌ Could not save this request. Please send it again.").catch(() => undefined);
+    await setStatusMessage(status, error instanceof CollaborationError ? `🚫 ${error.message}` : "❌ Could not save this request. Please send it again.").catch(() => undefined);
     throw error;
   }
   await status.edit(cardEdit(renderStatusCard("✅ Request saved — queued for the next update pass."))).catch(() => undefined);
   let pending = pendingUpdates.get(threadId);
   if (!pending) { pending = { entries: [], scheduled: false }; pendingUpdates.set(threadId, pending); }
-  pending.entries.push({ prompt, displayPrompt, images, author, requesterId, status });
+  if (!pending.entries.some((entry) => (entry.requestStatusId ?? entry.status.id) === status.id)) pending.entries.push({ prompt, displayPrompt, images, author, requesterId, status });
   const running = store.getProject(threadId);
   if (running?.pendingTurn?.statusMessageId) liveProgress.get(running.pendingTurn.statusMessageId)?.callback({
     kind: "queue", text: "Saved requests", queuedRequests: running.pendingQueue?.length ?? 0,
@@ -797,6 +864,24 @@ async function enqueueUserRequest(threadId: string, status: Message, prompt: str
 
 async function submitCardRequest(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, attachments: Attachment[]): Promise<string> {
   if (shuttingDown) throw new CardUserError("The bot is restarting. Your request has not been queued; try again shortly.");
+  const actor = interactionActor(interaction, config.adminUserIds.has(interaction.user.id));
+  const current = store.getProject(project.threadId);
+  if (!current) throw new CollaborationError("This project is no longer available.");
+  if (contributionAccess(current, actor) === "approval") {
+    const channel = interaction.channel;
+    if (!channel || !("send" in channel)) throw new CollaborationError("The project thread is unavailable.");
+    const reviewerId = ownerId(current, actor);
+    const status = await channel.send({ ...renderStatusCard(`⏳ ${reviewerId ? `<@${reviewerId}> · ` : ""}Saving a request for owner review…`),
+      allowedMentions: { parse: [], users: reviewerId ? [reviewerId] : [] },
+    });
+    try {
+      await collaboration.request(project.threadId, actor, status.id, prompt, commitAuthorIdentity({ globalName: interaction.user.globalName, username: interaction.user.username, id: interaction.user.id }), attachments);
+      store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: status.id });
+      await status.edit({ ...cardEdit(approvalCard(current, status.id, ownerId(current, actor))), allowedMentions: { parse: [], users: ownerId(current, actor) ? [ownerId(current, actor)!] : [] } }).catch(() => undefined);
+    } catch (error) { await setStatusMessage(status, "🚫 Could not save this request for approval. Please try again.").catch(() => undefined); throw error; }
+    return "Your request is saved and waiting for the thread owner's approval. It has not been sent to the agent.";
+  }
+  requireCurrentContributor(project.threadId, actor);
   const imageAttachments = attachments.filter((attachment) => (attachment.contentType ?? "").startsWith("image/"));
   const uploadAttachments = attachments.filter((attachment) => !(attachment.contentType ?? "").startsWith("image/"));
   let images: PromptImage[] = [];
@@ -812,6 +897,7 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
     if (uploads.length !== uploadAttachments.length) throw new CardUserError("Some attachments could not be saved into the project. Your request was not queued; please attach them again.");
   }
   const fullPrompt = [prompt, uploadPromptNote(uploads)].filter(Boolean).join("\n\n");
+  requireCurrentContributor(project.threadId, actor);
   // A steer is confirmed by the private interaction reply alone: no public
   // card is posted unless the request falls through to the durable queue (the
   // turn ended first, or attachments forced the queue path). A steer that
@@ -825,7 +911,7 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
   const status = await channel.send(renderStatusCard("⏳ Saving your request…"));
   store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: status.id });
   const author = commitAuthorIdentity({ globalName: interaction.user.globalName, username: interaction.user.username, id: interaction.user.id });
-  try { await enqueueUserRequest(project.threadId, status, fullPrompt, images, author, interaction.user.id, prompt, uploads); }
+  try { await enqueueUserRequest(project.threadId, status, fullPrompt, images, author, interaction.user.id, prompt, uploads, actor); }
   catch (error) {
     // appendQueuedRequest failed before accepting anything. A new submission
     // can safely retry without duplicating an accepted prompt.
@@ -1103,6 +1189,7 @@ async function startProjectThread(
         renameable: created && !requestedName,
         initiator: interactionInitiator(interaction),
         initiatorUserId: interaction.user.id,
+        ownerUserId: !created && thread.ownerId && thread.ownerId !== client.user?.id ? thread.ownerId : interaction.user.id,
         statusMessageId: status.id,
         infoMessageId: card?.id,
       }, callback, (title) => applyAiThreadTitle(thread, title));
@@ -1184,13 +1271,14 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
   if (sub === "help") {
     await interaction.reply({
       content:
-        "**ThreadSite** — every normal message in a project thread edits its site or game.\n" +
+        "**ThreadSite** — by default, every normal message in a project thread edits its site or game. The owner can restrict editing through Collaboration on the project card.\n" +
         "Use Discord Reply on the **running turn's status message** to steer it live. Other messages queue for the next update; several queued requests may merge into one update. Attachments always queue: images reach the model when it can see them, and any other files are saved into the project for the agent to read or use. " +
         "The live status message carries a **Stop** button while a turn runs; `/site stop` works even if that message is gone. " +
         "A turn with no progress for a few minutes is flagged on the card. Failures offer rollback or keep.\n\n" +
         "**/site start** — create a site (works in any channel)\n" +
         "**/makegam** — create a 2D or 3D game thread\n" +
         "**/site info** — links, project type, model, usage\n" +
+        "**/site collaboration** — choose contributors and review requests (owner/admin)\n" +
         "**/site rename name:…** — change the project name and links (old site links redirect)\n" +
         "**/site sync** — adopt commits pushed to the repo from outside the bot\n" +
         "**/site republish** — rebuild and republish without the model\n" +
@@ -1211,6 +1299,13 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
   if (!interaction.channel?.isThread()) throw new Error(`/${interaction.commandName} ${sub} must be used inside a site thread.`);
   const project = store.getProject(interaction.channel.id);
   if (!project) throw new Error("This thread has no site. Use /site start first.");
+  const actor = interactionActor(interaction, config.adminUserIds.has(interaction.user.id));
+  if (sub === "collaboration") {
+    await interaction.reply({ ...collaboration.panel(project, actor), flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
+    return;
+  }
+  if (!["info", "queue"].includes(sub)) requireContributor(project, actor);
+  if (sub === "pushkey") requireManager(project, actor);
 
   if (sub === "info") {
     const usage = await usageLog.threadTotal(project.threadId);
@@ -1235,7 +1330,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
   if (sub === "rename") {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const name = interaction.options.getString("name", true);
-    const renamed = await projects.enqueue(project.threadId, () => projects.renameProject(project.threadId, name));
+    const renamed = await enqueueContributorAction(project.threadId, actor, () => projects.renameProject(project.threadId, name));
     let titleUpdated = true;
     await applyAiThreadTitle(interaction.channel, renamed.displayName).catch((error) => {
       titleUpdated = false;
@@ -1248,7 +1343,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
 
   if (sub === "republish") {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const updated = await projects.enqueue(project.threadId, () => projects.republish(project.threadId));
+    const updated = await enqueueContributorAction(project.threadId, actor, () => projects.republish(project.threadId));
     await interaction.editReply(`Republished [${updated.displayName}](${projects.siteLink(updated)}) without calling the model.`);
     return;
   }
@@ -1258,7 +1353,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     const status = await interaction.channel?.send("📥 Syncing the workspace with the repository…").catch(() => undefined);
     const progress = status ? new DiscordProgress(status, `📥 Syncing ${project.displayName}`) : undefined;
     try {
-      const result = await projects.enqueue(project.threadId, () => projects.sync(project.threadId, progress?.callback));
+      const result = await enqueueContributorAction(project.threadId, actor, () => projects.sync(project.threadId, progress?.callback));
       await progress?.close();
       if (result.validationError) {
         await interaction.editReply(
@@ -1284,7 +1379,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
 
   if (sub === "compact") {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const result = await projects.enqueue(project.threadId, () => projects.compact(project.threadId));
+    const result = await enqueueContributorAction(project.threadId, actor, () => projects.compact(project.threadId));
     await interaction.editReply(
       `🧠 Compaction started with \`${result.model}\`. Older session context is being summarized; ` +
       "this thread keeps working normally afterwards. The site itself is unchanged.",
@@ -1311,7 +1406,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     progress.enableStopButton();
     const callback = withQuestionPings(progress.callback, project.threadId, interaction.user.id);
     try {
-      const result = await projects.enqueue(project.threadId, () =>
+      const result = await enqueueContributorAction(project.threadId, actor, () =>
         projects.switchMultiplayer(project.threadId, mode, status.id, callback, interaction.user.id, userNote));
       await progress.close();
       if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
@@ -1356,6 +1451,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     // Deliberately not queued: a stop that waited behind the turn it targets
     // would be useless when the turn is wedged on an unreachable provider.
+    requireCurrentContributor(project.threadId, actor);
     const outcome = await projects.stopTurn(project.threadId);
     await interaction.editReply(stopOutcomeText(outcome));
     if (outcome.stopped) log("info", "discord.stop_command_used", { threadId: project.threadId, userId: interaction.user.id });
@@ -1375,6 +1471,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     // and swaps in a fresh session; the stopped turn (if any) reports failure
     // in the thread through its normal path.
     const stoppedStatusId = project.pendingTurn?.statusMessageId;
+    requireCurrentContributor(project.threadId, actor);
     const { stoppedTurn } = await projects.resetSession(project.threadId);
     if (stoppedStatusId) {
       // The stopped turn's live status message would otherwise keep its
@@ -1397,7 +1494,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
 
   if (sub === "revert") {
     await interaction.deferReply();
-    const result = await projects.enqueue(project.threadId, () => projects.revert(project.threadId));
+    const result = await enqueueContributorAction(project.threadId, actor, () => projects.revert(project.threadId));
     const updated = store.getProject(project.threadId) ?? project;
     const body = result.undoneCommit
       ? `↩️ Undid the last turn (commit \`${result.undoneCommit}\`) and republished \`${result.keptCommit}\`.`
@@ -1412,8 +1509,11 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
 
   if (sub === "pushkey") {
     const rotate = interaction.options.getBoolean("rotate") ?? false;
-    await interaction.deferReply();
-    const { project: updated, created } = await projects.enqueue(project.threadId, () => projects.issuePushKey(project.threadId, rotate));
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const { project: updated, created } = await enqueueContributorAction(project.threadId, actor, () => {
+      requireManager(store.getProject(project.threadId)!, actor);
+      return projects.issuePushKey(project.threadId, rotate);
+    });
     if (!updated.pushKey) throw new Error("Push key issuance failed.");
     await interaction.editReply(
       (created
@@ -1944,6 +2044,16 @@ function isAdmin(interaction: ChatInputCommandInteraction | AutocompleteInteract
   return interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false;
 }
 
+function requireCurrentContributor(threadId: string, actor: ProjectActor): void {
+  const project = store.getProject(threadId);
+  if (!project) throw new CollaborationError("This project is no longer available.");
+  requireContributor(project, actor);
+}
+
+function enqueueContributorAction<T>(threadId: string, actor: ProjectActor, work: () => Promise<T>): Promise<T> {
+  return projects.enqueue(threadId, () => { requireCurrentContributor(threadId, actor); return work(); });
+}
+
 // Slash-command variant of the commit author: prefer the server display name,
 // then the global name, then the raw @username.
 function interactionInitiator(interaction: ChatInputCommandInteraction) {
@@ -2179,7 +2289,7 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
   await interaction.message.edit(disableMessageControls(interaction.message)).catch(() => undefined);
 
   if (publish) {
-    const result = await projects.enqueue(interaction.channel.id, () => projects.publishExternalPush(interaction.channel!.id));
+    const result = await enqueueContributorAction(interaction.channel.id, interactionActor(interaction, config.adminUserIds.has(interaction.user.id)), () => projects.publishExternalPush(interaction.channel!.id));
     if (result.validationError) {
       await interaction.editReply(
         `⚠️ The pushed commit \`${result.commit}\` failed validation and was **not** published — the live site keeps the previous version.\n` +
@@ -2192,7 +2302,7 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
       );
     }
   } else {
-    const result = await projects.enqueue(interaction.channel.id, () => projects.adoptExternalCommit(interaction.channel!.id));
+    const result = await enqueueContributorAction(interaction.channel.id, interactionActor(interaction, config.adminUserIds.has(interaction.user.id)), () => projects.adoptExternalCommit(interaction.channel!.id));
     await interaction.editReply(
       `🗂️ Adopted external commit \`${result.commit}\` into the workspace without publishing. The next message in this thread builds on it.`,
     );

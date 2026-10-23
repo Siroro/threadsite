@@ -75,6 +75,9 @@ export async function removeProjects(store: Store, selected: ProjectRecord[], mo
   // Preflight the whole selection before the first external deletion.
   for (const project of selected) {
     if (!project.pendingDeletion || mode === "forget") assertIdle(project);
+    if ((!project.pendingDeletion || mode === "forget") && store.listApprovals(project.threadId).length) {
+      throw new Error(`${project.repoName} has requests awaiting owner approval; approve or reject them before cleanup.`);
+    }
     if (JSON.stringify(store.getProject(project.threadId)) !== JSON.stringify(project)) throw new Error("A selected record changed. Stop the bot and retry.");
     if (mode === "remove") {
       await removalPaths(project);

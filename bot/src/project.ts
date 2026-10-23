@@ -342,6 +342,8 @@ export class ProjectService {
     multiplayerMode?: MultiplayerMode;
     /** Discord user who requested the project, pinged when the agent asks a question. */
     initiatorUserId?: string;
+    /** Human owner of an existing thread, or requester for a bot-created thread. */
+    ownerUserId?: string;
   }, onProgress?: ProgressCallback, onTitle?: (title: string) => Promise<void>): Promise<MutationResult> {
     this.runningOperations.set(input.threadId, (this.runningOperations.get(input.threadId) ?? 0) + 1);
     if (onTitle) this.titleCallbacks.set(input.threadId, onTitle);
@@ -377,6 +379,7 @@ export class ProjectService {
       initialPrompt: truncate(input.initialPrompt, 2_000),
       // The thread's founder, linked on the pinned card for the project's life.
       ...(input.initiatorUserId ? { starterId: input.initiatorUserId } : {}),
+      ...(input.ownerUserId ? { ownerId: input.ownerUserId } : {}),
       pendingNaming: { request: input.initialPrompt, ...(input.renameable ? {} : { name: input.displayName }) },
       ...(projectKind !== "site" ? { multiplayerMode } : {}),
       infoMessageId: input.infoMessageId,

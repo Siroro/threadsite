@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { ContributionKind, ContributionTally, ProjectRecord, QueuedRequest } from "./types.js";
+import type { CollaborationSettings, ContributionKind, ContributionTally, ProjectApproval, ProjectRecord, QueuedRequest } from "./types.js";
 
 /** Durable turn identity: matches by the stable id assigned when the turn is claimed. */
 export function pendingTurnMatches(current: ProjectRecord["pendingTurn"], expected: ProjectRecord["pendingTurn"]): boolean {
@@ -33,6 +33,7 @@ export class Store {
     db.exec("CREATE TABLE IF NOT EXISTS projects (thread_id TEXT PRIMARY KEY, record TEXT NOT NULL)");
     db.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     db.exec("CREATE TABLE IF NOT EXISTS card_state (thread_id TEXT NOT NULL, card_key TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY (thread_id, card_key))");
+    db.exec("CREATE TABLE IF NOT EXISTS project_approvals (thread_id TEXT NOT NULL, id TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(thread_id, id))");
     const store = new Store(file, db);
     if (!store.getModel() && defaultModel) await store.setModel(defaultModel);
     return store;
@@ -135,6 +136,7 @@ export class Store {
   }
 
   async deleteProject(threadId: string): Promise<void> {
+    this.db.prepare("DELETE FROM project_approvals WHERE thread_id = ?").run(threadId);
     this.db.prepare("DELETE FROM card_state WHERE thread_id = ?").run(threadId);
     this.db.prepare("DELETE FROM projects WHERE thread_id = ?").run(threadId);
   }
@@ -167,6 +169,56 @@ export class Store {
 
   close(): void {
     this.db.close();
+  }
+
+  setCollaboration(threadId: string, settings: CollaborationSettings, expectedRevision: number, ownerId?: string): void {
+    const current = this.getProject(threadId);
+    if (!current || current.pendingDeletion) throw new Error("This project is no longer available.");
+    if ((current.collaboration?.revision ?? 0) !== expectedRevision) throw new Error("Collaboration settings changed. Refresh the panel before editing them.");
+    const record = { ...current, collaboration: settings, ...(ownerId ? { ownerId } : {}) };
+    const result = this.db.prepare("UPDATE projects SET record = ? WHERE thread_id = ? AND COALESCE(json_extract(record, '$.collaboration.revision'), 0) = ?")
+      .run(JSON.stringify(record), threadId, expectedRevision);
+    if (!Number(result.changes)) throw new Error("Collaboration settings changed. Refresh the panel before editing them.");
+  }
+
+  getApproval(threadId: string, id: string): ProjectApproval | undefined {
+    const row = this.db.prepare("SELECT record FROM project_approvals WHERE thread_id = ? AND id = ?").get(threadId, id) as { record: string } | undefined;
+    return row ? JSON.parse(row.record) as ProjectApproval : undefined;
+  }
+
+  listApprovals(threadId: string): Omit<ProjectApproval, "attachments">[] {
+    const rows = this.db.prepare("SELECT json_remove(record, '$.attachments') AS record FROM project_approvals WHERE thread_id = ? ORDER BY id").all(threadId) as { record: string }[];
+    return rows.map((row) => JSON.parse(row.record) as Omit<ProjectApproval, "attachments">);
+  }
+
+  addApproval(threadId: string, request: ProjectApproval): void {
+    if (this.getApproval(threadId, request.id)) return;
+    const project = this.getProject(threadId);
+    if (!project || project.pendingDeletion) throw new Error("This project is no longer available.");
+    const result = this.db.prepare(`INSERT OR IGNORE INTO project_approvals SELECT ?, ?, ?
+      WHERE (SELECT COUNT(*) FROM project_approvals WHERE thread_id = ?) < 20`)
+      .run(threadId, request.id, JSON.stringify(request), threadId);
+    if (!Number(result.changes)) throw new Error("This project already has 20 requests waiting for approval.");
+  }
+
+  rejectApproval(threadId: string, id: string): boolean {
+    return Number(this.db.prepare("DELETE FROM project_approvals WHERE thread_id = ? AND id = ?").run(threadId, id).changes) > 0;
+  }
+
+  /** Approval and queue admission are one transaction: a crash cannot lose or double-admit a request. */
+  approveRequest(threadId: string, id: string, request: QueuedRequest): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.getProject(threadId);
+      if (!current || current.pendingDeletion) throw new Error("This project is no longer available.");
+      if (!this.getApproval(threadId, id)) { this.db.exec("ROLLBACK"); return false; }
+      const queue = current.pendingQueue ?? [];
+      if (!queue.some((entry) => entry.statusMessageId === request.statusMessageId)) queue.push(request);
+      this.db.prepare("UPDATE projects SET record = ? WHERE thread_id = ?").run(JSON.stringify({ ...current, pendingQueue: queue }), threadId);
+      this.db.prepare("DELETE FROM project_approvals WHERE thread_id = ? AND id = ?").run(threadId, id);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   async appendQueuedRequest(threadId: string, request: QueuedRequest): Promise<void> {

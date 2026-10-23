@@ -3,7 +3,7 @@ import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, ContainerBuilder, MessageFlags, PermissionFlagsBits, TextDisplayBuilder,
   type AnySelectMenuInteraction, type Attachment, type ButtonInteraction, type ModalSubmitInteraction,
 } from "discord.js";
-import { cardId, parseCardId, type CardRoute } from "./card-actions.js";
+import { cardId, parseCardId, type CardAction, type CardRoute } from "./card-actions.js";
 import { addCardHeader, cardEdit, cardMessage, renderStatusCard, type CardMessage } from "./card-ui.js";
 import { renderDetailPanel, renderQueuePanel, requestModal, type PanelSection, type PanelScope } from "./card-panels.js";
 import type { RequestFormState, StoredTurnCard } from "./card-state.js";
@@ -12,6 +12,8 @@ import { answerModal, customAnswerModal, readAnswerForm, renderQuestionReview } 
 import type { QuestionService } from "./question-service.js";
 import type { Store } from "./store.js";
 import type { ProjectRecord, QueuedRequest } from "./types.js";
+import { authorizeCard, CollaborationError, interactionActor, type ProjectActor } from "./collaboration.js";
+import type { CollaborationService } from "./collaboration-service.js";
 
 export type CardInteraction = ButtonInteraction | AnySelectMenuInteraction | ModalSubmitInteraction;
 export interface CardInteractionServices {
@@ -24,9 +26,11 @@ export interface CardInteractionServices {
   cancel(threadId: string, statusId: string): Promise<string>;
   submit(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, attachments: Attachment[]): Promise<string>;
   stop(threadId: string, statusMessageId: string): Promise<string>;
-  rollback(threadId: string, expectedVersion: string): Promise<void>;
+  rollback(threadId: string, expectedVersion: string, actor: ProjectActor): Promise<void>;
   busy(threadId: string): Promise<boolean>;
   error(error: unknown, interaction: CardInteraction): void;
+  collaboration?: CollaborationService;
+  adminUser?(userId: string): boolean;
 }
 
 /** Global routing survives restarts. Private views never edit the shared live card. */
@@ -40,6 +44,13 @@ export class CardInteractions {
       if (!route) throw new Error("This control is no longer supported. Use the latest project card.");
       const project = this.project(interaction);
       this.checkResource(project, route);
+      const actor = interactionActor(interaction, this.services.adminUser?.(interaction.user.id));
+      authorizeCard(project, actor, route.action);
+      if (["collaboration", "collabmode", "collabusers", "approve", "reject", "reviewrequest"].includes(route.action)) {
+        if (!this.services.collaboration) throw new CardUserError("Collaboration settings are unavailable.");
+        await this.services.collaboration.handle(interaction, project, actor, route);
+        return true;
+      }
       const viewing = ["details", "tab", "page", "project", "queue", "doc", "review", "retry"].includes(route.action);
       if (!viewing && !interaction.memberPermissions?.has(PermissionFlagsBits.SendMessagesInThreads)) throw new Error("You need permission to send messages in this thread to use that action.");
       await this.dispatch(interaction, project, route);
@@ -47,7 +58,7 @@ export class CardInteractions {
       this.services.error(error, interaction);
       // Service details remain in private logs. Domain errors below contain
       // only public wording; transport errors get a useful generic response.
-      const message = error instanceof CardUserError ? error.message : publicMessage(error);
+      const message = error instanceof CardUserError || error instanceof CollaborationError ? error.message : publicMessage(error);
       await this.respond(interaction, renderStatusCard(`⚠️ ${message}`)).catch(() => undefined);
     }
     return true;
@@ -67,7 +78,7 @@ export class CardInteractions {
     const { action, resource, args } = route;
     const threadId = project.threadId;
     if (action === "details" || action === "project" || action === "doc" || action === "tab" || action === "page") {
-      await this.begin(interaction);
+      await this.begin(interaction, route.action);
       const scope: PanelScope = action === "project" ? "project" : action === "doc" ? "doc" : action === "tab" || action === "page" ? parseScope(args[0]) : "turn";
       const selected = action === "tab" && interaction.isStringSelectMenu() ? interaction.values[0] : action === "page" ? args[1] : args[0];
       const page = action === "page" ? indexArg(args[2]) : 0;
@@ -76,7 +87,7 @@ export class CardInteractions {
       return;
     }
     if (action === "queue" || action === "cancel") {
-      await this.begin(interaction);
+      await this.begin(interaction, route.action);
       let note: string | undefined;
       if (action === "cancel") {
         if (!/^\d{5,25}$/.test(args[0] ?? "")) throw new CardUserError("That queue entry is invalid.");
@@ -101,7 +112,7 @@ export class CardInteractions {
       const nonce = args[0];
       const form = this.services.store.getCardState<RequestFormState>(threadId, `request:${nonce}`);
       if (!form || form.userId !== interaction.user.id || form.resource !== resource) throw new CardUserError("That request form has expired. Open a new form from the project card.");
-      await this.begin(interaction);
+      await this.begin(interaction, route.action);
       if (form.status !== "ready") { await this.respond(interaction, renderStatusCard(form.status === "accepted" ? "✅ This request was already saved." : "⏳ This request is already being submitted.")); return; }
       const prompt = interaction.fields.getTextInputValue("prompt").trim();
       const attachments = [...(interaction.fields.getUploadedFiles("images")?.values() ?? [])];
@@ -125,13 +136,13 @@ export class CardInteractions {
     }
     if (action === "stop") {
       if (project.pendingTurn?.statusMessageId !== resource) throw new CardUserError("That turn is no longer running. This control cannot stop a later turn.");
-      await this.begin(interaction);
+      await this.begin(interaction, route.action);
       await this.respond(interaction, renderStatusCard(await this.services.stop(threadId, resource)));
       return;
     }
     if (action === "rollback" || action === "keep" || action === "confirm") {
       const version = this.checkFailure(project, resource);
-      await this.begin(interaction);
+      await this.begin(interaction, route.action);
       if (action === "keep") { await this.respond(interaction, renderStatusCard("🗂️ Keeping the partial edits — the next message will build on them.")); return; }
       if (action === "rollback") {
         const card = new ContainerBuilder().setAccentColor(0xef4444);
@@ -150,7 +161,7 @@ export class CardInteractions {
       // position must never have its work discarded.
       if (!this.services.store.claimCardAction(threadId, `rollback:${resource}`, { status: "submitting" })) throw new CardUserError("This rollback was already requested.");
       try {
-        await this.services.rollback(threadId, version);
+        await this.services.rollback(threadId, version, interactionActor(interaction, this.services.adminUser?.(interaction.user.id)));
         this.services.store.patchCardState(threadId, `rollback:${resource}`, { status: "accepted" });
       } catch (error) {
         this.services.store.patchCardState(threadId, `rollback:${resource}`, { status: "retry" });
@@ -177,7 +188,7 @@ export class CardInteractions {
       await interaction.showModal(action === "questions" ? answerModal(resource, request, draft, index) : customAnswerModal(resource, request, index, draft));
       return;
     }
-    await this.begin(interaction);
+    await this.begin(interaction, route.action);
     if (action === "answer") {
       if (request.questions.length !== 1 || request.questions[0].multiple || !request.questions[0].options[index]) throw new CardUserError("Open Answer questions to answer this request completely.");
       draft.answers = [[request.questions[0].options[index].label]];
@@ -276,10 +287,12 @@ export class CardInteractions {
     return card.failureVersion;
   }
 
-  private async begin(interaction: CardInteraction): Promise<void> {
-    if (interaction.deferred || interaction.replied) return;
-    if (interaction.message?.flags.has(MessageFlags.Ephemeral)) await interaction.deferUpdate();
-    else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  private async begin(interaction: CardInteraction, action: CardAction): Promise<void> {
+    if (!interaction.deferred && !interaction.replied) {
+      if (interaction.message?.flags.has(MessageFlags.Ephemeral)) await interaction.deferUpdate();
+      else await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    }
+    authorizeCard(this.project(interaction), interactionActor(interaction, this.services.adminUser?.(interaction.user.id)), action);
   }
 
   private async respond(interaction: CardInteraction, message: CardMessage): Promise<void> {

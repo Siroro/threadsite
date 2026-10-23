@@ -35,7 +35,7 @@ For direct selection, names match exactly and options can be repeated. Commands 
 
 Full removal deletes the selected Discord thread, Forgejo repository, workspace, published site/aliases and SQLite registration, then refreshes the site index. No backup is written by default; pass `--backup` to save a SQLite snapshot first. That snapshot contains metadata, not a copy of the deleted source files. Registration-only cleanup keeps the thread, repository and files. Existing agent session history and relay snapshots are retained.
 
-Cleanup refuses queued/interrupted work, active agent turns, shared resources, unexpected workspace locations and paths through symlinks. Stop unfinished work with `/site stop`, clear `/site queue`, or let recovery finish first. During `--apply`, start.sh temporarily stops a running bot and restores its running state afterward, including on failure. Other services stay running. A failed removal retains the registration so the same selection can be retried; resources already deleted during that attempt are treated as absent on retry. Cleanup does not update the checkout, prune Docker volumes or remove unrelated data.
+Cleanup refuses queued/interrupted work, pending owner approvals, active agent turns, shared resources, unexpected workspace locations and paths through symlinks. Stop unfinished work with `/site stop`, clear `/site queue`, or let recovery finish first. During `--apply`, start.sh temporarily stops a running bot and restores its running state afterward, including on failure. Other services stay running. A failed removal retains the registration so the same selection can be retried; resources already deleted during that attempt are treated as absent on retry. Cleanup does not update the checkout, prune Docker volumes or remove unrelated data.
 
 ### Purging orphans from deleted threads
 
@@ -88,7 +88,7 @@ From `bot/`:
 
 From `preview/`: `npm test` for preview regression checks.
 
-From `gameserver/`: `npm run build`, then the applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, or `test:stall` scripts. `test:relay` and `test:client` need a local test relay listening on port 8090; restart, durability, and stall tests launch their own relay processes.
+From `gameserver/`: `npm run build`, then the applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, `test:stall`, `test:storage`, or `test:persistence` scripts. `test:relay` and `test:client` need a local test relay listening on port 8090 (or set `GAMESERVER_TEST_PORT` for an isolated relay); restart, durability, stall and persistence tests launch their own relay processes. Give restart/stall checks an isolated `GAMESERVER_STATE_DIR`; storage, durability and persistence checks create temporary state themselves. Player persistence checks cover save conflicts, quotas, leaderboard ordering, crash recovery and project deletion.
 
 Networking client changes: from `bot/`, `npm run build:net` regenerates `bot/assets/threadsite-net.js` and `.d.ts` — never edit those generated assets directly.
 

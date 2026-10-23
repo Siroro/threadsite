@@ -1,6 +1,7 @@
 import { ButtonBuilder, ButtonStyle, ContainerBuilder, TextDisplayBuilder, ThumbnailBuilder } from "discord.js";
 import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, KIND_COLORS, safeCardUrl, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
+import { COLLABORATION_LABELS } from "./collaboration-service.js";
 import type { ProjectDescription } from "./project-docs.js";
 import { projectKindLabel } from "./templates.js";
 import type { ContributionTally, ProjectRecord } from "./types.js";
@@ -113,11 +114,13 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
     new ButtonBuilder().setCustomId(cardId("change", project.threadId)).setLabel("Make a change").setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(cardId("project", project.threadId)).setLabel("Project details").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(cardId("queue", project.threadId)).setLabel(`Queue${project.pendingQueue?.length ? ` · ${project.pendingQueue.length}` : ""}`).setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(cardId("collaboration", project.threadId)).setLabel("Collaboration").setStyle(ButtonStyle.Secondary),
   ]);
   addCardDivider(card);
 
   // Settings come before the long request so they are visible immediately.
   const settings = [`**Type** · ${projectKindLabel(project.projectKind)}`];
+  settings.push(`**Editing** · ${COLLABORATION_LABELS[project.collaboration?.mode ?? "open"]}`);
   if (kind !== "site") {
     settings.push(`**Engine** · ${kind === "game-3d" ? "Three.js" : "Excalibur"}`, `**Multiplayer** · ${multiplayerLine(project)}`);
   }

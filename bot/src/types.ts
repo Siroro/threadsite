@@ -2,6 +2,18 @@ export type ProjectStatus = "creating" | "ready" | "error";
 export type ProjectKind = "site" | "game-2d" | "game-3d";
 /** Multiplayer architecture chosen at /makegam: shared arena, invite-code rooms, or none. */
 export type MultiplayerMode = "arena" | "rooms" | "singleplayer";
+export type CollaborationMode = "open" | "contributors" | "approval";
+export interface CollaborationSettings { mode: CollaborationMode; userIds: string[]; revision: number }
+export interface ApprovalAttachment { name: string; mime: string; dataUrl: string }
+export interface ProjectApproval {
+  id: string;
+  requesterId: string;
+  author: CommitAuthor;
+  prompt: string;
+  createdAt: string;
+  attachmentCount: number;
+  attachments: ApprovalAttachment[];
+}
 
 /** Per-project multiplayer wiring handed to game agents (game id + relay URL). */
 export interface MultiplayerContext {
@@ -64,6 +76,10 @@ export interface ProjectRecord {
   initialPrompt?: string;
   /** Discord user who started the thread, linked as the founder on the pinned project card. */
   starterId?: string;
+  /** Human thread owner; for bot-created threads this is the project requester. */
+  ownerId?: string;
+  /** Missing settings mean anyone can edit, including on existing projects. */
+  collaboration?: CollaborationSettings;
   /** Lifetime per-user contributions (requested turns, live steers, delivered answers), shown on the pinned card. */
   contributors?: Record<string, ContributionTally>;
   /** The pinned project-card message; edited in place after every turn outcome. */

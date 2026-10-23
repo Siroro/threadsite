@@ -4,6 +4,8 @@ ThreadSite is a small Discord harness for an AI coding agent. One Discord thread
 
 Live turn cards show an active-subagent count while delegated work is running; child actions and reports stay out of the activity feed.
 
+Projects default to **anyone can edit**. The human thread owner can use **Collaboration** on the pinned card or `/site collaboration` to select contributors or require approval of outside requests. Approval requests and their attachments survive restarts without starting agent work. See [collaboration settings](docs/commands.md#project-collaboration).
+
 - `/site start prompt:"..."` creates a Discord thread, a workspace, an agent session, a public Forgejo repository, the first git commit, and a live static site.
 - `/makegam dimension:<2d|3d> multiplayer:<arena|rooms|singleplayer> prompt:"..."` does the same for a **static browser game**. Games default to a shared-arena architecture; `rooms` builds invite-code rooms; `singleplayer` provisions no networking. `/site multiplayer` switches an existing game between the three live.
 

@@ -22,6 +22,9 @@ export const siteCommand = new SlashCommandBuilder()
     .setName("info")
     .setDescription("Show the live site and source repository for this thread"))
   .addSubcommand((sub) => sub
+    .setName("collaboration")
+    .setDescription("Choose who can contribute and review requests awaiting owner approval"))
+  .addSubcommand((sub) => sub
     .setName("rename")
     .setDescription("Rename this project, its site URL and its source repository")
     .addStringOption((option) => option
