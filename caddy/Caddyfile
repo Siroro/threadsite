@@ -20,26 +20,37 @@
 }
 
 {$SITES_DOMAIN:localhost} {
-	root * /srv/sites
-	file_server
-
-	# Cache policy, mirroring apache/threadsite-vhost.conf.example:
-	# ThreadSite appends ?v=<content-hash> to asset references on publish, so
-	# versioned assets are content-addressed and cache immutably; unversioned
-	# assets and HTML revalidate; the deploy marker the injected update checker
-	# polls is never cached. It lives at each site's subroot, hence both path
-	# forms.
-	@immutable {
-		path *.css *.js *.mjs
-		query v=*
+	# Multiplayer shares the sites hostname. Only the exact WebSocket path
+	# reaches the relay; its health, stats and admin endpoints stay private.
+	handle /ws {
+		reverse_proxy gameserver:8090
 	}
-	header @immutable Cache-Control "public, max-age=31536000, immutable"
-	@unversioned_asset path *.css *.js *.mjs
-	header @unversioned_asset Cache-Control "no-cache"
-	@page path *.html *.htm
-	header @page Cache-Control "no-cache"
-	@deploy_marker path /threadsite-version.json */threadsite-version.json
-	header @deploy_marker Cache-Control "no-store"
+
+	handle {
+		root * /srv/sites
+		file_server
+
+		# Cache policy, mirroring apache/threadsite-vhost.conf.example:
+		# ThreadSite appends ?v=<content-hash> to asset references on publish, so
+		# versioned assets are content-addressed and cache immutably; unversioned
+		# assets and HTML revalidate; the deploy marker the injected update checker
+		# polls is never cached. It lives at each site's subroot, hence both path
+		# forms.
+		@immutable {
+			path *.css *.js *.mjs
+			query v=*
+		}
+		header @immutable Cache-Control "public, max-age=31536000, immutable"
+		@unversioned_asset {
+			path *.css *.js *.mjs
+			not query v=*
+		}
+		header @unversioned_asset Cache-Control "no-cache"
+		@page path *.html *.htm
+		header @page Cache-Control "no-cache"
+		@deploy_marker path /threadsite-version.json */threadsite-version.json
+		header @deploy_marker Cache-Control "no-store"
+	}
 }
 
 import vhosts/*.caddy

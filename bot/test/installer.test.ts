@@ -83,7 +83,7 @@ test("installer configures public services, discovers the app, and waits for Dis
   assert.equal(await f.setting("DISCORD_BOT_TOKEN"), token);
   assert.equal(await f.setting("PUBLIC_SITES_BASE_URL"), "https://sites.example.com");
   assert.equal(await f.setting("FORGEJO_PUBLIC_URL"), "https://git.example.com");
-  assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), "wss://games.example.com/ws");
+  assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), "wss://sites.example.com/ws");
   assert.equal(await f.setting("GAMESERVER_ALLOWED_ORIGINS"), "https://sites.example.com");
   assert.match(await f.setting("OPENCODE_SERVER_PASSWORD"), /^[a-f0-9]{64}$/);
   const calls = await f.calls();
@@ -100,6 +100,29 @@ test("installer configures public services, discovers the app, and waits for Dis
   assert.ok(permissions & (1n << 35n), "invite permits creating project threads");
   assert.ok(permissions & (1n << 51n), "invite permits pinning project cards");
   assert.equal(invite.searchParams.get("guild_id"), "223456789012345678");
+});
+
+test("custom sites and Git hostnames work without a games hostname", async (t) => {
+  const f = await fixture(t);
+  await f.run(["--sites-domain", "lab.siroro.co.uk", "--git-domain", "git.siroro.co.uk", "--discord-token", token]);
+  assert.equal(await f.setting("PUBLIC_SITES_BASE_URL"), "https://lab.siroro.co.uk");
+  assert.equal(await f.setting("FORGEJO_PUBLIC_URL"), "https://git.siroro.co.uk");
+  assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), "wss://lab.siroro.co.uk/ws");
+  await assert.rejects(fs.access(path.join(f.root, "caddy/vhosts/games.caddy")), { code: "ENOENT" });
+  await f.run();
+  assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), "wss://lab.siroro.co.uk/ws");
+});
+
+test("a separate games hostname is retained on reruns and can be switched back to the sites hostname", async (t) => {
+  const f = await fixture(t);
+  await f.run([...f.args, "--games-domain", "games.example.com"]);
+  assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), "wss://games.example.com/ws");
+  await fs.access(path.join(f.root, "caddy/vhosts/games.caddy"));
+  await f.run();
+  assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), "wss://games.example.com/ws");
+  await f.run(["--games-on-sites"]);
+  assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), "wss://sites.example.com/ws");
+  await assert.rejects(fs.access(path.join(f.root, "caddy/vhosts/games.caddy")), { code: "ENOENT" });
 });
 
 test("missing, invalid and mismatched Discord inputs never write credentials or start services", async (t) => {

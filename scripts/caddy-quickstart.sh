@@ -35,10 +35,11 @@ Usage: scripts/caddy-quickstart.sh [options]
 Missing values are prompted for, including when run through curl | bash.
 Reruns reuse .env values. Secrets are read without echoing them.
 
-  --domain DOMAIN          Use sites.DOMAIN, git.DOMAIN and games.DOMAIN
+  --domain DOMAIN          Use sites.DOMAIN and git.DOMAIN
   --sites-domain HOST      Public hostname for generated sites
   --git-domain HOST        Public hostname for source repositories
-  --games-domain HOST      Public hostname for multiplayer
+  --games-domain HOST      Optional separate hostname for multiplayer
+  --games-on-sites         Use the sites hostname, replacing a saved games host
   --discord-token TOKEN    Discord bot token (or DISCORD_BOT_TOKEN)
   --discord-token-file FILE Read the Discord token from a private file
   --app-id ID              Optional; discovered from the bot token
@@ -67,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --sites-domain) SITES_DOMAIN="$2"; SITES_EXPLICIT=1; shift 2 ;;
     --git-domain) GIT_DOMAIN="$2"; GIT_EXPLICIT=1; shift 2 ;;
     --games-domain) GAMES_DOMAIN="$2"; GAMES_EXPLICIT=1; shift 2 ;;
+    --games-on-sites) GAMES_DOMAIN=""; GAMES_EXPLICIT=1; shift ;;
     --discord-token) DISCORD_TOKEN="$2"; shift 2 ;;
     --discord-token-file) [[ -r "$2" ]] || die "Cannot read Discord token file"; DISCORD_TOKEN="$(cat -- "$2")"; shift 2 ;;
     --app-id) APP_ID="$2"; shift 2 ;;
@@ -169,31 +171,32 @@ if [[ -z "$GIT_DOMAIN" ]]; then
   GIT_DOMAIN="$(get_env FORGEJO_DOMAIN)"
   [[ "$GIT_DOMAIN" != localhost ]] || GIT_DOMAIN=""
 fi
-if [[ -z "$GAMES_DOMAIN" ]]; then
+if (( ! GAMES_EXPLICIT )); then
   GAMES_DOMAIN="$(get_env GAMESERVER_PUBLIC_URL)"
-  GAMES_DOMAIN="${GAMES_DOMAIN#wss://}"
-  GAMES_DOMAIN="${GAMES_DOMAIN%%/*}"
-  [[ "$GAMES_DOMAIN" != localhost* ]] || GAMES_DOMAIN=""
+  if [[ "$GAMES_DOMAIN" == wss://* ]]; then
+    GAMES_DOMAIN="${GAMES_DOMAIN#wss://}"
+    GAMES_DOMAIN="${GAMES_DOMAIN%%/*}"
+    [[ "$GAMES_DOMAIN" != localhost* ]] || GAMES_DOMAIN=""
+    [[ "${GAMES_DOMAIN,,}" != "$(get_env SITES_DOMAIN)" ]] || GAMES_DOMAIN=""
+  else GAMES_DOMAIN=""
+  fi
 fi
 if [[ -n "$BASE_DOMAIN" ]]; then
   # An explicit base domain replaces saved hostnames; individual flags win.
   (( SITES_EXPLICIT )) || SITES_DOMAIN="sites.$BASE_DOMAIN"
   (( GIT_EXPLICIT )) || GIT_DOMAIN="git.$BASE_DOMAIN"
-  (( GAMES_EXPLICIT )) || GAMES_DOMAIN="games.$BASE_DOMAIN"
 fi
 if [[ -z "$SITES_DOMAIN" ]]; then
-  ask BASE_DOMAIN "Base domain (example.com creates sites/git/games.example.com)"
+  ask BASE_DOMAIN "Base domain (example.com creates sites.example.com and git.example.com)"
   if [[ -n "$BASE_DOMAIN" ]]; then
     SITES_DOMAIN="sites.$BASE_DOMAIN"
     GIT_DOMAIN="${GIT_DOMAIN:-git.$BASE_DOMAIN}"
-    GAMES_DOMAIN="${GAMES_DOMAIN:-games.$BASE_DOMAIN}"
   fi
 fi
 [[ -n "$SITES_DOMAIN" ]] || die "Provide --domain or --sites-domain (DNS must point at this server)"
 if (( ! SKIP_BOT )); then
   [[ -n "$GIT_DOMAIN" ]] || ask GIT_DOMAIN "Hostname for source repositories"
-  [[ -n "$GAMES_DOMAIN" ]] || ask GAMES_DOMAIN "Hostname for multiplayer"
-  [[ -n "$GIT_DOMAIN" && -n "$GAMES_DOMAIN" ]] || die "A working public install needs --git-domain and --games-domain, or --domain"
+  [[ -n "$GIT_DOMAIN" ]] || die "Provide --git-domain for source repositories, or use --domain"
 fi
 valid_domain() {
   local label labels=()
@@ -210,6 +213,7 @@ done
 SITES_DOMAIN="${SITES_DOMAIN,,}"
 GIT_DOMAIN="${GIT_DOMAIN,,}"
 GAMES_DOMAIN="${GAMES_DOMAIN,,}"
+[[ "$GAMES_DOMAIN" != "$SITES_DOMAIN" ]] || GAMES_DOMAIN=""
 [[ -z "$GIT_DOMAIN" || "$GIT_DOMAIN" != "$SITES_DOMAIN" ]] || die "Sites and repositories need different hostnames"
 [[ -z "$GAMES_DOMAIN" || ( "$GAMES_DOMAIN" != "$SITES_DOMAIN" && "$GAMES_DOMAIN" != "$GIT_DOMAIN" ) ]] || die "Multiplayer needs its own hostname"
 
@@ -326,10 +330,9 @@ if [[ -n "$GIT_DOMAIN" ]]; then
   set_env FORGEJO_PUBLIC_URL "https://$GIT_DOMAIN"
   set_env FORGEJO_DOMAIN "$GIT_DOMAIN"
 fi
-if [[ -n "$GAMES_DOMAIN" ]]; then
-  set_env GAMESERVER_PUBLIC_URL "wss://$GAMES_DOMAIN/ws"
-  set_env GAMESERVER_ALLOWED_ORIGINS "https://$SITES_DOMAIN"
-fi
+RELAY_DOMAIN="${GAMES_DOMAIN:-$SITES_DOMAIN}"
+set_env GAMESERVER_PUBLIC_URL "wss://$RELAY_DOMAIN/ws"
+set_env GAMESERVER_ALLOWED_ORIGINS "https://$SITES_DOMAIN"
 password="$(get_env OPENCODE_SERVER_PASSWORD)"
 if [[ -z "$password" || "$password" == change-this-internal-password ]]; then
   set_env OPENCODE_SERVER_PASSWORD "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
@@ -358,6 +361,8 @@ if [[ -n "$GIT_DOMAIN" ]]; then
 fi
 if [[ -n "$GAMES_DOMAIN" ]]; then
   sed -e "s|games\.example\.com|$GAMES_DOMAIN|g" -e "s|sites\.example\.com|$SITES_DOMAIN|g" caddy/vhosts/games.caddy.example > caddy/vhosts/games.caddy
+elif [[ -f caddy/vhosts/games.caddy ]]; then
+  rm -f -- caddy/vhosts/games.caddy
 fi
 export COMPOSE_PROFILES=caddy
 # The saved values take precedence over stale exported configuration.
@@ -393,7 +398,7 @@ else
 fi
 printf 'Sites: https://%s\n' "$SITES_DOMAIN"
 [[ -z "$GIT_DOMAIN" ]] || printf 'Source: https://%s\n' "$GIT_DOMAIN"
-[[ -z "$GAMES_DOMAIN" ]] || printf 'Multiplayer: wss://%s/ws\n' "$GAMES_DOMAIN"
+printf 'Multiplayer: wss://%s/ws\n' "$RELAY_DOMAIN"
 [[ -z "$INVITE_URL" ]] || printf 'Discord invite: %s\n' "$INVITE_URL"
 (( SKIP_BOT )) || printf 'Try /site start in a text channel.\n'
 printf 'Forgejo admin password (if generated): secrets/forgejo-admin-password\n'

@@ -15,7 +15,7 @@ You only need Node 24 on the host for local development. The containers include 
 
 **Recommended for new servers.** The installer collects your settings, builds the services, sets up HTTPS and waits for the bot to connect to Discord.
 
-First, [create a Discord bot](discord.md) and enable Message Content Intent. Point `sites.example.com`, `git.example.com` and `games.example.com` at your server, and make ports 80 and 443 reachable. Replace `example.com` below with your domain:
+First, [create a Discord bot](discord.md) and enable Message Content Intent. Point `sites.example.com` and `git.example.com` at your server, and make ports 80 and 443 reachable. Replace `example.com` below with your domain:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh | bash -s -- \
@@ -29,6 +29,8 @@ The prompts work even when the script is piped into Bash. You can also download 
 curl -fsSL https://raw.githubusercontent.com/Siroro/threadsite/main/scripts/caddy-quickstart.sh -o threadsite-setup.sh
 bash threadsite-setup.sh --domain example.com --install-docker
 ```
+
+For existing hostnames, use `--sites-domain lab.example.com --git-domain git.example.com` instead of `--domain example.com`. Multiplayer and leaderboards use `wss://lab.example.com/ws` on the same sites hostname. You do not need a games subdomain. Add `--games-domain games.example.com` if you want a separate one.
 
 It asks for:
 
@@ -46,6 +48,8 @@ The installer uses `scripts/bootstrap-forgejo.sh --no-restart-bot` so the bot st
 ### Running it again
 
 Saved settings are reused, including credentials. The script rebuilds the services and recreates the bot so configuration changes take effect. It keeps existing projects, provider settings, volumes and private files. An existing checkout is reused without fetching or resetting Git; use `./start.sh` when you want to update the code.
+
+An existing dedicated games hostname is preserved on reruns. Pass `--games-on-sites` to switch back to the sites hostname and remove the installer-managed games vhost.
 
 A failed credential check stops before services start. If a later startup check fails, the saved configuration stays available for a retry. Use `--skip-bot` only when you deliberately want infrastructure without a working Discord bot.
 
@@ -66,8 +70,10 @@ bash scripts/caddy-quickstart.sh \
 
 | Option | Purpose |
 | --- | --- |
-| `--domain` | Sets up `sites.`, `git.` and `games.` under this domain |
-| `--sites-domain`, `--git-domain`, `--games-domain` | Choose individual hostnames instead; all three are needed for a public bot install |
+| `--domain` | Sets up `sites.` and `git.` under this domain; multiplayer shares the sites host |
+| `--sites-domain`, `--git-domain` | Choose your own sites and source repository hostnames |
+| `--games-domain` | Optional separate hostname for multiplayer and leaderboards |
+| `--games-on-sites` | Replace a saved games hostname with the sites hostname |
 | `--discord-token`, `--discord-token-file` | Bot token; also accepts `DISCORD_BOT_TOKEN` |
 | `--app-id` | Optional application ID; checked against the token when provided |
 | `--guild-id` | Optional Discord server ID for server-specific commands |
@@ -86,10 +92,11 @@ bash scripts/caddy-quickstart.sh \
 COMPOSE_PROFILES=caddy
 SITES_DOMAIN=sites.example.com
 PUBLIC_SITES_BASE_URL=https://sites.example.com
+GAMESERVER_PUBLIC_URL=wss://sites.example.com/ws
+GAMESERVER_ALLOWED_ORIGINS=https://sites.example.com
 
 # Optional vhosts: copy and edit the tracked templates
 cp caddy/vhosts/forgejo.caddy.example caddy/vhosts/forgejo.caddy
-cp caddy/vhosts/games.caddy.example   caddy/vhosts/games.caddy
 
 docker compose up -d forgejo opencode preview gameserver caddy
 ./scripts/bootstrap-forgejo.sh
@@ -100,6 +107,7 @@ How it fits together:
 
 - `caddy/Caddyfile` (tracked) serves the publish root read-only with the same cache policy as [the Apache vhost](#serving-generated-sites-from-your-own-apache): versioned (`?v=`) assets immutable, everything else revalidating, `threadsite-version.json` never cached.
 - `caddy/vhosts/*.caddy` (untracked, generated) add the optional Forgejo and relay vhosts; empty `vhosts/` is valid.
+- The sites host proxies the exact `/ws` path to the relay. Other requests use the static file server. Relay health, stats and admin routes stay internal. A separate games hostname can be added with `caddy/vhosts/games.caddy.example` and a matching `GAMESERVER_PUBLIC_URL`.
 - Certificates live in the `caddy-data` volume and survive restarts; `CADDY_HTTP_PORT`/`CADDY_HTTPS_PORT` move the host ports, though 80/443 are required for certificate issuance.
 - `SITES_DOMAIN=localhost` (the default) uses Caddy's internal certificate. `https://localhost` works locally with an expected browser warning.
 - Day-2 operations are unchanged: `./start.sh` picks the profile up from `COMPOSE_PROFILES` in `.env`.
