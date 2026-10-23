@@ -17,7 +17,7 @@ Discord threads become static sites and browser games. This repo runs the bot, O
 - `bot/src/commands.ts`, `index.ts`: Discord registration and handlers. Required options precede optional options at every nesting level.
 - `bot/src/git.ts`, `build.ts`, `publish.ts`: source control, validation and atomic publication.
 - `bot/src/templates.ts`, `bot/assets/agents/`: generated-project instructions; `bot/assets/skills/`: their implementation references. Edit these sources, not live workspaces.
-- `bot/networking/threadsite-net.ts`: client source. Regenerate `bot/assets/threadsite-net.js` and `.d.ts` with `build:net`.
+- `bot/networking/threadsite-net.ts`: client source.
 - `gameserver/`: relay; `preview/`: isolated preview/browser QA; `docker-compose.yml`: service wiring.
 
 ## Contracts to preserve
@@ -36,19 +36,16 @@ Discord threads become static sites and browser games. This repo runs the bot, O
 
 ## Checks
 
-Use Node 24 and run commands in the component directory; there is no root npm package. Use `npm ci` when dependencies are needed.
+Use Node 24 and run commands in the component directory; there is no root npm package.
 
 | Change | Checks |
 | --- | --- |
-| Bot | `npm test`, `npm run build` |
+| Bot | `npm test` |
 | Discord commands | Also `node --import tsx --test test/commands.test.ts` |
-| Networking client | `npm run build:net` in `bot/`, relevant relay/client checks |
-| Relay | `npm run build`, applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, `test:stall` |
-| OpenCode v2 | `npm run build`, `npm test` in `opencode/` |
+| Networking client | Relevant relay/client checks |
+| Relay | Applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, `test:stall` |
+| OpenCode v2 | `npm test` in `opencode/` |
 | Preview / provider adapter | `npm test` in `preview/`; relevant browser/Docker checks for integration changes |
-| Compose | `docker compose config --quiet` |
 | Docs/instructions | Check referenced paths/commands and generated variants; `git diff --check` |
 
-Relay/client tests need a test relay on port 8090; restart/durability/stall tests launch their own. Use isolated state. Browser/Docker prerequisites are in [deployment](docs/deployment.md) and [v2 setup](docs/opencode-v2.md).
-
-When deployment is requested, rebuild affected services and verify health/logs on the intended host. Never delete persistent volumes as routine troubleshooting.
+Relay/client tests need a test relay on port 8090; restart/durability/stall tests launch their own. Use isolated state.
