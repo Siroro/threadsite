@@ -639,7 +639,7 @@ export class ProjectService {
       if (images?.length) {
         const parsed = parseModel(this.store.getModel())
           ?? await this.opencode.lastAssistantModel(workspacePath, project.sessionId);
-        const accepts = parsed ? await this.opencode.modelAcceptsAttachments(parsed.providerID, parsed.modelID) : undefined;
+        const accepts = parsed ? await this.opencode.modelAcceptsAttachments(parsed.providerID, parsed.modelID, project.workspacePath) : undefined;
         if (accepts !== true) {
           turnImages = undefined;
           emit(onProgress, "⚠️ The current model can't see images — the attachment(s) were dropped");
@@ -1858,7 +1858,7 @@ export class ProjectService {
     const parsed = parseModel(this.store.getModel())
       ?? await this.opencode.lastAssistantModel(project.workspacePath, project.sessionId);
     if (!parsed) return undefined;
-    return this.opencode.modelAcceptsAttachments(parsed.providerID, parsed.modelID);
+    return this.opencode.modelAcceptsAttachments(parsed.providerID, parsed.modelID, project.workspacePath);
   }
 
   /** Discard uncommitted working-tree edits from a failed turn (button-initiated rollback). */
@@ -2093,6 +2093,7 @@ export class ProjectService {
     }
 
     emit(onProgress, "📥 Pulling the repository's main branch");
+    const previousHead = await currentHead(project.workspacePath);
     const { commit, ahead, behind } = await syncWithRemote(project.workspacePath, this.forgejo);
     const short = commit.slice(0, 10);
     if (behind === 0 && ahead === 0) {
@@ -2105,7 +2106,6 @@ export class ProjectService {
 
     // The synced tree does not validate: keep the live site on the last good
     // commit and roll the workspace back to it, like publishExternalPush.
-    const previousHead = await commitHistory(project.workspacePath).then((h) => h.current).catch(() => undefined);
     const { project: updated, validationError } = await this.publishValidatedBuild(threadId, project, commit, {
       failedLabel: `Sync to ${short}`,
       previousHead,

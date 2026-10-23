@@ -144,7 +144,7 @@ export const adminCommand = new SlashCommandBuilder()
         { name: "medium", value: "medium" },
         { name: "high", value: "high" },
         { name: "xhigh", value: "xhigh" },
-        { name: "max (Anthropic)", value: "max" },
+        { name: "max", value: "max" },
       )))
   .addSubcommand((sub) => sub
     .setName("token")

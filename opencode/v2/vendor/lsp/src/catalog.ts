@@ -1,8 +1,7 @@
 /**
- * Built-in extension defaults for OpenCode v1 language server IDs. V2 still
- * parses the same `lsp` config shape but ships no runtime, so a config entry
+ * Built-in extension defaults for language server IDs. A config entry
  * like `{ "rust": { "command": ["rust-analyzer"] } }` needs extensions inferred
- * from its ID exactly as v1 did. Custom (non-builtin) IDs must declare
+ * from its server ID. Custom (non-builtin) IDs must declare
  * `extensions` themselves.
  */
 export const BUILTIN_EXTENSIONS: Record<string, string[]> = {
@@ -77,10 +76,9 @@ export interface RootRule {
 }
 
 /**
- * OpenCode v1's per-server roots, searched from the file's directory up to the
+ * Per-server roots, searched from the file's directory up to the
  * project directory. IDs not listed here, including custom IDs, run at the
- * project directory, as v1 did. (v1 also listed glob markers such as `*.tf`,
- * which its exact-name search never matched; they are left out.)
+ * project directory. Markers use exact file names rather than glob patterns.
  */
 export const BUILTIN_ROOTS: Record<string, RootRule> = {
   deno: { markers: ["deno.json", "deno.jsonc"], required: true },
@@ -89,7 +87,7 @@ export const BUILTIN_ROOTS: Record<string, RootRule> = {
   eslint: { markers: LOCKFILES },
   oxlint: { markers: [".oxlintrc.json", ...LOCKFILES, "package.json"] },
   biome: { markers: ["biome.json", "biome.jsonc", ...LOCKFILES] },
-  // v1 meant to fall back to go.mod, but its go.work lookup always answered first; gopls finds modules itself.
+  // gopls discovers modules when go.work is absent.
   gopls: { markers: ["go.work"] },
   "ruby-lsp": { markers: ["Gemfile"] },
   ty: { markers: [...PYTHON, "ty.toml"] },
@@ -108,7 +106,7 @@ export const BUILTIN_ROOTS: Record<string, RootRule> = {
   "yaml-ls": { markers: LOCKFILES },
   "lua-ls": { markers: [".luarc.json", ".luarc.jsonc", ".luacheckrc", ".stylua.toml", "stylua.toml", "selene.toml", "selene.yml"] },
   "php intelephense": { markers: ["composer.json", "composer.lock", ".php-version"] },
-  // OpenCode 1 also excluded package.json, which turned Prisma off in every npm project.
+  // Prisma runs in npm projects too; package.json is not an exclusion marker.
   prisma: { markers: ["schema.prisma", "prisma"] },
   dart: { markers: ["pubspec.yaml", "analysis_options.yaml"] },
   "ocaml-lsp": { markers: ["dune-project", "dune-workspace", ".merlin", "opam"] },

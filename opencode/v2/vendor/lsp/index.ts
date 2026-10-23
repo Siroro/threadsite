@@ -1,5 +1,5 @@
 // OpenCode 2 accepts an `lsp` config block but has no LSP runtime. This plugin
-// supplies OpenCode 1's two LSP features from that same block: the `lsp` tool
+// supplies the `lsp` tool from that block
 // and error diagnostics appended to write, edit, and patch results.
 //
 // The default export is the plain `{ id, setup }` shape OpenCode 2 loads, so

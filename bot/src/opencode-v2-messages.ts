@@ -1,5 +1,5 @@
 import type { FormInfo, SessionMessageInfo } from "@opencode/client";
-import type { SessionMessage } from "./opencode-v1.js";
+import type { SessionMessage } from "./opencode-shared.js";
 import type { AgentQuestion } from "./progress.js";
 
 /** Normalize at the application boundary; v2 wire types never escape the adapter. */

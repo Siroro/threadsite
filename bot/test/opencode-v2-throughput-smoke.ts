@@ -30,11 +30,11 @@ const marker = `finished-${randomUUID()}`;
 for (let index = 0; index < links.length; index++) await fs.writeFile(path.join(workspace, "site", "data", links[index]),
   JSON.stringify(index === links.length - 1 ? { marker } : { next: `site/data/${links[index + 1]}` }));
 
-const legacy = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"));
-legacy.mcp = {};
-legacy.lsp = false;
-legacy.formatter = false;
-const runtime = buildV2Config(legacy, { env: { OPENCODE_WEBSEARCH_PROVIDER: "off", CONTEXT7_ENABLED: "0" },
+const base = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"));
+base.mcp = { servers: {} };
+base.lsp = false;
+base.formatter = false;
+const runtime = buildV2Config(base, { env: { OPENCODE_WEBSEARCH_PROVIDER: "off", CONTEXT7_ENABLED: "0" },
   pluginPath: pathToFileURL(path.resolve(import.meta.dirname, "../../opencode/v2")).href });
 runtime.agents.sitebuilder.system = "Follow the user's read-only calibration task. Use read, one file per model step. No other tools.";
 runtime.agents.sitebuilder.steps = 30;

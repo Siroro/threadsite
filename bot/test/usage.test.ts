@@ -8,20 +8,18 @@ import type { SessionMessage } from "../src/opencode.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { UsageLog } = await import("../src/usage.js");
-const { LegacyOpenCodeHarness: OpenCodeHarness, usageFromMessages, reconcileUsage } = await import("../src/opencode.js");
+const { usageFromMessages, reconcileUsage } = await import("../src/opencode.js");
 
 function message(id: string, created: number, input = 100, output = 20): SessionMessage {
   return { info: { id, role: "assistant", providerID: "test", modelID: "model", time: { created },
-    tokens: { input, output, cache: { read: 30, write: 5 }, reasoning: 2 }, cost: 0.01 },
-  parts: [{ id: `part-${id}`, type: "step-finish", tokens: { input, output, cache: { read: 30, write: 5 }, reasoning: 2 }, cost: 0.01 }] };
+    tokens: { input, output, cache: { read: 30, write: 5 }, reasoning: 2 }, cost: 0.01 }, parts: [] };
 }
 
 test("saved billing counts each message/step once, includes cache/reasoning, and honors turn boundaries", () => {
   const first = message("first", 1000);
-  first.parts!.push(first.parts![0]);
-  const fallback = message("fallback", 1500);
-  fallback.parts = [];
-  const saved = usageFromMessages([message("old", 500), first, first, fallback, message("next", 2100)], 1000, 2000)!;
+  const second = message("second", 1500);
+  const unbilled: SessionMessage = { info: { id: "idle", role: "assistant", time: { created: 1800 } } };
+  const saved = usageFromMessages([message("old", 500), first, first, second, unbilled, message("next", 2100)], 1000, 2000)!;
   assert.equal(saved.inputTokens, 270);
   assert.equal(saved.outputTokens, 44);
   assert.equal(saved.cacheTokens, 70);
@@ -103,32 +101,6 @@ test("missing turn usage reconciles within saved boundaries, retaining failures 
   assert.equal((await log.modelBreakdown()).models[0].inputTokens, 370);
 });
 
-test("prompt usage is recovered without any live events, including paginated and child history", async () => {
-  const harness = new OpenCodeHarness();
-  const stub = harness as any;
-  let sent = false;
-  const started = Date.now() + 1000;
-  const all = Array.from({ length: 205 }, (_, i) => message(`m${String(i).padStart(3, "0")}`, started + i));
-  const cursors: string[] = [];
-  stub.startEventStream = async () => { throw new Error("stream unavailable"); };
-  stub.client = { session: {
-    prompt: async () => { sent = true; return { data: { parts: [{ type: "text", text: "Finished" }] } }; },
-    messages: async ({ sessionID, limit, before }: { sessionID: string; limit: number; before?: string }) => {
-      if (!sent) return { data: [] };
-      if (sessionID === "child") return { data: [message("child-message", started + 100)] };
-      if (before) cursors.push(before);
-      const eligible = before ? all.filter((m) => m.info!.id! < before) : all;
-      return { data: eligible.slice(-limit) };
-    },
-    children: async ({ sessionID }: { sessionID: string }) => ({ data: sessionID === "root" ? [{ id: "child" }] : [] }),
-  } };
-  const result = await harness.prompt("/workspace", "root", "Build the game");
-  assert.equal(result.text, "Finished");
-  assert.equal(result.usage.steps, 206);
-  assert.equal(result.usage.inputTokens, 206 * 135);
-  assert.deepEqual(cursors, ["m005"]);
-});
-
 test("project deletion erases every usage revision while preserving other projects and ignoring late events", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-delete-"));
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 5 }));
@@ -143,30 +115,4 @@ test("project deletion erases every usage revision while preserving other projec
   assert.doesNotMatch(await fs.readFile(file, "utf8"), /Private project name|gone/);
   assert.equal((await new UsageLog(file).threadTotal("gone")).turns, 0);
   assert.equal((await new UsageLog(file).threadTotal("keep")).turns, 1);
-});
-
-test("strict session teardown covers children, rejects questions and propagates failed deletion", async () => {
-  const harness = new OpenCodeHarness();
-  const calls: string[] = [];
-  const stub = harness as any;
-  let fail = false;
-  stub.client = { session: {
-    list: async () => ({ data: [{ id: "root", directory: "/project" }, { id: "child", parentID: "root", directory: "/child" },
-      { id: "other", directory: "/other" }] }),
-    abort: async ({ sessionID }: any) => { calls.push(`abort:${sessionID}`); return { data: true }; },
-    delete: async ({ sessionID }: any) => {
-      calls.push(`delete:${sessionID}`);
-      return fail ? { error: "Forbidden", response: { status: 403 } } : { data: true };
-    },
-    status: async () => ({ data: {} }),
-  }, question: {
-    list: async () => ({ data: [{ id: "question", sessionID: "root" }] }),
-    reject: async () => { calls.push("reject-question"); return { data: true }; },
-  } };
-  await harness.deleteSessionsInDirectory("/project", "root");
-  assert.ok(calls.indexOf("reject-question") < calls.indexOf("abort:root"));
-  assert.ok(calls.includes("delete:child"));
-  assert.ok(!calls.some((call) => call.endsWith(":other")));
-  fail = true;
-  await assert.rejects(harness.deleteSessionsInDirectory("/project", "root"), /Forbidden/);
 });

@@ -6,13 +6,13 @@ import path from "node:path";
 import { setupLsp } from "../dist/lsp.mjs";
 import { buildV2Config } from "./config.mjs";
 
-const legacy = JSON.parse(await fs.readFile(new URL("../opencode.json", import.meta.url), "utf8")
+const base = JSON.parse(await fs.readFile(new URL("../opencode.json", import.meta.url), "utf8")
   .catch((error) => error.code === "ENOENT" ? fs.readFile(new URL("../opencode.base.json", import.meta.url), "utf8") : Promise.reject(error)));
 
 test("LSP never discovers server commands from generated project configuration", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-lsp-config-"));
   try {
-    await fs.writeFile(path.join(root, "opencode.json"), JSON.stringify({ lsp: legacy.lsp }));
+    await fs.writeFile(path.join(root, "opencode.json"), JSON.stringify({ lsp: base.lsp }));
     await setupLsp({ location: { directory: root }, tool: {
       transform: () => assert.fail("project configuration must not enable servers"),
     } });
@@ -29,7 +29,7 @@ test("real language servers navigate and diagnose config-free project files with
   let tool;
   let disposed = 0;
   const registration = () => ({ dispose: async () => { disposed++; } });
-  const options = buildV2Config(legacy, { env: {} }).plugins[0].options;
+  const options = buildV2Config(base, { env: {} }).plugins[0].options;
   const serverRoot = process.env.THREADSITE_LSP_SERVER_ROOT;
   if (serverRoot) {
     options.lsp.typescript.command = [process.execPath, path.join(serverRoot, "typescript-language-server/lib/cli.mjs"), "--stdio"];

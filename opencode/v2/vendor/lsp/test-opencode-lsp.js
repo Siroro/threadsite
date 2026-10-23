@@ -188,7 +188,7 @@ async function waitForLog(log, method) {
   throw new Error(`Server did not log ${method}`)
 }
 
-test("write results get OpenCode 1's error block and TUI metadata; warnings and clean files add nothing", async () => {
+test("write results get an error block and TUI metadata; warnings and clean files add nothing", async () => {
   const root = await project(structuredClone(FAKE))
   const { after, cleanup } = await start(root)
   try {
@@ -485,7 +485,7 @@ test("servers that support pull diagnostics are asked directly", async () => {
   }
 })
 
-test("the lsp tool runs OpenCode 1's operations with 1-based positions", async () => {
+test("the lsp tool runs navigation operations with 1-based positions", async () => {
   const root = await project(structuredClone(FAKE))
   const { lsp, cleanup } = await start(root)
   try {
@@ -526,7 +526,7 @@ test("the lsp tool runs OpenCode 1's operations with 1-based positions", async (
   }
 })
 
-test("builtin server IDs run at OpenCode 1's per-server roots; custom IDs run at the project", async () => {
+test("builtin server IDs run at per-server roots; custom IDs run at the project", async () => {
   const root = await project({ pyright: { command: ["FAKE"] }, typescript: { command: ["FAKE"] }, custom: { command: ["FAKE"], extensions: [".sh"] } })
   const { lsp, cleanup } = await start(root)
   try {
@@ -557,7 +557,7 @@ test("builtin server IDs run at OpenCode 1's per-server roots; custom IDs run at
     await writeFile(join(root, "mod", "go.work"), "go 1.22\n")
     assert.equal(await serverRoot("gopls", join(root, "mod", "pkg", "x.go"), root), join(root, "mod"))
     assert.equal(await serverRoot("deno", join(root, "top.ts"), root), undefined)
-    // OpenCode 1 skipped Prisma in any npm project; every Prisma project has a package.json.
+    // A package.json must not disable Prisma in npm projects.
     await mkdir(join(root, "db", "prisma"), { recursive: true })
     await writeFile(join(root, "db", "package.json"), "{}")
     await writeFile(join(root, "db", "prisma", "schema.prisma"), "")
@@ -905,4 +905,4 @@ if (failed) {
   console.log(`FAIL - ${failed} of ${cases.length} OpenCode LSP plugin cases`)
   process.exit(1)
 }
-console.log("PASS - OpenCode LSP plugin restores OpenCode 1 diagnostics and the lsp tool")
+console.log("PASS - OpenCode LSP diagnostics and navigation")

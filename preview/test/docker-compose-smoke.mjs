@@ -19,14 +19,14 @@ const sites = path.join(root, "sites");
 const state = path.join(root, "state");
 for (const dir of [workspace, sites, state]) await fs.mkdir(dir);
 const opencodeEnv = {
-  XDG_DATA_HOME: "/opencode-data", OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: "fixture-only",
+  XDG_DATA_HOME: "/opencode-data", OPENCODE_SERVER_PASSWORD: "fixture-only",
   SURPLUS_API_KEY: "fixture-only", SURPLUS_BASE_URL: "http://fixture:7070/v1", SURPLUS_MODELS: "compose-vision,compose-text",
   OPENCODE_MAX_STEPS: "50",
-  OPENCODE_LOG_LEVEL: "INFO", OPENCODE_ENABLE_EXA: "0",
+  OPENCODE_LOG_LEVEL: "INFO", OPENCODE_WEBSEARCH_PROVIDER: "off",
 };
 const botEnv = {
   DISCORD_BOT_TOKEN: "fixture-only", DISCORD_APPLICATION_ID: "100", OPENCODE_URL: "http://opencode:4096",
-  OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: "fixture-only", WORKSPACE_ROOT: "/workspace",
+  OPENCODE_SERVER_PASSWORD: "fixture-only", WORKSPACE_ROOT: "/workspace",
   PUBLISH_ROOT: "/srv/sites", STATE_DB_FILE: "/data/state.db", LOG_FILE: "/data/smoke.jsonl",
   PUBLIC_SITES_BASE_URL: "http://static-web", MULTIPLAYER_ENABLED: "false",
   OPENCODE_MAX_STEPS: "50",

@@ -20,7 +20,7 @@ const { Store, pendingTurnMatches } = await import("../src/store.js");
 const { UsageLog } = await import("../src/usage.js");
 const { config } = await import("../src/config.js");
 const { publishSite, validateSite } = await import("../src/publish.js");
-const { currentHead, ensureGitRepository, ensureLocalBaseline, commitAndPush } = await import("../src/git.js");
+const { currentHead, ensureGitRepository, ensureLocalBaseline, commitAndPush, syncToRemote } = await import("../src/git.js");
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec("git", args, { cwd })).stdout.trim();
 async function openStore(file: string) {
@@ -294,6 +294,37 @@ async function projectFixture(id: string, forgejo = new LocalForgejo()) {
   await publishSite(path.join(dir, "site"), project.siteSlug);
   return { dir, project, store, service, forgejo, opencode, usage, base };
 }
+
+test("sync rejects broken remote changes and restores the pre-sync workspace and live site", async () => {
+  const f = await projectFixture("sync-rollback");
+  const acceptedHead = await currentHead(f.dir);
+  const liveFile = path.join(config.publishRoot, f.project.siteSlug, "js/main.js");
+  const previousLive = await fs.readFile(liveFile, "utf8");
+  const external = await workspace("sync-external");
+  await ensureGitRepository(external, f.project.repoName, f.forgejo);
+  // The empty external checkout starts clean before adopting the remote tree.
+  await fs.rm(path.join(external, "site"), { recursive: true });
+  await syncToRemote(external, f.forgejo);
+  await fs.writeFile(path.join(external, "site/src/main.ts"), "export const broken = ;");
+  const pushed = await commitAndPush(external, "Broken external change", f.forgejo);
+  assert.ok(pushed);
+
+  const result = await f.service.sync(f.project.threadId);
+  assert.match(result.validationError ?? "", /TypeScript compile error/);
+  assert.equal(await currentHead(f.dir), acceptedHead);
+  assert.equal(await fs.readFile(path.join(f.dir, "site/src/main.ts"), "utf8"), 'console.log("accepted turn");');
+  assert.equal(await fs.readFile(liveFile, "utf8"), previousLive);
+  assert.equal(f.store.getProject(f.project.threadId)!.lastSeenCommit?.slice(0, 10), pushed.commit);
+
+  await fs.writeFile(path.join(external, "site/src/main.ts"), 'console.log("repaired external change");');
+  const repaired = await commitAndPush(external, "Repair external change", f.forgejo);
+  assert.ok(repaired);
+  const retry = await f.service.sync(f.project.threadId);
+  assert.equal(retry.validationError, undefined);
+  assert.equal(retry.project.status, "ready");
+  assert.equal((await currentHead(f.dir)).slice(0, 10), repaired.commit);
+  assert.match(await fs.readFile(liveFile, "utf8"), /repaired external change/);
+});
 
 
 test("a preparation failure without a turn marker preserves its error and releases active bookkeeping", async () => {
@@ -787,26 +818,14 @@ test("switching multiplayer rewrites the wiring and runs a question-first agent 
 
 test("only a reply to the running turn's status message steers the live session", async () => {
   const f = await projectFixture("steer");
-  // A real harness with a stubbed transport, so the steering path exercised is
-  // the production one (promptAsync into the busy session, no abort).
-  const { LegacyOpenCodeHarness: Harness } = await import("../src/opencode.js");
-  const harness = new Harness();
-  const stub = harness as unknown as {
-    startEventStream: () => Promise<never>;
-    client: {
-      session: {
-        prompt: (options: unknown) => Promise<unknown>;
-        promptAsync: (options: unknown) => Promise<unknown>;
-        messages: () => Promise<unknown[]>;
-      };
-    };
-  };
-  stub.startEventStream = async () => { throw new Error("no stream in test"); };
-  stub.client.session.messages = async () => [];
-  let releasePrompt!: (value: unknown) => void;
-  stub.client.session.prompt = () => new Promise((resolve) => { releasePrompt = resolve; });
-  const asyncCalls: Array<{ parts: Array<{ text: string }> }> = [];
-  stub.client.session.promptAsync = async (options: unknown) => { asyncCalls.push(options as { parts: Array<{ text: string }> }); return {}; };
+  let releasePrompt!: (value: PromptResult) => void;
+  let busy = false;
+  const instructions: string[] = [];
+  const harness = Object.assign(f.opencode, {
+    isBusy: async () => busy,
+    prompt: () => { busy = true; return new Promise<PromptResult>((resolve) => { releasePrompt = resolve; }); },
+    steer: async (_directory: string, _session: string, instruction: string) => { instructions.push(instruction); return busy; },
+  });
   const service = new ProjectService(f.store, harness, f.forgejo, f.usage);
 
   const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -823,12 +842,12 @@ test("only a reply to the running turn's status message steers the live session"
   assert.equal(await service.steerActiveTurn(f.project.threadId, "make the snow ice-blue", "another-message"), false);
   // A reply to the running turn's status message goes straight into the busy session.
   assert.equal(await service.steerActiveTurn(f.project.threadId, "make the snow ice-blue", "status"), true);
-  assert.equal(asyncCalls.length, 1);
-  assert.match(asyncCalls[0].parts[0].text, /make the snow ice-blue/);
-  assert.match(asyncCalls[0].parts[0].text, /steering update for the CURRENT task/);
+  assert.equal(instructions.length, 1);
+  assert.match(instructions[0], /make the snow ice-blue/);
 
   // The steered turn itself completes normally through the whole pipeline.
-  releasePrompt({ parts: [{ type: "text", text: "Snow added with the steering folded in." }] });
+  busy = false;
+  releasePrompt({ text: "Snow added with the steering folded in.", usage: {} as PromptResult["usage"] });
   const result = await turning;
   if (result instanceof Error) throw result;
   assert.ok(result.commit || result.noChanges);

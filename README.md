@@ -16,7 +16,7 @@ See [docs/architecture.md](docs/architecture.md) for the full pipeline, agent sa
 ## Stack
 
 - Node 24 + discord.js bot
-- Native OpenCode v2 + `@opencode/client` (default), with OpenCode v1 + `@opencode-ai/sdk` available for compatibility
+- Native OpenCode v2 + `@opencode/client`
 - One shared Node 24 + `ws` multiplayer relay for all games (multi-tenant, in-memory)
 - Forgejo 15 LTS (SQLite, no separate database needed)
 - Your existing Apache static directory (the default), an optional bundled `httpd:2.4-alpine` profile, or an optional Caddy edge with automatic HTTPS
@@ -58,8 +58,7 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 
 | Setting | Purpose |
 | --- | --- |
-| `OPENCODE_API_VERSION` | `v2` (default) or `v1` for compatibility; selects the bot adapter and server image. Rebuild both services. Existing v1 deployments must follow [the v2 migration guide](docs/opencode-v2.md). |
-| `OPENCODE_URL` / `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` | Internal agent service endpoint and basic auth |
+| `OPENCODE_URL` / `OPENCODE_SERVER_PASSWORD` | Internal agent service endpoint and basic auth password (username `opencode`) |
 | `OPENCODE_DEFAULT_MODEL` | Model for new sessions (`provider/model-id`); changeable live via `/site-admin model` |
 | `OPENCODE_SUBAGENT_MODEL` | V2 model for both general and explore subagents (`provider/model-id`); blank keeps `opencode/mimo-v2.6-flash-free`. Recreate opencode after changes. |
 | `OPENCODE_BROWSER_QA_MODEL` | Dedicated v2 `browser-qa` vision model (`provider/model-id`); blank disables it. Browser-only, advisory inspection; supports background work while the builder continues. Independent of builder/general/explore models. |

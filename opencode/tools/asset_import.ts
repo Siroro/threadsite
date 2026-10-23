@@ -1,12 +1,10 @@
-import { tool } from "@opencode-ai/plugin";
+import { tool } from "../v2/tool-definition.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { queueSourceRecord } from "../lib/asset-sources.js";
 
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
-
-
-let sourceWriteQueue = Promise.resolve();
 
 export default tool({
   description: "Copy a user-uploaded file from scratch/uploads into site/assets so the project can use it. Use it for sprites, audio, fonts, data files and other binaries the user attached in Discord; readable reference material can stay in place instead.",
@@ -57,36 +55,6 @@ function normalizeDestination(input: string): string {
     throw new Error("Destination must be a normal relative path below site/assets with no dot/path-traversal segments");
   }
   return value;
-}
-
-async function queueSourceRecord(root: string, record: Record<string, unknown>): Promise<void> {
-  const run = sourceWriteQueue.then(async () => {
-    const file = path.join(root, "ASSET_SOURCES.json");
-    let records: Array<Record<string, unknown>> = [];
-    try {
-      const parsed = JSON.parse(await fs.readFile(file, "utf8"));
-      if (Array.isArray(parsed)) records = parsed;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        if (!(error instanceof SyntaxError)) throw error;
-        // Corrupt (e.g. truncated by a crash mid-write before writes were
-        // rename-atomic): keep it aside for inspection and start a fresh
-        // list rather than failing every future import.
-        await fs.rename(file, `${file}.corrupt`).catch(() => undefined);
-      }
-    }
-    records = records.filter((item) => item.file !== record.file);
-    records.push(record);
-    // Rename-atomic: a crash mid-write must not leave truncated JSON behind.
-    const temp = `${file}.tmp`;
-    await fs.writeFile(temp, `${JSON.stringify(records, null, 2)}\n`, { mode: 0o644 });
-    await fs.rename(temp, file);
-  });
-  // One rejected write must not poison the tail: the tools share one
-  // long-lived server process across every project session, so later calls
-  // still run and only this caller sees its own error.
-  sourceWriteQueue = run.catch(() => {});
-  await run;
 }
 
 function positiveInt(raw: string | undefined, fallback: number): number {

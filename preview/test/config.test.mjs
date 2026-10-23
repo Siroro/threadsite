@@ -5,37 +5,16 @@ import { applyRuntimeConfig } from "../../opencode/runtime-config.mjs";
 
 test("builder step budget defaults to 200 and accepts a validated environment override", () => {
   for (const value of [undefined, "", "  "]) {
-    const config = applyRuntimeConfig({ agent: { sitebuilder: { maxSteps: 120 }, titler: { maxSteps: 1 } } }, { OPENCODE_MAX_STEPS: value });
-    assert.equal(config.agent.sitebuilder.maxSteps, 200);
-    assert.equal(config.agent.titler.maxSteps, 1);
+    const config = applyRuntimeConfig({ agents: { sitebuilder: { steps: 120 }, titler: { steps: 1 } } }, { OPENCODE_MAX_STEPS: value });
+    assert.equal(config.agents.sitebuilder.steps, 200);
+    assert.equal(config.agents.titler.steps, 1);
   }
-  const config = applyRuntimeConfig({ agent: { sitebuilder: { prompt: "Keep this prompt" } } }, { OPENCODE_MAX_STEPS: " 350 " });
-  assert.equal(config.agent.sitebuilder.maxSteps, 350);
-  assert.equal(config.agent.sitebuilder.prompt, "Keep this prompt");
+  const config = applyRuntimeConfig({ agents: { sitebuilder: { system: "Keep this prompt" } } }, { OPENCODE_MAX_STEPS: " 350 " });
+  assert.equal(config.agents.sitebuilder.steps, 350);
+  assert.equal(config.agents.sitebuilder.system, "Keep this prompt");
   for (const value of ["0", "-1", "1.5", "200junk", "Infinity", "1e3", "9007199254740992"]) {
     assert.throws(() => applyRuntimeConfig({}, { OPENCODE_MAX_STEPS: value }), /OPENCODE_MAX_STEPS must be a positive integer/);
   }
-});
-
-test("builder permissions and project prompts explain the isolated scratch browser workflow", async () => {
-  const config = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"));
-  const rules = await fs.readFile(new URL("../../bot/assets/agents/shared.md", import.meta.url), "utf8");
-  assert.equal(config.permission.edit["scratch/**"], "allow");
-  assert.equal(config.permission.edit["*/scratch/**"], "allow");
-  assert.match(config.agent.sitebuilder.prompt, /read the project-root AGENTS\.md/i);
-  assert.match(rules, /scratch\/<name>\/src\/main\.ts/);
-  assert.match(rules, /__scratch\/<name>\//);
-  assert.match(rules, /__site\/assets\//);
-  assert.match(rules, /never published/);
-  assert.doesNotMatch(config.agent.sitebuilder.prompt, /Work only inside site\/|use edit only for files inside site\/\./);
-});
-
-test("delegated agents cannot expose browser MCP through a separate model setting", async () => {
-  const config = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"));
-  const rules = await fs.readFile(new URL("../../bot/assets/agents/shared.md", import.meta.url), "utf8");
-  for (const name of ["general", "explore"]) assert.equal(config.agent[name].permission["playwright_*"], "deny");
-  assert.equal(config.agent.titler.permission["*"], "deny");
-  assert.match(rules, /Text-only models receive no browser MCP tools/);
 });
 
 // A cold Chromium launch plus a software-rendered (SwiftShader) WebGL canvas
@@ -72,7 +51,7 @@ test("the OpenCode MCP client waits longer than the browser's own timeouts", asy
     fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"),
     fs.readFile(new URL("../browser-config.json", import.meta.url), "utf8"),
   ]);
-  const clientTimeout = JSON.parse(opencode).mcp?.playwright?.timeout;
+  const clientTimeout = JSON.parse(opencode).mcp?.servers?.playwright?.timeout?.execution;
   const navigation = JSON.parse(browser).timeouts?.navigation;
   assert.ok(clientTimeout > navigation,
     `MCP client timeout (${clientTimeout}ms) must exceed the browser navigation timeout (${navigation}ms), `

@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+
+const require = createRequire(new URL("../../bot/package.json", import.meta.url));
+const { OpenCode } = await import(pathToFileURL(require.resolve("@opencode/client")).href);
 
 // Optional smoke test against the pinned OpenCode image, without spending LLM
 // tokens. A mock OpenAI-compatible provider requests the real MCP screenshot and
@@ -50,14 +55,16 @@ export async function checkOpenCodeImageDelivery({ docker, network, root }) {
   let container;
   try {
     const config = {
-      $schema: "https://opencode.ai/config.json", model: "wiretest/vision-fixture", small_model: "wiretest/vision-fixture",
-      permission: { "*": "deny", "playwright_*": "allow" },
-      agent: { sitebuilder: { mode: "primary", prompt: "Call the requested browser tools, then finish.", steps: 5 } },
-      provider: { wiretest: { npm: "@ai-sdk/openai-compatible", options: {
+      default_agent: "sitebuilder", snapshots: false,
+      permissions: [{ action: "*", resource: "*", effect: "deny" }, { action: "playwright_*", resource: "*", effect: "allow" }],
+      agents: { sitebuilder: { mode: "primary", system: "Call the requested browser tools, then finish.", steps: 5,
+        model: "wiretest/vision-fixture" } },
+      providers: { wiretest: { package: "@ai-sdk/openai-compatible", settings: {
         baseURL: `http://host.docker.internal:${provider.address().port}/v1`, apiKey: "fixture-only",
-      }, models: { "vision-fixture": { name: "Vision fixture", attachment: true,
-        modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 100_000, output: 2048 } } } } },
-      mcp: { playwright: { type: "remote", url: "http://preview:8931/mcp", oauth: false, timeout: 90000 } },
+      }, models: { "vision-fixture": { name: "Vision fixture",
+        capabilities: { tools: true, input: ["text", "image"], output: ["text"] }, limit: { context: 100_000, output: 2048 } } } } },
+      mcp: { servers: { playwright: { type: "remote", url: "http://preview:8931/mcp", oauth: false,
+        codemode: false, timeout: { startup: 90000, catalog: 90000, execution: 90000 } } } },
     };
     const configFile = path.join(root, "wire-config.json");
     await fs.writeFile(configFile, JSON.stringify(config));
@@ -69,28 +76,24 @@ export async function checkOpenCodeImageDelivery({ docker, network, root }) {
     const port = (await docker("port", container, "4096/tcp")).split(":").at(-1);
     const base = `http://127.0.0.1:${port}`;
     for (let attempt = 0; ; attempt++) {
-      try { const response = await fetch(`${base}/global/health`, { signal: AbortSignal.timeout(3000) }); if (response.ok) break; } catch {}
+      try { const response = await fetch(`${base}/api/info`, { signal: AbortSignal.timeout(3000) }); if (response.ok) break; } catch {}
       if (attempt > 120) throw new Error("OpenCode did not start");
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     console.log("OpenCode started; creating fixture session...");
-    const directory = "?directory=%2Fworkspace%2F100%2F200";
-    const session = await (await fetch(`${base}/session${directory}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Preview delivery test" }),
-      signal: AbortSignal.timeout(90_000),
-    })).json();
+    const client = OpenCode.make({ baseUrl: base });
+    const session = await client.session.create({ location: { directory: "/workspace/100/200" },
+      title: "Preview delivery test", agent: "sitebuilder", model: { providerID: "wiretest", id: "vision-fixture" } },
+    { signal: AbortSignal.timeout(90_000) });
     assert.ok(session.id, JSON.stringify(session));
     console.log("Fixture session created; requesting browser screenshot...");
-    const response = await fetch(`${base}/session/${session.id}/message${directory}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(120_000),
-      body: JSON.stringify({ agent: "sitebuilder", model: { providerID: "wiretest", modelID: "vision-fixture" },
-        parts: [{ type: "text", text: "Open the preview, take a screenshot and inspect it." }] }),
-    });
-    const result = await response.json();
+    await client.session.prompt({ sessionID: session.id, text: "Open the preview, take a screenshot and inspect it.", delivery: "queue" });
+    await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(120_000) });
+    const result = (await client.message.list({ sessionID: session.id, order: "desc", limit: 50 })).data;
     if (requestFailure) throw requestFailure;
     assert.ok(receivedImage, `Image never reached provider; steps=${step}; result=${JSON.stringify(result).slice(0, 3000)}`);
     assert.match(JSON.stringify(result), /Screenshot received by the model/);
-    console.log("PASS: real OpenCode 1.18.27 forwards Playwright MCP screenshots as image input to an OpenAI-compatible vision provider.");
+    console.log("PASS: OpenCode forwards Playwright MCP screenshots as image input to the vision provider.");
   } catch (error) {
     if (container) console.error(await docker("logs", container));
     throw error;

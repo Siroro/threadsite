@@ -15,6 +15,7 @@ process.env.DISCORD_APPLICATION_ID ||= "test";
 const binary = process.env.OPENCODE_V2_BINARY;
 assert.ok(binary, "Set OPENCODE_V2_BINARY to the OpenCode 2.1.3 executable");
 const { buildV2Config } = await import("../../opencode/v2/config.mjs");
+const { buildSurplusProvider } = await import("../../opencode/surplus-adapter.mjs");
 const { OpenCodeV2Harness } = await import("../src/opencode-v2.js");
 const { config } = await import("../src/config.js");
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-v2-smoke-"));
@@ -60,12 +61,18 @@ docs.listen(0, "127.0.0.1");
 await once(docs, "listening");
 const docsPort = (docs.address() as import("node:net").AddressInfo).port;
 const models = new Set<string>();
+const efforts: string[] = [];
 const toolNames = new Set<string>();
 let providerRequests = 0;
 const provider = http.createServer(async (request, response) => {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   const body = JSON.parse(Buffer.concat(chunks).toString());
+  if (body.model === "glm-5.3") {
+    assert.equal(body.options?.reasoningEffort, undefined);
+    assert.equal(body.options?.reasoning_effort, undefined);
+    efforts.push(body.reasoning_effort);
+  }
   providerRequests++;
   models.add(body.model);
   if (body.model === "vision") {
@@ -85,12 +92,17 @@ const provider = http.createServer(async (request, response) => {
     { id: "call_notes", name: "project_notes", arguments: JSON.stringify({ note: "[decision] Preserve the smoke test fixture." }) },
     { id: "call_question", name: "question", arguments: JSON.stringify({ questions: [{ header: "Colour", question: "Choose a colour", options: [{ label: "Blue", description: "Blue palette" }] }] }) },
   ] : [];
+  if (text.includes("Effort wire smoke") && last?.role !== "tool") calls = [
+    { id: `effort_read_${efforts.length}`, name: "read", arguments: JSON.stringify({ path: "site/src/lsp-smoke.ts" }) },
+  ];
   if (text.includes("Delegate smoke") && last?.role !== "tool") calls = [{ id: "call_child", name: "subagent",
     arguments: JSON.stringify({ agent: text.includes("explore") ? "explore" : "general", description: "Inspect the fixture",
       prompt: "Child inspection smoke: read site/src/lsp-smoke.ts and summarize.", background: false }) }];
   if (text.includes("Child inspection smoke") && last?.role !== "tool") calls = [{ id: "call_child_read", name: "read",
     arguments: JSON.stringify({ path: "site/src/lsp-smoke.ts" }) }];
   if (text.includes("Browser QA smoke")) {
+    // Let the event subscription attach before the scripted delegation starts.
+    if (last?.role !== "tool") await new Promise((resolve) => setTimeout(resolve, 250));
     if (last?.role !== "tool") calls = [{ id: "call_browser_qa", name: "subagent",
       arguments: JSON.stringify({ agent: "browser-qa", model: "threadsite-test/text", background: true,
         description: "Inspect the preview", prompt: "Inspect browser fixture at http://127.0.0.1:8080/100/200/. Navigate and take a screenshot, then report." }) }];
@@ -141,19 +153,23 @@ lease.listen(0, "127.0.0.1");
 await once(lease, "listening");
 const port = (lease.address() as import("node:net").AddressInfo).port;
 await new Promise<void>((resolve) => lease.close(() => resolve()));
-const legacy = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"));
-legacy.provider = { "threadsite-test": { npm: "@ai-sdk/openai-compatible", name: "Local scripted provider",
-  options: { baseURL: `http://127.0.0.1:${providerPort}/v1`, apiKey: "test-only" },
+const base = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json", import.meta.url), "utf8"));
+base.providers = { "threadsite-test": { package: "@ai-sdk/openai-compatible", name: "Local scripted provider",
+  settings: { baseURL: `http://127.0.0.1:${providerPort}/v1`, apiKey: "test-only" },
   models: {
-    text: { name: "Test", limit: { context: 32000, output: 2048 }, modalities: { input: ["text"], output: ["text"] } },
-    child: { name: "Child test", limit: { context: 32000, output: 2048 }, modalities: { input: ["text"], output: ["text"] } },
-    vision: { name: "Vision QA test", limit: { context: 32000, output: 2048 }, modalities: { input: ["text", "image"], output: ["text"] } },
+    text: { name: "Test", limit: { context: 32000, output: 2048 }, capabilities: { tools: true, input: ["text"], output: ["text"] } },
+    child: { name: "Child test", limit: { context: 32000, output: 2048 }, capabilities: { tools: true, input: ["text"], output: ["text"] } },
+    vision: { name: "Vision QA test", limit: { context: 32000, output: 2048 }, capabilities: { tools: true, input: ["text", "image"], output: ["text"] } },
   } } };
-legacy.mcp = { playwright: { type: "remote", url: `http://127.0.0.1:${docsPort}/browser`, enabled: true, oauth: false, timeout: 5000 } };
-legacy.lsp = lspCommand ? { typescript: { ...legacy.lsp.typescript, command: lspCommand } } : false;
-legacy.formatter = false;
-for (const agent of Object.values(legacy.agent) as any[]) agent.model = "threadsite-test/text";
-const runtime = buildV2Config(legacy, { pluginPath: pathToFileURL(path.resolve(import.meta.dirname, "../../opencode/v2")).href,
+const surplus = await buildSurplusProvider({ env: { SURPLUS_BASE_URL: `http://127.0.0.1:${providerPort}/v1` },
+  fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "glm-5.3",
+    supported_parameters: ["tools", "reasoning_effort"], architecture: { input_modalities: ["text"] } }] }) }) });
+base.providers.surplus = surplus.provider;
+base.mcp = { servers: { playwright: { type: "remote", url: `http://127.0.0.1:${docsPort}/browser`, disabled: false, oauth: false, codemode: false, timeout: { startup: 5000, catalog: 5000, execution: 5000 } } } };
+base.lsp = lspCommand ? { typescript: { ...base.lsp.typescript, command: lspCommand } } : false;
+base.formatter = false;
+for (const agent of Object.values(base.agents) as any[]) agent.model = "threadsite-test/text";
+const runtime = buildV2Config(base, { pluginPath: pathToFileURL(path.resolve(import.meta.dirname, "../../opencode/v2")).href,
   env: { OPENCODE_BROWSER_QA_MODEL: "threadsite-test/vision" } });
 for (const agent of ["general", "explore"]) runtime.agents[agent].model = "threadsite-test/child";
 runtime.mcp.servers.context7.url = `http://127.0.0.1:${docsPort}/mcp`;
@@ -161,7 +177,7 @@ const configFile = path.join(root, "opencode.json");
 await fs.writeFile(configFile, JSON.stringify(runtime));
 const child = spawn(binary, ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--print-logs"], {
   cwd: workspace, windowsHide: true,
-  env: { ...process.env, OPENCODE_CONFIG: configFile, OPENCODE_CONFIG_CONTENT: "{}", OPENCODE_PASSWORD: "smoke-test-only",
+  env: { ...process.env, OPENCODE_CONFIG: configFile, OPENCODE_CONFIG_CONTENT: "{}", OPENCODE_PASSWORD: "smoke-test-only", OPENCODE_TEST_HOME: root,
     XDG_DATA_HOME: path.join(root, "data"), XDG_CONFIG_HOME: path.join(root, "config"), XDG_CACHE_HOME: path.join(root, "cache"), XDG_STATE_HOME: path.join(root, "state") },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -190,6 +206,15 @@ try {
     plugins = await client.plugin.list({ location: { directory: workspace } });
   }
   assert.ok(plugins.data.some((plugin) => plugin.id === "threadsite.v2" && plugin.state.status === "active"), JSON.stringify(plugins));
+  const effortSession = await harness.createSession(workspace, "Effort wire check");
+  try {
+    for (const [level, effective] of [["minimal", "low"], ["low", "low"], ["medium", "high"], ["high", "high"], ["xhigh", "max"], ["max", "max"], ["auto", undefined]]) {
+      const before = efforts.length;
+      const result = await harness.prompt(workspace, effortSession, "Effort wire smoke", "surplus/glm-5.3", undefined, "sitebuilder", level);
+      assert.equal(result.text, "Smoke Project");
+      assert.deepEqual(efforts.slice(before), [effective, effective], "the effective effort must survive tool calls and variant changes; only auto may omit it");
+    }
+  } finally { await client.session.remove({ sessionID: effortSession }); }
   let answered = false;
   const result = await harness.prompt(workspace, sessionID, "Build smoke", "threadsite-test/text", async (update) => {
     if (update.question && !update.question.resolved && !answered) {
@@ -239,6 +264,7 @@ try {
   const qaProgress: import("../src/progress.js").ProgressUpdate[] = [];
   const browserQa = await harness.prompt(workspace, sessionID, "Browser QA smoke", "threadsite-test/text", (update) => { qaProgress.push(update); });
   const activeQa = qaProgress.filter((update) => update.activeSubagents !== undefined).map((update) => update.activeSubagents);
+  await fs.writeFile(path.join(root, "qa-progress.json"), JSON.stringify(qaProgress, null, 2));
   assert.ok(activeQa.includes(1), "native background QA appears as an active subagent");
   assert.equal(activeQa.at(-1), 0, "completed QA disappears from the live count");
   assert.ok(qaProgress.every((update) => !update.tool?.name.startsWith("playwright_")), "child browser actions stay off the parent feed");
@@ -307,7 +333,7 @@ try {
   assert.equal(await harness.isBusy(workspace, sessionID), false);
   await harness.deleteSessionsInDirectory(workspace, sessionID);
   assert.deepEqual(await harness.workspaceSessions(), []);
-  assert.deepEqual([...models], ["text", "child", "vision"]);
+  assert.deepEqual([...models], ["glm-5.3", "text", "child", "vision"]);
   console.log(JSON.stringify({ ok: true, providerRequests, steps: result.usage.steps, delegatedAgents, browserCalls, tools: [...toolNames].sort(), root }));
 } catch (error) {
   console.error(`Smoke artifacts: ${root}`);

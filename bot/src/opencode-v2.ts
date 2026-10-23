@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { log, serializeError } from "./logger.js";
 import { applicationMessage, formQuestion } from "./opencode-v2-messages.js";
 import { usageFromMessages, reconcileUsage, describeTool, toolLabel, type SessionMessage, type PromptImage,
-  type PromptResult, type TurnUsage, type QuotaBlock } from "./opencode-v1.js";
+  type PromptResult, type TurnUsage, type QuotaBlock } from "./opencode-shared.js";
 import type { OpenCodeHarness } from "./opencode.js";
 import type { ProgressCallback, ProgressUpdate, ProgressPlanItem, ProgressSubagent } from "./progress.js";
 import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
@@ -116,9 +116,9 @@ interface Watch {
 
 /** Native OpenCode 2 adapter. Submission, observation and completion are separate
  * operations: a broken HTTP/SSE connection is never permission to replay a prompt. */
-export class OpenCodeV2Harness implements OpenCodeHarness {
+export class OpenCodeV2Harness {
   private readonly client: OpenCodeClient;
-  private catalog?: { expires: number; promise: Promise<ModelInfo[]> };
+  private readonly catalogs = new Map<string, { expires: number; promise: Promise<ModelInfo[]> }>();
   private readonly watches = new Map<string, Watch>();
   private readonly stopped = new Set<string>();
   private readonly prompts = new Set<string>();
@@ -142,15 +142,19 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     return session;
   }
 
-  private models(): Promise<ModelInfo[]> {
-    if (this.catalog && this.catalog.expires > Date.now()) return this.catalog.promise;
-    const promise = this.client.model.list({}, requestOptions()).then(({ data }) => data).catch((error) => {
-      this.catalog = undefined;
+  private models(directory?: string): Promise<ModelInfo[]> {
+    for (const [scope, catalog] of this.catalogs) if (catalog.expires <= Date.now()) this.catalogs.delete(scope);
+    const key = directory ? path.resolve(directory) : "";
+    const cached = this.catalogs.get(key);
+    if (cached && cached.expires > Date.now()) return cached.promise;
+    const promise = this.client.model.list(directory ? { location: { directory } } : {}, requestOptions()).then(({ data }) => data).catch((error) => {
+      this.catalogs.delete(key);
       log("warn", "opencode.v2_catalog_failed", { error: serializeError(error) });
       return [];
     });
-    this.catalog = { expires: Date.now() + 60_000, promise };
-    void promise.then((models) => { if (!models.length && this.catalog?.promise === promise) this.catalog = undefined; });
+    this.catalogs.set(key, { expires: Date.now() + 60_000, promise });
+    while (this.catalogs.size > 32) this.catalogs.delete(this.catalogs.keys().next().value!);
+    void promise.then((models) => { if (!models.length && this.catalogs.get(key)?.promise === promise) this.catalogs.delete(key); });
     return promise;
   }
 
@@ -159,8 +163,8 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
       .map((model) => `${model.providerID}/${model.id}`).sort();
   }
 
-  async modelAcceptsAttachments(providerID: string, modelID: string): Promise<boolean | undefined> {
-    return (await this.models()).find((model) => model.providerID === providerID && model.id === modelID)?.capabilities.input.includes("image");
+  async modelAcceptsAttachments(providerID: string, modelID: string, directory?: string): Promise<boolean | undefined> {
+    return (await this.models(directory)).find((model) => model.providerID === providerID && model.id === modelID)?.capabilities.input.includes("image");
   }
 
   private blocked(provider?: string): QuotaBlock | undefined {
@@ -221,7 +225,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     const selected = current ? { id: current.id, providerID: current.providerID,
       ...(variant && variant !== "auto" ? { variant } : {}) } : undefined;
     const vision = agent !== "titler" && !!selected
-      && await this.modelAcceptsAttachments(selected.providerID, selected.id) === true;
+      && await this.modelAcceptsAttachments(selected.providerID, selected.id, directory) === true;
     // Replace only harness-owned tool rules; preserve any other session rules.
     const permissions: PermissionRuleset = (session.permissions ?? []).filter((rule) =>
       !["threadsite_browser", "playwright_*"].includes(rule.action));
@@ -258,7 +262,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
       watch = this.watch(directory, sessionID, onProgress, since, baseline, agent === "sitebuilder");
       if (selected) {
         watch.models.set("__session", selected);
-        watch.contextLimit = (await this.models()).find((item) => item.id === selected.id && item.providerID === selected.providerID)?.limit.context;
+        watch.contextLimit = (await this.models(directory)).find((item) => item.id === selected.id && item.providerID === selected.providerID)?.limit.context;
       }
       const id = messageID();
       let submissionError: unknown;
@@ -654,7 +658,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
   async setProviderToken(providerID: string, token: string): Promise<void> {
     const { data: provider } = await this.client.provider.get({ providerID }, requestOptions());
     await this.client.credential.create({ integrationID: provider.integrationID ?? providerID, label: "ThreadSite", value: { type: "key", key: token }, activate: true }, requestOptions());
-    this.catalog = undefined;
+    this.catalogs.clear();
     this.quotas.delete(providerID);
   }
 
@@ -663,7 +667,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     for (const credential of await this.client.credential.list(requestOptions())) {
       if (credential.integrationID === (provider.integrationID ?? providerID)) await this.client.credential.remove({ credentialID: credential.id }, requestOptions());
     }
-    this.catalog = undefined;
+    this.catalogs.clear();
     this.quotas.delete(providerID);
   }
 
@@ -854,7 +858,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
     directory: string, child: boolean, callback?: ProgressCallback): void {
     const tool = watch.tools.get(id);
     const described = this.describeToolState(watch, id, status, directory);
-    // Same vocabulary as v1: a named action with its target, not a bare tool id.
+    // Describe the activity as a named action with its target, not a bare tool id.
     if (!tool || !described) return;
     const label = child ? "🤖 Subagent — " : "";
     this.publish(watch, `tool:${id}`, { text: `${label}${described.text}`, detail: described.detail, command: described.command,
@@ -934,7 +938,7 @@ export class OpenCodeV2Harness implements OpenCodeHarness {
         watch.streamed.delete(event.data.assistantMessageID);
         watch.timings.delete(event.data.assistantMessageID);
         watch.lastProgress = Date.now();
-        if (!child) void this.models().then((models) => {
+        if (!child) void this.models(directory).then((models) => {
           const selected = event.data.model;
           watch.contextLimit = models.find((model) => model.id === selected.id && model.providerID === selected.providerID)?.limit.context;
         });

@@ -54,7 +54,7 @@ workspaceSymbol also accepts query, a string to filter symbols by; an empty stri
 
 Results use 1-based path:line:character locations relative to the project. LSP servers must be configured for the file type; if none is available, an error is returned.`
 
-/** The OpenCode 1 `lsp` tool, with V2's `path` argument name. */
+/** Language server navigation and diagnostics using a project-relative path. */
 export function lspTool(manager: LspManager, root: string) {
   return {
     name: "lsp",
@@ -151,7 +151,7 @@ function callItems(items: unknown[], root: string): string[] {
 async function resolveFile(root: string, value: string): Promise<string> {
   const path = value.replace(/^@/, "")
   const file = isAbsolute(path) ? resolve(path) : resolve(root, path)
-  // OpenCode 1 asked before touching files outside the project; plugins cannot ask, so refuse.
+  // Refuse access outside the project boundary.
   // Symlinks are resolved too, so a link inside the project cannot reach outside it.
   const outside = new Error(`${value} is outside the project directory ${root}.`)
   if (!within(root, file)) throw outside

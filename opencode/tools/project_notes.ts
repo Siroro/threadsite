@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { tool } from "../v2/tool-definition.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 

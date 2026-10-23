@@ -39,7 +39,7 @@ http.createServer(async (req, res) => {
         assert.ok(reports.policy.budgetSteps <= 50, "Agent never received the finish-up steer within its budget");
         if (!steers.length) {
           delta = { role: "assistant", tool_calls: [{ index: 0, id: `budget_${reports.policy.budgetSteps}`, type: "function",
-            function: { name: "read", arguments: JSON.stringify({ filePath: "site/index.html" }) } }] };
+            function: { name: "read", arguments: JSON.stringify({ path: "site/index.html" }) } }] };
           finish = "tool_calls";
         } else delta = { role: "assistant", content: "Force finish received; current task finished." };
       } else {
