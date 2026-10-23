@@ -33,6 +33,11 @@ services:
     build:
       context: ./opencode
     restart: unless-stopped
+    # Additional provider-specific variables, without passing bot/Forgejo secrets.
+    # Standard keys below still come from .env and take precedence.
+    env_file:
+      - path: ${OPENCODE_ENV_FILE:-.env.opencode}
+        required: false
     environment:
       XDG_DATA_HOME: /opencode-data
       OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-change-this-internal-password}
@@ -58,13 +63,10 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
-      SURPLUS_API_KEY: ${SURPLUS_API_KEY:-}
-      SURPLUS_BASE_URL: ${SURPLUS_BASE_URL:-https://api.surplusintelligence.ai/v1}
-      SURPLUS_MODELS: ${SURPLUS_MODELS:-}
-      SURPLUS_CONTEXT_CAP: ${SURPLUS_CONTEXT_CAP:-}
     volumes:
       - ./data/workspaces:/workspace
       - opencode-data:/opencode-data
+      - ${OPENCODE_HOST_CONFIG_DIR:-./opencode/host}:/etc/threadsite/opencode:ro
     expose:
       - "4096"
     networks:

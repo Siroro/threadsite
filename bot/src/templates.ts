@@ -73,11 +73,12 @@ export function notesSection(notes: string | undefined): string {
 }
 
 /**
- * The two project documents the harness shows to the thread: what the project
- * is, and what each turn changed. Both are agent-maintained, so the prompt
- * has to ask for them by name.
+ * The project documents the harness shows to the thread and the repository.
+ * DESCRIPTION.md and CHANGELOG.md supply the cards; README.agent.md supplies
+ * the long-form repository README. All are agent-maintained, so the prompt has
+ * to ask for them by name.
  */
-const documentsInstruction = "Two documents in the project root are shown to everyone who opens the project, so keep them true and tight. DESCRIPTION.md: a headline of one sentence, at most 25 words, in a visitor's words (no file names, no code, no jargon) — the card shows the headline alone — plus a 'How to play' section of up to four short paragraphs (about 120 words): the goal first, then the controls, then one or two tips; it opens from the card's How to play view. CHANGELOG.md: one new section per turn, newest at the top — a heading of at most six words, then one sentence of at most 30 words on what a visitor will notice. Write each paragraph on a single line; never break a sentence across lines by hand. Write DESCRIPTION.md when the project first exists and whenever its shape changes, and add the CHANGELOG.md section before your final summary.";
+const documentsInstruction = "Three documents in the project root are shown to everyone who opens the project, so keep them true and tight. DESCRIPTION.md: a headline of one sentence, at most 25 words, in a visitor's words (no file names, no code, no jargon) — the card shows the headline alone — plus a 'How to play' section of up to four short paragraphs (about 120 words): the goal first, then the controls, then one or two tips; it opens from the card's How to play view. CHANGELOG.md: one new section per turn, newest at the top — a heading of at most six words, then one sentence of at most 30 words on what a visitor will notice. README.agent.md: the long-form repository README appended to README.md at the end of every turn — what the project is, how to play or use it, the controls, and useful development notes; use ## headings and keep it under 6,000 characters. Never edit README.md itself: the harness owns its title, ownership marker, live link, original request and attribution. Write each paragraph on a single line; never break a sentence across lines by hand. Write DESCRIPTION.md when the project first exists and whenever its shape changes, add the CHANGELOG.md section before your final summary, and keep README.agent.md current.";
 
 const planningInstruction = "For any request that needs multiple steps or changes across multiple files, call the todowrite tool before the first edit: create 3–6 concrete, checkable steps. Keep exactly one step in_progress, and mark a step completed as soon as it is finished while promoting the next one — the user watches this list live, so a list left behind misreports your progress. Before your final summary, mark every finished step completed and every dropped step cancelled. A prose plan does not replace the todo list. Skip todowrite only for a truly single-step change.";
 

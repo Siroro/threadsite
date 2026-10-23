@@ -26,7 +26,8 @@ export function buildV2Config(base, { pluginPath = "/opt/threadsite/v2", env = p
   };
 
   config.websearch = websearchSelection(env);
-  config.plugins = [{ package: pluginPath, options: { lsp: lspSettings(config.lsp), browserQaModel } }];
+  config.plugins = [{ package: pluginPath, options: { lsp: lspSettings(config.lsp), browserQaModel, contextCaps: config.contextCaps ?? {} } }];
+  delete config.contextCaps;
   config.mcp.servers.context7 = {
     type: "remote", url: "https://mcp.context7.com/mcp", oauth: false, codemode: false,
     disabled: env.CONTEXT7_ENABLED === "0",

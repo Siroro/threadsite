@@ -1,0 +1,20 @@
+{
+  "providers": {
+    "surplus": {
+      "name": "Surplus Intelligence",
+      "package": "@ai-sdk/openai-compatible",
+      "settings": {
+        "apiKey": "",
+        "baseURL": "https://api.surplusintelligence.ai/v1",
+        "timeout": 3000000
+      },
+      "models": {
+        "glm-4.7": {}
+      }
+    }
+  },
+  "catalogs": {
+    "surplus": {}
+  },
+  "contextCaps": { "surplus": 100000 }
+}

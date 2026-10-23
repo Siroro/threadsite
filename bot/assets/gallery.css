@@ -141,19 +141,8 @@ select:focus-visible {
   fill: currentColor;
   stroke: none;
 }
-.brand-caption {
-  font-size: 8px;
-  letter-spacing: 1.2px;
-  color: var(--faint);
-  margin: 13px 0 48px;
-  white-space: nowrap;
-}
-.nav-label {
-  font-size: 9px;
-  letter-spacing: 1.7px;
-  color: var(--faint);
-  margin: 0 0 13px 13px;
-  font-weight: 650;
+.side-navigation {
+  margin-top: 40px;
 }
 .nav-item {
   width: 100%;
@@ -202,46 +191,6 @@ select:focus-visible {
   background: var(--line);
   margin: 25px 12px;
 }
-.local-note {
-  font-size: 10px;
-  color: var(--faint);
-  margin: 16px 13px;
-}
-.sidebar-bottom {
-  margin-top: auto;
-  padding-top: 40px;
-}
-.make-card {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 17px 16px;
-  background:
-    linear-gradient(
-      145deg,
-      var(--surface),
-      transparent);
-}
-.mini-spark {
-  display: block;
-  color: var(--accent);
-  margin-bottom: 13px;
-}
-.mini-spark svg {
-  width: 22px;
-  height: 22px;
-  fill: currentColor;
-  stroke: none;
-}
-.make-card strong {
-  font-size: 12px;
-  letter-spacing: -.1px;
-}
-.make-card p {
-  font-size: 11px;
-  line-height: 1.7;
-  color: var(--muted);
-  margin: 6px 0 15px;
-}
 .text-button {
   border: 0;
   padding: 0;
@@ -257,13 +206,6 @@ select:focus-visible {
 .text-button svg {
   width: 15px;
   height: 15px;
-}
-.sidebar-signoff {
-  display: block;
-  font-size: 10px;
-  line-height: 1.8;
-  color: var(--faint);
-  margin: 22px 10px 0;
 }
 .page {
   margin-left: 240px;
@@ -1144,26 +1086,13 @@ select {
 .page-footer {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 22px;
   border-top: 1px solid var(--line);
   margin-top: 44px;
   padding: 24px 0 28px;
   font-size: 9px;
   color: var(--faint);
-}
-.footer-mark {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  color: var(--muted);
-  margin-right: auto;
-}
-.footer-mark svg {
-  width: 15px;
-  height: 15px;
-  color: var(--accent);
-  fill: currentColor;
-  stroke: none;
 }
 .page-footer a:hover {
   color: var(--text);
@@ -1466,11 +1395,6 @@ dialog::backdrop {
     width: 26px;
     height: 26px;
   }
-  .brand-caption {
-    font-size: 6px;
-    letter-spacing: 1.1px;
-    margin-bottom: 36px;
-  }
   .page {
     margin-left: 190px;
   }
@@ -1478,16 +1402,6 @@ dialog::backdrop {
     font-size: 11px;
     padding: 11px 10px;
     gap: 9px;
-  }
-  .local-note {
-    font-size: 8px;
-    margin-left: 10px;
-  }
-  .make-card {
-    padding: 13px;
-  }
-  .make-card strong {
-    font-size: 11px;
   }
   .hero {
     grid-template-columns: 1fr;
@@ -1553,9 +1467,6 @@ dialog::backdrop {
   .page-footer {
     flex-wrap: wrap;
   }
-  .page-footer > span:last-child {
-    display: none;
-  }
 }
 @media (max-width: 700px) {
   .sidebar {
@@ -1569,22 +1480,15 @@ dialog::backdrop {
     font-size: 25px;
     gap: 8px;
   }
-  .brand-caption {
-    font-size: 7px;
-    margin: 11px 0 20px;
-    letter-spacing: 1.1px;
-  }
   .side-navigation {
     display: flex;
     gap: 5px;
     overflow-x: auto;
     padding: 0 0 12px;
-    margin: 0 -3px;
+    margin: 20px -3px 0;
     scrollbar-width: none;
   }
-  .side-navigation .nav-label,
-  .nav-divider,
-  .local-note {
+  .nav-divider {
     display: none;
   }
   .nav-item {
@@ -1603,9 +1507,6 @@ dialog::backdrop {
   .nav-count {
     font-size: 8px;
     padding: 0 4px;
-  }
-  .sidebar-bottom {
-    display: none;
   }
   .page {
     margin-left: 0;

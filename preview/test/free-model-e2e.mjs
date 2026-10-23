@@ -15,7 +15,8 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-free-e2e-"));
 const project = `threadsite-free-e2e-${randomUUID().slice(0, 8)}`;
 const override = path.join(root, "compose.json.yaml");
 const mount = (source, target, read_only = false) => ({ type: "bind", source, target, read_only });
-for (const name of ["workspaces", "sites", "state", "artifacts"]) await fs.mkdir(path.join(root, name));
+for (const name of ["workspaces", "sites", "state", "artifacts", "opencode-host"]) await fs.mkdir(path.join(root, name));
+await fs.writeFile(path.join(root, "opencode-host", "providers.json"), JSON.stringify({ catalogs: { surplus: false } }));
 const tokenFile = path.join(root, "forgejo-token");
 await fs.writeFile(tokenFile, "", { mode: 0o600 });
 const env = {
@@ -41,10 +42,11 @@ await fs.writeFile(override, `services:
   preview:
     volumes: !override ${JSON.stringify([mount(path.join(root, "workspaces"), "/workspace", true), mount(fixtures, "/app/fixtures", true), mount(path.join(root, "artifacts"), "/artifacts")])}
   opencode:
+    env_file: !reset []
     environment: !override ${JSON.stringify({ XDG_DATA_HOME: "/opencode-data",
       OPENCODE_SERVER_PASSWORD: "isolated-test-only", OPENCODE_MAX_STEPS: "60", OPENCODE_LOG_LEVEL: "INFO",
-      OPENCODE_WEBSEARCH_PROVIDER: "off", CONTEXT7_ENABLED: "1", SURPLUS_BASE_URL: "http://127.0.0.1:1/v1", SURPLUS_MODELS: "unused" })}
-    volumes: !override ${JSON.stringify([mount(path.join(root, "workspaces"), "/workspace"), { type: "volume", source: "opencode-data", target: "/opencode-data" }])}
+      OPENCODE_WEBSEARCH_PROVIDER: "off", CONTEXT7_ENABLED: "1" })}
+    volumes: !override ${JSON.stringify([mount(path.join(root, "workspaces"), "/workspace"), mount(path.join(root, "opencode-host"), "/etc/threadsite/opencode", true), { type: "volume", source: "opencode-data", target: "/opencode-data" }])}
   bot:
     env_file: !reset []
     environment: !override ${JSON.stringify(env)}

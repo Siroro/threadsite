@@ -33,7 +33,7 @@ export function galleryDate(value: string): string {
 }
 export function galleryCover(project: GalleryProject, eager = false): string {
   const image = project.image && publicGalleryUrl(project.image);
-  return `<div class="cover-art ${project.kind}" aria-hidden="true"><div class="art-orbit"></div><div class="art-grid"></div>${galleryIcon(project.kind === "site" ? "globe" : "game")}<span>${project.kind === "site" ? "A SMALL CORNER OF THE INTERNET" : "YOUR NEXT SIDE QUEST"}</span></div>${image ? `<img src="${escapeGallery(image)}" alt="Screenshot of ${escapeGallery(project.name)}" width="800" height="450" ${eager ? 'fetchpriority="high"' : 'loading="lazy"'} decoding="async">` : ""}`;
+  return `<div class="cover-art ${project.kind}" aria-hidden="true"><div class="art-orbit"></div><div class="art-grid"></div>${galleryIcon(project.kind === "site" ? "globe" : "game")}</div>${image ? `<img src="${escapeGallery(image)}" alt="Screenshot of ${escapeGallery(project.name)}" width="800" height="450" ${eager ? 'fetchpriority="high"' : 'loading="lazy"'} decoding="async">` : ""}`;
 }
 export function galleryCard(project: GalleryProject, saved = false, visited = false): string {
   const url = publicGalleryUrl(project.url);
@@ -44,9 +44,9 @@ export function galleryCard(project: GalleryProject, saved = false, visited = fa
   return `<article class="project-card ${project.kind}" data-project-id="${id}">
     <div class="card-visual"><a class="cover" href="${escapeGallery(url)}" target="_blank" rel="noopener" data-open="${id}" aria-label="${project.kind === "site" ? "Open" : "Play"} ${name} (opens in a new tab)">${galleryCover(project)}</a>
       <span class="kind-badge">${GALLERY_KINDS[project.kind]}</span><button type="button" class="save-button icon-button" data-save="${id}" aria-pressed="${saved}" aria-label="${saved ? "Unsave" : "Save"} ${name}" title="${saved ? "Remove from saved" : "Save for later"}" data-enhance hidden>${galleryIcon("heart")}</button>
-    </div><div class="card-body"><div class="card-meta">${project.mode ? `<span class="mode-dot ${project.mode}">${GALLERY_MODES[project.mode]}</span>` : '<span>Made for the web</span>'}${visited ? '<span class="visited-mark">Opened before</span>' : ""}</div>
+    </div><div class="card-body"><div class="card-meta">${project.mode ? `<span class="mode-dot ${project.mode}">${GALLERY_MODES[project.mode]}</span>` : '<span>Website</span>'}${visited ? '<span class="visited-mark">Opened before</span>' : ""}</div>
       <h3><a href="${escapeGallery(url)}" target="_blank" rel="noopener" data-open="${id}">${name}</a></h3>
-      <p class="card-pitch">${escapeGallery(project.pitch || (project.kind === "site" ? "A little idea with a home on the internet. Open it and take a look." : "A browser game made to be played. Jump in and find your next favourite."))}</p>
+      ${project.pitch ? `<p class="card-pitch">${escapeGallery(project.pitch)}</p>` : ""}
       <div class="card-footer"><time datetime="${escapeGallery(project.updatedAt)}" title="Last updated ${escapeGallery(galleryDate(project.updatedAt))}">${galleryDate(project.updatedAt)}</time>
         <div class="card-actions">${source ? `<a class="source-link" href="${escapeGallery(source)}" target="_blank" rel="noopener" title="View source for ${name}" aria-label="View source for ${name} (opens in a new tab)">${galleryIcon("code")}</a>` : ""}<button type="button" class="details-button" data-details="${id}" aria-label="Details for ${name}" aria-haspopup="dialog" aria-controls="project-dialog" data-enhance hidden>Details ${galleryIcon("chevron")}</button><a class="card-launch" href="${escapeGallery(url)}" target="_blank" rel="noopener" data-open="${id}" aria-label="${project.kind === "site" ? "Open" : "Play"} ${name} (opens in a new tab)">${project.kind === "site" ? "Open" : "Play"} ${galleryIcon("arrow")}</a></div>
       </div></div></article>`;

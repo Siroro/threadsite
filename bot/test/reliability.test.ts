@@ -370,6 +370,56 @@ test("renames refresh both URLs, preserve old subpage links, and revert the whol
   assert.match(await fs.readFile(path.join(config.publishRoot, "sumo-shove/js/main.js"), "utf8"), /baseline/);
 });
 
+test("README.md carries the original request, submitter and agent README through turns, rename and revert", async () => {
+  const f = await projectFixture("readme");
+  await f.store.patchProject(f.project.threadId, {
+    initialPrompt: "Build a **koi pond** arcade with a literal ``` fence.",
+    starterName: "Ada Lovelace",
+  });
+  f.opencode.prompt = async () => {
+    await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("readme v1");');
+    await fs.writeFile(path.join(f.dir, "README.agent.md"), "## About\n\nFeed the koi.\n", "utf8");
+    return { text: "Built the pond", usage: {} };
+  };
+  const first = await f.service.mutate(f.project.threadId, "Build the koi pond");
+  assert.equal(first.deliveryError, undefined);
+  const readme = await fs.readFile(path.join(f.dir, "README.md"), "utf8");
+  assert.match(readme, /maintained by the ThreadSite harness\./);
+  assert.match(readme, /## Original request/);
+  assert.match(readme, /Requested by Ada Lovelace\./);
+  assert.ok(readme.includes("````\nBuild a **koi pond** arcade with a literal ``` fence.\n````"), "the prompt is safe inside a fence longer than its own backticks");
+  assert.match(readme, /## About\n\nFeed the koi\./);
+  assert.match(await git(f.dir, "show", "HEAD:README.agent.md"), /Feed the koi/);
+
+  f.opencode.prompt = async () => {
+    await fs.writeFile(path.join(f.dir, "README.md"), "direct edit must lose");
+    await fs.writeFile(path.join(f.dir, "README.agent.md"), "## About\n\nRide the koi.\n", "utf8");
+    await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("readme v2");');
+    return { text: "Updated the pond", usage: {} };
+  };
+  const second = await f.service.mutate(f.project.threadId, "Update the readme");
+  assert.equal(second.deliveryError, undefined);
+  const updated = await fs.readFile(path.join(f.dir, "README.md"), "utf8");
+  assert.doesNotMatch(updated, /direct edit must lose/);
+  assert.match(updated, /Ride the koi\./);
+  assert.doesNotMatch(updated, /Feed the koi\./);
+
+  const renamed = await f.service.renameProject(f.project.threadId, "Koi Pond Deluxe");
+  assert.equal(renamed.siteSlug, "koi-pond-deluxe");
+  const renamedReadme = await fs.readFile(path.join(f.dir, "README.md"), "utf8");
+  assert.match(renamedReadme, /Requested by Ada Lovelace\./);
+  assert.match(renamedReadme, /Ride the koi\./);
+  assert.match(renamedReadme, /koi-pond-deluxe/);
+
+  const reverted = await f.service.revert(f.project.threadId);
+  assert.ok(reverted.undoneCommit);
+  const revertedReadme = await fs.readFile(path.join(f.dir, "README.md"), "utf8");
+  assert.match(revertedReadme, /Requested by Ada Lovelace\./);
+  assert.match(revertedReadme, /Feed the koi\./);
+  assert.doesNotMatch(revertedReadme, /Ride the koi\./);
+  assert.match(revertedReadme, /koi-pond-deluxe/);
+});
+
 test("concurrent projects choose distinct readable names without overwriting another site", async () => {
   const forgejo = new LocalForgejo();
   const a = await projectFixture("collision1", forgejo);
@@ -444,6 +494,7 @@ test("the first successful build adopts the AI name in the returned site and rep
   const result = await service.createProject({
     threadId: "123456789012345678", guildId: "100", parentChannelId: "200", displayName: "site-a-long-original-prompt",
     initialPrompt: "Make a garden", renameable: true, infoMessageId: "card-message",
+    initiator: { name: "Ada Lovelace", email: "ada@users.noreply.example" },
   }, undefined, async (title) => { titles.push(title); });
   assert.deepEqual(titles, ["Fresh Garden"]);
   assert.equal(result.project.displayName, "Fresh Garden");
@@ -456,6 +507,10 @@ test("the first successful build adopts the AI name in the returned site and rep
   const saved = store.getProject("123456789012345678")!;
   assert.equal(saved.infoMessageId, "card-message");
   assert.equal(saved.initialPrompt, "Make a garden");
+  assert.equal(saved.starterName, "Ada Lovelace");
+  const readme = await fs.readFile(path.join(workspacePath, "README.md"), "utf8");
+  assert.match(readme, /Requested by Ada Lovelace\./);
+  assert.match(readme, /Make a garden/);
 });
 
 test("a resumed initial build falls back to a different title model and updates all identities", async () => {

@@ -2,6 +2,7 @@ import { z } from "zod";
 import * as definitions from "../dist/tools.mjs";
 import { setupLsp } from "../dist/lsp.mjs";
 import { checkExpandedCommand } from "./command-policy.mjs";
+import { applyContextCaps } from "./context-caps.mjs";
 
 export default {
   id: "threadsite.v2",
@@ -11,6 +12,11 @@ export default {
     const configuredQaModel = (model) => `${model.providerID}/${model.id}` === browserQaModel?.split("#")[0];
     const isBrowserTool = (name) => /^playwright[._]/.test(name);
     const models = () => ctx.model.list({ location: { directory: ctx.location.directory } });
+    const contextCaps = ctx.options?.contextCaps;
+    const registerCaps = contextCaps && Object.keys(contextCaps).length
+      ? () => ctx.model.transform((models) => applyContextCaps(models, contextCaps)) : undefined;
+    if (registerCaps) registrations.push(await registerCaps());
+    let finalCaps;
     const stopLsp = await setupLsp(ctx);
     if (stopLsp) registrations.push({ dispose: stopLsp });
     registrations.push(await ctx.tool.transform((tools) => {
@@ -63,6 +69,10 @@ export default {
     // builder's browser denial. Replace those rules only on the QA child before
     // its first tool registry is selected; never broaden the parent session.
     registrations.push(await ctx.session.hook("prompt", async (event) => {
+      // OpenCode installs its config transform after user plugins. Append a
+      // final cap once config is ready, so alias inheritance cannot restore an
+      // uncapped source window before compaction or a provider request.
+      if (registerCaps) await (finalCaps ??= registerCaps().then((registration) => { registrations.push(registration); }));
       // MCP connects asynchronously at each location. Select the first registry
       // only after discovery settles, including failed/disabled services.
       const deadline = Date.now() + 10_000;

@@ -2,6 +2,33 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import plugin from "./plugin.mjs";
 
+test("concurrent first prompts cap inherited models after native config without accumulating transforms", async () => {
+  const hooks = {};
+  let transforms = 0;
+  let disposed = 0;
+  const model = { providerID: "paid", id: "alias", limit: { context: 200000, input: 180000, output: 16000 } };
+  const registration = () => ({ dispose: async () => {} });
+  const cleanup = await plugin.setup({ location: { directory: "/project" }, options: { contextCaps: { paid: 100000 } },
+    model: { transform: async (callback) => {
+      transforms++;
+      callback({ list: () => [model], update: (_provider, _id, update) => update(model) });
+      return { dispose: async () => { disposed++; } };
+    } },
+    mcp: { list: async () => ({ data: [] }) },
+    tool: { transform: async () => registration(), hook: async () => registration(), reload: async () => {} },
+    session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); }, get: async () => ({ agent: "sitebuilder" }) },
+  });
+  try {
+    model.limit.context = 250000;
+    model.limit.input = 200000;
+    await Promise.all([hooks.prompt({ sessionID: "first" }), hooks.prompt({ sessionID: "second" })]);
+    await hooks.prompt({ sessionID: "third" });
+    assert.deepEqual(model.limit, { context: 100000, input: 100000, output: 16000 });
+    assert.equal(transforms, 2, "one initial transform plus one shared final transform covers every prompt");
+  } finally { await cleanup(); }
+  assert.equal(disposed, transforms, "plugin cleanup must dispose every cap transform");
+});
+
 test("first prompts wait for MCP discovery and refresh tools before selecting the registry", async () => {
   const hooks = {};
   const calls = [];

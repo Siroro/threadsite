@@ -10,7 +10,7 @@ With `PUBLIC_INDEX_ENABLED=true`, ThreadSite refreshes the static gallery at `PU
 - Save favourites and revisit recently opened projects. These collections, layout and theme preferences stay in localStorage in the current browser. They are not public likes, user accounts or shared analytics. If storage is blocked, collections work for the current visit.
 - Open project details for the larger screenshot, public description, how-to-play/use instructions and newest changelog entry. Play/Open launches the project in a new tab; Source opens its repository. Previews are screenshots, never embedded game scripts.
 - Share the current search/filter combination or a direct link to project details. Project identifiers survive renames. Browser Back/Forward restores filter and detail state. Clipboard denial falls back to a selectable link.
-- Use Surprise me to pick from the current filtered collection. The creation guide explains the existing Discord commands without inventing a separate creation service.
+- Use Random project to pick from the current filtered collection. The creation guide explains the existing Discord commands without inventing a separate creation service.
 
 Search is available with `/` or Ctrl/⌘K. Detail dialogs support keyboard focus and Escape; layouts respond to mobile widths and reduced-motion preferences. All projects retain ordinary links when JavaScript is disabled.
 

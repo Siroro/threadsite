@@ -23,7 +23,7 @@ Discord thread message
 
 Git commits are made by the harness, not the model: the subject is the Discord request, the author is the Discord user who sent it, and the bot is the committer with a `Co-authored-by:` trailer (`COMMIT_BOT_NAME`/`COMMIT_BOT_EMAIL`).
 
-A finished turn is presented in two messages: the turn's own message becomes the technical card (the agent's full report, the commit, the usage) and a reply to it carries the playable card (the browser-QA screenshot, what the project is and how to play it, what this turn changed, and the play link). Both come from two documents the agent maintains in the project root — `DESCRIPTION.md` and `CHANGELOG.md` — which the harness reads after every turn, so nothing has to be generated after the fact. See [commands.md](commands.md).
+A finished turn is presented in two messages: the turn's own message becomes the technical card (the agent's full report, the commit, the usage) and a reply to it carries the playable card (the browser-QA screenshot, what the project is and how to play it, what this turn changed, and the play link). The card text comes from two documents the agent maintains in the project root — `DESCRIPTION.md` and `CHANGELOG.md` — which the harness reads after every turn, so nothing has to be generated after the fact. The agent also maintains `README.agent.md`: after every turn the harness regenerates `README.md` with its ownership marker, live link, original request and submitter, then appends that section. See [commands.md](commands.md).
 
 ## Why static-only
 
@@ -92,7 +92,7 @@ Errors are serialized with their full `Error.cause` chains into the private JSON
 
 ## Session context management
 
-Automatic compaction is enabled in the agent platform config (`opencode/opencode.json`): a recent context tail is kept, headroom is reserved before the model window fills, and stale tool output is pruned. The platform decides when a session is "full" against each model's advertised `limit.context`; for Surplus models, `SURPLUS_CONTEXT_CAP` (default 100000 tokens, `0` disables) caps that advertised window so long threads compact early.
+Automatic compaction is enabled in the agent platform config (`opencode/opencode.json`): a recent context tail is kept, headroom is reserved before the model window fills, and stale tool output is pruned. The platform decides when a session is "full" against each model's advertised limits. Hosts can cap context and larger input windows through the `contextCaps` map in their private provider config, keyed by provider or `provider/model-id`; model entries override provider entries. These caps apply to native and custom catalogs, independently of discovery. Surplus has a bundled JSON default of 100000 tokens (`0` disables), so long threads compact early. See [context cap configuration](deployment.md#context-caps-for-any-provider-or-model).
 
 Project files plus `AGENTS.md` are the durable source of truth, so after compaction the agent simply re-reads the workspace. `/site compact` forces compaction on demand.
 

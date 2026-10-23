@@ -104,12 +104,14 @@ When a turn finishes, it is presented in two messages:
 
 Both cards keep working after the turn: the technical card adds **Turn details**, **Changed files**, **Browser findings** and a **Follow up** request form, and the playable card adds **How to play**, **Changelog** and **Request a change**. Each opens that turn's saved data in a private panel, so details stay available on old turns and after restarts.
 
-Both come from two documents the agent maintains in the project root, so nothing has to be generated after the fact:
+The cards come from two documents the agent maintains in the project root, so nothing has to be generated after the fact:
 
 - **`DESCRIPTION.md`** — what the project is, in a visitor's words, in two parts: a one-sentence headline of at most 25 words, plus a `## How to play` section the rules cap at four short paragraphs (~120 words) — goal first, then controls, then a tip or two; still no file names, no code, no jargon, updated whenever the project's shape changes.
 - **`CHANGELOG.md`** — one section per turn, newest at the top, saying what a visitor will notice. The agent adds its section before its final summary.
 
-The harness reads both after every turn: the playable card shows the description headline and the newest changelog entry, the pinned card shows the headline, and the full how-to-play opens from the card's **How to play** button. A project that has neither document yet still renders the card: the original request stands in for the description, and a turn without a screenshot still shows the card. The technical card includes Play/Open, Source and View commit buttons. Reports that exceed the combined V2 text limit include a readable excerpt and the complete report as an attached `turn-report.md` file. If screenshot delivery is denied, the Play card retries without the image, keeping its text and buttons.
+The agent also maintains **`README.agent.md`**. At the end of every turn the harness regenerates `README.md` with the project title, ownership marker, live link, original request and submitter, then appends the agent's README section. `README.md` itself is not agent-editable, so direct edits are lost. Because the repository is public, the original request and the submitter's display name are published there.
+
+The harness reads both card documents after every turn: the playable card shows the description headline and the newest changelog entry, the pinned card shows the headline, and the full how-to-play opens from the card's **How to play** button. A project that has neither document yet still renders the card: the original request stands in for the description, and a turn without a screenshot still shows the card. The technical card includes Play/Open, Source and View commit buttons. Reports that exceed the combined V2 text limit include a readable excerpt and the complete report as an attached `turn-report.md` file. If screenshot delivery is denied, the Play card retries without the image, keeping its text and buttons.
 
 ### AI-generated thread titles
 
@@ -161,7 +163,7 @@ Discord thread message
   -> edit site/** only (browser code authored in TypeScript under site/src/)
   -> harness build: bundle/minify site/src/ -> gitignored site/js/ (esbuild, tree-shaken)
   -> validate static tree (bundle errors and type errors get one repair round-trip)
-  -> bot writes README metadata
+  -> bot writes README (harness metadata + original request + README.agent.md section)
   -> commit/push authored source + the vendored net client (site/net/) to public Forgejo (no site/js or build manifest)
   -> atomically replace the published Apache directory with runtime files (no site/src or site/net)
   -> refresh the public all-sites index

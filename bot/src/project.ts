@@ -13,7 +13,7 @@ import { ensureSkillFiles, skillNames } from "./skills.js";
 import { Store, pendingTurnMatches } from "./store.js";
 import { initialProjectInstruction, multiplayerModeLabel, multiplayerSwapInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, repairInstruction } from "./templates.js";
 import { starterHtml, starterSource } from "./starter.js";
-import { ensureProjectDocuments, readProjectChangelog, readProjectDescription, type ProjectChangelog, type ProjectDescription } from "./project-docs.js";
+import { ensureProjectDocuments, readProjectChangelog, readProjectDescription, readProjectReadmeSection, type ProjectChangelog, type ProjectDescription } from "./project-docs.js";
 import type { CommitAuthor, MultiplayerContext, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog } from "./usage.js";
 import type { ProgressCallback, ProgressPhase } from "./progress.js";
@@ -379,6 +379,7 @@ export class ProjectService {
       initialPrompt: truncate(input.initialPrompt, 2_000),
       // The thread's founder, linked on the pinned card for the project's life.
       ...(input.initiatorUserId ? { starterId: input.initiatorUserId } : {}),
+      ...(input.initiator?.name ? { starterName: input.initiator.name } : {}),
       ...(input.ownerUserId ? { ownerId: input.ownerUserId } : {}),
       pendingNaming: { request: input.initialPrompt, ...(input.renameable ? {} : { name: input.displayName }) },
       ...(projectKind !== "site" ? { multiplayerMode } : {}),
@@ -392,8 +393,9 @@ export class ProjectService {
     await fs.mkdir(srcDir, { recursive: true });
     await fs.writeFile(path.join(siteDir, "index.html"), starterHtml(input.displayName), "utf8");
     await fs.writeFile(path.join(srcDir, "main.ts"), starterSource(projectKind), "utf8");
-    // The two author-maintained documents: what the project is (for the play
-    // card) and what changed each turn. The agent keeps them current.
+    // The three author-maintained documents: what the project is and changed
+    // each turn (for the play card), plus the long-form README content. The
+    // agent keeps them current; the harness composes README.md from the last.
     await ensureProjectDocuments(workspacePath, input.displayName);
     // Authored source plus the vendored net client (site/net/) is the Git
     // record. Harness build inputs and generated bundles are recreated locally
@@ -567,6 +569,12 @@ export class ProjectService {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site. Use /site start first.");
     if (project.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
+    // Older records only stored the founder id. Reading the name from the
+    // founder's own next turn lets legacy READMEs gain attribution without a
+    // Discord lookup or exposing the numeric id.
+    if (!project.starterName && project.starterId && requesterId === project.starterId && author?.name) {
+      project = await this.store.patchProject(threadId, { starterName: author.name });
+    }
     if (!initial) project = await this.ensureProjectName(threadId, onProgress);
     if (!prompt.trim() && !images?.length) throw new Error("Prompt is empty.");
     if (prompt.length > config.maxPromptChars) throw new Error(`Prompt exceeds MAX_PROMPT_CHARS (${config.maxPromptChars}).`);
@@ -632,7 +640,7 @@ export class ProjectService {
       }
       // Ensure the play card's author-maintained documents are available.
       if (await ensureProjectDocuments(workspacePath, project.displayName)) {
-        emit(onProgress, "📝 Added the project description and changelog");
+        emit(onProgress, "📝 Added the project description, changelog and README source");
       }
       // Authoritative image gate, re-checked inside the queue: the model the
       // pre-check in index.ts verified may have changed (admin override, fresh
@@ -1411,7 +1419,7 @@ export class ProjectService {
       return patched;
     } catch (error) {
       // Not fatal: the turn proceeds on the full window and OpenCode's own
-      // auto-compaction (relative to SURPLUS_CONTEXT_CAP) remains the safety net.
+      // auto-compaction (relative to the model's context limit) remains the safety net.
       log("warn", "project.session_auto_compact_failed", { threadId, error: serializeError(error) });
       return undefined;
     }
@@ -2208,9 +2216,30 @@ export class ProjectService {
   }
 
   private async writeReadme(project: ProjectRecord): Promise<void> {
-    const readme = `# ${project.displayName}\n\nThis is a ${projectKindLabel(project.projectKind)} maintained by the ThreadSite harness.\n\n- Live site: ${this.siteLink(project)}\n\nForgejo contains the authored source. Every accepted mutation is committed, then the harness builds a minified runtime-only deployment; generated bundles and harness networking inputs are not committed.\n`;
-    await fs.writeFile(safeChild(project.workspacePath, "README.md"), readme, "utf8");
+    const section = await readProjectReadmeSection(project.workspacePath);
+    const request = truncate(project.initialPrompt?.replace(/\r\n?/g, "\n").trim() ?? "", 2_000).trim();
+    const requester = project.starterName?.replace(/\s+/g, " ").trim();
+    const requestBlock = request
+      ? `\n\n## Original request\n\n${requester ? `Requested by ${requester}.` : "Requested in Discord."}\n\n${markdownCodeBlock(request)}`
+      : "";
+    const readme = `# ${project.displayName}\n\nThis is a ${projectKindLabel(project.projectKind)} maintained by the ThreadSite harness.\n\n- Live site: ${this.siteLink(project)}\n\nForgejo contains the authored source. Every accepted mutation is committed, then the harness builds a minified runtime-only deployment; generated bundles and harness networking inputs are not committed.${requestBlock}${section ? `\n\n---\n\n${section}` : ""}\n`;
+    const readmePath = safeChild(project.workspacePath, "README.md");
+    const existing = await fs.lstat(readmePath).catch(() => undefined);
+    if (existing && !existing.isFile()) {
+      // Never follow a symlink planted in the workspace: the README is
+      // harness-owned, so replace the link with a regular file.
+      if (!existing.isSymbolicLink()) throw new Error("README.md is not a regular file.");
+      await fs.unlink(readmePath);
+    }
+    await fs.writeFile(readmePath, readme, "utf8");
   }
+}
+
+/** Wrap arbitrary user text in a fence longer than any backtick run inside it. */
+function markdownCodeBlock(text: string): string {
+  const longest = (text.match(/`+/g) ?? []).reduce((max, run) => Math.max(max, run.length), 0);
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return `${fence}\n${text}\n${fence}`;
 }
 
 /** Durable project memory (PROJECT_NOTES.md); empty when no notes exist yet. */

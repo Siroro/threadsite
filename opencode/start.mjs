@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { buildSurplusProvider } from "./surplus-adapter.mjs";
+import { applyProviderConfig, readProviderConfig } from "./provider-config.mjs";
 import { applyRuntimeConfig } from "./runtime-config.mjs";
 import { buildV2Config } from "./v2/config.mjs";
 
@@ -9,23 +9,21 @@ const outputPath = "/root/.config/opencode/opencode.json";
 
 let config = applyRuntimeConfig(JSON.parse(await readFile(templatePath, "utf8")));
 console.log(`[threadsite] Builder step limit: ${config.agents.sitebuilder.steps}`);
-const surplus = await buildSurplusProvider({
+const defaults = JSON.parse(await readFile(new URL("./providers.json", import.meta.url), "utf8"));
+const host = await readProviderConfig("/etc/threadsite/opencode/providers.json");
+config.providers = { ...defaults.providers, ...config.providers };
+config = await applyProviderConfig(config, host, {
+  defaultCatalogs: defaults.catalogs,
+  defaultContextCaps: defaults.contextCaps,
   env: process.env,
   log: (message) => console.log(message),
   warn: (message) => console.warn(message),
 });
 
-config.providers ||= {};
-config.providers.surplus = surplus.provider;
 config = buildV2Config(config);
 
 await mkdir("/root/.config/opencode", { recursive: true });
 await writeFile(outputPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-
-console.log(
-  `[threadsite] Surplus provider configured with ${Object.keys(surplus.provider.models).length} model id(s)` +
-    (surplus.contextCap ? ` and a ${surplus.contextCap}-token context cap (auto-compaction ceiling).` : " without a context cap."),
-);
 
 const logLevel = (process.env.OPENCODE_LOG_LEVEL || "INFO").toLowerCase();
 const child = spawn("opencode", ["--print-logs", "--log-level", logLevel, "serve", "--hostname", "0.0.0.0", "--port", "4096"], {

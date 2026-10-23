@@ -19,6 +19,7 @@ test("native v2 config preserves builder features and isolated subagent models w
   }
   assert.ok(config.agents.titler.permissions.some((rule) => rule.action === "*" && rule.effect === "deny"));
   assert.ok(config.permissions.some((rule) => rule.action === "shell" && rule.resource === "git *" && rule.effect === "deny"));
+  assert.ok(config.permissions.some((rule) => rule.action === "edit" && rule.resource === "README.agent.md" && rule.effect === "allow"));
   assert.equal(config.mcp.servers.playwright.timeout.execution, 90000);
   assert.deepEqual(base, original);
 });
