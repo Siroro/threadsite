@@ -1,5 +1,5 @@
 /** Versioned, bounded IDs. Resources are Discord message/thread IDs; question IDs are revisions. */
-export const CARD_ACTIONS = ["details", "tab", "page", "project", "queue", "cancel", "change", "steer", "request", "stop", "answer", "select", "questions", "form", "other", "custom", "skip", "review", "send", "retry", "doc", "rollback", "keep", "confirm"] as const;
+export const CARD_ACTIONS = ["details", "tab", "page", "project", "queue", "cancel", "change", "steer", "request", "stop", "answer", "select", "questions", "form", "other", "custom", "skip", "review", "send", "retry", "doc", "rollback", "keep", "confirm", "collaboration", "collabmode", "collabusers", "approve", "reject", "reviewrequest"] as const;
 export type CardAction = typeof CARD_ACTIONS[number];
 export interface CardRoute { action: CardAction; resource: string; args: string[] }
 

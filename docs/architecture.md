@@ -100,6 +100,8 @@ Additionally, a thread idle longer than `SESSION_IDLE_RESET_MS` (default 2 h) ge
 
 ## Persistence and recovery
 
+Project collaboration defaults to open editing. The persisted human owner, selected contributors and editing mode authorize Discord messages, live steers and controls through a shared policy. In approval mode, outside requests and attachment bytes stay in the private SQLite `project_approvals` table until an owner/admin decision; they never trigger agent work or write workspace files before approval. Queue admission and removal of the pending approval share one SQLite transaction. Approved requests then use the ordinary durable queue and recovery path. Project teardown deletes pending approvals; maintenance refuses unfinished approval queues. See [collaboration settings](commands.md#project-collaboration).
+
 Every accepted thread update is saved before it is marked queued, including its author and attachments. Images travel with the request as data URIs when the next turn's model can see them; every other attachment type is downloaded at message receipt into the workspace under `scratch/uploads/` (gitignored, never published) and the prompt names the saved paths, so the agent reads reference material in place and installs binaries into `site/assets/` with the `asset_import` tool. Starting a batch atomically moves only its consumed requests into the in-flight turn record; startup restores queued requests even when no agent turn was running, and replacement status messages retain original request IDs so deleted Discord messages do not cause duplicate work.
 
 - Discord thread → project/session mappings: SQLite at `data/bot/state.db` (`STATE_DB_FILE`).
