@@ -216,8 +216,7 @@ services:
       - "${STATIC_PORT:-8080}:80"
 
   # Optional edge for fresh-server deployments: Caddy with automatic HTTPS.
-  # The default publication path stays host Apache (or bundled-static above);
-  # enable this profile only when nothing else on the host binds 80/443.
+  # Enable this profile only when nothing else on the host binds 80/443.
   # Serves the publish root and, through vhosts written into caddy/vhosts/,
   # can also proxy Forgejo and the multiplayer relay. One-command setup:
   # scripts/caddy-quickstart.sh (see caddy/ and docs/deployment.md).

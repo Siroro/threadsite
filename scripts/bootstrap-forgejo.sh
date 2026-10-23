@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+RESTART_BOT=1
+if [[ "${1:-}" == --no-restart-bot && $# == 1 ]]; then
+  RESTART_BOT=0
+elif (( $# )); then
+  echo "Usage: scripts/bootstrap-forgejo.sh [--no-restart-bot]" >&2
+  exit 2
+fi
 cd "$(dirname "$0")/.."
 
 if [[ ! -f .env ]]; then
@@ -105,6 +112,9 @@ else
   echo "WARNING: Forgejo did not return an admin access token; /site pushkey will not work until this script succeeds." >&2
 fi
 
-echo "Wrote secrets/forgejo-token for the non-admin '$OWNER' account. Restarting bot if it already exists..."
-docker compose restart bot >/dev/null 2>&1 || true
+echo "Wrote secrets/forgejo-token for the non-admin '$OWNER' account."
+if (( RESTART_BOT )); then
+  echo "Restarting bot if it already exists..."
+  docker compose restart bot >/dev/null 2>&1 || true
+fi
 echo "Done."

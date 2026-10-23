@@ -80,6 +80,13 @@ The script uses `STATE_DB_FILE` from the container, or an explicit `--db FILE`. 
 
 ## Local regression checks
 
+GitHub Actions runs on pushes to `main`, pull requests, and manual dispatch:
+
+- [CI](../.github/workflows/ci.yml) builds the bot and OpenCode tools, runs the bot/OpenCode/preview test suites, and checks the gallery in Chromium.
+- [Multiplayer](../.github/workflows/multiplayer.yml) builds the networking client and relay, then checks relay/client behavior, restarts, durability, stalled hosts, deletion, player storage, saves, and leaderboards.
+
+Both workflows use Node 24 and need no Discord or model credentials. Relay checks use temporary state. Docker preview integration and the opt-in real-language-server check remain separate checks described below and in [OpenCode](opencode-v2.md).
+
 From `bot/`:
 
 - `npm test` — production import containment, restart-safe queue handoff, naming, collisions, interrupted renames, revert coverage
@@ -93,6 +100,8 @@ From `gameserver/`: `npm run build`, then the applicable `test:relay`, `test:cli
 Networking client changes: from `bot/`, `npm run build:net` regenerates `bot/assets/threadsite-net.js` and `.d.ts` — never edit those generated assets directly.
 
 Tests use temporary files, local git repositories, and a fake agent/Forgejo service; no Discord login or paid inference is needed.
+
+Installer checks in the bot suite also need Bash and `jq`. They run the real install script against fake Discord and Docker commands in temporary directories. They cover configuration, credential failures, model availability, startup timeouts and preserving existing files on reruns.
 
 ### Preview integration tests
 
