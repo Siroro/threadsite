@@ -25,7 +25,7 @@ test("the native plugin hides unsafe builtins and browser access on each text-on
     assert.equal(entries.get(name).options.permission, "threadsite_docs");
   }
   assert.equal(entries.get("playwright_browser_take_screenshot").options.permission, "threadsite_browser");
-  for (const name of ["asset_download", "js_syntax_check", "project_notes", "todoread"]) assert.ok(entries.has(name));
+  for (const name of ["asset_download", "asset_import", "js_syntax_check", "project_notes", "todoread"]) assert.ok(entries.has(name));
   const delegation = { tool: "subagent", input: { background: true } };
   await hooks["execute.before"](delegation);
   assert.equal(delegation.input.background, false, "publication must wait for delegated work");

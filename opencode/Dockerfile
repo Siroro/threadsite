@@ -29,6 +29,7 @@ COPY v2/ /opt/threadsite/v2/
 COPY tools/ /opt/threadsite/tools/
 RUN if [ "$OPENCODE_API_VERSION" = "v2" ]; then cd /opt/threadsite && npm ci && npm run build; fi
 COPY tools/asset_download.ts /root/.config/opencode/tools/asset_download.ts
+COPY tools/asset_import.ts /root/.config/opencode/tools/asset_import.ts
 COPY tools/js_syntax_check.ts /root/.config/opencode/tools/js_syntax_check.ts
 COPY tools/project_notes.ts /root/.config/opencode/tools/project_notes.ts
 

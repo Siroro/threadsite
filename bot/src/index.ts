@@ -42,6 +42,7 @@ import { recoverPublishRoot } from "./publish.js";
 import { Store, pendingTurnMatches } from "./store.js";
 import { multiplayerModeLabel, projectKindLabel } from "./templates.js";
 import type { CommitAuthor, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
+import { saveUploadAttachments, uploadPromptNote, type UploadedFile } from "./uploads.js";
 import { UsageLog, type UsageTotal } from "./usage.js";
 import { startWebhookServer } from "./webhook.js";
 import { renderPlayCard, renderTechnicalCard, type TurnCardState } from "./turn-card.js";
@@ -690,16 +691,10 @@ client.on(Events.MessageCreate, async (message) => {
   const imageAttachments = [...message.attachments.values()].filter((attachment) =>
     (attachment.contentType ?? "").startsWith("image/")
   );
-  if (!content && !imageAttachments.length) {
-    if (message.attachments.size > 0) {
-      // A PDF/zip/log attachment with no text: nothing will ever consume it, so
-      // say so instead of leaving the message unanswered.
-      await message
-        .reply("🚫 Only images can be attached right now — describe the change you want in text instead.")
-        .catch(() => undefined);
-    }
-    return;
-  }
+  const uploadAttachments = [...message.attachments.values()].filter((attachment) =>
+    !(attachment.contentType ?? "").startsWith("image/")
+  );
+  if (!content && !imageAttachments.length && !uploadAttachments.length) return;
 
   // Acknowledge first: the capability check below calls the agent service,
   // whose HTTP timeouts are disabled by design, so a wedged service would
@@ -722,11 +717,11 @@ client.on(Events.MessageCreate, async (message) => {
     if (accepts === true) {
       images = await downloadImageAttachments(imageAttachments);
       log("info", "discord.images_forwarded", { threadId: message.channel.id, requested: imageAttachments.length, downloaded: images.length });
-      if (!images.length && !content) {
+      if (!images.length && !content && !uploadAttachments.length) {
         await status.edit("🚫 The image could not be downloaded, so there was nothing to send. Please try attaching it again.").catch(() => undefined);
         return;
       }
-    } else if (!content) {
+    } else if (!content && !uploadAttachments.length) {
       await status.edit(
         accepts === undefined
           ? "🚫 Could not confirm that this project's model can see images, so the attachment was not sent. Describe the change you want in text instead."
@@ -735,16 +730,34 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
   }
-  const prompt = content
-    || (images.length ? `The user attached ${images.length} image${images.length === 1 ? "" : "s"} to this message.` : "");
+
+  // Every other attachment type is saved into the workspace: the agent service
+  // inlines only text and images into the model request, so binaries must live
+  // on disk for the agent to read or install them. No model capability gates
+  // this path.
+  let uploads: UploadedFile[] = [];
+  if (uploadAttachments.length) {
+    uploads = await saveUploadAttachments(project.workspacePath, uploadAttachments);
+    log("info", "discord.uploads_saved", { threadId: message.channel.id, requested: uploadAttachments.length, saved: uploads.length });
+    if (!uploads.length && !content && !images.length) {
+      await status.edit("🚫 The attachment could not be downloaded, so there was nothing to send. Please try attaching it again.").catch(() => undefined);
+      return;
+    }
+  }
+  const prompt = [
+    content || (images.length ? `The user attached ${images.length} image${images.length === 1 ? "" : "s"} to this message.` : ""),
+    uploadPromptNote(uploads),
+  ].filter(Boolean).join("\n\n");
   if (!prompt) {
     await status.edit("🚫 There was nothing to send. Describe the change you want in text instead.").catch(() => undefined);
     return;
   }
 
   // Only an explicit Discord reply to the current turn's status can steer it.
-  // Ordinary messages, replies to other messages, images and late replies queue.
-  if (!imageAttachments.length && await projects.steerActiveTurn(message.channel.id, prompt, message.reference?.messageId, message.author.id)) {
+  // Ordinary messages, replies to other messages, attachments and late replies
+  // queue — attachments are written into the workspace here, which a running
+  // turn must never observe mid-flight.
+  if (!imageAttachments.length && !uploadAttachments.length && await projects.steerActiveTurn(message.channel.id, prompt, message.reference?.messageId, message.author.id)) {
     await status.edit("🧭 Sent to the running turn").catch(() => undefined);
     // A doorbell, not a record: long enough to read, then the confirmation
     // leaves the thread — the turn's own card carries the story from here.
@@ -759,13 +772,14 @@ client.on(Events.MessageCreate, async (message) => {
     id: message.author.id,
   });
 
-  await enqueueUserRequest(message.channel.id, status, prompt, images, author, message.author.id);
+  await enqueueUserRequest(message.channel.id, status, prompt, images, author, message.author.id, undefined, uploads);
 });
 
 /** Both normal messages and modal requests use the same durable queue and drain. */
-async function enqueueUserRequest(threadId: string, status: Message, prompt: string, images: PromptImage[], author: CommitAuthor | undefined, requesterId: string, displayPrompt?: string): Promise<void> {
+async function enqueueUserRequest(threadId: string, status: Message, prompt: string, images: PromptImage[], author: CommitAuthor | undefined, requesterId: string, displayPrompt?: string, files?: readonly UploadedFile[]): Promise<void> {
   try {
-    await store.appendQueuedRequest(threadId, { prompt, displayPrompt, author, requesterId, statusMessageId: status.id, images: images.length ? images : undefined });
+    await store.appendQueuedRequest(threadId, { prompt, displayPrompt, author, requesterId, statusMessageId: status.id,
+      images: images.length ? images : undefined, files: files?.length ? [...files] : undefined });
   } catch (error) {
     await setStatusMessage(status, "❌ Could not save this request. Please send it again.").catch(() => undefined);
     throw error;
@@ -783,18 +797,27 @@ async function enqueueUserRequest(threadId: string, status: Message, prompt: str
 
 async function submitCardRequest(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, attachments: Attachment[]): Promise<string> {
   if (shuttingDown) throw new CardUserError("The bot is restarting. Your request has not been queued; try again shortly.");
+  const imageAttachments = attachments.filter((attachment) => (attachment.contentType ?? "").startsWith("image/"));
+  const uploadAttachments = attachments.filter((attachment) => !(attachment.contentType ?? "").startsWith("image/"));
   let images: PromptImage[] = [];
-  if (attachments.length) {
+  if (imageAttachments.length) {
     const accepts = await withTimeout(projects.modelAcceptsImages(project.threadId).catch(() => undefined), 3000);
-    if (accepts !== true) throw new CardUserError("This project's model cannot currently accept reference images. Submit a text-only request or try again after changing the model.");
-    images = await downloadImageAttachments(attachments);
-    if (images.length !== attachments.length) throw new CardUserError("Some reference images could not be downloaded. Your request was not queued; please attach them again.");
+    if (accepts !== true) throw new CardUserError("This project's model cannot currently accept reference images. Remove the images, or try again after changing the model.");
+    images = await downloadImageAttachments(imageAttachments);
+    if (images.length !== imageAttachments.length) throw new CardUserError("Some reference images could not be downloaded. Your request was not queued; please attach them again.");
   }
+  let uploads: UploadedFile[] = [];
+  if (uploadAttachments.length) {
+    uploads = await saveUploadAttachments(project.workspacePath, uploadAttachments);
+    if (uploads.length !== uploadAttachments.length) throw new CardUserError("Some attachments could not be saved into the project. Your request was not queued; please attach them again.");
+  }
+  const fullPrompt = [prompt, uploadPromptNote(uploads)].filter(Boolean).join("\n\n");
   // A steer is confirmed by the private interaction reply alone: no public
   // card is posted unless the request falls through to the durable queue (the
-  // turn ended first, or images forced the queue path). A steer that throws
-  // also never reaches the queue, so the interaction handler resets the form.
-  if (form.steer && !images.length && await projects.steerActiveTurn(project.threadId, prompt, form.resource, interaction.user.id)) {
+  // turn ended first, or attachments forced the queue path). A steer that
+  // throws also never reaches the queue, so the interaction handler resets
+  // the form.
+  if (form.steer && !images.length && !uploads.length && await projects.steerActiveTurn(project.threadId, fullPrompt, form.resource, interaction.user.id)) {
     return "🧭 Your instruction was sent to the running turn.";
   }
   const channel = interaction.channel;
@@ -802,7 +825,7 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
   const status = await channel.send(renderStatusCard("⏳ Saving your request…"));
   store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: status.id });
   const author = commitAuthorIdentity({ globalName: interaction.user.globalName, username: interaction.user.username, id: interaction.user.id });
-  try { await enqueueUserRequest(project.threadId, status, prompt, images, author, interaction.user.id, prompt); }
+  try { await enqueueUserRequest(project.threadId, status, fullPrompt, images, author, interaction.user.id, prompt, uploads); }
   catch (error) {
     // appendQueuedRequest failed before accepting anything. A new submission
     // can safely retry without duplicating an accepted prompt.
@@ -1162,7 +1185,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     await interaction.reply({
       content:
         "**ThreadSite** — every normal message in a project thread edits its site or game.\n" +
-        "Use Discord Reply on the **running turn's status message** to steer it live. Other messages queue for the next update; several queued requests may merge into one update. Image attachments reach the model when it can see them and always queue for the next pass. " +
+        "Use Discord Reply on the **running turn's status message** to steer it live. Other messages queue for the next update; several queued requests may merge into one update. Attachments always queue: images reach the model when it can see them, and any other files are saved into the project for the agent to read or use. " +
         "The live status message carries a **Stop** button while a turn runs; `/site stop` works even if that message is gone. " +
         "A turn with no progress for a few minutes is flagged on the card. Failures offer rollback or keep.\n\n" +
         "**/site start** — create a site (works in any channel)\n" +

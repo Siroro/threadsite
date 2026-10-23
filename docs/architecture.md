@@ -27,7 +27,7 @@ A finished turn is presented in two messages: the turn's own message becomes the
 
 ## Why static-only
 
-The agent cannot run `npm install`, unrestricted shell commands, git writes, or server code. Every deliverable — sites and games alike — is HTML/CSS/static browser JavaScript/assets. The `sitebuilder` agent may edit `site/**` and inspect the workspace; external directories are denied and shell commands use an allowlist. `webfetch` and `websearch` are allowed for research, with the search provider pre-selected in the agent service (`OPENCODE_WEBSEARCH_PROVIDER`) so its first-use consent prompt never reaches users; media downloads go through the guarded `asset_download` tool (SSRF/private-network blocking, path containment, redirect limits, timeouts, and `ASSET_MAX_BYTES` all enforced).
+The agent cannot run `npm install`, unrestricted shell commands, git writes, or server code. Every deliverable — sites and games alike — is HTML/CSS/static browser JavaScript/assets. The `sitebuilder` agent may edit `site/**` and inspect the workspace; external directories are denied and shell commands use an allowlist. `webfetch` and `websearch` are allowed for research, with the search provider pre-selected in the agent service (`OPENCODE_WEBSEARCH_PROVIDER`) so its first-use consent prompt never reaches users; media downloads go through the guarded `asset_download` tool (SSRF/private-network blocking, path containment, redirect limits, timeouts, and `ASSET_MAX_BYTES` all enforced), and files users attach in Discord are installed through `asset_import`, which copies them from the upload area under `scratch/uploads/` into `site/assets/` with provenance recorded.
 
 A second publication boundary applies before anything goes live: `site/index.html` is required; symlinks, dotfiles (including `.htaccess`), and server-executable extensions (PHP, CGI, shell scripts) are rejected; total files and bytes are capped (`MAX_SITE_FILES`, `MAX_SITE_BYTES`). Publication accepts arbitrary static extensions otherwise.
 
@@ -100,7 +100,7 @@ Additionally, a thread idle longer than `SESSION_IDLE_RESET_MS` (default 2 h) ge
 
 ## Persistence and recovery
 
-Every accepted thread update is saved before it is marked queued, including its author and image attachments. Starting a batch atomically moves only its consumed requests into the in-flight turn record; startup restores queued requests even when no agent turn was running, and replacement status messages retain original request IDs so deleted Discord messages do not cause duplicate work.
+Every accepted thread update is saved before it is marked queued, including its author and attachments. Images travel with the request as data URIs when the next turn's model can see them; every other attachment type is downloaded at message receipt into the workspace under `scratch/uploads/` (gitignored, never published) and the prompt names the saved paths, so the agent reads reference material in place and installs binaries into `site/assets/` with the `asset_import` tool. Starting a batch atomically moves only its consumed requests into the in-flight turn record; startup restores queued requests even when no agent turn was running, and replacement status messages retain original request IDs so deleted Discord messages do not cause duplicate work.
 
 - Discord thread → project/session mappings: SQLite at `data/bot/state.db` (`STATE_DB_FILE`).
 - Project worktrees: `data/workspaces/<guild>/<thread>`.
