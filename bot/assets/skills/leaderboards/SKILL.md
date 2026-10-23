@@ -7,7 +7,7 @@ description: "Design and implement leaderboards, high-score tables and record sy
 
 A leaderboard is a **competition**, not a log of runs. One board answers one question — "who is best at this?" — and ranks each player by their personal best. The relay already stores one best score per persistent player per board, so a single board naturally gives you one row per player. The failure mode to avoid is building a table that mixes boards or runs, so the same player appears several times.
 
-Singleplayer games follow the same shape with local saves and a local ranking table; ignore the `net.*` calls in the examples.
+Both singleplayer and multiplayer use **global** boards through the small dedicated client under `site/leaderboards/`; read the harness-seeded `LEADERBOARDS.md` for the API and failure handling. The score client does not join rooms or synchronize gameplay. Import `ThreadSiteLeaderboards` and `LEADERBOARDS_CONFIG`, create `boards = new ThreadSiteLeaderboards(LEADERBOARDS_CONFIG)`, and call `boards.setName(chosenPlayerName)` after asking the player. Use it even when a multiplayer `net` connection already exists. Local saves and run history are separate from global rankings. Keep gameplay playable offline and show ranking failures clearly.
 
 ## Choose the shape first
 
@@ -34,19 +34,18 @@ type Progress = {
   careerBest: number;
 };
 
-const checkpoint = await net.saves.get<Progress>("progress-v1");
-const progress = validateProgress(checkpoint.value); // fall back to a fresh schema
+const progress = validateProgress(loadLocalProgress()); // fall back to a fresh schema
 const previousCareer = progress.careerBest;
 
 updateLevelBest(progress, levelId, score, timeMs);
 const career = careerScore(progress); // one stable formula, e.g. sum of level bests
 progress.careerBest = Math.max(previousCareer, career);
 
-await net.saves.set("progress-v1", progress, checkpoint.revision);
-if (career > previousCareer) await net.leaderboards.submit("career-v1", career);
+saveLocalProgress(progress);
+if (career > previousCareer) await boards.submit("career-v1", career);
 ```
 
-The save is also the place for detailed per-level bests, times, medals and recent runs; the career board only needs the number that represents the whole competition. Catch persistence failures and keep the run playable; retry when connectivity returns.
+The save is also the place for detailed per-level bests, times, medals and recent runs; the career board only needs the number that represents the whole competition. Multiplayer games may additionally use `net.saves` for checkpoint persistence, observing its revision-conflict rules. Catch score failures and keep the run playable. After an uncertain submission refresh the board before deciding to retry; do not automatically replay requests.
 
 ## Per-level boards and tabs
 

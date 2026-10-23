@@ -1,6 +1,7 @@
 // ThreadSite Multiplayer Protocol v4 browser client.
 // TypeScript is the source of truth; the bot build emits the zero-dependency
 // threadsite-net.js and declarations vendored into generated games.
+import { getPlayerIdentity } from "./threadsite-player.js";
 
 export const PROTOCOL_VERSION = 4;
 export type NetStatus = "connecting" | "online" | "reconnecting" | "degraded" | "closed";
@@ -200,8 +201,6 @@ const HEARTBEAT_TIMEOUT_MS = 30_000;
 const INTERPOLATED_KEYS = new Set(["x", "y", "z", "vx", "vy", "vz", "rotation", "angle", "facing"]);
 const CID_STORAGE_KEY = "threadsite-session-cid-v4";
 const RESUME_STORAGE_PREFIX = "threadsite-resume-room-v4:";
-const PLAYER_STORAGE_PREFIX = "threadsite-player-v1:";
-const temporaryPlayerTokens = new Map<string, string>();
 const encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
 
 export class ThreadSiteNetError extends Error {
@@ -260,23 +259,8 @@ function saveResumeRoom(game: string, room: string | null): void {
 }
 
 function playerIdentity(game: string, supplied?: string): { token: string | null; persistent: boolean } {
-  if (supplied !== undefined) {
-    if (!/^[a-f0-9]{64}$/.test(supplied)) throw new ThreadSiteNetError("playerToken must be 64 lowercase hex characters.", "bad_config");
-    return { token: supplied, persistent: false };
-  }
-  const key = `${PLAYER_STORAGE_PREFIX}${game}`;
-  try {
-    const saved = localStorage.getItem(key);
-    if (saved && /^[a-f0-9]{64}$/.test(saved)) return { token: saved, persistent: true };
-  } catch { /* unavailable storage uses a page-lifetime identity */ }
-  let token = temporaryPlayerTokens.get(game);
-  if (!token) {
-    try { token = Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join(""); }
-    catch { return { token: null, persistent: false }; }
-    temporaryPlayerTokens.set(game, token);
-  }
-  try { localStorage.setItem(key, token); return { token, persistent: true }; }
-  catch { return { token, persistent: false }; }
+  if (supplied !== undefined && !/^[a-f0-9]{64}$/.test(supplied)) throw new ThreadSiteNetError("playerToken must be 64 lowercase hex characters.", "bad_config");
+  return getPlayerIdentity(game, supplied);
 }
 
 export class ThreadSiteNet {

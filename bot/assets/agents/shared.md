@@ -5,7 +5,7 @@ The harness builds, validates, commits and publishes this project as static file
 ## Workspace
 
 - Edit `site/`, `scratch/<name>/`, and root `DESCRIPTION.md` / `CHANGELOG.md` / `README.agent.md`. Browser TypeScript belongs in `site/src/`; styles, media and data go in `site/css/`, `site/assets/` and `site/data/`.
-- Read/import but never edit harness inputs: `site/net/`, `node_modules/`, `AGENTS.md`, `NETWORKING.md`, `README.md` (generated from `README.agent.md`), `ASSET_SOURCES.json`, `build-manifest.json`, `.opencode/`. Never edit generated `site/js/`.
+- Read/import but never edit harness inputs: `site/net/`, `site/leaderboards/`, `node_modules/`, `AGENTS.md`, `NETWORKING.md`, `LEADERBOARDS.md`, `README.md` (generated from `README.agent.md`), `ASSET_SOURCES.json`, `build-manifest.json`, `.opencode/`. Never edit generated `site/js/`.
 - Static browser code only. No backend, secrets, dotfiles, symlinks or package/build configuration. Use relative URLs: publication may be under any path prefix.
 - Author with edit/write/apply_patch. Shell is for permitted inspection, checks and asset handling; never bypass editing restrictions. Git writes, package managers, builds and publication belong to the harness.
 
@@ -61,7 +61,7 @@ Write paragraphs on single lines. These files supply the public project card and
 
 - `DESCRIPTION.md`: a title, then one visitor-facing headline sentence (≤25 words). Under `## How to play`, give the goal, controls and tips in up to four short paragraphs (~120 words total). Create it initially and update when the experience changes; avoid implementation jargon.
 - `CHANGELOG.md`: add one section per turn, newest first: a heading (≤6 words), then one sentence (≤30 words) about the visible change. Keep previous entries.
-- `README.agent.md`: the long-form README section appended to `README.md` at the end of every turn. Cover what the project is, how to play or use it, the controls, and useful development notes. Use `##` headings and keep it under 6,000 characters. Do not repeat or edit the harness-owned title, live link, original request or attribution in `README.md`.
+- `README.agent.md`: a separate file seeded by the harness with writing guidance; you have permission to edit it. Fill it in during the initial build and keep it current on later turns. The harness appends its contents to `README.md` below the original request and submitter. Cover what the project is, how to play or use it, the controls, and useful development notes. Use `##` headings and keep it under 6,000 characters. Do not repeat or edit the harness-owned title, live link, original request or attribution in `README.md`.
 
 ## Research and assets
 

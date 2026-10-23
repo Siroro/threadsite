@@ -1,6 +1,6 @@
 ## Multiplayer
 
-Use only `../net/threadsite-net.js` with `NET_CONFIG` from `../net/net-config.js`. Preserve the injected game identity. The client owns transport, reconnect, clocks, host election and transform interpolation; do not replace them.
+For gameplay networking use only `../net/threadsite-net.js` with `NET_CONFIG` from `../net/net-config.js`. Rankings use the separate score client in `LEADERBOARDS.md`. Preserve the injected game identity. The gameplay client owns transport, reconnect, clocks, host election and transform interpolation; do not replace them.
 
 {{modeGuidance}}
 
@@ -14,8 +14,8 @@ Read `NETWORKING.md` before implementing networking or debugging sync; consult `
 - Capture one complete JSON world `{ runId, tick, state }`. Restore replaces shared state before authority starts; present only updates guest visuals. Start/stop shared simulation with authority changes, including background-tab handoff; never cache startup host status.
 - New runs need fresh `runId` values and monotonic ticks; snapshot shape changes need a `schemaVersion` bump. Durable arenas resume paused: persist durations, not wall-clock deadlines, and never publish fresh state over a restored world.
 - Use smooth `entities.syncCollection()` for snapshot entity views. Reliable events carry discrete results; ephemeral events are replaceable cosmetics. Durable outcomes belong in snapshots; scope run-specific reliable events to `net.run`.
-- For personal progression use `net.saves.get/set/delete`; for public personal bests use `net.leaderboards.submit/list`. Read the persistence and board-shape guidance in `NETWORKING.md` first. Default to one main board; multiple boards (including per-level) are fine when each competition has its own tab/selector, never concatenated into one table. Keep per-player run history in saves, not in a ranking table. Keep saves separate from shared world state, save at checkpoints, handle revision conflicts and offline play, and never broadcast the private player credential. Scores are client-reported, not verified by the relay.
-- Follow the player-name rule under Games before creating the session: leaderboard entries and peer displays carry the connection's sanitized `name` (≤32 chars), which is fixed at connect time. Prompt prominently, persist the chosen name locally, and pass it as the `name` option on every connect; a rename applies from the next connection, and resubmitting then updates the stored entry's name.
+- For personal progression use `net.saves.get/set/delete`; for global personal bests use the separate `ThreadSiteLeaderboards` client, also used by singleplayer games. Read `LEADERBOARDS.md` for rankings and `NETWORKING.md` for checkpoint persistence. Default to one main board; separate competitions belong behind tabs. Keep run history in saves, handle revision conflicts and offline play, and never broadcast the private player credential. Scores are client-reported, not verified by the relay.
+- Follow the player-name rule under Games: prompt prominently, persist the chosen name locally, and pass it as the `name` option on every gameplay connection. Peer names are fixed at connect time. Also call the dedicated score client's `setName()` when the player renames; the stored leaderboard name changes on the next improved submission. Both names are sanitized and capped at 32 characters.
 
 ### Rates and checks
 

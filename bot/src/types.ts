@@ -72,7 +72,7 @@ export interface ProjectRecord {
   updatedAt: string;
   /** Durable deletion intent: block new work and retry teardown after failures/restarts. */
   pendingDeletion?: { requestedAt: string; reason: string; lastError?: string; agentsDeleted?: boolean };
-  /** The request that created the project, shown on the pinned project card. */
+  /** Full original request, retained for the repository README and project card. */
   initialPrompt?: string;
   /** Discord user who started the thread, linked as the founder on the pinned project card. */
   starterId?: string;
@@ -97,7 +97,7 @@ export interface ProjectRecord {
   lastCommit?: string;
   /** Pre-turn commit; metadata-only rename commits belong to the same undo boundary. */
   lastTurnBaseCommit?: string;
-  /** Stable relay tenant: renaming public URLs must not reset a game's world. */
+  /** Stable game identity for global leaderboards and optional multiplayer; survives renames. */
   multiplayerGameId?: string;
   /** Multiplayer architecture chosen at /makegam. */
   multiplayerMode?: MultiplayerMode;

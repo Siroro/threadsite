@@ -19,6 +19,8 @@ import path from "node:path";
 export const DESCRIPTION_FILE = "DESCRIPTION.md";
 export const CHANGELOG_FILE = "CHANGELOG.md";
 export const README_AGENT_FILE = "README.agent.md";
+/** Leave room below Forgejo's 64 KiB ownership-detection limit. */
+export const README_MAX_BYTES = 63 * 1024;
 /** Keep the generated README well below Forgejo's 64 KiB ownership-detection limit. */
 export const README_SECTION_MAX_BYTES = 24 * 1024;
 
@@ -118,7 +120,7 @@ export async function readProjectChangelog(workspacePath: string): Promise<Proje
  * reject symlinks and bound the bytes: Forgejo only recognizes the repository
  * as harness-managed while that README stays under 64 KiB.
  */
-export async function readProjectReadmeSection(workspacePath: string): Promise<string | undefined> {
+export async function readProjectReadmeSection(workspacePath: string, maxBytes = README_SECTION_MAX_BYTES): Promise<string | undefined> {
   const file = path.join(workspacePath, README_AGENT_FILE);
   const stat = await fs.lstat(file).catch(() => undefined);
   if (!stat?.isFile() || stat.isSymbolicLink()) return undefined;
@@ -126,11 +128,15 @@ export async function readProjectReadmeSection(workspacePath: string): Promise<s
   const text = raw ? cleanDocument(raw) : "";
   if (!text) return undefined;
   const bytes = Buffer.from(text, "utf8");
-  if (bytes.length <= README_SECTION_MAX_BYTES) return text;
-  let cut = bytes.subarray(0, README_SECTION_MAX_BYTES).toString("utf8").replace(/\uFFFD+$/, "");
+  const limit = Math.max(0, Math.min(README_SECTION_MAX_BYTES, maxBytes));
+  if (bytes.length <= limit) return text;
+  const notice = `\n\n_README section truncated to fit the repository limit. See \`${README_AGENT_FILE}\` in the repository for the full text._`;
+  const contentLimit = limit - Buffer.byteLength(notice, "utf8");
+  if (contentLimit <= 0) return undefined;
+  let cut = bytes.subarray(0, contentLimit).toString("utf8").replace(/\uFFFD+$/, "");
   const newline = cut.lastIndexOf("\n");
-  if (newline > README_SECTION_MAX_BYTES / 2) cut = cut.slice(0, newline);
-  return `${cut.trimEnd()}\n\n_README section truncated to fit the repository limit. See \`${README_AGENT_FILE}\` in the repository for the full text._`;
+  if (newline > contentLimit / 2) cut = cut.slice(0, newline);
+  return `${cut.trimEnd()}${notice}`;
 }
 
 export function parseProjectChangelog(raw: string | undefined): ProjectChangelog | undefined {

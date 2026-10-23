@@ -19,10 +19,16 @@ const { buildSurplusProvider } = await import("../../opencode/surplus-adapter.mj
 const { applyProviderConfig, readProviderConfig } = await import("../../opencode/provider-config.mjs");
 const { OpenCodeV2Harness } = await import("../src/opencode-v2.js");
 const { config } = await import("../src/config.js");
+const { ensureProjectDocuments } = await import("../src/project-docs.js");
+const { ensureLeaderboardFiles } = await import("../src/leaderboards.js");
+const { projectAgents } = await import("../src/templates.js");
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-v2-smoke-"));
 const workspace = path.join(root, "workspace", "guild", "thread");
 await fs.mkdir(path.join(workspace, "site", "src"), { recursive: true });
-await fs.writeFile(path.join(workspace, "AGENTS.md"), "Smoke fixture. Follow the user's task.");
+await fs.writeFile(path.join(workspace, "AGENTS.md"), await projectAgents("site"));
+await ensureProjectDocuments(workspace, "Smoke Project");
+await ensureLeaderboardFiles(workspace, "game-2d", "smoke-game");
+await fs.writeFile(path.join(workspace, "README.md"), "Harness-owned README fixture.\n");
 const lspCommand = process.env.OPENCODE_LSP_SMOKE_COMMAND ? JSON.parse(process.env.OPENCODE_LSP_SMOKE_COMMAND) : undefined;
 const source = 'export const count: number = "wrong";\n';
 await fs.writeFile(path.join(workspace, "site", "src", "lsp-smoke.ts"), source);
@@ -66,8 +72,10 @@ const efforts: string[] = [];
 const toolNames = new Set<string>();
 let providerRequests = 0;
 const provider = http.createServer(async (request, response) => {
+  if (request.method !== "POST") { response.writeHead(404).end(); return; }
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  if (!chunks.length) { response.writeHead(400).end(); return; }
   const body = JSON.parse(Buffer.concat(chunks).toString());
   if (body.model === "glm-5.3") {
     assert.equal(body.options?.reasoningEffort, undefined);
@@ -125,6 +133,15 @@ const provider = http.createServer(async (request, response) => {
     { id: "call_write", name: "write", arguments: JSON.stringify({ path: "site/src/lsp-smoke.ts", content: source }) },
     { id: "call_lsp", name: "lsp", arguments: JSON.stringify({ operation: "hover", path: "site/src/lsp-smoke.ts", line: 1, character: 14 }) },
   ];
+  if (text.includes("README permission smoke")) {
+    if (last?.role !== "tool") calls = [{ id: "call_readme_read", name: "read",
+      arguments: JSON.stringify({ path: "README.agent.md" }) }];
+    else if (last.tool_call_id === "call_readme_read") calls = [
+      { id: "call_readme_allowed", name: "write", arguments: JSON.stringify({ path: "README.agent.md", content: "## About\n\nAuthored through the native write tool.\n" }) },
+      { id: "call_readme_denied", name: "write", arguments: JSON.stringify({ path: "README.md", content: "This edit must be denied." }) },
+      { id: "call_leaderboard_denied", name: "write", arguments: JSON.stringify({ path: "site/leaderboards/leaderboards-config.js", content: "This edit must be denied." }) },
+    ];
+  }
   if (!body.stream) {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ id: "chat_smoke", object: "chat.completion", model: body.model,
@@ -256,6 +273,19 @@ try {
     assert.ok(!toolNames.has("context7_query-docs"), "an unavailable documentation service must not block builder work");
   }
   assert.ok(!toolNames.has("context7_unexpected-write"));
+  const readmeSession = await harness.createSession(workspace, "README permissions");
+  try {
+    const boardConfig = await fs.readFile(path.join(workspace, "site/leaderboards/leaderboards-config.js"), "utf8");
+    await harness.prompt(workspace, readmeSession, "README permission smoke", "threadsite-test/text");
+    assert.equal(await fs.readFile(path.join(workspace, "README.agent.md"), "utf8"), "## About\n\nAuthored through the native write tool.\n");
+    assert.equal(await fs.readFile(path.join(workspace, "README.md"), "utf8"), "Harness-owned README fixture.\n");
+    assert.equal(await fs.readFile(path.join(workspace, "site/leaderboards/leaderboards-config.js"), "utf8"), boardConfig);
+    const messages = await harness.listMessages(workspace, readmeSession);
+    const parts = messages.flatMap((message) => message.parts ?? []);
+    assert.ok(parts.some((part) => part.id === "call_readme_allowed" && part.type === "tool" && part.state?.status === "completed"));
+    assert.ok(parts.some((part) => part.id === "call_readme_denied" && part.type === "tool" && part.state?.status === "error"));
+    assert.ok(parts.some((part) => part.id === "call_leaderboard_denied" && part.type === "tool" && part.state?.status === "error"));
+  } finally { await client.session.remove({ sessionID: readmeSession }); }
   if (lspCommand) {
     await harness.prompt(workspace, sessionID, "Language server smoke", "threadsite-test/text");
     const messages = JSON.stringify(await harness.listMessages(workspace, sessionID));

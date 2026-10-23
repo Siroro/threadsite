@@ -7,7 +7,17 @@ Games default to **shared-arena multiplayer** (or invite-code **rooms**, or none
 
 A single relay therefore serves any number of games and rooms per game, bounded only by configured caps.
 
-## What the harness injects into every game project
+## Global leaderboards in every gameplay mode
+
+Singleplayer and multiplayer games use the same small, dedicated `ThreadSiteLeaderboards` browser client, seeded under `site/leaderboards/` with its TypeScript declarations and stable game configuration. `LEADERBOARDS.md` explains the API, and the `leaderboards` skill covers ranking design. It has no dependency on the full gameplay client: each score/list operation makes a short score-only request through the existing `/ws` endpoint without joining a room, selecting a host or synchronizing gameplay. Existing proxies and `GAMESERVER_PUBLIC_URL` serve both APIs. `MULTIPLAYER_ENABLED=false` disables gameplay wiring, not global rankings.
+
+Boards are global within one game and board key, shared across rooms and singleplayer/multiplayer modes. Both clients use the same anonymous browser credential and persistent store, so existing scores remain visible and the same player does not gain a duplicate identity. Names are required before submission; they are not unique identities. Rankings retain personal bests, sort direction and tie ordering, persist across relay restarts, and are removed with the game, including games that were always singleplayer. Score-only requests cannot access private saves.
+
+The harness pins the game ID before provisioning and preserves it across renames and architecture switches. It repairs the dedicated files before and after turns and restores them for publishing/reverting. The compiler bundles only the score client when gameplay is singleplayer; unbundled files and declarations stay in Git and are excluded from static publication. Older `net.leaderboards` callers remain compatible, while new code uses the dedicated library in both modes.
+
+Gameplay remains playable offline. Score requests time out, never automatically reconnect or replay, and report uncertain submissions so the game can refresh the board before deciding whether to retry. Local records must not be presented as global rankings. Scores remain client-reported. The integration check `npm run test:leaderboards` in `gameserver/` launches an isolated relay and checks both clients, isolation, limits, restart durability, deletion and offline timeouts.
+
+## Gameplay wiring for multiplayer projects
 
 On creation — and re-checked before every mutation, in case the agent removed them:
 
@@ -63,20 +73,23 @@ The relay periodically snapshots the latest authoritative world of each game's s
 
 ## Personal saves and leaderboards
 
-Both networked modes support personal JSON save slots and public best-score leaderboards through the existing WebSocket client. They are independent of room codes, arena world snapshots and host authority. Generated projects stay static; the harness owns all storage. Singleplayer-only projects keep their no-relay contract and use local saves instead.
+Both networked modes support personal JSON save slots through the gameplay client. All gameplay modes use the separate global leaderboard client. Rankings are independent of room codes, arena world snapshots and host authority. Generated projects stay static; the harness owns server storage. Singleplayer games use local saves and the dedicated client for global scores, without importing or connecting the gameplay client.
 
 ```ts
 import { ThreadSiteNet } from "../net/threadsite-net.js";
 import { NET_CONFIG } from "../net/net-config.js";
+import { ThreadSiteLeaderboards } from "../leaderboards/threadsite-leaderboards.js";
+import { LEADERBOARDS_CONFIG } from "../leaderboards/leaderboards-config.js";
 
 const net = await ThreadSiteNet.connect({ ...NET_CONFIG, mode: "single", name: "Player" });
+const boards = new ThreadSiteLeaderboards({ ...LEADERBOARDS_CONFIG, name: "Player" });
 const checkpoint = await net.saves.get<{ schemaVersion: number; level: number }>("progress-v1");
 // Validate the loaded shape/schema before applying it to game state.
 const saved = await net.saves.set("progress-v1", { schemaVersion: 1, level: 3 }, checkpoint.revision);
 // await net.saves.delete("progress-v1", saved.revision);
-await net.leaderboards.submit("points-v1", 250); // higher is better
-await net.leaderboards.submit("time-ms-v1", 32150, { order: "asc" }); // lower is better
-const top = await net.leaderboards.list("points-v1", { limit: 10 });
+await boards.submit("points-v1", 250); // higher is better
+await boards.submit("time-ms-v1", 32150, { order: "asc" }); // lower is better
+const top = await boards.list("points-v1", { limit: 10 });
 // top = { order: "desc", entries: [{ playerId, name, score, updatedAt }] }
 ```
 

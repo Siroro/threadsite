@@ -377,6 +377,7 @@ test("README.md carries the original request, submitter and agent README through
     starterName: "Ada Lovelace",
   });
   f.opencode.prompt = async () => {
+    assert.ok((await fs.lstat(path.join(f.dir, "README.agent.md"))).isFile(), "existing projects get the separate file before the agent runs");
     await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("readme v1");');
     await fs.writeFile(path.join(f.dir, "README.agent.md"), "## About\n\nFeed the koi.\n", "utf8");
     return { text: "Built the pond", usage: {} };
@@ -389,9 +390,11 @@ test("README.md carries the original request, submitter and agent README through
   assert.match(readme, /Requested by Ada Lovelace\./);
   assert.ok(readme.includes("````\nBuild a **koi pond** arcade with a literal ``` fence.\n````"), "the prompt is safe inside a fence longer than its own backticks");
   assert.match(readme, /## About\n\nFeed the koi\./);
+  assert.ok(readme.indexOf("## Original request") < readme.indexOf("## About"));
   assert.match(await git(f.dir, "show", "HEAD:README.agent.md"), /Feed the koi/);
 
   f.opencode.prompt = async () => {
+    assert.equal(await fs.readFile(path.join(f.dir, "README.agent.md"), "utf8"), "## About\n\nFeed the koi.\n", "the harness preserves authored content before later turns");
     await fs.writeFile(path.join(f.dir, "README.md"), "direct edit must lose");
     await fs.writeFile(path.join(f.dir, "README.agent.md"), "## About\n\nRide the koi.\n", "utf8");
     await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("readme v2");');
@@ -418,6 +421,29 @@ test("README.md carries the original request, submitter and agent README through
   assert.match(revertedReadme, /Feed the koi\./);
   assert.doesNotMatch(revertedReadme, /Ride the koi\./);
   assert.match(revertedReadme, /koi-pond-deluxe/);
+
+  // Large multibyte requests and agent sections must not break repository
+  // ownership detection, nor destroy the full authored source or saved prompt.
+  const longPrompt = "池".repeat(16_000);
+  const longSection = "## Notes\n\n" + "魚".repeat(8_000);
+  await f.store.patchProject(f.project.threadId, { initialPrompt: longPrompt, starterName: undefined, starterId: "123456789012345678" });
+  await fs.writeFile(path.join(f.dir, "README.agent.md"), longSection, "utf8");
+  await commitAndPush(f.dir, "Expand the agent README", f.forgejo);
+  await f.service.renameProject(f.project.threadId, "Big Koi Pond");
+  const boundedReadme = await fs.readFile(path.join(f.dir, "README.md"), "utf8");
+  assert.ok(boundedReadme.includes(longPrompt), "the full prompt fits before the agent section is shortened");
+  assert.match(boundedReadme, /https:\/\/discord.com\/users\/123456789012345678/);
+  assert.ok(Buffer.byteLength(boundedReadme, "utf8") < 64 * 1024);
+  assert.ok(boundedReadme.includes("魚"));
+  assert.equal(await fs.readFile(path.join(f.dir, "README.agent.md"), "utf8"), longSection);
+
+  const oversizedPrompt = "````\n" + "🦈".repeat(24_000);
+  await f.store.patchProject(f.project.threadId, { initialPrompt: oversizedPrompt });
+  await f.service.renameProject(f.project.threadId, "Shark Pond");
+  const oversizedReadme = await fs.readFile(path.join(f.dir, "README.md"), "utf8");
+  assert.ok(Buffer.byteLength(oversizedReadme, "utf8") < 64 * 1024);
+  assert.ok(!oversizedReadme.includes("�"), "shortening does not split Unicode characters");
+  assert.equal(f.store.getProject(f.project.threadId)!.initialPrompt, oversizedPrompt);
 });
 
 test("concurrent projects choose distinct readable names without overwriting another site", async () => {
@@ -480,11 +506,14 @@ test("the first successful build adopts the AI name in the returned site and rep
   const store = await openStore(path.join(root, "auto-title.db"));
   const forgejo = new LocalForgejo();
   let workspacePath = "";
+  const initialPrompt = ("Make a garden. " + "Include koi and lily pads. ".repeat(120)).trim();
   const opencode = {
     createSession: async (dir: string) => { workspacePath = dir; return "session"; },
     generateTitle: async () => ({ title: "Fresh Garden", usage: {} }),
     isBusy: async () => false,
     prompt: async () => {
+      assert.ok((await fs.lstat(path.join(workspacePath, "README.agent.md"))).isFile(), "new projects are seeded before the first prompt");
+      await fs.writeFile(path.join(workspacePath, "README.agent.md"), "## About\n\nExplore the garden.\n");
       await fs.writeFile(path.join(workspacePath, "site/src/main.ts"), 'console.log("fresh garden");');
       return { text: "A fresh garden", usage: {} };
     },
@@ -493,7 +522,7 @@ test("the first successful build adopts the AI name in the returned site and rep
   const titles: string[] = [];
   const result = await service.createProject({
     threadId: "123456789012345678", guildId: "100", parentChannelId: "200", displayName: "site-a-long-original-prompt",
-    initialPrompt: "Make a garden", renameable: true, infoMessageId: "card-message",
+    initialPrompt, renameable: true, infoMessageId: "card-message",
     initiator: { name: "Ada Lovelace", email: "ada@users.noreply.example" },
   }, undefined, async (title) => { titles.push(title); });
   assert.deepEqual(titles, ["Fresh Garden"]);
@@ -506,11 +535,13 @@ test("the first successful build adopts the AI name in the returned site and rep
   // The pinned project card stays linked to the original request.
   const saved = store.getProject("123456789012345678")!;
   assert.equal(saved.infoMessageId, "card-message");
-  assert.equal(saved.initialPrompt, "Make a garden");
+  assert.equal(saved.initialPrompt, initialPrompt);
   assert.equal(saved.starterName, "Ada Lovelace");
   const readme = await fs.readFile(path.join(workspacePath, "README.md"), "utf8");
   assert.match(readme, /Requested by Ada Lovelace\./);
   assert.match(readme, /Make a garden/);
+  assert.ok(readme.includes(initialPrompt), "the original prompt is retained beyond 2,000 characters");
+  assert.match(await git(workspacePath, "show", "HEAD:README.agent.md"), /Explore the garden/);
 });
 
 test("a resumed initial build falls back to a different title model and updates all identities", async () => {
@@ -857,12 +888,17 @@ test("switching multiplayer rewrites the wiring and runs a question-first agent 
   // Harness wiring followed the new mode before the agent ran.
   assert.match(await fs.readFile(path.join(f.dir, "AGENTS.md"), "utf8"), /Session mode — rooms/);
   assert.ok(await fs.access(path.join(f.dir, "site/net/net-config.js")).then(() => true, () => false), "net config is in place for rooms");
+  const boardsConfig = await fs.readFile(path.join(f.dir, "site/leaderboards/leaderboards-config.js"), "utf8");
+  const stableGameId = f.store.getProject(f.project.threadId)!.multiplayerGameId;
+  await f.service.renameProject(f.project.threadId, "Ranking Game");
+  assert.equal(f.store.getProject(f.project.threadId)!.multiplayerGameId, stableGameId);
 
   // Going singleplayer removes the wiring outright — net dir and guide gone.
   instruction = "";
   await f.service.switchMultiplayer(f.project.threadId, "singleplayer", "status-2");
   assert.equal(f.store.getProject(f.project.threadId)!.multiplayerMode, "singleplayer");
-  assert.match(instruction, /no networking at all/);
+  assert.equal(await fs.readFile(path.join(f.dir, "site/leaderboards/leaderboards-config.js"), "utf8"), boardsConfig, "rankings retain their identity after renaming and switching gameplay modes");
+  await fs.access(path.join(f.dir, "site/leaderboards/threadsite-leaderboards.js"));
   await assert.rejects(fs.access(path.join(f.dir, "site/net")));
   await assert.rejects(fs.access(path.join(f.dir, "NETWORKING.md")));
   assert.match(await fs.readFile(path.join(f.dir, "AGENTS.md"), "utf8"), /## Singleplayer only/);
