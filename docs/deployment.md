@@ -69,32 +69,110 @@ Then open:
 
 The publish root gets an automatically generated `index.html` listing all ready sites and their source repos.
 
-## LLM credentials
+## OpenCode providers and credentials
 
 Two supported paths:
 
-1. **Preferred for unattended deployments**: set a provider environment variable in `.env`, such as `OPENCODE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `SURPLUS_API_KEY`. The default project configuration uses `opencode/hy3-free`.
+1. **Preferred for unattended deployments**: configure credentials in the private host provider JSON described below. Built-in providers also accept standard `.env` keys such as `OPENCODE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `OPENROUTER_API_KEY`. The default project configuration uses `opencode/hy3-free`.
 2. **Convenience**: as a Discord server admin, run `/site-admin token provider:<id> token:<secret>`. The response is ephemeral and the bot never echoes the token; it is stored in the agent platform's persistent auth volume. For Surplus, the provider ID is `surplus`.
 
-The second path still sends the secret through Discord's interaction infrastructure; for higher-assurance deployments use `.env`/Docker secrets instead.
+The second path still sends the secret through Discord's interaction infrastructure. Host files and environment variables keep credentials outside Discord.
+
+### Host provider configuration
+
+ThreadSite uses OpenCode 2's native `providers` format, documented in [OpenCode providers](https://opencode.ai/v2/docs/providers/). Add built-in provider overrides or custom providers without changing the image or the bot:
+
+1. Copy `opencode/host/providers.example.json` to `opencode/host/providers.json` and edit it. The example shows Surplus; replace or extend the `providers` map for your host. With no file, the bundled policy and Surplus catalog fetcher still work.
+2. For optional extra provider environment variables, copy `.env.opencode.example` to `.env.opencode`. Standard variables explicitly forwarded in Compose, including `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`, still belong in `.env` and take precedence over this extra file. Surplus can be configured entirely in JSON.
+3. Select a configured model using `OPENCODE_DEFAULT_MODEL=provider/model-id` or `/site-admin model`; subagent and browser QA models remain independently configurable.
+
+`OPENCODE_HOST_CONFIG_DIR` changes the host directory mounted read-only at `/etc/threadsite/opencode`. `OPENCODE_ENV_FILE` changes the optional extra environment-file path. The local defaults are Git-ignored, excluded from the OpenCode build context and outside generated workspaces. Restart OpenCode after changing `providers.json`; recreate it after changing environment variables. Provider overrides cannot replace ThreadSite's agents, permissions, plugins or publication policy.
+
+For example, a custom compatible provider with explicit prices and conservative text-only capabilities:
+
+```json
+{
+  "providers": {
+    "acme": {
+      "name": "Host gateway",
+      "package": "@ai-sdk/openai-compatible",
+      "env": ["ACME_API_KEY"],
+      "settings": { "baseURL": "https://llm.example.com/v1" },
+      "models": {
+        "coding-model": {
+          "capabilities": { "tools": true, "input": ["text"], "output": ["text"] },
+          "limit": { "context": 100000, "output": 8192 },
+          "cost": { "input": 2, "output": 6, "cache": { "read": 0.5, "write": 2 } }
+        }
+      }
+    }
+  }
+}
+```
+
+Put `ACME_API_KEY=...` in `.env.opencode`, or store the credential via `/site-admin token provider:acme`. The prices above are illustrative: use your provider's actual USD per million tokens. Native `settings`, `headers`, `body`, model aliases (`modelID`), variants and tiered `cost` arrays are passed through. Strings can reference `{env:VARIABLE}` or `{file:/etc/threadsite/opencode/key-file}`; keep key files in the mounted host directory and use absolute container paths. An explicit `settings.apiKey` takes precedence over stored credentials.
+
+### Context caps for any provider or model
+
+Add a `contextCaps` map to `opencode/host/providers.json`. It applies to built-in OpenCode models and custom/discovered models, including paid models, without requiring a `providers` or `catalogs` entry:
+
+```json
+{
+  "contextCaps": {
+    "openai": 100000,
+    "anthropic": 100000,
+    "surplus": 100000,
+    "surplus/deepseek-v4.1-flash": 64000
+  }
+}
+```
+
+Provider keys cap all of that provider's models. Full `provider/model-id` keys override the provider cap for that model, including model IDs containing slashes. Values are non-negative integer token counts: `0` removes that host cap, while omission retains a bundled default if one exists. Surplus defaults to 100000; other providers have no bundled cap. This selection is explicit and applies equally to paid and free models; prices and usage accounting are unchanged.
+
+The native plugin applies caps across OpenCode's resolved model catalog, including models never listed in the host file. It lowers context and any larger input ceiling while retaining smaller native windows and the output limit. Native auto-compaction and the bot's context meter use the capped window. Compaction reserves headroom (the bundled buffer is 20000 tokens), so its trigger is below the cap; very small caps leave little room for work. Existing `providers.<id>.models.<model>.limit` overrides remain supported, with host caps taking precedence over larger explicit limits. Legacy `catalogs.<id>.contextCap` also remains supported as an additional discovery-time ceiling; set it to `0` when moving entirely to `contextCaps`.
+
+### Model discovery and accounting
+
+Add a `catalogs` entry for any configured OpenAI-compatible provider to refresh its `GET <settings.baseURL>/models` at startup:
+
+```json
+{ "catalogs": { "acme": {} }, "contextCaps": { "acme": 100000 } }
+```
+
+This is an optional ThreadSite extension alongside the native `providers` map. Catalog requests use the configured headers and `settings.apiKey`, or the first populated variable from `env`. They do not read OpenCode's saved credential store; public catalogs such as Surplus work with saved credentials. Configured models remain available if discovery fails. Discovery excludes entries that explicitly lack tool support, carries context/output limits and advertised image input, and adds reasoning-effort variants. Configured models without declared/discovered image input default to text-only, including when overriding a built-in model; add image capability only when the route supports it. Set a catalog to `false` to disable discovery for that provider (including Surplus); independent `contextCaps` still apply.
+
+Catalog `pricing.prompt`, `pricing.completion`, `pricing.input_cache_read` and `pricing.input_cache_write` values are interpreted as USD per token and converted to native OpenCode USD per million token costs. Explicit model configuration overrides discovered values. Discovery does not guess prices or image capability from model names.
+
+OpenCode calculates request cost using its model pricing, and the bot records native usage from both live events and persisted history. Input, output, reasoning, cache, child-agent and failed-turn usage continue into the durable ledger and `/site-admin usage`; overlapping live/history records are reconciled. Providers that omit token counts remain unavailable. Models without pricing may report $0, which is not evidence that the provider is free; add explicit model costs when discovery or the built-in catalog lacks prices.
 
 ### Surplus Intelligence provider
 
-Surplus Intelligence is wired into the agent platform as the custom provider ID `surplus` via its [OI]-compatible provider adapter. Canonical API base URL: `https://api.surplusintelligence.ai/v1`.
+Surplus remains the custom provider ID `surplus`, with its public model fetcher enabled by default. It uses the shared provider/catalog loader; it does not depend on OpenCode's built-in model library. The bundled `opencode/providers.json` contains its endpoint, fallback model map and context cap. Override them in the private `opencode/host/providers.json`:
 
-```dotenv
-SURPLUS_API_KEY=inf_your_key_here
-SURPLUS_BASE_URL=https://api.surplusintelligence.ai/v1
+```json
+{
+  "providers": {
+    "surplus": {
+      "settings": {
+        "apiKey": "your-surplus-key",
+        "baseURL": "https://api.surplusintelligence.ai/v1"
+      },
+      "models": { "glm-4.7": {}, "gpt-5.5": {} }
+    }
+  },
+  "catalogs": { "surplus": {} },
+  "contextCaps": { "surplus": 100000 }
+}
 ```
 
-When the agent container starts, its startup script calls the public Surplus `GET /v1/models`, keeps tool-capable (or capability-unspecified) models, and carries context/output limits and advertised image-input support into the generated provider config. Discovery also runs when the key is stored through `/site-admin token`. `SURPLUS_MODELS` is a comma-separated fallback/extra list, useful when a newly-added model is not returned by discovery yet.
+When the agent container starts, its startup script calls the public Surplus `GET /v1/models`, keeps tool-capable (or capability-unspecified) models, and carries prices, context/output limits and advertised image-input support into the generated provider config. Discovery also runs when the key is stored through `/site-admin token`; omit `settings.apiKey` to use that stored credential. The `models` map adds fallback/extra entries, useful when a newly-added model is not returned by discovery yet.
 
 ```text
 /site-admin model model:surplus/glm-4.7
 /site-admin model model:surplus/gpt-5.5
 ```
 
-If `SURPLUS_API_KEY` is set in the environment, that key is placed in the generated provider configuration and should be treated as the authoritative credential. `SURPLUS_CONTEXT_CAP` (default 100000, `0` disables) caps the context window advertised for Surplus models so long threads compact early.
+Surplus environment settings are no longer read. Move existing credentials into `providers.surplus.settings.apiKey` (or use a `{file:...}` reference), endpoint overrides into `settings.baseURL`, extra model IDs into `models`, and the context ceiling into `contextCaps.surplus`. The ceiling defaults to 100000 tokens; `0` disables it. Host JSON overrides take precedence over bundled JSON defaults. Catalog pricing is imported when advertised, and host model costs can supply missing prices.
 
 ## Caddy quickstart
 

@@ -5,7 +5,7 @@ import { buildSurplusProvider } from "../../opencode/surplus-adapter.mjs";
 test("discovers image input publicly, including the marketplace's vision feature signal", async () => {
   let request;
   const { provider } = await buildSurplusProvider({
-    env: { SURPLUS_MODELS: "offline-extra" },
+    config: { providers: { surplus: { models: { "offline-extra": {} } } }, catalogs: { surplus: { contextCap: 100000 } } },
     fetchImpl: async (url, options) => {
       request = { url, options };
       return { ok: true, json: async () => ({ data: [
@@ -31,13 +31,15 @@ test("discovers image input publicly, including the marketplace's vision feature
 });
 
 test("catalog failure preserves fallback models and never guesses vision", async () => {
+  let authorization;
   const { provider } = await buildSurplusProvider({
-    env: { SURPLUS_MODELS: "deepseek-new-vision", SURPLUS_API_KEY: "test-key" },
+    config: { providers: { surplus: { settings: { apiKey: "test-key" }, models: { "deepseek-new-vision": {} } } } },
     fetchImpl: async (_url, options) => {
-      assert.equal(options.headers.Authorization, "Bearer test-key");
+      authorization = options.headers.Authorization;
       throw new Error("offline");
     },
   });
+  assert.equal(authorization, "Bearer test-key");
   assert.ok(provider.models["deepseek-new-vision"]);
   assert.deepEqual(provider.models["deepseek-new-vision"].capabilities.input, ["text"]);
 });

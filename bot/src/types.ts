@@ -76,6 +76,8 @@ export interface ProjectRecord {
   initialPrompt?: string;
   /** Discord user who started the thread, linked as the founder on the pinned project card. */
   starterId?: string;
+  /** Display name of the project requester, for README attribution alongside starterId. */
+  starterName?: string;
   /** Human thread owner; for bot-created threads this is the project requester. */
   ownerId?: string;
   /** Missing settings mean anyone can edit, including on existing projects. */

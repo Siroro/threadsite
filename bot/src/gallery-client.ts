@@ -69,8 +69,7 @@ function startGallery(): void {
     sortOrder.disabled = state.collection === "recent";
     const isFiltered = Boolean(state.q || state.type !== "all" || state.mode !== "all");
     element("hero").hidden = isFiltered || state.collection !== "all";
-    element("collection-title").textContent = state.collection === "saved" ? "Saved for a good day." : state.collection === "recent" ? "Back for another look." : state.type === "games" ? "Press play. Get lost." : state.type === "site" ? "Little corners of the web." : "Explore the collection.";
-    element("collection-eyebrow").textContent = state.collection === "saved" ? "YOUR FAVOURITES, ALL IN ONE PLACE" : state.collection === "recent" ? "RECENTLY OPENED IN THIS BROWSER" : "FIND YOUR NEXT OBSESSION";
+    element("collection-title").textContent = state.collection === "saved" ? "Saved projects" : state.collection === "recent" ? "Recently opened" : state.type === "games" ? "Games" : state.type === "site" ? "Websites" : state.type === "game-2d" ? "2D games" : state.type === "game-3d" ? "3D games" : "All projects";
     element("result-count").textContent = `${result.visible.length} of ${result.total} project${result.total === 1 ? "" : "s"}${state.q ? ` matching “${state.q}”` : ""}`;
     document.querySelectorAll<HTMLElement>('[data-action="reset"]').forEach((button) => { button.hidden = button.closest(".results-toolbar") ? !isFiltered : false; });
     document.querySelector<HTMLElement>('[data-action="clear-search"]')!.hidden = !state.q;
@@ -83,19 +82,19 @@ function startGallery(): void {
     document.querySelectorAll<HTMLButtonElement>('[data-action="surprise"]').forEach((button) => { button.disabled = !result.total; });
     element("empty-state").hidden = result.total !== 0;
     element("load-more").hidden = result.page >= result.pages;
-    element("shown-count").textContent = `You've explored ${result.visible.length} of ${result.total} projects`;
+    element("shown-count").textContent = `Showing ${result.visible.length} of ${result.total} projects`;
     if (!projects.length) {
-      element("empty-title").textContent = "A blank canvas. For now.";
-      element("empty-description").textContent = "The first published project will start the collection.";
+      element("empty-title").textContent = "No projects yet";
+      element("empty-description").textContent = "Published projects will appear here.";
     } else if (state.collection === "saved" && !isFiltered) {
-      element("empty-title").textContent = "Keep a little something for later.";
-      element("empty-description").textContent = "Tap the heart on any project to find it here. Your collection stays in this browser.";
+      element("empty-title").textContent = "No saved projects";
+      element("empty-description").textContent = "Use the heart button to save a project.";
     } else if (state.collection === "recent" && !isFiltered) {
-      element("empty-title").textContent = "Your next rabbit hole is out there.";
-      element("empty-description").textContent = "Projects you open from the gallery will appear here, ready for another visit.";
+      element("empty-title").textContent = "No recently opened projects";
+      element("empty-description").textContent = "Projects you open from this gallery will appear here.";
     } else {
-      element("empty-title").textContent = "Nothing down this rabbit hole. Yet.";
-      element("empty-description").textContent = "Try a different search or clear the filters to see more projects.";
+      element("empty-title").textContent = "No matching projects";
+      element("empty-description").textContent = "Try another search or clear the filters.";
     }
   }
   function renderDetailSave(project: GalleryProject): void {
@@ -139,7 +138,7 @@ function startGallery(): void {
   async function copy(text: string): Promise<void> {
     try {
       if (!navigator.clipboard?.writeText) throw new Error("unavailable");
-      await navigator.clipboard.writeText(text); notify("Copied. Pass it on.");
+      await navigator.clipboard.writeText(text); notify("Copied");
     } catch {
       element<HTMLInputElement>("share-link").value = text;
       if (!shareDialog.open) shareDialog.showModal();

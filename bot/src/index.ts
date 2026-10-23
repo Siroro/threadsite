@@ -1705,7 +1705,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
 }
 
 // Autocomplete currently serves only /site-admin model: the agent service's
-// current free OpenCode models plus the configured Surplus models, filtered by
+// current free OpenCode models plus host-configured provider models, filtered by
 // what the admin has typed. Choice names are the exact "provider/model-id"
 // strings the command accepts; "default" is offered too since it clears the
 // override. The command stays free-text — unlisted provider/model ids remain

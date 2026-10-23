@@ -16,6 +16,7 @@ const binary = process.env.OPENCODE_V2_BINARY;
 assert.ok(binary, "Set OPENCODE_V2_BINARY to the OpenCode 2.1.3 executable");
 const { buildV2Config } = await import("../../opencode/v2/config.mjs");
 const { buildSurplusProvider } = await import("../../opencode/surplus-adapter.mjs");
+const { applyProviderConfig, readProviderConfig } = await import("../../opencode/provider-config.mjs");
 const { OpenCodeV2Harness } = await import("../src/opencode-v2.js");
 const { config } = await import("../src/config.js");
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-v2-smoke-"));
@@ -157,14 +158,21 @@ const base = JSON.parse(await fs.readFile(new URL("../../opencode/opencode.json"
 base.providers = { "threadsite-test": { package: "@ai-sdk/openai-compatible", name: "Local scripted provider",
   settings: { baseURL: `http://127.0.0.1:${providerPort}/v1`, apiKey: "test-only" },
   models: {
-    text: { name: "Test", limit: { context: 32000, output: 2048 }, capabilities: { tools: true, input: ["text"], output: ["text"] } },
+    text: { name: "Test", cost: { input: 2, output: 6, cache: { read: 0.5 } },
+      limit: { context: 32000, output: 2048 }, capabilities: { tools: true, input: ["text"], output: ["text"] } },
     child: { name: "Child test", limit: { context: 32000, output: 2048 }, capabilities: { tools: true, input: ["text"], output: ["text"] } },
     vision: { name: "Vision QA test", limit: { context: 32000, output: 2048 }, capabilities: { tools: true, input: ["text", "image"], output: ["text"] } },
   } } };
-const surplus = await buildSurplusProvider({ env: { SURPLUS_BASE_URL: `http://127.0.0.1:${providerPort}/v1` },
+const surplus = await buildSurplusProvider({ config: { providers: { surplus: { settings: { baseURL: `http://127.0.0.1:${providerPort}/v1` } } } },
   fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "glm-5.3",
     supported_parameters: ["tools", "reasoning_effort"], architecture: { input_modalities: ["text"] } }] }) }) });
 base.providers.surplus = surplus.provider;
+base.providers.openai = { models: { "host-context-alias": { modelID: "gpt-5.2" } } };
+const providerFile = path.join(root, "providers.json");
+await fs.writeFile(providerFile, JSON.stringify({ providers: base.providers, contextCaps: {
+  ...surplus.contextCaps, "threadsite-test": 30000, "threadsite-test/child": 28000, openai: 100000,
+} }));
+Object.assign(base, await applyProviderConfig({ ...base, providers: {} }, await readProviderConfig(providerFile)));
 base.mcp = { servers: { playwright: { type: "remote", url: `http://127.0.0.1:${docsPort}/browser`, disabled: false, oauth: false, codemode: false, timeout: { startup: 5000, catalog: 5000, execution: 5000 } } } };
 base.lsp = lspCommand ? { typescript: { ...base.lsp.typescript, command: lspCommand } } : false;
 base.formatter = false;
@@ -206,6 +214,9 @@ try {
     plugins = await client.plugin.list({ location: { directory: workspace } });
   }
   assert.ok(plugins.data.some((plugin) => plugin.id === "threadsite.v2" && plugin.state.status === "active"), JSON.stringify(plugins));
+  const cappedModels = (await client.model.list({ location: { directory: workspace } })).data;
+  assert.equal(cappedModels.find((model) => model.providerID === "threadsite-test" && model.id === "text")?.limit.context, 30000);
+  assert.equal(cappedModels.find((model) => model.providerID === "threadsite-test" && model.id === "child")?.limit.context, 28000);
   const effortSession = await harness.createSession(workspace, "Effort wire check");
   try {
     for (const [level, effective] of [["minimal", "low"], ["low", "low"], ["medium", "high"], ["high", "high"], ["xhigh", "max"], ["max", "max"], ["auto", undefined]]) {
@@ -227,6 +238,13 @@ try {
   assert.equal(answered, true);
   assert.ok(result.usage.steps >= 2);
   assert.ok(result.usage.inputTokens > 0);
+  assert.equal(result.usage.contextLimit, 30000, "bot usage must use the native capped context window");
+  assert.ok(Math.abs(result.usage.cost - result.usage.steps * 0.00023) < 1e-10,
+    "native model prices must bill 80 uncached + 20 cached input and 10 output tokens per step");
+  const recoveredBilling = (await harness.usageMessages(workspace, sessionID)).filter((message) => message.info?.tokens);
+  assert.ok(recoveredBilling.length > 0);
+  assert.ok(recoveredBilling.every((message) => Math.abs((message.info?.cost ?? 0) - 0.00023) < 1e-10),
+    "priced billing must survive persisted history recovery");
   assert.match(await fs.readFile(path.join(workspace, "PROJECT_NOTES.md"), "utf8"), /Preserve the smoke/);
   for (const name of ["todowrite", "todoread", "project_notes", "js_syntax_check", "asset_download", "asset_import"]) assert.ok(toolNames.has(name), `Missing production tool ${name}`);
   assert.ok(![...toolNames].some((name) => name.startsWith("playwright")));
@@ -315,7 +333,14 @@ try {
   await harness.compactSession(workspace, sessionID, "threadsite-test", "text");
   assert.ok((await harness.listMessages(workspace, sessionID)).some((message) => message.parts?.some((part) => part.type === "compaction")));
   await harness.setProviderToken("openai", "smoke-test-only");
+  const nativeModels = (await client.model.list({ location: { directory: workspace } })).data.filter((model) => model.providerID === "openai");
+  assert.ok(nativeModels.length > 0, "native provider models must be available without a ThreadSite catalog fetch");
+  assert.ok(nativeModels.some((model) => model.id === "host-context-alias"), "native model aliases must inherit the same host caps");
+  assert.ok(nativeModels.every((model) => model.limit.context <= 100000 && (model.limit.input ?? 0) <= 100000),
+    "provider caps must reach native models and their input ceilings");
   await harness.clearProviderToken("openai");
+  await harness.setProviderToken("threadsite-test", "custom-provider-test-only");
+  await harness.clearProviderToken("threadsite-test");
   const saved = await harness.usageMessages(workspace, sessionID);
   assert.ok(saved.length >= 4);
   const userID = await harness.lastUserMessageId(workspace, sessionID);

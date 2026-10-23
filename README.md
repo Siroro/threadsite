@@ -48,7 +48,7 @@ Running operations go through the root `start.sh` (update/rebuild/health/logs), 
 
 ## Configuration
 
-All settings live in `.env` (see `.env.example` for the complete annotated list).
+Deployment settings live in `.env` (see `.env.example`). OpenCode also accepts a private host provider file and optional extra provider environment file, described below.
 
 ### Discord
 
@@ -61,7 +61,7 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 | `PROGRESS_UPDATE_MS` | Minimum interval between live progress-card edits |
 | `TURN_STALL_WARN_MS` | No-agent-activity duration before the card shows a stall warning |
 
-### Agent service
+### OpenCode
 
 | Setting | Purpose |
 | --- | --- |
@@ -77,14 +77,24 @@ All settings live in `.env` (see `.env.example` for the complete annotated list)
 | `OPENCODE_BLIP_NUDGES` | Quick same-model retries for transient upstream errors (5xx/overloaded/429) before failing or failing over (default 2; 0 disables) |
 | `SESSION_IDLE_RESET_MS` / `SESSION_CONTEXT_COMPACT_THRESHOLD` | Fresh session after idle; auto-compaction threshold |
 | `OPENCODE_API_KEY` and other provider keys | Provider credentials (or store later via `/site-admin token`) |
+| `OPENCODE_HOST_CONFIG_DIR` | Read-only host config directory (default `./opencode/host`); optional `providers.json` adds/overrides native providers, endpoints, models, capabilities and prices |
+| `OPENCODE_ENV_FILE` | Optional extra environment file for custom provider credentials (default `.env.opencode`); standard keys above still come from `.env` |
 
-### Surplus Intelligence (optional provider)
+Copy `opencode/host/providers.example.json` to `opencode/host/providers.json` and edit the native `providers` map for your host. Copy `.env.opencode.example` to `.env.opencode` for additional provider-specific variables. Both local files are Git-ignored. Provider configuration is separate from generated workspaces and cannot replace ThreadSite's agent/tool policy. Restart OpenCode after provider-file changes; recreate it after environment changes. See [provider setup and pricing](docs/deployment.md#opencode-providers-and-credentials).
+
+Token, cache, per-model and failed-turn usage continue through OpenCode into `/site-admin usage`. Built-in catalog prices and custom model `cost` values use USD per million tokens. Optional compatible catalog discovery imports advertised prices; missing prices remain unknown, so a $0 report alone does not establish that a model is free.
+
+Set `contextCaps` in the host JSON to cap any paid or free provider/model, including OpenCode's built-in catalog: `{"contextCaps":{"openai":100000,"surplus/deepseek-v4.1-flash":64000}}`. Model entries override provider entries; `0` removes that host cap. Caps affect compaction and the bot's context meter, retain smaller native limits, and do not require catalog discovery. Unlisted providers keep their native limits. Surplus defaults to 100000 tokens.
+
+#### Surplus model availability
+
+The custom Surplus `/v1/models` fetcher remains enabled at startup, including with credentials stored through `/site-admin token`. It uses the shared OpenCode provider loader for capabilities, prices, limits and reasoning variants. Defaults live in `opencode/providers.json`; configure Surplus entirely in the private `opencode/host/providers.json`, with no Surplus environment variables required.
 
 | Setting | Purpose |
 | --- | --- |
-| `SURPLUS_API_KEY` / `SURPLUS_BASE_URL` | Buyer key and API base (`https://api.surplusintelligence.ai/v1`) |
-| `SURPLUS_MODELS` | Comma-separated fallback/extra model IDs merged with live discovery |
-| `SURPLUS_CONTEXT_CAP` | Context ceiling advertised for Surplus models (default 100000, `0` disables) |
+| `providers.surplus.settings.apiKey` / `baseURL` | Buyer key and API base (`https://api.surplusintelligence.ai/v1`); omit the key to use stored credentials |
+| `providers.surplus.models` | Fallback/extra model map merged with live discovery |
+| `contextCaps.surplus` | Advertised context ceiling (default 100000, `0` disables); model entries such as `surplus/deepseek-v4.1-flash` override it |
 
 ### Forgejo
 

@@ -34,6 +34,8 @@ for (const item of cases) {
     });
   assert.match(result.text, /Docker build and browser check passed/);
   assert.ok(browserActivity > 0, "Bot must receive browser progress events");
+  assert.ok(result.usage.inputTokens > 0 && result.usage.outputTokens > 0 && result.usage.cost > 0,
+    "discovered model prices and provider token counts must reach bot billing");
   // The preview must never silently make the bot's final build for it.
   await assert.rejects(fs.stat(path.join(site, "js")), { code: "ENOENT" });
   const built = await buildSite(workspace);

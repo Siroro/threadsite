@@ -7,9 +7,11 @@ reports.policy = { checked: [], budgetSteps: 0, steers: 0 };
 const json = (res, body, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
 http.createServer(async (req, res) => {
   if (req.url === "/report") return json(res, reports);
+  assert.equal(req.headers.authorization, "Bearer fixture-only", "host provider credentials must reach discovery and inference");
   if (req.url === "/v1/models") return json(res, { data: [{
     id: "compose-vision", name: "Docker vision fixture", context_length: 200000, max_completion_tokens: 4096,
     architecture: { input_modalities: ["text", "image"] }, supported_parameters: ["tools"],
+    pricing: { prompt: "0.000002", completion: "0.000006", input_cache_read: "0.0000005" },
   }, {
     id: "compose-text", name: "Docker text-only fixture", context_length: 200000, max_completion_tokens: 4096,
     architecture: { input_modalities: ["text"] }, supported_parameters: ["tools"],

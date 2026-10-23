@@ -10,7 +10,7 @@ import type { TurnCardState } from "../src/turn-card.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { renderTechnicalCard, renderPlayCard } = await import("../src/turn-card.js");
-const { changelogTemplate, descriptionTemplate, readProjectChangelog, readProjectDescription } = await import("../src/project-docs.js");
+const { changelogTemplate, descriptionTemplate, readmeAgentTemplate, readProjectChangelog, readProjectDescription, readProjectReadmeSection, README_SECTION_MAX_BYTES } = await import("../src/project-docs.js");
 
 /** The text-display content of the playable card, joined in render order. */
 function playCardText(message: ReturnType<typeof renderPlayCard>): string {
@@ -134,4 +134,20 @@ test("the project's own documents are read back as the card's blurb and its newe
     title: "Leaderboard",
     body: "Added a leaderboard for the top ten koi.",
   });
+});
+
+test("the agent README is empty until written and is bounded before it reaches README.md", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-agent-readme-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, "README.agent.md"), readmeAgentTemplate(), "utf8");
+  assert.equal(await readProjectReadmeSection(root), undefined, "an untouched template says nothing");
+
+  await fs.writeFile(path.join(root, "README.agent.md"), "## About\n\nFeed the koi.\n", "utf8");
+  assert.equal(await readProjectReadmeSection(root), "## About\n\nFeed the koi.");
+
+  await fs.writeFile(path.join(root, "README.agent.md"), "x".repeat(README_SECTION_MAX_BYTES * 2), "utf8");
+  const bounded = await readProjectReadmeSection(root);
+  assert.ok(bounded);
+  assert.ok(Buffer.byteLength(bounded, "utf8") <= README_SECTION_MAX_BYTES + 200, "the appended section stays well under Forgejo's 64 KiB README limit");
+  assert.match(bounded, /truncated/);
 });

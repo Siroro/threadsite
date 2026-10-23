@@ -2,19 +2,25 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 /**
- * The project's two author-maintained documents, kept next to the README in
+ * The project's three author-maintained documents, kept next to the README in
  * the project root:
  *
  * - `DESCRIPTION.md` — what the project is, in a visitor's words, plus how to
  *   play it. The agent keeps it current; the play card shows it.
  * - `CHANGELOG.md` — one section per turn, newest first. The agent adds an
  *   entry before its final summary; the play card shows the newest one.
+ * - `README.agent.md` — the long-form README appended to `README.md` at the end
+ *   of every turn: what the project is, how to use or play it, controls and
+ *   useful notes. The harness owns `README.md` itself.
  *
- * Both live outside `site/`, so they are repository content rather than
- * published pages, and both are read back after every turn.
+ * All live outside `site/`, so they are repository content rather than
+ * published pages, and all are read back after every turn.
  */
 export const DESCRIPTION_FILE = "DESCRIPTION.md";
 export const CHANGELOG_FILE = "CHANGELOG.md";
+export const README_AGENT_FILE = "README.agent.md";
+/** Keep the generated README well below Forgejo's 64 KiB ownership-detection limit. */
+export const README_SECTION_MAX_BYTES = 24 * 1024;
 
 /** The description as the play card shows it: the pitch and how to play. */
 export interface ProjectDescription {
@@ -46,6 +52,13 @@ export function changelogTemplate(): string {
     + "<!-- Add a new section at the top of this file for each turn: a heading of at most six words, then one sentence, on one line, about what a visitor will notice. -->\n";
 }
 
+/** The first `README.agent.md` a new project starts with. */
+export function readmeAgentTemplate(): string {
+  return "<!-- This file is appended to README.md at the end of every turn. Edit this file, never README.md. -->\n"
+    + "<!-- Write a concise, visitor-facing README section: what the project is, how to play or use it, the controls, and useful development notes. Use ## headings and keep it under 6,000 characters. -->\n"
+    + "<!-- Do not repeat the harness-owned title, live link, original request or attribution. -->\n";
+}
+
 /** Strip the placeholder comments and the leading heading from a document. */
 function cleanDocument(text: string): string {
   return text
@@ -55,21 +68,21 @@ function cleanDocument(text: string): string {
 }
 
 /**
- * Create the two project documents when they are missing. Existing content is
+ * Create the three project documents when they are missing. Existing content is
  * never touched: the agent owns them from then on.
  */
 export async function ensureProjectDocuments(workspacePath: string, name: string): Promise<boolean> {
   let created = false;
-  const description = path.join(workspacePath, DESCRIPTION_FILE);
-  if (!await fs.stat(description).catch(() => undefined)) {
-    await fs.writeFile(description, descriptionTemplate(name), "utf8");
+  // lstat, not stat: a dangling symlink must never redirect a harness write
+  // outside the workspace.
+  const ensure = async (file: string, content: string): Promise<void> => {
+    if (await fs.lstat(file).then(() => true, () => false)) return;
+    await fs.writeFile(file, content, "utf8");
     created = true;
-  }
-  const changelog = path.join(workspacePath, CHANGELOG_FILE);
-  if (!await fs.stat(changelog).catch(() => undefined)) {
-    await fs.writeFile(changelog, changelogTemplate(), "utf8");
-    created = true;
-  }
+  };
+  await ensure(path.join(workspacePath, DESCRIPTION_FILE), descriptionTemplate(name));
+  await ensure(path.join(workspacePath, CHANGELOG_FILE), changelogTemplate());
+  await ensure(path.join(workspacePath, README_AGENT_FILE), readmeAgentTemplate());
   return created;
 }
 
@@ -98,6 +111,26 @@ export function parseProjectDescription(raw: string | undefined): ProjectDescrip
 export async function readProjectChangelog(workspacePath: string): Promise<ProjectChangelog | undefined> {
   const raw = await fs.readFile(path.join(workspacePath, CHANGELOG_FILE), "utf8").catch(() => undefined);
   return parseProjectChangelog(raw);
+}
+
+/**
+ * Read the agent-maintained README section. It becomes part of `README.md`, so
+ * reject symlinks and bound the bytes: Forgejo only recognizes the repository
+ * as harness-managed while that README stays under 64 KiB.
+ */
+export async function readProjectReadmeSection(workspacePath: string): Promise<string | undefined> {
+  const file = path.join(workspacePath, README_AGENT_FILE);
+  const stat = await fs.lstat(file).catch(() => undefined);
+  if (!stat?.isFile() || stat.isSymbolicLink()) return undefined;
+  const raw = await fs.readFile(file, "utf8").catch(() => undefined);
+  const text = raw ? cleanDocument(raw) : "";
+  if (!text) return undefined;
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= README_SECTION_MAX_BYTES) return text;
+  let cut = bytes.subarray(0, README_SECTION_MAX_BYTES).toString("utf8").replace(/\uFFFD+$/, "");
+  const newline = cut.lastIndexOf("\n");
+  if (newline > README_SECTION_MAX_BYTES / 2) cut = cut.slice(0, newline);
+  return `${cut.trimEnd()}\n\n_README section truncated to fit the repository limit. See \`${README_AGENT_FILE}\` in the repository for the full text._`;
 }
 
 export function parseProjectChangelog(raw: string | undefined): ProjectChangelog | undefined {

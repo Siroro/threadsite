@@ -1,4 +1,7 @@
 .env
+.env.opencode
+opencode/host/*
+!opencode/host/providers.example.json
 secrets/*
 !secrets/.gitkeep
 data/

@@ -5,7 +5,7 @@ Every skill here ships in the bot image and is seeded into game workspaces by
 after every turn. Two tiers:
 
 - **Maintained in-tree — edit the files directly, never download over them:**
-  `game-2d`, `game-3d`, `excalibur` (authored), and `threejs-game-studio`
+  `game-2d`, `game-3d`, `excalibur`, `leaderboards` (authored), and `threejs-game-studio`
   (forked from chrislaupama/threejs-game-studio, MIT — it needed heavy
   ThreadSite re-curation: Rapier/three-mesh-bvh physics guidance,
   harness-native release gates instead of its npm scripts).

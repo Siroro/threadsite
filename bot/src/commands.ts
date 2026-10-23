@@ -154,7 +154,7 @@ export const adminCommand = new SlashCommandBuilder()
     .setDescription("Store/replace a provider API token (ephemeral reply)")
     .addStringOption((option) => option
       .setName("provider")
-      .setDescription("Provider ID, e.g. anthropic, openai, openrouter, surplus")
+      .setDescription("OpenCode provider ID, including host-configured providers")
       .setRequired(true)
       .setMaxLength(80))
     .addStringOption((option) => option

@@ -17,6 +17,7 @@ const SHARED_SKILLS = [
   "game-ai",
   "game-feel",
   "game-ui-ux",
+  "leaderboards",
   "camera-systems",
   "input-systems",
   "audio-design",

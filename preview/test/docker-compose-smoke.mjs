@@ -17,10 +17,14 @@ const mount = (source, target, read_only = false) => ({ type: "bind", source, ta
 const workspace = path.join(root, "workspaces");
 const sites = path.join(root, "sites");
 const state = path.join(root, "state");
-for (const dir of [workspace, sites, state]) await fs.mkdir(dir);
+const hostConfig = path.join(root, "opencode-host");
+for (const dir of [workspace, sites, state, hostConfig]) await fs.mkdir(dir);
+await fs.writeFile(path.join(hostConfig, "providers.json"), JSON.stringify({ providers: { surplus: {
+  settings: { baseURL: "http://fixture:7070/v1", apiKey: "fixture-only" },
+  models: { "compose-vision": {}, "compose-text": {} },
+} }, catalogs: { surplus: { contextCap: 100000 } } }));
 const opencodeEnv = {
   XDG_DATA_HOME: "/opencode-data", OPENCODE_SERVER_PASSWORD: "fixture-only",
-  SURPLUS_API_KEY: "fixture-only", SURPLUS_BASE_URL: "http://fixture:7070/v1", SURPLUS_MODELS: "compose-vision,compose-text",
   OPENCODE_MAX_STEPS: "50",
   OPENCODE_LOG_LEVEL: "INFO", OPENCODE_WEBSEARCH_PROVIDER: "off",
 };
@@ -44,8 +48,9 @@ await fs.writeFile(override, `services:
   preview:
     volumes: !override ${JSON.stringify([mount(workspace, "/workspace", true), mount(tests, "/app/fixtures", true)])}
   opencode:
+    env_file: !reset []
     environment: !override ${JSON.stringify(opencodeEnv)}
-    volumes: !override ${JSON.stringify([mount(workspace, "/workspace"), { type: "volume", source: "opencode-data", target: "/opencode-data" }])}
+    volumes: !override ${JSON.stringify([mount(workspace, "/workspace"), mount(hostConfig, "/etc/threadsite/opencode", true), { type: "volume", source: "opencode-data", target: "/opencode-data" }])}
     depends_on:
       fixture:
         condition: service_healthy
