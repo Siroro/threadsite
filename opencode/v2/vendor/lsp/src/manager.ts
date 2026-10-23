@@ -18,7 +18,7 @@ const WARMUP_TIMEOUT_MS = 6_000
 const TRANSIENT_CODES = new Set([-32800, -32801, -32802])
 
 interface Target {
-  /** One client per server and root, as OpenCode 1 ran them. */
+  /** One client per server and root. */
   readonly key: string
   readonly server: ServerConfig
   readonly root: string
@@ -194,7 +194,7 @@ export class LspManager {
 
   async #sync(file: string, uri: string, signal?: AbortSignal): Promise<Synced[]> {
     signal?.throwIfAborted()
-    // OpenCode 1 asked before touching files outside the project; plugins cannot ask, so they are never sent.
+    // Files outside the project boundary are never sent to language servers.
     const text = await readInside(this.#root, file)
     signal?.throwIfAborted()
     const ready: { target: Target; client: LspClient }[] = []

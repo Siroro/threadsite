@@ -1,107 +1,17 @@
-import http from "node:http";
-import { Readable } from "node:stream";
-
-/**
- * Every reasoning-effort level the Discord /effort command can select. All are
- * declared as model variants for Surplus models whose catalog entry advertises
- * `reasoning_effort`; the gateway accepts each value (verified against
- * glm-5.3-flash), so no combination can fail a turn with a 400.
- */
 const EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
-
-const DEFAULT_PROXY_PORT = 18098;
 
 function positiveNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : undefined;
 }
 
-/**
- * OpenCode serializes a selected variant's options into the request body as a
- * top-level `options: { reasoningEffort }` wrapper — not a parameter any
- * OpenAI-compatible gateway understands, so Surplus silently ignores it and
- * every request runs at the model's default effort. The proxy below rewrites
- * that wrapper into the `reasoning_effort` field the catalog advertises;
- * translation is a no-op once OpenCode sends the parameter natively.
- */
-function translateEffort(body) {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-  const wrapped = body.options;
-  if (!wrapped || typeof wrapped !== "object") return null;
-  const effort = wrapped.reasoningEffort ?? wrapped.reasoning_effort;
-  if (typeof effort !== "string") return null;
-  body.reasoning_effort ??= effort;
-  delete wrapped.reasoningEffort;
-  delete wrapped.reasoning_effort;
-  if (Object.keys(wrapped).length === 0) delete body.options;
-  return effort;
-}
-
-const HOP_BY_HOP_HEADERS = new Set([
-  "host",
-  "connection",
-  "content-length",
-  "transfer-encoding",
-  "keep-alive",
-  "accept-encoding",
-  "upgrade",
-]);
-
-export async function startEffortProxy({ port = DEFAULT_PROXY_PORT, host = "127.0.0.1", upstreamBase, log = () => {} }) {
-  const origin = new URL(upstreamBase).origin;
-  const server = http.createServer(async (req, res) => {
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      let outBody = Buffer.concat(chunks);
-      if (req.method === "POST" && typeof req.url === "string" && req.url.includes("chat/completions")) {
-        try {
-          const parsed = JSON.parse(outBody.toString("utf8"));
-          const effort = translateEffort(parsed);
-          if (effort) {
-            outBody = Buffer.from(JSON.stringify(parsed));
-            log(`translated reasoning effort '${effort}' for ${parsed.model ?? "unknown model"}`);
-          }
-        } catch {
-          // Not JSON (multipart, empty) — forward untouched.
-        }
-      }
-      const headers = {};
-      for (const [name, value] of Object.entries(req.headers)) {
-        if (!HOP_BY_HOP_HEADERS.has(name) && value !== undefined) headers[name] = value;
-      }
-      // No abort signal: agent turns legitimately stream for many minutes.
-      const upstreamRes = await fetch(origin + req.url, {
-        method: req.method,
-        headers,
-        body: req.method === "GET" || req.method === "HEAD" ? undefined : outBody,
-        redirect: "manual",
-      });
-      const responseHeaders = {};
-      const contentType = upstreamRes.headers.get("content-type");
-      if (contentType) responseHeaders["content-type"] = contentType;
-      res.writeHead(upstreamRes.status, responseHeaders);
-      if (upstreamRes.body) Readable.fromWeb(upstreamRes.body).pipe(res);
-      else res.end();
-    } catch (error) {
-      if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
-      res.end(`surplus-adapter proxy error: ${error}`);
-    }
-  });
-  server.on("error", (error) => log(`proxy server error: ${error}`));
-  server.on("clientError", (_error, socket) => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"));
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, host, () => resolve());
-  });
-  return server;
-}
-
-function effortVariantsFor(supportedParameters) {
+function effortVariantsFor(modelID, supportedParameters) {
   if (!Array.isArray(supportedParameters) || !supportedParameters.includes("reasoning_effort")) return undefined;
-  const variants = {};
-  for (const level of EFFORT_LEVELS) variants[level] = { options: { reasoningEffort: level } };
-  return variants;
+  // GLM's native tiers are low/high/max. Send those exact values across all
+  // serving routes so unsupported aliases cannot fall back to default effort.
+  const glm53 = /^glm-5\.3(?:-flash(?:x)?)?$/i.test(modelID);
+  const effective = { minimal: "low", low: "low", medium: "high", high: "high", xhigh: "max", max: "max" };
+  return EFFORT_LEVELS.map((id) => ({ id, body: { reasoning_effort: glm53 ? effective[id] : id } }));
 }
 
 // The marketplace treats either catalog signal as image support. Do not infer
@@ -109,12 +19,11 @@ function effortVariantsFor(supportedParameters) {
 function imageCapabilities(model) {
   const inputs = model.architecture?.input_modalities ?? model.input_modalities ?? model.modalities?.input;
   const features = model.supported_features;
-  if (!Array.isArray(inputs) && !Array.isArray(features)) return {};
+  if (!Array.isArray(inputs) && !Array.isArray(features)) return { capabilities: { tools: true, input: ["text"], output: ["text"] } };
   const vision = (Array.isArray(inputs) && inputs.includes("image"))
     || (Array.isArray(features) && features.includes("vision"));
   return {
-    attachment: Boolean(vision),
-    modalities: { input: vision ? ["text", "image"] : ["text"], output: ["text"] },
+    capabilities: { tools: true, input: vision ? ["text", "image"] : ["text"], output: ["text"] },
   };
 }
 
@@ -135,18 +44,6 @@ function resolveContextCap(env) {
   return parsed;
 }
 
-function resolveProxyPort(env, warn) {
-  const raw = (env.SURPLUS_PROXY_PORT || "").trim();
-  if (!raw) return DEFAULT_PROXY_PORT;
-  if (/^0+(?:\.0+)?$/.test(raw)) return 0; // explicit zero disables the proxy
-  const parsed = positiveNumber(raw);
-  if (parsed === undefined) {
-    warn(`[threadsite] Ignoring unparseable SURPLUS_PROXY_PORT=${raw}; using ${DEFAULT_PROXY_PORT}.`);
-    return DEFAULT_PROXY_PORT;
-  }
-  return parsed;
-}
-
 const FALLBACK_MODELS = [
   "claude-opus-4.8",
   "claude-sonnet-4.6",
@@ -159,8 +56,8 @@ const FALLBACK_MODELS = [
 /**
  * Builds the OpenCode provider config for Surplus: catalog discovery (with the
  * context cap), reasoning-effort variants for models that support the parameter,
- * and the translating effort proxy in front of the real endpoint. Returns the
- * provider entry for the generated opencode.json plus the applied context cap.
+ * using native request bodies. Returns the provider entry for the generated
+ * opencode.json plus the applied context cap.
  */
 export async function buildSurplusProvider({ env = process.env, fetchImpl = globalThis.fetch, log = () => {}, warn = () => {} }) {
   const baseURL = (env.SURPLUS_BASE_URL || "https://api.surplusintelligence.ai/v1").replace(/\/$/, "");
@@ -176,7 +73,7 @@ export async function buildSurplusProvider({ env = process.env, fetchImpl = glob
     // Fallback entries carry no catalog metadata; give them the cap so the ceiling
     // still applies when discovery could not run. No variants either — without
     // catalog metadata we cannot know which models accept reasoning_effort.
-    discovered.set(id, contextCap ? { name: id, limit: { context: contextCap } } : { name: id });
+    discovered.set(id, { name: id, capabilities: { tools: true, input: ["text"], output: ["text"] }, ...(contextCap ? { limit: { context: contextCap } } : {}) });
   }
 
   // Discovery is public. Refresh capabilities even when the key is stored in
@@ -209,7 +106,7 @@ export async function buildSurplusProvider({ env = process.env, fetchImpl = glob
           if (context) entry.limit.context = context;
           if (output) entry.limit.output = output;
         }
-        const variants = effortVariantsFor(supported);
+        const variants = effortVariantsFor(model.id, supported);
         if (variants) entry.variants = variants;
         discovered.set(model.id, entry);
         accepted += 1;
@@ -220,33 +117,21 @@ export async function buildSurplusProvider({ env = process.env, fetchImpl = glob
     }
   }
 
-  // Route requests through the effort-translating proxy. If it fails to start,
-  // fall back to the direct endpoint — /effort is inert in that case, but turns
-  // still work at the model's default effort.
-  let providerBase = baseURL;
-  const proxyPort = resolveProxyPort(env, warn);
-  if (proxyPort > 0) {
-    try {
-      await startEffortProxy({ port: proxyPort, upstreamBase: baseURL, log: (message) => log(`[surplus-proxy] ${message}`) });
-      const prefix = new URL(baseURL).pathname.replace(/\/+$/, "");
-      providerBase = `http://127.0.0.1:${proxyPort}${prefix}`;
-      log(`[threadsite] Surplus effort proxy listening on 127.0.0.1:${proxyPort} -> ${baseURL}`);
-    } catch (error) {
-      warn(`[threadsite] Surplus effort proxy failed to start (${error}); connecting directly. /effort will request but not apply.`);
-    }
-  }
+  // Bundled catalog models carry their own endpoint settings, which take
+  // precedence over provider settings. Keep custom endpoints and auth aligned
+  // for both discovered and newly configured models.
+  const settings = {
+    baseURL,
+    timeout: 3_000_000,
+    ...(apiKey ? { apiKey: "{env:SURPLUS_API_KEY}" } : {}),
+  };
+  for (const model of discovered.values()) model.settings = { ...settings };
 
   return {
     provider: {
-      npm: "@ai-sdk/openai-compatible",
+      package: "@ai-sdk/openai-compatible",
       name: "Surplus Intelligence",
-      options: {
-        baseURL: providerBase,
-        // Mirrors OpenCode's bundled Surplus definition: agent turns legitimately
-        // run for many minutes, so the default client timeout is too short.
-        timeout: 3_000_000,
-        ...(apiKey ? { apiKey: "{env:SURPLUS_API_KEY}" } : {}),
-      },
+      settings,
       models: Object.fromEntries([...discovered.entries()].sort(([a], [b]) => a.localeCompare(b))),
     },
     contextCap,

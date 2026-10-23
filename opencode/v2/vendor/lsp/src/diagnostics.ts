@@ -18,7 +18,7 @@ interface Completed {
 
 /**
  * After write, edit, or patch, send each changed file to its servers and append
- * their errors to the result, as OpenCode 1 did. Read starts the file's servers
+ * their errors to the result. Read starts the file's servers
  * in the background so the first edit does not wait for a cold start. Deleted
  * and moved-away files are closed so servers stop analyzing their old contents.
  */
@@ -33,7 +33,7 @@ export function afterTool(manager: LspManager, root: string, diagnostics: boolea
   }
 }
 
-/** Files with a server that resolve inside the project. OpenCode 1 asked before touching others; plugins cannot ask. */
+/** Files with a server that resolve inside the project boundary. */
 async function checkable(manager: LspManager, root: string, files: string[]): Promise<string[]> {
   const inside = await Promise.all(files.map((file) => manager.serversFor(file).length > 0 && insideProject(root, file)))
   return files.filter((_, index) => inside[index])

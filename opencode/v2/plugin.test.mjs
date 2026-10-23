@@ -2,6 +2,51 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import plugin from "./plugin.mjs";
 
+test("first prompts wait for MCP discovery and refresh tools before selecting the registry", async () => {
+  const hooks = {};
+  const calls = [];
+  const registration = () => ({ dispose: async () => {} });
+  let pending = true;
+  const cleanup = await plugin.setup({ location: { directory: "/second" },
+    mcp: { list: async ({ location }) => {
+      assert.equal(location.directory, "/second");
+      calls.push("discovery");
+      const status = pending ? "pending" : "connected";
+      pending = false;
+      return { data: [{ name: "playwright", status: { status } }, { name: "context7", status: { status: "failed", error: "offline" } }] };
+    } },
+    tool: { transform: async () => registration(), hook: async () => registration(), reload: async () => { calls.push("tools"); } },
+    session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); },
+      get: async () => { calls.push("session"); return { agent: "sitebuilder" }; } },
+  });
+  try {
+    await hooks.prompt({ sessionID: "first" });
+    assert.deepEqual(calls, ["discovery", "discovery", "tools", "session"]);
+  } finally { await cleanup(); }
+});
+
+test("browser capability filtering queries the plugin workspace rather than the server's default location", async () => {
+  const hooks = {};
+  const registration = () => ({ dispose: async () => {} });
+  const cleanup = await plugin.setup({ location: { directory: "/second" },
+    tool: { transform: async () => registration(), hook: async () => registration() },
+    session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); } },
+    model: { list: async (input) => ({ data: [{ id: "vision", providerID: "test", enabled: true,
+      capabilities: { input: input?.location?.directory === "/second" ? ["text", "image"] : ["text"] } }] }) },
+  });
+  try {
+    const event = (agent, id = "vision") => ({ agent, model: { providerID: "test", id }, tools: { playwright_browser_navigate: {}, read: {} } });
+    const builder = event("sitebuilder");
+    await hooks.context(builder);
+    assert.ok(builder.tools.playwright_browser_navigate);
+    for (const item of [event("general"), event("explore"), event("sitebuilder", "missing")]) {
+      await hooks.context(item);
+      assert.equal(item.tools.playwright_browser_navigate, undefined);
+      assert.ok(item.tools.read);
+    }
+  } finally { await cleanup(); }
+});
+
 test("the native plugin hides unsafe builtins and browser access on each text-only or delegated request", async () => {
   const entries = new Map(["shell", "read", "lsp", "context7_resolve-library-id", "context7_query-docs", "context7_unexpected-write", "other_query-docs", "opencode_worktree_remove", "persistent_pty", "playwright_browser_take_screenshot"].map((id) => [id, { id, name: id }]));
   const hooks = {};
@@ -60,7 +105,8 @@ test("QA children replace inherited browser denials without changing the builder
   let session = { id: "child", parentID: "root", agent: "browser-qa", model: { providerID: "test", id: "vision" } };
   const registration = () => ({ dispose: async () => {} });
   const cleanup = await plugin.setup({ location: { directory: "/workspace/project" }, options: { browserQaModel: "test/vision" },
-    tool: { transform: async () => registration(), hook: async () => registration() },
+    mcp: { list: async () => ({ data: [] }) },
+    tool: { transform: async () => registration(), hook: async () => registration(), reload: async () => {} },
     session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); },
       get: async () => session, update: async (input) => { updates.push(input); } },
     model: { list: async () => ({ data: [{ providerID: "test", id: "vision", capabilities: { input: ["text", "image"] } }] }) },

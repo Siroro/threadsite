@@ -1,13 +1,8 @@
 FROM node:24-bookworm-slim
 
-ARG OPENCODE_VERSION=1.18.27
-ARG OPENCODE_API_VERSION=v2
-ARG OPENCODE_V2_VERSION=2.1.3
-ENV OPENCODE_API_VERSION=${OPENCODE_API_VERSION}
-RUN if [ "$OPENCODE_API_VERSION" = "v2" ]; then npm install -g "@opencode/cli@${OPENCODE_V2_VERSION}"; \
-    elif [ "$OPENCODE_API_VERSION" = "v1" ]; then npm install -g "opencode-ai@${OPENCODE_VERSION}"; \
-    else echo "OPENCODE_API_VERSION must be v1 or v2" >&2; exit 1; fi \
-    && mkdir -p /root/.config/opencode/tools /opencode-data /workspace /opt/threadsite
+ARG OPENCODE_VERSION=2.1.3
+RUN npm install -g "@opencode/cli@${OPENCODE_VERSION}" \
+    && mkdir -p /opencode-data /workspace /opt/threadsite
 
 # LSP servers and formatter used by the opencode.json lsp/formatter sections.
 # Installed globally with the TypeScript compiler used by the validation gate.
@@ -27,11 +22,8 @@ COPY surplus-adapter.mjs /opt/threadsite/surplus-adapter.mjs
 COPY package.json package-lock.json /opt/threadsite/
 COPY v2/ /opt/threadsite/v2/
 COPY tools/ /opt/threadsite/tools/
-RUN if [ "$OPENCODE_API_VERSION" = "v2" ]; then cd /opt/threadsite && npm ci && npm run build; fi
-COPY tools/asset_download.ts /root/.config/opencode/tools/asset_download.ts
-COPY tools/asset_import.ts /root/.config/opencode/tools/asset_import.ts
-COPY tools/js_syntax_check.ts /root/.config/opencode/tools/js_syntax_check.ts
-COPY tools/project_notes.ts /root/.config/opencode/tools/project_notes.ts
+COPY lib/ /opt/threadsite/lib/
+RUN cd /opt/threadsite && npm ci && npm run build
 
 WORKDIR /workspace
 EXPOSE 4096

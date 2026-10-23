@@ -299,7 +299,7 @@ export class DiscordProgress {
     // that read intent out of status sentences.
     if (!command && /waiting for (?:the )?project queue|queued/i.test(text)) this.phase = "queued";
     // A generic session-busy event must not bury a more useful running tool.
-    // The v1 busy status and the v2 status stream repeat their busy text on
+    // The status stream repeats its busy text on
     // every event, so without this guard the card would only ever say
     // "Model is thinking" while a tool runs.
     if (/(?:model|opencode) is (?:thinking|working)|status updated/i.test(text)

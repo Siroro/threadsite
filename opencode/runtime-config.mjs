@@ -5,8 +5,8 @@ export function applyRuntimeConfig(config, env = process.env) {
   if ((raw && !/^\d+$/.test(raw)) || !Number.isSafeInteger(maxSteps) || maxSteps <= 0) {
     throw new Error("OPENCODE_MAX_STEPS must be a positive integer (default: 200).");
   }
-  config.agent ||= {};
-  config.agent.sitebuilder ||= {};
-  config.agent.sitebuilder.maxSteps = maxSteps;
+  config.agents ||= {};
+  config.agents.sitebuilder ||= {};
+  config.agents.sitebuilder.steps = maxSteps;
   return config;
 }

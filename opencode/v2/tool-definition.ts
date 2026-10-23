@@ -1,4 +1,10 @@
-// Build-time bridge for the existing, independently guarded tool definitions.
-// Neither the v1 plugin API nor its runtime is loaded into OpenCode 2.
+/** Guarded tool definitions registered by the native runtime plugin. */
 import { z } from "zod";
-export const tool = Object.assign((definition: unknown) => definition, { schema: z });
+
+interface ToolDefinition<Args extends z.ZodRawShape> {
+  description: string;
+  args: Args;
+  execute(args: z.infer<z.ZodObject<Args>>, context: { directory: string }): Promise<string>;
+}
+
+export const tool = Object.assign(<Args extends z.ZodRawShape>(definition: ToolDefinition<Args>) => definition, { schema: z });

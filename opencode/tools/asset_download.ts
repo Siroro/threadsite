@@ -1,15 +1,13 @@
-import { tool } from "@opencode-ai/plugin";
+import { tool } from "../v2/tool-definition.js";
 import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
+import { queueSourceRecord } from "../lib/asset-sources.js";
 
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
-
-
-let sourceWriteQueue = Promise.resolve();
 
 export default tool({
   description: "Safely download any public HTTP(S) file into site/assets. Use websearch first, prefer trustworthy/reusable sources, and provide source/license notes when known. Private/local network targets are blocked; destination and size limits still apply.",
@@ -71,9 +69,8 @@ async function fetchPublicAsset(
     await assertPublicUrl(current, options.allowHttp);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error("asset download timeout")), options.timeoutMs);
-    let response: Response;
     try {
-      response = await fetch(current, {
+      const response = await fetch(current, {
         redirect: "manual",
         signal: controller.signal,
         headers: {
@@ -83,42 +80,43 @@ async function fetchPublicAsset(
           Accept: "*/*",
         },
       });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        if (!location) throw new Error(`Redirect ${response.status} had no Location header`);
+        current = new URL(location, current);
+        continue;
+      }
+      if (!response.ok) throw new Error(`Asset server returned HTTP ${response.status}`);
+
+      const contentLength = Number.parseInt(response.headers.get("content-length") || "0", 10);
+      if (Number.isFinite(contentLength) && contentLength > options.maxBytes) {
+        throw new Error(`Asset is ${contentLength} bytes, above ASSET_MAX_BYTES=${options.maxBytes}`);
+      }
+      if (!response.body) throw new Error("Asset response had no body");
+
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > options.maxBytes) {
+          await reader.cancel("asset too large").catch(() => undefined);
+          throw new Error(`Asset exceeded ASSET_MAX_BYTES=${options.maxBytes}`);
+        }
+        chunks.push(value);
+      }
+      return {
+        bytes: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))),
+        contentType: (response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase(),
+        finalUrl: current.toString(),
+      };
     } finally {
+      // fetch resolves at headers; the same deadline must cover a slow or
+      // stalled response body before the tool can release the turn.
       clearTimeout(timer);
     }
-
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      const location = response.headers.get("location");
-      if (!location) throw new Error(`Redirect ${response.status} had no Location header`);
-      current = new URL(location, current);
-      continue;
-    }
-    if (!response.ok) throw new Error(`Asset server returned HTTP ${response.status}`);
-
-    const contentLength = Number.parseInt(response.headers.get("content-length") || "0", 10);
-    if (Number.isFinite(contentLength) && contentLength > options.maxBytes) {
-      throw new Error(`Asset is ${contentLength} bytes, above ASSET_MAX_BYTES=${options.maxBytes}`);
-    }
-    if (!response.body) throw new Error("Asset response had no body");
-
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > options.maxBytes) {
-        await reader.cancel("asset too large").catch(() => undefined);
-        throw new Error(`Asset exceeded ASSET_MAX_BYTES=${options.maxBytes}`);
-      }
-      chunks.push(value);
-    }
-    return {
-      bytes: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))),
-      contentType: (response.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase(),
-      finalUrl: current.toString(),
-    };
   }
   throw new Error("Too many redirects while downloading asset");
 }
@@ -158,36 +156,6 @@ function isPrivateAddress(address: string): boolean {
       normalized.startsWith("ff") || normalized.startsWith("2001:db8:");
   }
   return true;
-}
-
-async function queueSourceRecord(root: string, record: Record<string, unknown>): Promise<void> {
-  const run = sourceWriteQueue.then(async () => {
-    const file = path.join(root, "ASSET_SOURCES.json");
-    let records: Array<Record<string, unknown>> = [];
-    try {
-      const parsed = JSON.parse(await fs.readFile(file, "utf8"));
-      if (Array.isArray(parsed)) records = parsed;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        if (!(error instanceof SyntaxError)) throw error;
-        // Corrupt (e.g. truncated by a crash mid-write before writes were
-        // rename-atomic): keep it aside for inspection and start a fresh
-        // list rather than failing every future download.
-        await fs.rename(file, `${file}.corrupt`).catch(() => undefined);
-      }
-    }
-    records = records.filter((item) => item.file !== record.file);
-    records.push(record);
-    // Rename-atomic: a crash mid-write must not leave truncated JSON behind.
-    const temp = `${file}.tmp`;
-    await fs.writeFile(temp, `${JSON.stringify(records, null, 2)}\n`, { mode: 0o644 });
-    await fs.rename(temp, file);
-  });
-  // One rejected write must not poison the tail: the tools share one
-  // long-lived server process across every project session, so later calls
-  // still run and only this caller sees its own error.
-  sourceWriteQueue = run.catch(() => {});
-  await run;
 }
 
 function positiveInt(raw: string | undefined, fallback: number): number {

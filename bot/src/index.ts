@@ -1547,7 +1547,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     await interaction.editReply(
       level === "auto"
         ? "Future turns will use the model's default reasoning effort."
-        : `Future turns will request \`${level}\` reasoning effort. Models without that variant just fall back to their default.`,
+        : `Future turns will request \`${level}\` reasoning effort. Availability depends on the model and provider.`,
     );
     for (const project of store.listProjects()) void refreshProjectCard(project.threadId);
     return;

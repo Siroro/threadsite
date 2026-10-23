@@ -71,16 +71,16 @@ Screenshots are returned as MCP images, so the selected model must accept image 
 
 ## Transport recovery
 
-The bot can lose its HTTP/streaming connection to the agent service while the agent turn continues running normally. Before each prompt the harness snapshots the persisted agent message IDs. If the synchronous SDK request fails with a transport-shaped error (`fetch failed`, `ECONNRESET`, `ENOTFOUND`, `ETIMEDOUT`, Undici socket errors), ThreadSite:
+The bot can lose its HTTP/streaming connection to the agent service while the agent turn continues running normally. Before each prompt the harness snapshots persisted message IDs and assigns a stable submission ID. If the submission response is lost, ThreadSite:
 
 1. does not immediately classify the event as a provider failure;
 2. reconnects the agent event stream when possible;
-3. polls the session's persisted message history and status;
-4. identifies a new terminal `sitebuilder` assistant message absent from the snapshot;
+3. reconciles that submission ID against the native inbox and persisted history, then polls execution status;
+4. waits for a persisted execution outcome rather than an intermediate assistant stop;
 5. resumes validation/git/publishing from that persisted result without re-sending the prompt;
 6. only emits a private incident if it can prove the turn failed or recovery failed.
 
-The prompt is never blindly retried after an ambiguous transport failure — that could create duplicate model turns. A persisted completed assistant message wins even if the status endpoint still reports `busy`.
+The prompt is never blindly retried after an ambiguous transport failure — that could create duplicate model turns. A persisted successful execution outcome establishes completion; background browser QA also has to be reviewed before delivery releases the turn.
 
 The recovery window defaults to 30 minutes (`OPENCODE_RECONCILE_TIMEOUT_MS`, poll interval `OPENCODE_RECONCILE_POLL_MS`). If the window expires while the agent service still reports the session busy, ThreadSite attempts an HTTP session abort; if that cannot be confirmed, it preserves the worktree rather than resetting files under a possibly running agent.
 

@@ -10,10 +10,11 @@ export default {
     const browserQaModel = ctx.options?.browserQaModel;
     const configuredQaModel = (model) => `${model.providerID}/${model.id}` === browserQaModel?.split("#")[0];
     const isBrowserTool = (name) => /^playwright[._]/.test(name);
+    const models = () => ctx.model.list({ location: { directory: ctx.location.directory } });
     const stopLsp = await setupLsp(ctx);
     if (stopLsp) registrations.push({ dispose: stopLsp });
     registrations.push(await ctx.tool.transform((tools) => {
-      // Direct tools retain the v1 model-facing contract. Browser tools use a
+      // Guarded tools use their declared schema. Browser tools use a
       // dedicated permission action so they can be absent for non-vision turns.
       const allowed = new Set(["read", "write", "edit", "apply_patch", "glob", "grep", "list", "shell", "skill", "subagent", "webfetch", "websearch", "question", "todowrite", "lsp"]);
       const docs = new Set(["context7_resolve-library-id", "context7_query-docs"]);
@@ -47,7 +48,7 @@ export default {
       // and shell commands must finish before the parent can publish their edits.
       if (event.tool === "shell" || (event.tool === "subagent" && event.input.agent !== "browser-qa")) event.input.background = false;
       if (event.tool === "subagent" && event.input.agent === "browser-qa") {
-        const catalog = await ctx.model.list();
+        const catalog = await models();
         const model = browserQaModel && catalog.data.find(configuredQaModel);
         if (!model?.capabilities.input.includes("image") || model.enabled === false) {
           throw new Error("Browser QA unavailable: OPENCODE_BROWSER_QA_MODEL must select an available model advertising image input. Continue static checks and report visual QA as unavailable.");
@@ -62,9 +63,21 @@ export default {
     // builder's browser denial. Replace those rules only on the QA child before
     // its first tool registry is selected; never broaden the parent session.
     registrations.push(await ctx.session.hook("prompt", async (event) => {
+      // MCP connects asynchronously at each location. Select the first registry
+      // only after discovery settles, including failed/disabled services.
+      const deadline = Date.now() + 10_000;
+      while (true) {
+        const catalog = await ctx.mcp.list({ location: { directory: ctx.location.directory } },
+          { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) }).catch(() => undefined);
+        if (!catalog) break;
+        const { data } = catalog;
+        if (!data.some((server) => server.status.status === "pending") || Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      await ctx.tool.reload();
       const session = await ctx.session.get({ sessionID: event.sessionID });
       if (session.agent !== "browser-qa" || !session.parentID) return;
-      const catalog = await ctx.model.list();
+      const catalog = await models();
       const model = catalog.data.find((model) => configuredQaModel(model) && model.providerID === session.model?.providerID && model.id === session.model?.id);
       const vision = model?.enabled !== false && model?.capabilities.input.includes("image");
       await ctx.session.update({ sessionID: event.sessionID, permissions: [
@@ -75,7 +88,7 @@ export default {
     // Last defence if a session's selected model changes outside the bot. This
     // also applies to subagents independently of the parent's image support.
     registrations.push(await ctx.session.hook("context", async (event) => {
-      const catalog = await ctx.model.list();
+      const catalog = await models();
       const model = catalog.data.find((model) => model.id === event.model.id && model.providerID === event.model.providerID);
       const vision = model?.enabled !== false && model?.capabilities.input.includes("image");
       for (const name of Object.keys(event.tools)) {

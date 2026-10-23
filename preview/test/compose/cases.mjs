@@ -70,7 +70,7 @@ export function planFor(testCase) {
     return { interaction: 'passed', stage: '${stage}', bundleHash };
   }`;
   return [
-    ["read", { filePath: `${root}/site/index.html` }],
+    ["read", { path: `${root}/site/index.html` }],
     ["write", { path: `${root}/site/index.html`, content: html }],
     ["write", { path: `${root}/site/src/main.ts`, content: source(testCase.kind, "first") }],
     ["playwright_browser_navigate", { url: `http://127.0.0.1:8080/100/${testCase.id}/` }],
@@ -84,7 +84,7 @@ export function planFor(testCase) {
     ["playwright_browser_take_screenshot", { scale: "css" }],
     ["playwright_browser_resize", { width: 390, height: 844 }],
     ["playwright_browser_take_screenshot", { scale: "css" }],
-    ["read", { filePath: `${root}/site/src/main.ts` }],
+    ["read", { path: `${root}/site/src/main.ts` }],
     ["write", { path: `${root}/site/src/main.ts`, content: source(testCase.kind, "updated") }],
     ["playwright_browser_navigate", { url: `http://127.0.0.1:8080/100/${testCase.id}/` }],
     ["playwright_browser_type", { target: "#name", text: "Ada" }],

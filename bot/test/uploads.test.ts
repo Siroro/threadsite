@@ -68,6 +68,22 @@ test("oversized and undownloadable attachments are skipped without failing the r
   }
 });
 
+test("concurrent same-name uploads retain every request's bytes", async () => {
+  const workspacePath = await workspace();
+  try {
+    const contents = Array.from({ length: 12 }, (_, index) => `attachment ${index}`);
+    const results = await Promise.all(contents.map((content) => saveUploadAttachments(workspacePath, [
+      attachment({ name: "shared.txt", url: `data:text/plain,${encodeURIComponent(content)}` }),
+    ])));
+    assert.ok(results.every((files) => files.length === 1));
+    assert.equal(new Set(results.map(([file]) => file.path)).size, contents.length);
+    const saved = await Promise.all(results.map(([file]) => fs.readFile(savedPath(workspacePath, file.name), "utf8")));
+    assert.deepEqual(saved, contents);
+  } finally {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
 test("a message saves at most MAX_TURN_UPLOADS attachments", async () => {
   const workspacePath = await workspace();
   try {

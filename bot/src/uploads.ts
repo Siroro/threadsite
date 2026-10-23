@@ -49,10 +49,7 @@ export async function saveUploadAttachments(workspacePath: string, attachments: 
       const response = await fetch(attachment.url);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const bytes = Buffer.from(await response.arrayBuffer());
-      const name = await uniqueUploadName(workspacePath, uploadFileName(attachment.name));
-      const target = safeChild(workspacePath, UPLOAD_DIR, name);
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.writeFile(target, bytes, { mode: 0o644 });
+      const name = await saveUniqueUpload(workspacePath, uploadFileName(attachment.name), bytes);
       saved.push({ name, path: `${UPLOAD_DIR}/${name}`, bytes: bytes.length, mime: attachment.contentType ?? undefined });
     } catch (error) {
       logError("discord.upload_save_failed", error, { url: attachment.url });
@@ -69,16 +66,20 @@ export function uploadPromptNote(files: readonly UploadedFile[]): string {
 }
 
 /** Keep every upload's original name while never overwriting an existing file. */
-async function uniqueUploadName(workspacePath: string, desired: string): Promise<string> {
+async function saveUniqueUpload(workspacePath: string, desired: string, bytes: Buffer): Promise<string> {
   const dir = safeChild(workspacePath, UPLOAD_DIR);
-  const taken = async (name: string): Promise<boolean> =>
-    fs.access(safeChild(dir, name)).then(() => true, () => false);
-  if (!await taken(desired)) return desired;
+  await fs.mkdir(dir, { recursive: true });
   const extension = path.extname(desired);
   const stem = desired.slice(0, desired.length - extension.length) || "file";
-  for (let attempt = 2; attempt < 100; attempt += 1) {
-    const candidate = `${stem}-${attempt}${extension}`;
-    if (!await taken(candidate)) return candidate;
+  for (let attempt = 1; ; attempt += 1) {
+    const name = attempt === 1 ? desired : `${stem}-${attempt}${extension}`;
+    try {
+      // Claim and write in one operation: overlapping Discord handlers can
+      // choose the same name before either has finished saving its request.
+      await fs.writeFile(safeChild(dir, name), bytes, { mode: 0o644, flag: "wx" });
+      return name;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
   }
-  return `${stem}-${Date.now().toString(36)}${extension}`;
 }

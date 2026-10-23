@@ -20,7 +20,7 @@ export function errorsOnly(diagnostics: Diagnostic[]): Diagnostic[] {
   return diagnostics.filter((diagnostic) => (diagnostic.severity ?? 1) === 1)
 }
 
-/** OpenCode 1's diagnostics block, errors only. Empty when there are none. */
+/** Diagnostics block, errors only. Empty when there are none. */
 export function diagnosticsReport(file: string, diagnostics: Diagnostic[]): string {
   const errors = errorsOnly(diagnostics)
   if (errors.length === 0) return ""

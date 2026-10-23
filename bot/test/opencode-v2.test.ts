@@ -7,7 +7,7 @@ process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { OpenCodeV2Harness } = await import("../src/opencode-v2.js");
 const { applicationMessage } = await import("../src/opencode-v2-messages.js");
-const { usageFromMessages, isTerminalAssistant } = await import("../src/opencode-v1.js");
+const { usageFromMessages, isTerminalAssistant } = await import("../src/opencode-shared.js");
 const { config } = await import("../src/config.js");
 
 function fixture() {
@@ -101,6 +101,64 @@ test("unknown and text-only models remove browser access on every turn", async (
     assert.equal(f.session.permissions.find((rule: any) => rule.action === "threadsite_browser").effect, "deny");
     assert.equal(f.session.permissions.find((rule: any) => rule.action === "playwright_*").effect, "deny");
   }
+});
+
+test("model capabilities and cache entries belong to the requested workspace", async () => {
+  const f = fixture();
+  const queried: Array<string | undefined> = [];
+  f.client.model.list = async (input: any) => {
+    queried.push(input.location?.directory);
+    return { data: [{ id: "vision", providerID: "test", enabled: true, status: "active",
+      capabilities: { input: input.location?.directory === "/vision" ? ["text", "image"] : ["text"] } }] };
+  };
+  assert.equal(await f.harness.modelAcceptsAttachments("test", "vision"), false);
+  assert.equal(await f.harness.modelAcceptsAttachments("test", "vision", "/vision"), true);
+  assert.equal(await f.harness.modelAcceptsAttachments("test", "vision", "/text"), false);
+  assert.equal(await f.harness.modelAcceptsAttachments("test", "missing", "/vision"), undefined);
+  assert.equal(await f.harness.modelAcceptsAttachments("test", "vision", "/vision"), true);
+  assert.deepEqual(queried, [undefined, "/vision", "/text"]);
+});
+
+test("model switches refresh browser permissions on the same persistent session", async () => {
+  const f = fixture();
+  const send = f.client.session.prompt;
+  let turn = 0;
+  f.client.session.prompt = async (input: any) => {
+    await send(input);
+    for (const message of f.history.slice(-2)) message.id += `_${++turn}`;
+  };
+  const offered: string[] = [];
+  for (const model of ["test/vision", "test/text", "test/missing", "test/vision"]) {
+    await f.harness.prompt("/w", "ses_root", "Build", model);
+    offered.push(f.session.permissions.find((rule: any) => rule.action === "threadsite_browser").effect);
+  }
+  assert.deepEqual(offered, ["allow", "deny", "deny", "allow"]);
+  assert.equal(await f.harness.modelAcceptsAttachments("test", "text"), false);
+});
+
+test("title generation uses a bounded tool-free session and cleans up success and failure", async () => {
+  const f = fixture();
+  f.client.session.create = async (input: any) => { f.calls.push({ name: "create", input }); return f.session; };
+  f.client.session.wait = async (_input: any, options: any) => { assert.ok(options.signal instanceof AbortSignal); };
+  let fail = true;
+  f.client.session.prompt = async (input: any, options: any) => {
+    assert.ok(options.signal instanceof AbortSignal);
+    assert.equal(f.session.agent, "titler");
+    assert.ok(f.session.permissions.some((rule: any) => rule.action === "*" && rule.effect === "deny"));
+    assert.equal(f.session.permissions.find((rule: any) => rule.action === "threadsite_browser").effect, "deny");
+    assert.deepEqual(f.session.model, { id: "text", providerID: "test" });
+    if (fail) throw new Error("model timeout");
+    f.history.push(assistant("title", 100, "Neon Drift"));
+    f.history.push({ type: "idle", id: "title_idle", outcome: "succeeded", time: { created: Date.now() } });
+  };
+  await assert.rejects(f.harness.generateTitle("/w", "Build a racing game", "test/text"), /model timeout/);
+  fail = false;
+  const result = await f.harness.generateTitle("/w", "Build a racing game", "test/text");
+  assert.equal(result.title, "Neon Drift");
+  assert.equal(result.usage.inputTokens, 120);
+  assert.equal(f.calls.filter((call) => call.name === "create").length, 2);
+  assert.equal(f.calls.filter((call) => call.name === "interrupt").length, 2);
+  assert.equal(f.calls.filter((call) => call.name === "remove").length, 2);
 });
 
 test("steering uses native non-resuming delivery and preserves the running variant", async () => {

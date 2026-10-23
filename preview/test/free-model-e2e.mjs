@@ -20,8 +20,8 @@ const tokenFile = path.join(root, "forgejo-token");
 await fs.writeFile(tokenFile, "", { mode: 0o600 });
 const env = {
   DISCORD_BOT_TOKEN: "isolated-test-only", DISCORD_APPLICATION_ID: "100",
-  OPENCODE_API_VERSION: "v2", OPENCODE_URL: "http://opencode:4096",
-  OPENCODE_SERVER_USERNAME: "opencode", OPENCODE_SERVER_PASSWORD: "isolated-test-only",
+  OPENCODE_URL: "http://opencode:4096",
+  OPENCODE_SERVER_PASSWORD: "isolated-test-only",
   OPENCODE_DEFAULT_MODEL: "opencode/mimo-v2.6-flash-free", OPENCODE_MAX_STEPS: "60",
   OPENCODE_FAILOVER_MODELS: "", OPENCODE_BLIP_NUDGES: "0",
   OPENCODE_RECONCILE_TIMEOUT_MS: "120000", OPENCODE_RECONCILE_POLL_MS: "500",
@@ -41,12 +41,9 @@ await fs.writeFile(override, `services:
   preview:
     volumes: !override ${JSON.stringify([mount(path.join(root, "workspaces"), "/workspace", true), mount(fixtures, "/app/fixtures", true), mount(path.join(root, "artifacts"), "/artifacts")])}
   opencode:
-    build:
-      args:
-        OPENCODE_API_VERSION: v2
     environment: !override ${JSON.stringify({ XDG_DATA_HOME: "/opencode-data",
       OPENCODE_SERVER_PASSWORD: "isolated-test-only", OPENCODE_MAX_STEPS: "60", OPENCODE_LOG_LEVEL: "INFO",
-      OPENCODE_ENABLE_EXA: "0", CONTEXT7_ENABLED: "1", SURPLUS_BASE_URL: "http://127.0.0.1:1/v1", SURPLUS_MODELS: "unused" })}
+      OPENCODE_WEBSEARCH_PROVIDER: "off", CONTEXT7_ENABLED: "1", SURPLUS_BASE_URL: "http://127.0.0.1:1/v1", SURPLUS_MODELS: "unused" })}
     volumes: !override ${JSON.stringify([mount(path.join(root, "workspaces"), "/workspace"), { type: "volume", source: "opencode-data", target: "/opencode-data" }])}
   bot:
     env_file: !reset []
