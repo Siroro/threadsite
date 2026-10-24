@@ -115,6 +115,31 @@ test("every phase keeps a valid V2 payload with long plans, paths, history and p
   }
 });
 
+test("changed files carry per-file line counts, and older snapshots fall back to bare paths", () => {
+  const state = buildingSnapshot();
+  state.files = { files: 4, added: 3, modified: 1, deleted: 0, additions: 120, deletions: 8,
+    entries: [
+      { path: "site/src/main.ts", additions: 64 },
+      { path: "site/src/sim.ts", additions: 30, deletions: 8 },
+      { path: "site/assets/fonts/space-grotesk-500.woff2", binary: true },
+      { path: "site/index.html", additions: 26, deletions: 0 },
+    ] };
+  const panel = progressDetailSections(state).find((section) => section.key === "files")!;
+  assert.match(panel.text, /\*\*4 files\*\* · 3 added · 1 modified · 0 removed · \*\*\+120 \/ −8\*\* lines/);
+  assert.match(panel.text, /- `site\/src\/main\.ts` · \+64$/m);
+  assert.match(panel.text, /- `site\/src\/sim\.ts` · \+30\/−8$/m);
+  assert.match(panel.text, /- `site\/assets\/fonts\/space-grotesk-500\.woff2` · binary$/m);
+  // The overview panel previews the same counts on its first three paths.
+  const overview = progressDetailSections(state).find((section) => section.key === "overview")!;
+  assert.match(overview.text, /`site\/src\/main\.ts` · \+64/);
+  assert.match(overview.text, /`site\/assets\/fonts\/space-grotesk-500\.woff2` · binary/);
+  assert.match(overview.text, /\+1 more/);
+  // A snapshot saved before per-file entries existed still lists paths without counts.
+  const legacy = progressDetailSections(buildingSnapshot()).find((section) => section.key === "files")!;
+  assert.match(legacy.text, /- `site\/src\/player\.ts`$/m);
+  assert.doesNotMatch(legacy.text, / · \+\d/);
+});
+
 test("the compact live card shows recent public narration; the private panel keeps all of it", () => {
   const state = buildingSnapshot();
   state.thought = undefined;

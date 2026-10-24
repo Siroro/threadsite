@@ -4,7 +4,7 @@ import { questionControls } from "./question-ui.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
 import { renderProgressCard, type ProgressSnapshot, type ProgressActivity, type ProgressContext, type ProgressFiles, type ProgressMetrics, type ProgressPhase, type ProgressPlanItem, type ProgressSubagent, type ProgressTool } from "./progress-view.js";
-export type { ProgressContext, ProgressFiles, ProgressMetrics, ProgressPhase, ProgressPlanItem, ProgressSubagent, ProgressTool } from "./progress-view.js";
+export type { ProgressContext, ProgressFileEntry, ProgressFiles, ProgressMetrics, ProgressPhase, ProgressPlanItem, ProgressSubagent, ProgressTool } from "./progress-view.js";
 
 /** One question the agent asked via OpenCode's question tool. */
 export interface AgentQuestion {
