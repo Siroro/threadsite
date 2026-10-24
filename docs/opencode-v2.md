@@ -1,6 +1,6 @@
 # OpenCode runtime
 
-ThreadSite runs OpenCode 2.1.3 with the pinned `@opencode/client` 2.1.3. The bot adapter is `bot/src/opencode-v2.ts`; the service policy is `opencode/opencode.json`.
+ThreadSite runs OpenCode 2.1.4 with the pinned `@opencode/client` 2.1.4. The bot adapter is `bot/src/opencode-v2.ts`; the service policy is `opencode/opencode.json`.
 
 The adapter implements session ownership, native inbox submission, persisted execution outcomes, live and saved usage, finish-up steering, provider failover, titles, compaction, conversation revert, stop/reset and project deletion. Persisted messages and live billing overlap and are reconciled rather than added.
 
@@ -98,7 +98,7 @@ npm run build
 The opt-in real-server check launches an isolated OpenCode executable, temporary workspaces/state and a local scripted model provider. It requires no paid provider or production credentials:
 
 ```bash
-# Install @opencode/cli@2.1.3 separately, then provide its executable path.
+# Install @opencode/cli@2.1.4 separately, then provide its executable path.
 OPENCODE_V2_BINARY=/absolute/path/to/opencode npm run test:opencode-v2
 ```
 

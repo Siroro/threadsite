@@ -14,7 +14,7 @@ import { OpenCode, type SessionMessageInfo } from "@opencode/client";
 process.env.DISCORD_BOT_TOKEN ||= "isolated-test";
 process.env.DISCORD_APPLICATION_ID ||= "isolated-test";
 const binary = process.env.OPENCODE_V2_BINARY;
-assert.ok(binary, "Set OPENCODE_V2_BINARY to the OpenCode 2.1.3 executable");
+assert.ok(binary, "Set OPENCODE_V2_BINARY to the OpenCode 2.1.4 executable");
 const { buildV2Config } = await import("../../opencode/v2/config.mjs");
 const { OpenCodeV2Harness } = await import("../src/opencode-v2.js");
 const { DiscordProgress } = await import("../src/progress.js");
