@@ -14,7 +14,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   await fs.mkdir(path.join(root, "scripts"), { recursive: true });
   for (const file of ["start.sh", "scripts/deploy.sh"]) {
-    await fs.writeFile(path.join(root, file), (await fs.readFile(new URL(`../../${file}`, import.meta.url), "utf8")).replaceAll("\r\n", "\n"));
+    await fs.writeFile(path.join(root, file), (await fs.readFile(new URL(`../../${file}`, import.meta.url), "utf8")).replaceAll("\r\n", "\n"), { mode: 0o755 });
   }
   await fs.writeFile(path.join(root, ".env"), "# isolated test\n");
   await fs.mkdir(path.join(root, "bin"));
