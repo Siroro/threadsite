@@ -43,9 +43,18 @@ export interface ProgressMetrics {
   liveTokensPerSecond?: number;
   outputTokensPerSecond?: number;
 }
+/** One changed file with its line counts; binary files carry no counts. */
+export interface ProgressFileEntry {
+  path: string;
+  additions?: number;
+  deletions?: number;
+  binary?: boolean;
+}
 export interface ProgressFiles {
   files: number; added: number; modified: number; deleted: number; additions: number; deletions: number;
   paths?: string[];
+  /** Per-file line counts; older saved snapshots carry only paths. */
+  entries?: ProgressFileEntry[];
 }
 export interface ProgressActivity { text: string; detail?: string; at: number; key?: string; command?: boolean }
 export interface ProgressSnapshot {
@@ -168,8 +177,8 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   if (state.files && !state.questions?.length) {
     const files = state.files;
     const counts = [files.added ? `${files.added} new` : "", files.modified ? `${files.modified} modified` : "", files.deleted ? `${files.deleted} removed` : ""].filter(Boolean);
-    const paths = (files.paths ?? []).slice(0, 3).map((file) => `\`${clean(file, 90).replaceAll("`", "") }\``);
-    const rest = (files.paths?.length ?? 0) - paths.length;
+    const paths = fileEntries(files).slice(0, 3).map((entry) => `\`${clean(entry.path, 90).replaceAll("`", "")}\`${fileEntrySuffix(entry)}`);
+    const rest = fileEntries(files).length - paths.length;
     fields.push({ name: "Changes this turn", value: [`**${files.files} file${files.files === 1 ? "" : "s"}** · **+${files.additions} / −${files.deletions}** lines`, counts.join(" · "), ...paths, rest > 0 ? `+${rest} more` : ""].filter(Boolean).join("\n") });
   } else if (state.changes && !state.questions?.length) {
     fields.push({ name: "Changes this turn", value: plain(state.changes, 500) });
@@ -384,6 +393,22 @@ export function hasUsageData(metrics: ProgressMetrics | undefined): boolean {
     || metrics.steps || metrics.compactions || metrics.liveTokensPerSecond || metrics.outputTokensPerSecond);
 }
 
+/**
+ * The changed-file list, preferring per-file entries. Snapshots saved before
+ * they existed carry only paths, so those still render without counts.
+ */
+function fileEntries(files: ProgressFiles): ProgressFileEntry[] {
+  if (files.entries?.length) return files.entries;
+  return (files.paths ?? []).map((path) => ({ path }));
+}
+
+/** `+A/−D` beside a file; binary files say why there is nothing to count. */
+function fileEntrySuffix(entry: ProgressFileEntry): string {
+  const counts = [entry.additions === undefined ? "" : `+${entry.additions}`, entry.deletions === undefined ? "" : `−${entry.deletions}`].filter(Boolean).join("/");
+  if (counts) return ` · ${counts}`;
+  return entry.binary ? " · binary" : "";
+}
+
 const detailSections = {
   plan(state: ProgressSnapshot): PanelSection | undefined {
     const items = state.plan.filter((item) => item.content.trim());
@@ -393,7 +418,7 @@ const detailSections = {
     const files = state.files;
     const text = [
       files ? `**${files.files} file${files.files === 1 ? "" : "s"}** · ${files.added} added · ${files.modified} modified · ${files.deleted} removed · **+${files.additions} / −${files.deletions}** lines` : "",
-      ...(files?.paths ?? []).map((file) => `- \`${file.replaceAll("`", "")}\``),
+      ...(files ? fileEntries(files) : []).map((entry) => `- \`${entry.path.replaceAll("`", "")}\`${fileEntrySuffix(entry)}`),
       state.changes ?? "",
     ].filter(Boolean).join("\n");
     return text.trim() ? { key: "files", label: "Changed files", text } : undefined;

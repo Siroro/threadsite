@@ -280,6 +280,18 @@ export interface WorkingTreeSnapshot {
   numstat: Map<string, { additions: number; deletions: number }>;
 }
 
+/** One changed file with its line counts, mirroring the turn's aggregates. */
+export interface WorkingTreeEntry {
+  /** Repository-relative path as Git prints it. */
+  path: string;
+  /** Lines added this turn; undefined where no line data exists (binary files). */
+  additions?: number;
+  /** Lines removed this turn; undefined alongside additions. */
+  deletions?: number;
+  /** Set when the content is binary, so the missing counts are explained. */
+  binary?: boolean;
+}
+
 export interface WorkingTreeStats {
   files: number;
   added: number;
@@ -288,6 +300,8 @@ export interface WorkingTreeStats {
   additions: number;
   deletions: number;
   paths?: string[];
+  /** Per-file line counts in the same sorted order as paths. */
+  entries?: WorkingTreeEntry[];
 }
 
 /**
@@ -318,6 +332,7 @@ export async function workingTreeStats(workspace: string, baseline?: WorkingTree
   const stats: WorkingTreeStats = { files: 0, added: 0, modified: 0, deleted: 0, additions: 0, deletions: 0 };
   const currentPaths = new Set<string>();
   const changedPaths = new Set<string>();
+  const entries = new Map<string, WorkingTreeEntry>();
   for (const line of status.split("\n")) {
     if (!line) continue;
     const code = line.slice(0, 2);
@@ -332,7 +347,12 @@ export async function workingTreeStats(workspace: string, baseline?: WorkingTree
         stats.added += 1;
         // Binary assets have no meaningful line count — counting 0x0A bytes in
         // them is how a few MB of media turns into tens of thousands of "lines".
-        if (!isBinary(content)) stats.additions += countLines(content.toString("utf8"));
+        if (isBinary(content)) entries.set(file, { path: file, binary: true });
+        else {
+          const lines = countLines(content.toString("utf8"));
+          entries.set(file, { path: file, additions: lines });
+          stats.additions += lines;
+        }
       }
       currentPaths.add(file);
       continue;
@@ -348,6 +368,7 @@ export async function workingTreeStats(workspace: string, baseline?: WorkingTree
     if (code.includes("A")) stats.added += 1;
     else if (code.includes("D")) stats.deleted += 1;
     else stats.modified += 1;
+    entries.set(file, { path: file });
   }
 
   const numstat = await git(workspace, ["diff", "HEAD", "--numstat"]);
@@ -359,8 +380,15 @@ export async function workingTreeStats(workspace: string, baseline?: WorkingTree
     if (added !== "-" && removed !== "-") {
       const current = { additions: Number.parseInt(added, 10) || 0, deletions: Number.parseInt(removed, 10) || 0 };
       const before = baseline?.numstat.get(file);
-      stats.additions += Math.max(0, current.additions - (before?.additions ?? 0));
-      stats.deletions += Math.max(0, current.deletions - (before?.deletions ?? 0));
+      const additions = Math.max(0, current.additions - (before?.additions ?? 0));
+      const deletions = Math.max(0, current.deletions - (before?.deletions ?? 0));
+      stats.additions += additions;
+      stats.deletions += deletions;
+      const entry = entries.get(file);
+      if (entry && !entry.binary) entries.set(file, { ...entry, additions, deletions });
+    } else {
+      const entry = entries.get(file);
+      if (entry && entry.additions === undefined && entry.deletions === undefined) entries.set(file, { ...entry, binary: true });
     }
   }
   for (const [file, before] of baseline?.files ?? []) {
@@ -373,8 +401,10 @@ export async function workingTreeStats(workspace: string, baseline?: WorkingTree
     stats.files += 1;
     stats.deleted += 1;
     stats.deletions += before.lines;
+    entries.set(file, before.lines > 0 ? { path: file, deletions: before.lines } : { path: file });
   }
   stats.paths = [...changedPaths].sort();
+  stats.entries = stats.paths.map((file) => entries.get(file) ?? { path: file });
   return stats;
 }
 
