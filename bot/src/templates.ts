@@ -84,6 +84,20 @@ export function renameNoteInstruction(note: { from: string; to: string }): strin
 }
 
 /**
+ * One-shot repair turn after an initial build shipped without naming the
+ * project. Its reply is a summary of the project and becomes the turn card's
+ * final text.
+ */
+export function namingFixInstruction(kind: ProjectKind): string {
+  const noun = kind === "site" ? "website" : "game";
+  return `The ${noun} was delivered without a project name: the \`# \` title heading of DESCRIPTION.md still carries its placeholder. Fix that now. `
+    + "Choose a distinctive, memorable name for what you built — not a restatement of the original request and not a generic label; "
+    + `if the ${noun} already presents a title on screen, use exactly that name. `
+    + "Write it as the `# ` title heading of DESCRIPTION.md and change nothing else: the harness adopts that heading as the project's public name, repository and thread title. "
+    + "Then reply with a short summary of the project for the person who requested it: its name, what it is, and what they can do — a few sentences in visitor words, no file lists.";
+}
+
+/**
  * The project documents the harness shows to the thread and the repository.
  * DESCRIPTION.md and CHANGELOG.md supply the cards; README.agent.md supplies
  * the long-form repository README. All are agent-maintained, so the prompt has

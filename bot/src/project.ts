@@ -12,7 +12,7 @@ import { buildSite, GENERATED_GITIGNORE } from "./build.js";
 import { enginePackages, ensureEnginePackages } from "./engines.js";
 import { ensureSkillFiles, skillNames } from "./skills.js";
 import { Store, pendingTurnMatches } from "./store.js";
-import { initialProjectInstruction, multiplayerModeLabel, multiplayerSwapInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, renameNoteInstruction, repairInstruction } from "./templates.js";
+import { initialProjectInstruction, multiplayerModeLabel, multiplayerSwapInstruction, mutationInstruction, namingFixInstruction, projectAgents, projectKindLabel, recoveryInstruction, renameNoteInstruction, repairInstruction } from "./templates.js";
 import { starterHtml, starterSource } from "./starter.js";
 import { ensureProjectDocuments, readProjectChangelog, readProjectDescription, readProjectReadmeSection, readProjectTitle, setProjectTitle, README_MAX_BYTES, type ProjectChangelog, type ProjectDescription } from "./project-docs.js";
 import type { CommitAuthor, MultiplayerContext, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
@@ -151,6 +151,16 @@ export class ProjectService {
     private readonly renameThread?: (project: ProjectRecord, title: string) => Promise<void>,
   ) {}
 
+  /**
+   * The adoptable agent-chosen name: DESCRIPTION.md's title heading, when it
+   * is a real choice rather than the seeded placeholder or an unusable string.
+   */
+  private async adoptableProjectName(project: ProjectRecord): Promise<string | undefined> {
+    const heading = await readProjectTitle(project.workspacePath);
+    return heading && heading.toLowerCase() !== project.displayName.toLowerCase()
+      ? projectName(heading) : undefined;
+  }
+
   /** Required queue barrier: the project identity and Discord acknowledgement must finish before another prompt. */
   async ensureProjectName(threadId: string, onProgress?: ProgressCallback): Promise<ProjectRecord> {
     let project = this.store.getProject(threadId);
@@ -172,9 +182,7 @@ export class ProjectService {
         // it builds. The placeholder-seeded heading is not a choice, and
         // anything the sanitizer rejects falls back to a readable name from
         // the original request — naming never blocks the first delivery.
-        const heading = await readProjectTitle(project.workspacePath);
-        name = heading && heading.toLowerCase() !== project.displayName.toLowerCase()
-          ? projectName(heading) : undefined;
+        name = await this.adoptableProjectName(project);
         name ||= fallbackProjectName(naming.request, project.projectKind);
         // Save the chosen name before any remote operation, so restarts never regenerate it.
         naming = { ...naming, name };
@@ -193,6 +201,32 @@ export class ProjectService {
     }
     if (project.pendingNaming) project = await this.store.patchProject(threadId, { pendingNaming: undefined });
     return project;
+  }
+
+  /**
+   * One harness-driven turn asking the agent to name its own project after
+   * the initial build left DESCRIPTION.md's heading at the seeded placeholder.
+   * It defers the pre-turn naming (this turn exists to fix exactly that) and
+   * hands its reply back as the turn card's final summary. The repair turn's
+   * own delivery then adopts the name or falls back — never a second repair.
+   */
+  private async namingFixTurn(project: ProjectRecord, input: {
+    author?: CommitAuthor;
+    onProgress?: ProgressCallback;
+    projectKind: ProjectKind;
+    pendingTurn?: ProjectRecord["pendingTurn"];
+  }): Promise<{ text: string; usage?: TurnUsage } | undefined> {
+    emit(input.onProgress, "🏷️ The project was delivered unnamed — asking the agent to name it");
+    try {
+      const result = await this.mutate(project.threadId, "Name the project", false, input.onProgress, input.author,
+        input.pendingTurn?.statusMessageId, undefined, [], undefined, undefined, namingFixInstruction(input.projectKind), true);
+      const text = result.agentSummary.trim();
+      return text && !result.validationError && !result.deliveryError
+        ? { text, usage: result.usage } : undefined;
+    } catch (error) {
+      log("warn", "project.naming_fix_failed", { threadId: project.threadId, error: serializeError(error) });
+      return undefined;
+    }
   }
 
   /** Backfill missed historical events; safe to retry after every startup. */
@@ -570,7 +604,7 @@ export class ProjectService {
     } finally { this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 1) - 1); }
   }
 
-  async mutate(threadId: string, prompt: string, initial = false, onProgress?: ProgressCallback, author?: CommitAuthor, statusMessageId?: string, images?: readonly PromptImage[], queuedStatusIds: readonly string[] = [], displayRequest?: string, requesterId?: string, instructionOverride?: string): Promise<MutationResult> {
+  async mutate(threadId: string, prompt: string, initial = false, onProgress?: ProgressCallback, author?: CommitAuthor, statusMessageId?: string, images?: readonly PromptImage[], queuedStatusIds: readonly string[] = [], displayRequest?: string, requesterId?: string, instructionOverride?: string, deferNaming = false): Promise<MutationResult> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site. Use /site start first.");
     if (project.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
@@ -580,7 +614,7 @@ export class ProjectService {
     if (!project.starterName && project.starterId && requesterId === project.starterId && author?.name) {
       project = await this.store.patchProject(threadId, { starterName: author.name });
     }
-    if (!initial) project = await this.ensureProjectName(threadId, onProgress);
+    if (!initial && !deferNaming) project = await this.ensureProjectName(threadId, onProgress);
     if (!prompt.trim() && !images?.length) throw new Error("Prompt is empty.");
     if (prompt.length > config.maxPromptChars) throw new Error(`Prompt exceeds MAX_PROMPT_CHARS (${config.maxPromptChars}).`);
 
@@ -1038,6 +1072,18 @@ export class ProjectService {
 
     if (ownsTurn && !validationError && !deliveryError && (project.pendingNaming || project.pendingThreadName)) {
       try {
+        // An initial build that never named its project gets exactly one
+        // harness-driven repair turn to do so before the fallback name is
+        // adopted; its reply becomes the card's final summary.
+        if (input.initial && project.pendingNaming && !project.pendingNaming.name
+          && !(await this.adoptableProjectName(project))) {
+          const fix = await this.namingFixTurn(project, input);
+          if (fix) {
+            agentSummary = fix.text;
+            usage = addUsage(usage, fix.usage);
+          }
+          project = this.store.getProject(threadId) ?? project;
+        }
         project = await this.ensureProjectName(threadId, input.onProgress);
         if (commitStats && project.lastCommit) commitStats = { ...commitStats, commit: project.lastCommit };
       } catch (error) {
