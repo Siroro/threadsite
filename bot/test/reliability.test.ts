@@ -635,6 +635,72 @@ test("a placeholder DESCRIPTION.md title falls back to a durable readable name f
   assert.equal(f.store.getProject(f.project.threadId)!.displayName, "Midnight Drift Racing Game", "a retry must retain the chosen name");
 });
 
+test("an unnamed first build gets one repair turn whose reply becomes the card summary and the project name", async () => {
+  const store = await openStore(path.join(root, "auto-naming-fix.db"));
+  const forgejo = new LocalForgejo();
+  let workspacePath = "";
+  const instructions: string[] = [];
+  const opencode = {
+    createSession: async (dir: string) => { workspacePath = dir; return "session"; },
+    isBusy: async () => false,
+    prompt: async (_directory: string, _sessionId: string, instruction: string) => {
+      instructions.push(instruction);
+      if (instructions.length === 1) {
+        // The initial build ships without ever touching DESCRIPTION.md.
+        await fs.writeFile(path.join(workspacePath, "site/src/main.ts"), 'console.log("unnamed build");');
+        return { text: "Built the deliverable", usage: {} };
+      }
+      assert.match(instruction, /title heading of DESCRIPTION\.md/);
+      await fs.writeFile(path.join(workspacePath, "DESCRIPTION.md"), "# Neon Loom\n\nWeave light through the rift.\n");
+      return { text: "Neon Loom: weave light through the rift in short solo rounds.", usage: {} };
+    },
+  } as unknown as OpenCodeHarness;
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-naming-fix-usage.jsonl")));
+  const result = await service.createProject({
+    threadId: "123456789012345681", guildId: "100", parentChannelId: "200", displayName: "game-unnamed-request",
+    initialPrompt: "Make a cool game", renameable: true,
+  }, undefined, async () => {});
+  assert.equal(instructions.length, 2, "exactly one naming repair turn");
+  assert.match(instructions[0], /REQUEST:\nMake a cool game$/);
+  assert.equal(result.agentSummary, "Neon Loom: weave light through the rift in short solo rounds.");
+  assert.equal(result.project.displayName, "Neon Loom");
+  assert.equal(result.project.siteSlug, "neon-loom");
+  assert.equal(result.project.repoName, "neon-loom");
+  assert.equal(result.project.renameNote, undefined);
+  const saved = store.getProject("123456789012345681")!;
+  assert.equal(saved.pendingNaming, undefined);
+  assert.equal(saved.status, "ready");
+});
+
+test("a repair turn that still does not name the project falls back once without looping", async () => {
+  const store = await openStore(path.join(root, "auto-naming-fix-stubborn.db"));
+  const forgejo = new LocalForgejo();
+  let workspacePath = "";
+  let prompts = 0;
+  const opencode = {
+    createSession: async (dir: string) => { workspacePath = dir; return "session"; },
+    isBusy: async () => false,
+    prompt: async () => {
+      prompts++;
+      await fs.writeFile(path.join(workspacePath, "site/src/main.ts"), `console.log("attempt ${prompts}");`);
+      // The heading never stops being the seeded placeholder.
+      return { text: `Attempt ${prompts} done`, usage: {} };
+    },
+  } as unknown as OpenCodeHarness;
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-naming-fix-stubborn-usage.jsonl")));
+  const result = await service.createProject({
+    threadId: "123456789012345682", guildId: "100", parentChannelId: "200", displayName: "game-make-me-a-game",
+    initialPrompt: "Make a cool game", renameable: true,
+  }, undefined, async () => {});
+  assert.equal(prompts, 2, "one initial turn plus one repair turn, never more");
+  assert.equal(result.project.displayName, "Cool Game");
+  assert.equal(result.project.repoName, "cool-game");
+  // The fallback rename retitles the description so identity and document agree.
+  assert.match(await fs.readFile(path.join(workspacePath, "DESCRIPTION.md"), "utf8"), /^# Cool Game$/m);
+  assert.equal(result.agentSummary, "Attempt 2 done", "the repair reply still becomes the card summary");
+  assert.equal(store.getProject("123456789012345682")!.pendingNaming, undefined);
+});
+
 test("a user rename retitles DESCRIPTION.md, is committed, and is announced to the next turn", async () => {
   const f = await projectFixture("rename-note");
   await fs.writeFile(path.join(f.dir, "DESCRIPTION.md"), "# Starfall\n\nHold the beacon.\n");
