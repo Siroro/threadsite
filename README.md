@@ -8,7 +8,7 @@ Build websites and browser games from Discord.
 
 Start a project with a slash command, then reply in its thread to make changes. The bot builds and publishes your site or game, with a live link and a source repository for every project.
 
-![A ThreadSite project thread in Discord, with a request and live build progress](docs/screenshots/discord-thread.png)
+![A Discord thread with a request, the live turn card and a follow-up instruction](docs/screenshots/discord-turn-progress.png)
 
 ## Install
 
@@ -54,13 +54,13 @@ To make changes, just reply:
 
 Attach images or files for reference, or reply while the bot is working to give it more instructions. The pinned card has the latest link, source code and project controls.
 
+![A completed turn with its update report, source links and Play game reply](docs/screenshots/discord-turn-complete.png)
+
 ### Working together
 
 Thread members can make changes by default. Use **Collaboration** on the pinned card to limit editing to chosen people or approve requests first.
 
 **Queue** shows waiting requests. Use `/site stop` to stop the current work or `/site revert` to undo the last accepted update. See the [command guide](docs/commands.md) for all controls.
-
-![A Discord game server with project threads and a pinned game card](docs/screenshots/discord-games.png)
 
 ## Multiplayer
 
