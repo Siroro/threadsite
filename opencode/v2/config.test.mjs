@@ -10,14 +10,12 @@ test("native v2 config preserves builder features and isolated subagent models w
   const original = structuredClone(base);
   const config = buildV2Config(applyRuntimeConfig(structuredClone(base), { OPENCODE_MAX_STEPS: "350" }));
   assert.equal(config.agents.sitebuilder.steps, 350);
-  assert.equal(config.agents.titler.steps, 1);
   assert.equal(config.experimental.todo, true);
   assert.equal(config.snapshots, false);
   for (const id of ["general", "explore"]) {
     assert.equal(config.agents[id].model, original.agents[id].model);
     assert.ok(config.agents[id].permissions.some((rule) => rule.action === "threadsite_browser" && rule.effect === "deny"));
   }
-  assert.ok(config.agents.titler.permissions.some((rule) => rule.action === "*" && rule.effect === "deny"));
   assert.ok(config.permissions.some((rule) => rule.action === "shell" && rule.resource === "git *" && rule.effect === "deny"));
   assert.ok(config.permissions.some((rule) => rule.action === "edit" && rule.resource === "README.agent.md" && rule.effect === "allow"));
   assert.equal(config.mcp.servers.playwright.timeout.execution, 90000);
@@ -36,7 +34,6 @@ test("v2 subagent model override applies to general and explore while preserving
       }
     }
     assert.deepEqual(config.agents.sitebuilder, defaults.agents.sitebuilder);
-    assert.deepEqual(config.agents.titler, defaults.agents.titler);
   }
   for (const value of [undefined, "", "  "]) {
     const config = buildV2Config(base, { env: { OPENCODE_SUBAGENT_MODEL: value } });

@@ -2,7 +2,7 @@
 
 Deleting a registered Discord thread automatically deletes the entire linked project. Deleting its parent channel also triggers cleanup for its registered threads. Archiving or locking a thread keeps the project.
 
-Cleanup removes the Forgejo repository (including either name of an interrupted rename), repository push accounts, workspace and scratch views, published site and redirects, atomic-publish leftovers, OpenCode sessions and their child/titler histories, project usage entries, multiplayer rooms and saved relay world, and SQLite registration. The gallery is refreshed. Cached browser previews stop serving bundles once the workspace disappears.
+Cleanup removes the Forgejo repository (including either name of an interrupted rename), repository push accounts, workspace and scratch views, published site and redirects, atomic-publish leftovers, OpenCode sessions and their child histories, project usage entries, multiplayer rooms and saved relay world, and SQLite registration. The gallery is refreshed. Cached browser previews stop serving bundles once the workspace disappears.
 
 The bot first saves `pendingDeletion` in SQLite, blocks new work and restart recovery, cancels queued jobs and stops agent sessions. It waits for a build or publish already in progress to finish before removing local files, so a late publish cannot recreate the site. Shared resources, unexpected workspace paths and symlinks are refused. If an operation fails, the registration remains only as a cleanup receipt with the failure reason, and the next sweep retries it. The bot records completed agent cleanup before removing files so retries do not need to reopen an already deleted workspace.
 

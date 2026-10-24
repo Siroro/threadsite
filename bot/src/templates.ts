@@ -73,12 +73,23 @@ export function notesSection(notes: string | undefined): string {
 }
 
 /**
+ * Tell the next turn about a user rename. The rename itself never starts an
+ * agent turn, so this is how the builder learns its project has a new name.
+ */
+export function renameNoteInstruction(note: { from: string; to: string }): string {
+  return `\n\nPROJECT RENAME (requested by the user): "${note.from}" is now called "${note.to}". `
+    + "The title heading of DESCRIPTION.md and the repository README already say the new name. "
+    + "Carry it through everything a player or visitor sees — the on-screen title, page titles, headings and HUD text — and remove stale uses of the old name. "
+    + "Keep file names, identifiers and the injected multiplayer/leaderboard game identity unchanged: they are stable across renames.";
+}
+
+/**
  * The project documents the harness shows to the thread and the repository.
  * DESCRIPTION.md and CHANGELOG.md supply the cards; README.agent.md supplies
  * the long-form repository README. All are agent-maintained, so the prompt has
  * to ask for them by name.
  */
-const documentsInstruction = "Three documents in the project root are shown to everyone who opens the project, so keep them true and tight. DESCRIPTION.md: a headline of one sentence, at most 25 words, in a visitor's words (no file names, no code, no jargon) — the card shows the headline alone — plus a 'How to play' section of up to four short paragraphs (about 120 words): the goal first, then the controls, then one or two tips; it opens from the card's How to play view. CHANGELOG.md: one new section per turn, newest at the top — a heading of at most six words, then one sentence of at most 30 words on what a visitor will notice. README.agent.md: the long-form repository README appended to README.md at the end of every turn — what the project is, how to play or use it, the controls, and useful development notes; use ## headings and keep it under 6,000 characters. Never edit README.md itself: the harness owns its title, ownership marker, live link, original request and attribution. Write each paragraph on a single line; never break a sentence across lines by hand. Write DESCRIPTION.md when the project first exists and whenever its shape changes, add the CHANGELOG.md section before your final summary, and keep README.agent.md current.";
+const documentsInstruction = "Three documents in the project root are shown to everyone who opens the project, so keep them true and tight. DESCRIPTION.md: a `# ` title heading carrying the project's name — choose a distinctive, memorable name for what you built by the end of the first turn and keep it unless the user asks for a new one; the harness adopts that heading as the project's public name, repository and thread title, so never leave the seeded placeholder or a generic label like 'My Game' there — then a headline of one sentence, at most 25 words, in a visitor's words (no file names, no code, no jargon) — the card shows the headline alone — plus a 'How to play' section of up to four short paragraphs (about 120 words): the goal first, then the controls, then one or two tips; it opens from the card's How to play view. CHANGELOG.md: one new section per turn, newest at the top — a heading of at most six words, then one sentence of at most 30 words on what a visitor will notice. README.agent.md: the long-form repository README appended to README.md at the end of every turn — what the project is, how to play or use it, the controls, and useful development notes; use ## headings and keep it under 6,000 characters. Never edit README.md itself: the harness owns its title, ownership marker, live link, original request and attribution. Write each paragraph on a single line; never break a sentence across lines by hand. Write DESCRIPTION.md when the project first exists and whenever its shape changes, add the CHANGELOG.md section before your final summary, and keep README.agent.md current.";
 
 const planningInstruction = "For any request that needs multiple steps or changes across multiple files, call the todowrite tool before the first edit: create 3–6 concrete, checkable steps. Keep exactly one step in_progress, and mark a step completed as soon as it is finished while promoting the next one — the user watches this list live, so a list left behind misreports your progress. Before your final summary, mark every finished step completed and every dropped step cancelled. A prose plan does not replace the todo list. Skip todowrite only for a truly single-step change.";
 
@@ -89,16 +100,19 @@ function multiplayerPhrase(mode: MultiplayerMode): string {
   return "multiplayer-first through the harness relay, solo fallback";
 }
 
+/** Naming is part of the deliverable: a project with its own name reads as intentional. */
+const namingInstruction = "Give what you build a name of its own: a distinctive, memorable title a visitor would recall — never a restatement of the request or a generic label. Set it as the `# ` title heading of DESCRIPTION.md by the end of this build (the harness adopts that heading as the project's public name, repository and thread title) and make it the on-screen identity: the title or landing screen and the page title should say it.";
+
 export function initialProjectInstruction(kind: ProjectKind, userPrompt: string, notes?: string, mode: MultiplayerMode = "arena"): string {
   const common = `Inspect the starter files. ${planningInstruction} Research the web when it will materially improve the result, and implement the deliverable rather than only describing it. Browser code is authored in TypeScript under site/src/; the harness compiles and bundles it after your reply. Prefer a clear multi-file structure over one giant index.html.`;
   const gameDesign = "Identify the core action, challenge and player decisions in your plan, then implement a complete, enjoyable round before optional polish. Match the requested genre; do not substitute a generic collect-N-pickups loop unless the user explicitly asks for a collection game.";
   if (kind === "game-2d") {
-    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below using the installed engine, ${multiplayerPhrase(mode)}. ${gameDesign} Use asset_download for suitable reusable media. ${documentsInstruction}${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below using the installed engine, ${multiplayerPhrase(mode)}. ${gameDesign} ${namingInstruction} Use asset_download for suitable reusable media. ${documentsInstruction}${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
   if (kind === "game-3d") {
-    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below using the installed engine, ${multiplayerPhrase(mode)}. ${gameDesign} Use asset_download for suitable media/models/textures/audio. ${documentsInstruction}${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below using the installed engine, ${multiplayerPhrase(mode)}. ${gameDesign} ${namingInstruction} Use asset_download for suitable reusable media/models/textures/audio. ${documentsInstruction}${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
-  return `${common}\n\nCreate the static website described below. Make it feel intentionally designed and interactive where appropriate. Use real researched/reusable media when it improves the result, otherwise tasteful local CSS/SVG/Canvas visuals. ${documentsInstruction}${notesSection(notes)}\n\nSITE REQUEST:\n${userPrompt}`;
+  return `${common}\n\nCreate the static website described below. Make it feel intentionally designed and interactive where appropriate. Use real researched/reusable media when it improves the result, otherwise tasteful local CSS/SVG/Canvas visuals. ${namingInstruction} ${documentsInstruction}${notesSection(notes)}\n\nSITE REQUEST:\n${userPrompt}`;
 }
 
 export function mutationInstruction(kind: ProjectKind, userPrompt: string, notes?: string, mode: MultiplayerMode = "arena"): string {

@@ -12,7 +12,7 @@ import type { OpenCodeHarness } from "./opencode.js";
 import type { ProgressCallback, ProgressUpdate, ProgressPlanItem, ProgressSubagent } from "./progress.js";
 import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
 import { steeringInstruction } from "./templates.js";
-import { cleanThreadTitle, errorText, parseModel, sleep } from "./util.js";
+import { errorText, parseModel, sleep } from "./util.js";
 
 const requestOptions = () => ({ signal: AbortSignal.timeout(10_000) });
 const emptyUsage = (): TurnUsage => ({ inputTokens: 0, outputTokens: 0, cacheTokens: 0,
@@ -224,12 +224,11 @@ export class OpenCodeV2Harness {
     const current = configuredModel ?? (defaultModel ? { id: defaultModel.id, providerID: defaultModel.providerID } : undefined);
     const selected = current ? { id: current.id, providerID: current.providerID,
       ...(variant && variant !== "auto" ? { variant } : {}) } : undefined;
-    const vision = agent !== "titler" && !!selected
+    const vision = !!selected
       && await this.modelAcceptsAttachments(selected.providerID, selected.id, directory) === true;
     // Replace only harness-owned tool rules; preserve any other session rules.
     const permissions: PermissionRuleset = (session.permissions ?? []).filter((rule) =>
       !["threadsite_browser", "playwright_*"].includes(rule.action));
-    if (agent === "titler") permissions.push({ action: "*", resource: "*", effect: "deny" });
     permissions.push({ action: "threadsite_browser", resource: "*", effect: vision ? "allow" : "deny" },
       { action: "playwright_*", resource: "*", effect: vision ? "allow" : "deny" });
     await this.client.session.update({ sessionID, permissions }, requestOptions());
@@ -561,29 +560,6 @@ export class OpenCodeV2Harness {
     const compaction = (await this.rawMessages(sessionID, 100)).filter((message) => message.type === "compaction").at(-1);
     if (compaction?.type === "compaction" && compaction.status === "failed") {
       throw new V2TurnError(`Session compaction failed: ${compaction.error.message}`, { cause: compaction.error });
-    }
-  }
-
-  async generateTitle(directory: string, requestText: string, model?: string): Promise<{ title?: string; usage: TurnUsage }> {
-    const sessionID = await this.createSession(directory, "ThreadSite title");
-    const timeout = AbortSignal.timeout(30_000);
-    let usage = emptyUsage();
-    try {
-      await this.configure(directory, sessionID, "titler", model);
-      await this.client.session.prompt({ sessionID, text: `Give this project a short readable title. Return only the title.\n${requestText}`, delivery: "queue" }, { signal: timeout });
-      await this.client.session.wait({ sessionID }, { signal: timeout });
-      const messages = await this.rawMessages(sessionID);
-      usage = usageFromMessages(messages.map((message) => applicationMessage(message, sessionID))) ?? usage;
-      if (messages.at(-1)?.type === "idle" && (messages.at(-1) as { outcome: string }).outcome !== "succeeded") throw new V2TurnError("Title generation failed");
-      return { title: cleanThreadTitle(this.summary(messages)) || undefined, usage };
-    } catch (cause) {
-      try { usage = usageFromMessages(await this.usageMessages(directory, sessionID)) ?? usage; } catch { /* keep observed usage */ }
-      throw Object.assign(new V2TurnError(errorText(cause), { cause }), { turnUsage: usage });
-    } finally {
-      // Stop first; failed cleanup must not orphan a title request burning tokens.
-      await this.abortTurn(directory, sessionID).catch((error) => log("warn", "opencode.v2_title_abort_failed", { error: serializeError(error) }));
-      await this.client.session.remove({ sessionID }, requestOptions()).catch((error) => log("warn", "opencode.v2_title_cleanup_failed", { error: serializeError(error) }));
-      this.stopped.delete(sessionID);
     }
   }
 

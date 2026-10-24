@@ -12,9 +12,9 @@ import { buildSite, GENERATED_GITIGNORE } from "./build.js";
 import { enginePackages, ensureEnginePackages } from "./engines.js";
 import { ensureSkillFiles, skillNames } from "./skills.js";
 import { Store, pendingTurnMatches } from "./store.js";
-import { initialProjectInstruction, multiplayerModeLabel, multiplayerSwapInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, repairInstruction } from "./templates.js";
+import { initialProjectInstruction, multiplayerModeLabel, multiplayerSwapInstruction, mutationInstruction, projectAgents, projectKindLabel, recoveryInstruction, renameNoteInstruction, repairInstruction } from "./templates.js";
 import { starterHtml, starterSource } from "./starter.js";
-import { ensureProjectDocuments, readProjectChangelog, readProjectDescription, readProjectReadmeSection, README_MAX_BYTES, type ProjectChangelog, type ProjectDescription } from "./project-docs.js";
+import { ensureProjectDocuments, readProjectChangelog, readProjectDescription, readProjectReadmeSection, readProjectTitle, setProjectTitle, README_MAX_BYTES, type ProjectChangelog, type ProjectDescription } from "./project-docs.js";
 import type { CommitAuthor, MultiplayerContext, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
 import { UsageLog } from "./usage.js";
 import type { ProgressCallback, ProgressPhase } from "./progress.js";
@@ -167,43 +167,21 @@ export class ProjectService {
       project = await this.store.patchProject(threadId, { pendingNaming: naming });
       let name = naming.name && projectName(naming.name);
       if (!name) {
-        emit(onProgress, "🏷️ Choosing a permanent project name");
-        const primary = this.store.getModel() || (typeof this.opencode.listSelectableModels === "function"
-          ? (await this.opencode.listSelectableModels().catch(() => []))[0] : undefined);
-        const models: Array<string | undefined> = [primary];
-        for (let attempt = 0; attempt < models.length && attempt < 3; attempt++) {
-          if (this.store.getProject(threadId)?.pendingDeletion) throw new TurnStoppedError("Project deleted while choosing its name.");
-          const model = models[attempt];
-          try {
-            const generated = await this.opencode.generateTitle(project.workspacePath, naming.request, model);
-            name = generated.title && projectName(generated.title);
-            await this.usageLog.record({ label: "title", threadId, project: project.displayName,
-              kind: project.projectKind ?? "site", usage: generated.usage, fallbackModel: model, failed: !name });
-            if (name) break;
-            throw new Error("The title model did not return a usable name.");
-          } catch (error) {
-            const usage = errorUsage(error);
-            if (usage) await this.usageLog.record({ label: "title", threadId, project: project.displayName,
-              kind: project.projectKind ?? "site", usage, fallbackModel: model, failed: true });
-            log("warn", "project.title_generation_failed", { threadId, model, error: serializeError(error) });
-            if (attempt === 0) {
-              const available = typeof this.opencode.listSelectableModels === "function"
-                ? await this.opencode.listSelectableModels().catch(() => []) : [];
-              const provider = parseModel(primary)?.providerID;
-              available.sort((a, b) => Number(parseModel(a)?.providerID === provider) - Number(parseModel(b)?.providerID === provider));
-              for (const alternative of [...config.opencodeFailoverModels, ...available]) {
-                if (alternative && !models.includes(alternative)) models.push(alternative);
-              }
-            }
-          }
-        }
+        emit(onProgress, "🏷️ Adopting the project's name from DESCRIPTION.md");
+        // The agent names the project as DESCRIPTION.md's title heading while
+        // it builds. The placeholder-seeded heading is not a choice, and
+        // anything the sanitizer rejects falls back to a readable name from
+        // the original request — naming never blocks the first delivery.
+        const heading = await readProjectTitle(project.workspacePath);
+        name = heading && heading.toLowerCase() !== project.displayName.toLowerCase()
+          ? projectName(heading) : undefined;
         name ||= fallbackProjectName(naming.request, project.projectKind);
         // Save the chosen name before any remote operation, so restarts never regenerate it.
         naming = { ...naming, name };
         project = await this.store.patchProject(threadId, { pendingNaming: naming });
       }
       if (project.displayName !== name || project.repoName !== project.siteSlug || /^(?:site|game)-/.test(project.siteSlug)) {
-        project = await this.renameProject(threadId, name, onProgress, true);
+        project = await this.renameProject(threadId, name!, onProgress, true, false);
       }
     }
     if (project.pendingNaming || project.pendingThreadName) await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
@@ -468,8 +446,13 @@ export class ProjectService {
     }
   }
 
-  /** Reserve names before remote changes so concurrent projects cannot choose the same URL. */
-  async renameProject(threadId: string, name: string, onProgress?: ProgressCallback, allowUnfinished = false): Promise<ProjectRecord> {
+  /**
+   * Reserve names before remote changes so concurrent projects cannot choose
+   * the same URL. `notifyAgent` marks a user-initiated rename so the next turn
+   * hears about it; the automatic first naming passes false (the agent chose
+   * the name itself).
+   */
+  async renameProject(threadId: string, name: string, onProgress?: ProgressCallback, allowUnfinished = false, notifyAgent = true): Promise<ProjectRecord> {
     this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 0) + 1);
     try {
     const displayName = projectName(name);
@@ -499,7 +482,9 @@ export class ProjectService {
         await this.store.patchProject(threadId, {
           multiplayerGameId: project.multiplayerGameId ?? project.siteSlug,
           ...(project.pendingNaming ? { pendingNaming: { ...project.pendingNaming, name: displayName } } : {}),
-          pendingRename: { displayName, siteSlug, repoName, fromSiteSlug: project.siteSlug, fromRepoName: project.repoName, repoId: source.id,
+          pendingRename: { displayName, siteSlug, repoName, fromSiteSlug: project.siteSlug, fromRepoName: project.repoName,
+            fromDisplayName: project.displayName, repoId: source.id,
+            ...(notifyAgent ? { notifyAgent: true } : {}),
             ...(!clean || project.status !== "ready" ? { preserveWorktree: true } : {}) },
         });
         return;
@@ -529,6 +514,14 @@ export class ProjectService {
     await this.ensureProjectWebhook(intent.repoName);
     const renamed = { ...project, displayName: intent.displayName, siteSlug: intent.siteSlug };
     await this.writeReadme(renamed);
+    // The description's title heading is the project's name; keep it pointed
+    // at the new one. A clean tree commits it with the rename below, while a
+    // preserved worktree carries it into the next turn's commit with the
+    // other pending edits.
+    await setProjectTitle(project.workspacePath, intent.displayName)
+      .catch((error) => log("warn", "project.description_title_sync_failed", { threadId, error: errorText(error) }));
+    const renameNote = intent.notifyAgent && intent.fromDisplayName !== undefined
+      ? { from: intent.fromDisplayName, to: intent.displayName } : undefined;
     // The gallery card image follows the project to its new slug.
     await moveGalleryPreview(intent.fromSiteSlug, intent.siteSlug)
       .catch((error) => log("warn", "project.gallery_preview_move_failed", { threadId, error: errorText(error) }));
@@ -545,6 +538,7 @@ export class ProjectService {
       project = await this.store.patchProject(threadId, {
         displayName: intent.displayName, siteSlug: intent.siteSlug, repoName: intent.repoName,
         siteAliases: aliases, lastSeenCommit: head, pendingRename: undefined, pendingThreadName: intent.displayName,
+        ...(renameNote ? { renameNote } : {}),
       });
       await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo));
       return project;
@@ -567,6 +561,7 @@ export class ProjectService {
       displayName: intent.displayName, siteSlug: intent.siteSlug, repoName: intent.repoName,
       siteAliases: aliases, lastCommit: head.slice(0, 10), lastSeenCommit: head, pendingRename: undefined,
       pendingThreadName: intent.displayName,
+      ...(renameNote ? { renameNote } : {}),
     });
     await publishIndex(this.store.listProjects(), (repo) => this.forgejo.repoWebUrl(repo))
       .catch((error) => log("warn", "project.index_refresh_failed", { threadId, error: errorText(error) }));
@@ -678,6 +673,9 @@ export class ProjectService {
         ? initialProjectInstruction(projectKind, prompt, notes, multiplayerMode)
         : mutationInstruction(projectKind, prompt, notes, multiplayerMode));
       if (project.browserQaFindings) instruction += browserQaFeedback(project.browserQaFindings);
+      // A rename the user made between turns: told once, at the start of the
+      // next submitted turn, then cleared with that turn's settlement.
+      if (project.renameNote) instruction += renameNoteInstruction(project.renameNote);
       if (turnImages?.length) {
         instruction += `\n\nThe user's message included ${turnImages.length} attached image${turnImages.length === 1 ? "" : "s"}, delivered with this prompt.`;
       }
@@ -995,6 +993,8 @@ export class ProjectService {
         ...(commitStats ? { lastSeenCommit: await currentHead(workspacePath) } : {}),
         ...(qaFindings ? { browserQaFindings: qaFindings } : {}),
         pendingTurn: undefined,
+        // The turn that carried the rename note has settled; it never repeats.
+        renameNote: undefined,
         // Record when the session was last used and how full its context window
         // ended; the next turn's lifecycle check reads both.
         lastTurnAt: new Date().toISOString(),
@@ -1120,7 +1120,8 @@ export class ProjectService {
         agentSummary = "This turn had already finished on the agent side before the restart; it was committed and published by recovery.";
       } else {
         const savedNotes = await readProjectNotes(project.workspacePath);
-        const notes = [savedNotes, project.browserQaFindings ? browserQaFeedback(project.browserQaFindings) : ""].filter(Boolean).join("\n\n") || undefined;
+        const notes = [savedNotes, project.browserQaFindings ? browserQaFeedback(project.browserQaFindings) : "",
+          project.renameNote ? renameNoteInstruction(project.renameNote) : ""].filter(Boolean).join("\n\n") || undefined;
         try {
           const result = await this.recoveryPrompt(project.workspacePath, project.sessionId, recoveryInstruction(pending.prompt, notes), onProgress, threadId, pending.images);
           agentSummary = result.text;
@@ -1604,7 +1605,7 @@ export class ProjectService {
    * for every project the store tracks, then stop EVERY other session on the
    * agent service — abort running turns, discard pending questions, and
    * delete each session. The sweep also covers sessions the store no longer
-   * knows about (orphans, subagent children, abandoned titler runs), so
+   * knows about (orphans and subagent children), so
    * nothing survives to keep working or be resumed. Fresh sessions are
    * created and committed to the store BEFORE the old ones are stopped, so
    * interrupted turns' "session vanished" recovery path sees the session id

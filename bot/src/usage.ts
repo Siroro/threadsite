@@ -8,10 +8,10 @@ import { formatCost, formatTokens, truncate } from "./util.js";
 /**
  * Append-only token/cost ledger behind `/site-admin usage`: one JSONL line per
  * agent turn — completed or failed, initial, mutation, repair, restart-recovery
- * — and per AI thread-title prompt. Turn IDs allow durable revisions without
- * counting recovery twice. A separate file from project state so
- * day-by-day history survives without growing the store, and so a corrupt line
- * costs one entry, not the whole bot state.
+ * — plus, in older deployments, per AI thread-title prompt. Turn IDs allow
+ * durable revisions without counting recovery twice. A separate file from
+ * project state so day-by-day history survives without growing the store, and
+ * so a corrupt line costs one entry, not the whole bot state.
  */
 export interface UsageEntry {
   v: 1;
@@ -22,7 +22,7 @@ export interface UsageEntry {
   pending?: boolean;
   /** ISO completion timestamp. */
   ts: string;
-  /** "turn" is a real agent turn; "title" is a bounded side prompt. */
+  /** "turn" is a real agent turn; "title" is a retired side prompt kept for historical ledger lines. */
   label: "turn" | "title";
   threadId: string;
   project: string;

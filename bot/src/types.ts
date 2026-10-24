@@ -103,6 +103,8 @@ export interface ProjectRecord {
   multiplayerMode?: MultiplayerMode;
   siteAliases?: string[];
   pendingThreadName?: string;
+  /** A user rename the agent has not been told about yet; prepended to the next turn's instructions. */
+  renameNote?: { from: string; to: string };
   /** Naming survives initial-build failures, bot restarts and Discord/Forgejo outages. */
   pendingNaming?: { request: string; name?: string };
   /** Durable rename intent, resumed before further work if delivery is interrupted. */
@@ -112,9 +114,13 @@ export interface ProjectRecord {
     repoName: string;
     fromSiteSlug: string;
     fromRepoName: string;
+    /** Display name before this rename; the next-turn note quotes it. */
+    fromDisplayName?: string;
     repoId: number;
     /** Rename metadata/public URLs while retaining failed-turn source edits. */
     preserveWorktree?: boolean;
+    /** User-initiated rename: the next agent turn is told about it. */
+    notifyAgent?: boolean;
   };
   /**
    * Full hash of the commit the bot last saw on the repo's main branch, set on

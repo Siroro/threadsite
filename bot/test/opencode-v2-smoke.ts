@@ -294,8 +294,6 @@ try {
     assert.match(messages, /const count: number/);
   }
   assert.equal(await harness.steer(workspace, sessionID, "Too late"), false);
-  const title = await harness.generateTitle(workspace, "Name this fixture", "threadsite-test/text");
-  assert.equal(title.title, "Smoke Project");
   const delegatedAgents: string[] = [];
   for (const agent of ["general", "explore"]) {
     const delegated = await harness.prompt(workspace, sessionID, `Delegate smoke ${agent}`, "threadsite-test/text");
