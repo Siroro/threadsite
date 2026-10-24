@@ -502,17 +502,17 @@ test("mutate claims queued work durably before the agent starts", async () => {
   assert.equal(f.store.getProject(f.project.threadId)!.pendingQueue![0].prompt, "next pass");
 });
 
-test("the first successful build adopts the AI name in the returned site and repository links", async () => {
+test("the first successful build adopts the agent-chosen DESCRIPTION.md title as the project name", async () => {
   const store = await openStore(path.join(root, "auto-title.db"));
   const forgejo = new LocalForgejo();
   let workspacePath = "";
   const initialPrompt = ("Make a garden. " + "Include koi and lily pads. ".repeat(120)).trim();
   const opencode = {
     createSession: async (dir: string) => { workspacePath = dir; return "session"; },
-    generateTitle: async () => ({ title: "Fresh Garden", usage: {} }),
     isBusy: async () => false,
     prompt: async () => {
       assert.ok((await fs.lstat(path.join(workspacePath, "README.agent.md"))).isFile(), "new projects are seeded before the first prompt");
+      await fs.writeFile(path.join(workspacePath, "DESCRIPTION.md"), "# Koi Pond\n\nTend a living garden pond.\n");
       await fs.writeFile(path.join(workspacePath, "README.agent.md"), "## About\n\nExplore the garden.\n");
       await fs.writeFile(path.join(workspacePath, "site/src/main.ts"), 'console.log("fresh garden");');
       return { text: "A fresh garden", usage: {} };
@@ -525,13 +525,14 @@ test("the first successful build adopts the AI name in the returned site and rep
     initialPrompt, renameable: true, infoMessageId: "card-message",
     initiator: { name: "Ada Lovelace", email: "ada@users.noreply.example" },
   }, undefined, async (title) => { titles.push(title); });
-  assert.deepEqual(titles, ["Fresh Garden"]);
-  assert.equal(result.project.displayName, "Fresh Garden");
-  assert.equal(result.project.siteSlug, "fresh-garden");
-  assert.equal(result.project.repoName, "fresh-garden");
+  assert.deepEqual(titles, ["Koi Pond"]);
+  assert.equal(result.project.displayName, "Koi Pond");
+  assert.equal(result.project.siteSlug, "koi-pond");
+  assert.equal(result.project.repoName, "koi-pond");
+  assert.equal(result.project.renameNote, undefined, "automatic naming is not announced to the agent");
   assert.equal(result.commit, (await currentHead(workspacePath)).slice(0, 10));
-  assert.match(service.siteLink(result.project), /\/fresh-garden\/$/);
-  assert.match(service.repoLink(result.project), /\/fresh-garden$/);
+  assert.match(service.siteLink(result.project), /\/koi-pond\/$/);
+  assert.match(service.repoLink(result.project), /\/koi-pond$/);
   // The pinned project card stays linked to the original request.
   const saved = store.getProject("123456789012345678")!;
   assert.equal(saved.infoMessageId, "card-message");
@@ -544,7 +545,7 @@ test("the first successful build adopts the AI name in the returned site and rep
   assert.match(await git(workspacePath, "show", "HEAD:README.agent.md"), /Explore the garden/);
 });
 
-test("a resumed initial build falls back to a different title model and updates all identities", async () => {
+test("a resumed initial build adopts the DESCRIPTION.md title and updates all identities", async () => {
   const f = await projectFixture("resumed-title");
   await f.store.setModel("test/primary");
   const startedAt = new Date(Date.now() - 5_000).toISOString();
@@ -554,16 +555,10 @@ test("a resumed initial build falls back to a different title model and updates 
     pendingTurn: { id: "resumed-initial", prompt: "Build a neon drifting game", initial: true, startedAt },
   });
   await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("finished while bot was down");');
-  const attempts: Array<string | undefined> = [];
+  await fs.writeFile(path.join(f.dir, "DESCRIPTION.md"), "# Neon Drift\n\nDrift a neon car through the night.\n");
   Object.assign(f.opencode, {
     health: async () => "ok (200)", watchExistingTurn: async () => async () => {}, listPendingQuestions: async () => [],
     listMessages: async () => [{ info: { id: "finished", role: "assistant", finish: "stop", time: { created: Date.now(), completed: Date.now() } } }],
-    listSelectableModels: async () => ["test/primary", "test/backup"],
-    generateTitle: async (_directory: string, _request: string, model?: string) => {
-      attempts.push(model);
-      if (model === "test/primary") throw new Error("primary model unavailable");
-      return { title: "Neon Drift", usage: {} };
-    },
   });
   const reopened = await openStore(path.join(root, "state-resumed-title.db"));
   const titles: string[] = [];
@@ -574,10 +569,10 @@ test("a resumed initial build falls back to a different title model and updates 
   });
   const result = await restarted.recoverTurn(f.project.threadId);
   assert.equal(result.deliveryError, undefined);
-  assert.deepEqual(attempts, ["test/primary", "test/backup"]);
   assert.deepEqual(titles, ["Neon Drift"]);
   assert.equal(result.project.displayName, "Neon Drift");
   assert.equal(result.project.repoName, "neon-drift");
+  assert.equal(result.project.renameNote, undefined, "automatic naming is not announced to the agent");
   assert.equal(result.project.pendingNaming, undefined);
   assert.equal(result.project.pendingThreadName, undefined);
   assert.match(await git(f.dir, "remote", "get-url", "origin"), /neon-drift\.git$/);
@@ -622,23 +617,46 @@ test("a failed Discord rename blocks the next prompt and retries after restart w
 });
 
 
-test("all title models failing still produces a durable readable name", async () => {
+test("a placeholder DESCRIPTION.md title falls back to a durable readable name from the request", async () => {
   const f = await projectFixture("fallback-title");
-  await f.store.setModel("test/primary");
   await f.store.patchProject(f.project.threadId, { displayName: "game-placeholder",
     initialPrompt: "Build a midnight drift racing game", pendingNaming: { request: "Build a midnight drift racing game" } });
   assert.equal(f.store.listRecoveryProjects()[0].threadId, f.project.threadId, "pending naming must survive recovery");
-  const models: Array<string | undefined> = [];
-  Object.assign(f.opencode, {
-    listSelectableModels: async () => ["test/primary", "test/backup"],
-    generateTitle: async (_dir: string, _request: string, model?: string) => { models.push(model); throw new Error("model unavailable"); },
-  });
+  // The agent never replaced the seeded heading, so it is not a name choice.
+  await fs.writeFile(path.join(f.dir, "DESCRIPTION.md"), "# game-placeholder\n\nAn unfinished thing.\n");
+  await commitAndPush(f.dir, "Interrupted naming docs", f.forgejo);
   const named = await f.service.ensureProjectName(f.project.threadId);
-  assert.deepEqual(models, ["test/primary", "test/backup"]);
   assert.equal(named.displayName, "Midnight Drift Racing Game");
   assert.equal(named.repoName, "midnight-drift-racing-game");
+  assert.equal(named.renameNote, undefined);
+  // The fallback rename retitles the description so the document matches the identity.
+  assert.match(await fs.readFile(path.join(f.dir, "DESCRIPTION.md"), "utf8"), /^# Midnight Drift Racing Game$/m);
   await f.service.ensureProjectName(f.project.threadId);
-  assert.equal(models.length, 2, "a retry must retain the chosen name");
+  assert.equal(f.store.getProject(f.project.threadId)!.displayName, "Midnight Drift Racing Game", "a retry must retain the chosen name");
+});
+
+test("a user rename retitles DESCRIPTION.md, is committed, and is announced to the next turn", async () => {
+  const f = await projectFixture("rename-note");
+  await fs.writeFile(path.join(f.dir, "DESCRIPTION.md"), "# Starfall\n\nHold the beacon.\n");
+  await commitAndPush(f.dir, "Describe the game", f.forgejo);
+  const renamed = await f.service.renameProject(f.project.threadId, "Starfall Keeper");
+  assert.equal(renamed.displayName, "Starfall Keeper");
+  assert.deepEqual(renamed.renameNote, { from: "Old Name", to: "Starfall Keeper" });
+  assert.equal(await fs.readFile(path.join(f.dir, "DESCRIPTION.md"), "utf8"), "# Starfall Keeper\n\nHold the beacon.\n");
+  assert.match(await git(f.dir, "show", "HEAD:DESCRIPTION.md"), /^# Starfall Keeper$/m);
+  const instructions: string[] = [];
+  f.opencode.prompt = async (_directory: string, _sessionId: string, instruction: string) => {
+    instructions.push(instruction);
+    await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("rebranded");');
+    return { text: "Rebranded", usage: {} } as PromptResult;
+  };
+  const result = await f.service.mutate(f.project.threadId, "update the title screen");
+  assert.equal(result.deliveryError, undefined);
+  assert.equal(instructions.length, 1);
+  assert.match(instructions[0], /PROJECT RENAME/);
+  assert.match(instructions[0], /"Old Name"/);
+  assert.match(instructions[0], /"Starfall Keeper"/);
+  assert.equal(f.store.getProject(f.project.threadId)!.renameNote, undefined, "the note is told once");
 });
 
 test("webhook outages do not block project creation or leave renames pending", async () => {

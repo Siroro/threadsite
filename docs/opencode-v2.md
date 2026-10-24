@@ -33,7 +33,7 @@ message ID. Stop interrupts the child and drains its notification before the fin
 parent interrupt, preventing a late result from restarting the stopped turn.
 
 Set `OPENCODE_SUBAGENT_MODEL=provider/model-id` in `.env` to select the model for
-both `general` and `explore` subagents independently of the builder and titler.
+both `general` and `explore` subagents independently of the builder.
 An unset or blank value keeps their configured default (`opencode/mimo-v2.6-flash-free`).
 The selected provider must be available and have any required credentials.
 Malformed model references fail service startup.

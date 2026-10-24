@@ -43,6 +43,7 @@ export interface ProjectChangelog {
 /** The first `DESCRIPTION.md` a new project starts with. */
 export function descriptionTemplate(name: string): string {
   return `# ${name}\n\n`
+    + "<!-- The heading above is the project's public name: replace it with the distinctive name you chose for what you built. -->\n"
     + "<!-- One sentence, at most 25 words, in words a visitor understands: what this is and what they can do. No file names, no code, no internals — and keep it on one line. Replace this line. -->\n\n"
     + "## How to play\n\n"
     + "<!-- Up to four short paragraphs, about 120 words total: the goal first, then the controls, then a tip or two. Visitor words only. Replace this. -->\n";
@@ -86,6 +87,37 @@ export async function ensureProjectDocuments(workspacePath: string, name: string
   await ensure(path.join(workspacePath, CHANGELOG_FILE), changelogTemplate());
   await ensure(path.join(workspacePath, README_AGENT_FILE), readmeAgentTemplate());
   return created;
+}
+
+/**
+ * The project's chosen name: the first `# ` heading of DESCRIPTION.md. The
+ * agent picks it while building; the harness adopts it as the project's
+ * public identity once the first turn is delivered.
+ */
+export async function readProjectTitle(workspacePath: string): Promise<string | undefined> {
+  const raw = await fs.readFile(path.join(workspacePath, DESCRIPTION_FILE), "utf8").catch(() => undefined);
+  if (!raw) return undefined;
+  return /^#\s+(.+)$/m.exec(raw)?.[1]?.trim() || undefined;
+}
+
+/**
+ * Point DESCRIPTION.md's title heading at the project's current name after a
+ * rename, leaving the agent-owned body untouched. Returns whether the file
+ * changed. A missing or symlinked document is skipped: the next turn re-seeds
+ * it with the current name anyway, and a harness write must never leave the
+ * workspace.
+ */
+export async function setProjectTitle(workspacePath: string, name: string): Promise<boolean> {
+  const file = path.join(workspacePath, DESCRIPTION_FILE);
+  const stat = await fs.lstat(file).catch(() => undefined);
+  if (!stat?.isFile() || stat.isSymbolicLink()) return false;
+  const raw = await fs.readFile(file, "utf8");
+  const reheading = raw.replace(/^#\s+.*$/m, `# ${name}`);
+  const next = reheading === raw && !/^#\s/m.test(raw)
+    ? `# ${name}\n\n${raw.replace(/^[^\S\n]+/, "")}` : reheading;
+  if (next === raw) return false;
+  await fs.writeFile(file, next, "utf8");
+  return true;
 }
 
 /** Read the project's own description: the pitch above the "How to play" heading, and the play section below it. */

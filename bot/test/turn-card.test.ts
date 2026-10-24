@@ -10,7 +10,7 @@ import type { TurnCardState } from "../src/turn-card.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { renderTechnicalCard, renderPlayCard } = await import("../src/turn-card.js");
-const { changelogTemplate, descriptionTemplate, readmeAgentTemplate, readProjectChangelog, readProjectDescription, readProjectReadmeSection, README_SECTION_MAX_BYTES } = await import("../src/project-docs.js");
+const { changelogTemplate, descriptionTemplate, readmeAgentTemplate, readProjectChangelog, readProjectDescription, readProjectReadmeSection, readProjectTitle, setProjectTitle, README_SECTION_MAX_BYTES } = await import("../src/project-docs.js");
 
 /** The text-display content of the playable card, joined in render order. */
 function playCardText(message: ReturnType<typeof renderPlayCard>): string {
@@ -156,8 +156,32 @@ test("the project's own documents are read back as the card's blurb and its newe
   });
 });
 
-test("the agent README is empty until written and is bounded before it reaches README.md", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-agent-readme-"));
+test("the description title heading is readable and a rename rewrites only that heading", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-docs-title-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  assert.equal(await readProjectTitle(root), undefined, "a missing document has no title");
+  await fs.writeFile(path.join(root, "DESCRIPTION.md"), descriptionTemplate("game-placeholder"), "utf8");
+  assert.equal(await readProjectTitle(root), "game-placeholder");
+  const body = "Pitch.\n\n## How to play\n\nPlay.\n";
+  await fs.writeFile(path.join(root, "DESCRIPTION.md"), `# Starfall\n\n${body}`, "utf8");
+  assert.equal(await setProjectTitle(root, "Starfall Keeper"), true);
+  assert.equal(await fs.readFile(path.join(root, "DESCRIPTION.md"), "utf8"), `# Starfall Keeper\n\n${body}`);
+  assert.equal(await setProjectTitle(root, "Starfall Keeper"), false, "an unchanged heading writes nothing");
+  await fs.writeFile(path.join(root, "DESCRIPTION.md"), body, "utf8");
+  assert.equal(await readProjectTitle(root), undefined, "no heading means no title");
+  assert.equal(await setProjectTitle(root, "Koi Pond"), true, "a heading-less document gains one");
+  assert.equal(await fs.readFile(path.join(root, "DESCRIPTION.md"), "utf8"), `# Koi Pond\n\n${body}`);
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-docs-outside-"));
+  t.after(() => fs.rm(outside, { recursive: true, force: true }));
+  await fs.writeFile(path.join(outside, "DESCRIPTION.md"), "# Escaped\n\nOutside.\n");
+  await fs.rm(path.join(root, "DESCRIPTION.md"));
+  try { await fs.symlink(path.join(outside, "DESCRIPTION.md"), path.join(root, "DESCRIPTION.md")); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error; t.diagnostic("Windows disallowed the test symlink; the heading checks above still ran."); return; }
+  assert.equal(await setProjectTitle(root, "Hijacked"), false, "a symlinked document is never rewritten");
+  assert.match(await fs.readFile(path.join(outside, "DESCRIPTION.md"), "utf8"), /^# Escaped$/m);
+});
+
+test("the agent README is empty until written and is bounded before it reaches README.md", async (t) => {  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-agent-readme-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.writeFile(path.join(root, "README.agent.md"), readmeAgentTemplate(), "utf8");
   assert.equal(await readProjectReadmeSection(root), undefined, "an untouched template says nothing");

@@ -136,31 +136,6 @@ test("model switches refresh browser permissions on the same persistent session"
   assert.equal(await f.harness.modelAcceptsAttachments("test", "text"), false);
 });
 
-test("title generation uses a bounded tool-free session and cleans up success and failure", async () => {
-  const f = fixture();
-  f.client.session.create = async (input: any) => { f.calls.push({ name: "create", input }); return f.session; };
-  f.client.session.wait = async (_input: any, options: any) => { assert.ok(options.signal instanceof AbortSignal); };
-  let fail = true;
-  f.client.session.prompt = async (input: any, options: any) => {
-    assert.ok(options.signal instanceof AbortSignal);
-    assert.equal(f.session.agent, "titler");
-    assert.ok(f.session.permissions.some((rule: any) => rule.action === "*" && rule.effect === "deny"));
-    assert.equal(f.session.permissions.find((rule: any) => rule.action === "threadsite_browser").effect, "deny");
-    assert.deepEqual(f.session.model, { id: "text", providerID: "test" });
-    if (fail) throw new Error("model timeout");
-    f.history.push(assistant("title", 100, "Neon Drift"));
-    f.history.push({ type: "idle", id: "title_idle", outcome: "succeeded", time: { created: Date.now() } });
-  };
-  await assert.rejects(f.harness.generateTitle("/w", "Build a racing game", "test/text"), /model timeout/);
-  fail = false;
-  const result = await f.harness.generateTitle("/w", "Build a racing game", "test/text");
-  assert.equal(result.title, "Neon Drift");
-  assert.equal(result.usage.inputTokens, 120);
-  assert.equal(f.calls.filter((call) => call.name === "create").length, 2);
-  assert.equal(f.calls.filter((call) => call.name === "interrupt").length, 2);
-  assert.equal(f.calls.filter((call) => call.name === "remove").length, 2);
-});
-
 test("steering uses native non-resuming delivery and preserves the running variant", async () => {
   const f = fixture();
   assert.equal(await f.harness.steer("/w", "ses_root", "Finish"), false);
