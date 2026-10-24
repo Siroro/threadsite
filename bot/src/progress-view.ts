@@ -4,7 +4,8 @@ import { cardId } from "./card-actions.js";
 import type { PanelSection } from "./card-panels.js";
 import type { QuestionRow } from "./question-ui.js";
 import type { QuestionStatus } from "./card-state.js";
-import { formatTokens, formatTokensPerSecond } from "./util.js";
+import { modelDisplayName, modelNameSummary, type ModelUsage, type SessionUsage } from "./opencode-shared.js";
+import { formatCost, formatTokens, formatTokensPerSecond } from "./util.js";
 
 export type ProgressPhase = "queued" | "preparing" | "working" | "checking" | "publishing";
 /**
@@ -42,6 +43,8 @@ export interface ProgressMetrics {
   compactions?: number;
   liveTokensPerSecond?: number;
   outputTokensPerSecond?: number;
+  /** Per-model attribution, when steps carried their model; live turns may lack it. */
+  models?: ModelUsage[];
 }
 /** One changed file with its line counts; binary files carry no counts. */
 export interface ProgressFileEntry {
@@ -289,9 +292,13 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   } else if (stop) addCardLinks(card, [stop, cardLink("Live site", state.context.siteUrl), cardLink("Source", state.context.repoUrl)]);
   const metrics = state.metrics;
   const rate = metrics?.liveTokensPerSecond ?? metrics?.outputTokensPerSecond;
+  // The step count carries the provider-stripped model identity in its
+  // parentheses — one fragment, and the same wording on the finished card.
+  const model = metrics?.models ? modelNameSummary(metrics.models) : "";
+  const steps = metrics?.steps ? `${metrics.steps} model step${metrics.steps === 1 ? "" : "s"}${model ? ` (${model})` : ""}` : model;
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${[
     `Elapsed ${elapsed(state.now - state.startedAt)}`,
-    metrics?.steps ? `${metrics.steps} model step${metrics.steps === 1 ? "" : "s"}` : "",
+    steps,
     metrics?.contextTokens ? metrics.contextLimit ? `${formatTokens(metrics.contextTokens)}/${formatTokens(metrics.contextLimit)} context` : `${formatTokens(metrics.contextTokens)} context` : "",
     rate && rate > 0 ? `${metrics?.liveTokensPerSecond ? "~" : "avg ~"}${formatTokensPerSecond(rate)} tok/s` : "",
     state.activeTools ? `${state.activeTools} running` : "",
@@ -331,6 +338,38 @@ export function usageDetailText(metrics: ProgressMetrics): string {
 }
 
 const PLAN_MARKS: Record<ProgressPlanItem["status"], string> = { completed: "✓", in_progress: "●", cancelled: "↷", pending: "○" };
+
+/**
+ * Per-model figures for the final usage tab with each model's tokens. Names
+ * are provider-stripped for members; admins see the full provider/model id,
+ * since routing is the part they can act on. Spend joins a line only for
+ * admins — model identities are fine to show any viewer, but spend data
+ * stays admin-only.
+ */
+export function modelUsageLines(models: ModelUsage[], admin = false): string {
+  return models
+    .filter((entry) => entry.model && entry.model !== "unknown")
+    .map((entry) => `\`${admin ? entry.model : modelDisplayName(entry.model)}\` — in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)}`
+      + (admin && entry.cost > 0 ? ` · ${formatCost(entry.cost)}` : ""))
+    .join("\n");
+}
+
+/**
+ * The usage tab's root-versus-subagent split: which figures belong to the main
+ * turn and which to each child, and the model(s) each part ran — a mid-session
+ * model switch or failover shows as a second name. Spend and provider-qualified
+ * ids join each line only for admins, like the model lines.
+ */
+export function sessionUsageLines(sessions: SessionUsage[], admin = false): string {
+  return sessions
+    .map((entry) => {
+      const models = entry.models ? modelNameSummary(entry.models, 2, admin) : "";
+      return `${entry.root ? "Root turn" : `🤖 ${entry.agent ?? "subagent"}`}${models ? ` (${models})` : ""}`
+        + ` — in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)} · ${entry.steps} step${entry.steps === 1 ? "" : "s"}`
+        + (admin && entry.cost > 0 ? ` · ${formatCost(entry.cost)}` : "");
+    })
+    .join("\n");
+}
 
 export function progressDetailSections(state: ProgressSnapshot): PanelSection[] {
   const overview = renderProgressOverview(state).components[0].components

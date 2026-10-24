@@ -195,6 +195,86 @@ test("finished turns only list pages the turn actually recorded", () => {
   assert.match(cardView(panel).text, /general/);
 });
 
+test("turn details show every viewer the models it used, but spend only to site admins", () => {
+  const result = {
+    name: "Koi Pond Arcade", kind: "site" as const, published: true, commitFiles: 2, additions: 10, deletions: 2,
+    durationMs: 90_000,
+    usage: {
+      inputTokens: 1_200_000, outputTokens: 45_000, cacheTokens: 980_000, contextTokens: 1_100_000,
+      contextLimit: 2_000_000, compactions: 0, steps: 18, cost: 3.42,
+      models: [
+        { model: "surplus/deepseek-4.1", inputTokens: 1_000_000, outputTokens: 40_000, cacheTokens: 900_000, cost: 2.1 },
+        { model: "opencode/glm-5.3", inputTokens: 200_000, outputTokens: 5_000, cacheTokens: 80_000, cost: 1.32 },
+      ],
+      sessions: [
+        { sessionID: "ses_root", root: true as const, inputTokens: 900_000, outputTokens: 38_000, cacheTokens: 800_000, cost: 1.9, steps: 14,
+          models: [
+            { model: "surplus/deepseek-4.1", inputTokens: 700_000, outputTokens: 30_000, cacheTokens: 600_000, cost: 1.4 },
+            { model: "surplus/glm-5.3", inputTokens: 200_000, outputTokens: 8_000, cacheTokens: 200_000, cost: 0.5 },
+          ] },
+        { sessionID: "ses_explore", agent: "explore", inputTokens: 200_000, outputTokens: 5_000, cacheTokens: 100_000, cost: 1.0, steps: 3,
+          models: [{ model: "surplus/glm-5.3", inputTokens: 200_000, outputTokens: 5_000, cacheTokens: 100_000, cost: 1.0 }] },
+        { sessionID: "ses_qa", agent: "browser-qa", inputTokens: 100_000, outputTokens: 2_000, cacheTokens: 80_000, cost: 0.52, steps: 1,
+          models: [{ model: "opencode/glm-5.3-flash", inputTokens: 100_000, outputTokens: 2_000, cacheTokens: 80_000, cost: 0.52 }] },
+      ],
+    },
+    siteUrl: "https://sites.example.invalid/koi/", repoUrl: "https://git.example.invalid/site-koi",
+  };
+  const member = turnPanelSections({ result }, undefined, "turn").find((section) => section.key === "usage")!;
+  assert.ok(member, "a turn with provider counts has a usage page");
+  assert.match(member.text, /`deepseek-4\.1` — in 1M · out 40k/);
+  assert.match(member.text, /`glm-5\.3` — in 200k · out 5k/);
+  assert.match(member.text, /Root turn \(deepseek-4\.1, glm-5\.3\) — in 900k · out 38k · 14 steps/, "a mid-session failover names both models");
+  assert.match(member.text, /🤖 explore \(glm-5\.3\) — in 200k · out 5k · 3 steps/);
+  assert.match(member.text, /🤖 browser-qa \(glm-5\.3-flash\) — in 100k · out 2k · 1 step/);
+  assert.doesNotMatch(member.text, /surplus|opencode\//, "a non-admin viewer sees model names without their providers");
+  assert.doesNotMatch(member.text, /\$/, "a non-admin viewer never sees spend figures");
+
+  const admin = turnPanelSections({ result }, undefined, "turn", true).find((section) => section.key === "usage")!;
+  assert.match(admin.text, /Turn spend \*\*\$3\.42\*\*/);
+  assert.match(admin.text, /`surplus\/deepseek-4\.1` — in 1M · out 40k · \$2\.10/, "admins see the provider routing and per-model spend");
+  assert.match(admin.text, /Root turn \(surplus\/deepseek-4\.1, surplus\/glm-5\.3\) — in 900k · out 38k · 14 steps · \$1\.90/, "the split carries per-session models and spend for admins");
+  assert.match(admin.text, /🤖 browser-qa \(opencode\/glm-5\.3-flash\) — in 100k · out 2k · 1 step · \$0\.52/);
+
+  const unpriced = { ...result, usage: { ...result.usage, cost: 0, models: result.usage.models.map((entry) => ({ ...entry, cost: 0 })) } };
+  const explained = turnPanelSections({ result: unpriced }, undefined, "turn", true).find((section) => section.key === "usage")!;
+  assert.match(explained.text, /pricing is not reported/, "a $0 spend says why instead of reading as free");
+});
+
+test("a turn without subagent spend shows no root/subagent split", () => {
+  const result = {
+    name: "Koi Pond Arcade", kind: "site" as const, published: true, commitFiles: 2, additions: 10, deletions: 2,
+    durationMs: 90_000,
+    usage: {
+      inputTokens: 900_000, outputTokens: 38_000, cacheTokens: 800_000, contextTokens: 900_000,
+      contextLimit: 2_000_000, compactions: 0, steps: 14, cost: 1.9,
+      models: [{ model: "surplus/deepseek-4.1", inputTokens: 900_000, outputTokens: 38_000, cacheTokens: 800_000, cost: 1.9 }],
+      sessions: [{ sessionID: "ses_root", root: true as const, inputTokens: 900_000, outputTokens: 38_000, cacheTokens: 800_000, cost: 1.9, steps: 14 }],
+    },
+    siteUrl: "https://sites.example.invalid/koi/", repoUrl: "https://git.example.invalid/site-koi",
+  };
+  const sections = turnPanelSections({ result }, undefined, "turn");
+  const usage = sections.find((section) => section.key === "usage")!;
+  assert.doesNotMatch(usage.text, /Root & subagents/, "a lone root session adds no split: the totals already say it");
+  assert.doesNotMatch(usage.text, /Root turn/, "no root line without children to split from");
+});
+
+test("the live public card names the running model without provider or spend; admin figures stay in the private details", () => {
+  const state = buildingSnapshot();
+  state.metrics = { ...state.metrics, models: [
+    { model: "surplus/deepseek-4.1", inputTokens: 70_000, outputTokens: 5_400, cacheTokens: 60_000, cost: 0.4 },
+    { model: "surplus/glm-5.3", inputTokens: 12_300, outputTokens: 800, cacheTokens: 5_840, cost: 0.02 },
+  ] };
+  const live = cardView(renderProgressCard(state));
+  assert.match(live.text, /12 model steps \(deepseek-4\.1, glm-5\.3\)/, "the step count carries the model identity");
+  assert.doesNotMatch(live.text, /surplus\//, "the public live card never shows provider routing");
+  assert.doesNotMatch(live.text, /\$/, "the public live card never shows spend");
+
+  const bare = cardView(renderProgressCard({ ...state, metrics: { contextTokens: 28_400, contextLimit: 100_000, steps: 12 } }));
+  assert.match(bare.text, /12 model steps/, "a snapshot without per-model attribution keeps the bare step count");
+  assert.doesNotMatch(bare.text, /\(/, "no per-model attribution adds no parenthetical");
+});
+
 
 test("detail panels paginate every character and keep section choice stable", () => {
   const sections = [

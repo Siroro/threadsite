@@ -7,7 +7,8 @@ import { cardId, parseCardId, type CardAction, type CardRoute } from "./card-act
 import { addCardHeader, cardEdit, cardMessage, renderStatusCard, type CardMessage } from "./card-ui.js";
 import { renderDetailPanel, renderQueuePanel, requestModal, type PanelSection, type PanelScope } from "./card-panels.js";
 import type { RequestFormState, StoredTurnCard } from "./card-state.js";
-import { elapsed, hasUsageData, progressDetailSections, subagentDetailText, subagentHistory, usageDetailText, type ProgressSnapshot } from "./progress-view.js";
+import { elapsed, hasUsageData, modelUsageLines, sessionUsageLines, progressDetailSections, subagentDetailText, subagentHistory, usageDetailText, type ProgressSnapshot } from "./progress-view.js";
+import { formatCost } from "./util.js";
 import { answerModal, customAnswerModal, readAnswerForm, renderQuestionReview } from "./question-ui.js";
 import type { QuestionService } from "./question-service.js";
 import type { Store } from "./store.js";
@@ -82,7 +83,10 @@ export class CardInteractions {
       const scope: PanelScope = action === "project" ? "project" : action === "doc" ? "doc" : action === "tab" || action === "page" ? parseScope(args[0]) : "turn";
       const selected = action === "tab" && interaction.isStringSelectMenu() ? interaction.values[0] : action === "page" ? args[1] : args[0];
       const page = action === "page" ? indexArg(args[2]) : 0;
-      const sections = scope === "project" ? await this.services.projectSections(project) : this.turnSections(threadId, resource, scope);
+      // Spend figures ride only the viewer's own ephemeral panel, never the
+      // shared card: gate them on the admin check at render time.
+      const admin = Boolean(this.services.adminUser?.(interaction.user.id));
+      const sections = scope === "project" ? await this.services.projectSections(project) : this.turnSections(threadId, resource, scope, admin);
       await this.respond(interaction, renderDetailPanel(scope === "project" ? project.displayName : "Turn details", resource, scope, sections, selected, page));
       return;
     }
@@ -237,13 +241,13 @@ export class CardInteractions {
     await this.respond(interaction, renderQuestionReview(resource, request, draft, next < 0 ? 0 : next, service.delivery(project.threadId, resource, revision)));
   }
 
-  private turnSections(threadId: string, resource: string, scope: PanelScope): PanelSection[] {
+  private turnSections(threadId: string, resource: string, scope: PanelScope, admin = false): PanelSection[] {
     const card = this.services.store.getCardState<StoredTurnCard>(threadId, resource);
     // A running turn reads from memory: the persisted snapshot only reaches
     // disk on the few-seconds flush cadence, and Refresh should show now.
     const snapshot = this.services.liveSnapshot?.(resource) ?? card?.snapshot;
     if (!card && !snapshot) throw new CardUserError("No saved details are available for this older turn.");
-    return turnPanelSections(card, snapshot, scope);
+    return turnPanelSections(card, snapshot, scope, admin);
   }
 
   private checkFailure(project: ProjectRecord, resource: string): string {
@@ -269,9 +273,10 @@ export class CardInteractions {
 /**
  * The pages behind a turn's details dropdown. Only sections with real content
  * are offered: an empty plan, absent findings or an unwritten changelog must
- * not become a dead entry in the select menu.
+ * not become a dead entry in the select menu. Spend figures appear only when
+ * the viewer is a site admin — this panel is that viewer's private reply.
  */
-export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: ProgressSnapshot | undefined, scope: PanelScope): PanelSection[] {
+export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: ProgressSnapshot | undefined, scope: PanelScope, admin = false): PanelSection[] {
   const sections = snapshot ? progressDetailSections(snapshot) : [];
   const result = card?.result;
   if (result) {
@@ -301,8 +306,23 @@ export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: Pr
   }
   if (result?.usage && hasUsageData(result.usage)) {
     const live = sections.find((entry) => entry.key === "usage")?.text;
+    const models = modelUsageLines(result.usage.models, admin);
+    // The split only earns its block when a subagent actually spent; a lone
+    // root session is already what the totals say.
+    const children = result.usage.sessions?.filter((entry) => !entry.root && (entry.inputTokens || entry.outputTokens)) ?? [];
+    const split = children.length && result.usage.sessions
+      ? `**Root & subagents**\n${sessionUsageLines(result.usage.sessions.filter((entry) => entry.root || entry.inputTokens || entry.outputTokens), admin)}`
+      : "";
+    const spend = admin
+      ? result.usage.cost > 0
+        ? `**Cost**\nTurn spend **${formatCost(result.usage.cost)}**`
+        : `**Cost**\n$0 — the provider's pricing is not reported for these models`
+      : "";
     const finalUsage: PanelSection = { key: "usage", label: "Usage & context", text: [
       `**Final provider counts**\n${usageDetailText(result.usage)}`,
+      models ? `**By model**\n${models}` : "",
+      split,
+      spend,
       live ? `**Last live reading**\n${live}` : "",
     ].filter(Boolean).join("\n\n") };
     const position = sections.findIndex((entry) => entry.key === "usage");

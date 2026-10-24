@@ -6,7 +6,7 @@ import { OpenCode, type OpenCodeClient, type ModelInfo, type ModelRef, type Sess
 import { config } from "./config.js";
 import { log, serializeError } from "./logger.js";
 import { applicationMessage, formQuestion } from "./opencode-v2-messages.js";
-import { usageFromMessages, reconcileUsage, describeTool, toolLabel, type SessionMessage, type PromptImage,
+import { usageFromMessages, reconcileUsage, sessionUsageFromMessages, describeTool, toolLabel, type SessionMessage, type PromptImage,
   type PromptResult, type TurnUsage, type QuotaBlock } from "./opencode-shared.js";
 import type { OpenCodeHarness } from "./opencode.js";
 import type { ProgressCallback, ProgressUpdate, ProgressPlanItem, ProgressSubagent } from "./progress.js";
@@ -407,15 +407,16 @@ export class OpenCodeV2Harness {
     return (await this.rawMessages(sessionID, limit)).map((message) => applicationMessage(message, sessionID));
   }
 
-  private async usageHistory(directory: string, sessionID: string): Promise<Array<{ sessionID: string; message: SessionMessageInfo }>> {
+  private async usageHistory(directory: string, sessionID: string): Promise<Array<{ sessionID: string; agent?: string; message: SessionMessageInfo }>> {
     await this.session(directory, sessionID);
     const sessions = await this.allSessions();
     const visited = new Set<string>();
-    const result: Array<{ sessionID: string; message: SessionMessageInfo }> = [];
+    const result: Array<{ sessionID: string; agent?: string; message: SessionMessageInfo }> = [];
     const visit = async (id: string): Promise<void> => {
       if (visited.has(id)) return;
       visited.add(id);
-      for (const message of await this.rawMessages(id)) result.push({ sessionID: id, message });
+      const agent = sessions.find((session) => session.id === id)?.agent;
+      for (const message of await this.rawMessages(id)) result.push({ sessionID: id, ...(agent ? { agent } : {}), message });
       for (const child of sessions) if (child.parentID === id && sameDirectory(child.location.directory, directory)) await visit(child.id);
     };
     await visit(sessionID);
@@ -427,7 +428,8 @@ export class OpenCodeV2Harness {
   }
 
   private async finalUsage(directory: string, sessionID: string, since: number, baseline: Set<string>, watch: Watch): Promise<TurnUsage> {
-    const observed = usageFromMessages([...watch.steps.values()], since) ?? emptyUsage();
+    const streamSteps = [...watch.steps.values()];
+    const observed = usageFromMessages(streamSteps, since) ?? emptyUsage();
     observed.contextLimit = watch.contextLimit;
     observed.compactions = watch.compactions;
     Object.assign(observed, timingTotals(watch.timings.values()));
@@ -445,9 +447,20 @@ export class OpenCodeV2Harness {
       // Child billing is cumulative, but the context indicator belongs to root.
       result.contextTokens = usageFromMessages(messages.filter((message) => message.info?.sessionID === sessionID), since, Infinity, baseline)?.contextTokens
         ?? result.contextTokens;
+      // Root-versus-subagent split from the same message set the billing
+      // reconcile judged fuller, so the split never disagrees with the totals.
+      const savedIsFuller = saved !== undefined && saved.inputTokens + saved.outputTokens >= observed.inputTokens + observed.outputTokens;
+      result.sessions = sessionUsageFromMessages(savedIsFuller ? messages : streamSteps, sessionID,
+        (id) => watch.subagents?.get(id)?.agent ?? entries.find((entry) => entry.sessionID === id)?.agent,
+        since, Infinity, baseline);
       return result;
     }
-    catch (error) { log("warn", "opencode.v2_usage_recovery_failed", { sessionID, error: serializeError(error) }); return observed; }
+    catch (error) {
+      log("warn", "opencode.v2_usage_recovery_failed", { sessionID, error: serializeError(error) });
+      observed.sessions = sessionUsageFromMessages(streamSteps, sessionID,
+        (id) => watch.subagents?.get(id)?.agent, since);
+      return observed;
+    }
   }
 
   async lastUserMessageId(directory: string, sessionID: string): Promise<string | undefined> {

@@ -322,7 +322,7 @@ test("every persisted v2 model step is billed once, including child usage", asyn
   root[0].time = { created: 1_000, streamed: 3_000, completed: 9_000 };
   root[1].time = { created: 20_000, streamed: 22_000, completed: 50_000 };
   child[0].time = { created: 20_000, streamed: 21_000, completed: 22_000 };
-  f.client.session.list = async () => ({ data: [f.session, { ...f.session, id: "ses_child", parentID: "ses_root" }], cursor: {} });
+  f.client.session.list = async () => ({ data: [f.session, { ...f.session, id: "ses_child", parentID: "ses_root", agent: "explore" }], cursor: {} });
   f.client.message.list = async ({ sessionID }: any) => ({ data: sessionID === "ses_child" ? child : root, cursor: {} });
   const messages = await f.harness.usageMessages("/w", "ses_root");
   const usage = usageFromMessages([...messages, ...messages]);
@@ -334,6 +334,13 @@ test("every persisted v2 model step is billed once, including child usage", asyn
   assert.equal(final.timedOutputTokens, 36);
   assert.equal(final.generationMs, 5_000, "overlapping child/provider windows exclude tool execution time");
   assert.equal(final.outputTokensPerSecond, 7.2);
+  assert.deepEqual(final.sessions.map((entry: any) => [entry.root ? "root" : entry.agent, entry.steps, entry.inputTokens]),
+    [["root", 2, 340], ["explore", 1, 320]],
+    "the split attributes root and child steps with the child's agent name");
+  assert.deepEqual(final.sessions.map((entry: any) => entry.models?.map((model: any) => model.model)),
+    [["test/text"], ["test/text"]], "each session carries the model its steps actually ran");
+  assert.equal(final.sessions.reduce((sum: number, entry: any) => sum + entry.inputTokens, 0), final.inputTokens,
+    "the split sums to the billed totals");
 });
 
 test("root finish-up budget counts persisted steps and sends a single non-resuming receipt", async () => {

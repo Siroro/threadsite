@@ -35,6 +35,29 @@ export interface ModelUsage {
   cost: number;
 }
 
+/**
+ * Token/cost accounting for one session inside a turn: the root session the
+ * user's request runs in, or one subagent child. Sums to the turn's totals.
+ */
+export interface SessionUsage {
+  /** OpenCode session id. */
+  sessionID: string;
+  /** Child sessions carry their agent name ("explore", "browser-qa", …). */
+  agent?: string;
+  /** Marks the turn's own session. */
+  root?: true;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
+  /** Provider-reported USD cost, when pricing is known. */
+  cost: number;
+  /** Model steps with provider counts. */
+  steps: number;
+  /** Per-model breakdown within this session; a mid-session model switch or
+   * failover lands as a second entry, attributed to the model that ran it. */
+  models?: ModelUsage[];
+}
+
 /** Token/context accounting for one agent turn, accumulated from OpenCode events. */
 export interface TurnUsage {
   /** Input+cache tokens billed across every model step of the turn. */
@@ -61,6 +84,8 @@ export interface TurnUsage {
   outputTokensPerSecond?: number;
   /** Per-model token/cost breakdown across every step of the turn. */
   models: ModelUsage[];
+  /** Root-versus-subagent split, when the turn's sessions were attributed. */
+  sessions?: SessionUsage[];
 }
 
 /** An image attachment forwarded into a prompt as a data-URI file part. */
@@ -128,10 +153,47 @@ export function reconcileUsage(observed: TurnUsage | undefined, saved: TurnUsage
   if (!saved) return observed;
   const billing = saved.inputTokens + saved.outputTokens >= (observed.inputTokens ?? 0) + (observed.outputTokens ?? 0)
     ? saved : observed;
-  return { ...observed, ...billing, contextLimit: observed.contextLimit ?? saved.contextLimit,
+  const result = { ...observed, ...billing, contextLimit: observed.contextLimit ?? saved.contextLimit,
     compactions: Math.max(observed.compactions ?? 0, saved.compactions ?? 0),
     ...(observed.generationMs ? { generationMs: observed.generationMs, timedOutputTokens: observed.timedOutputTokens,
       outputTokensPerSecond: observed.outputTokensPerSecond } : {}) };
+  // The two sides price the same steps independently: the stream can report a
+  // provider-quoted cost the saved messages lack (or vice versa), so a $0
+  // snapshot must not erase the other side's spend. Take the fuller figure
+  // per model and in total; tokens stay with the billing snapshot.
+  const peer = billing === saved ? observed : saved;
+  if ((peer.cost ?? 0) > (billing.cost ?? 0)) {
+    result.cost = peer.cost;
+    result.models = billing.models.map((entry) => {
+      const priced = peer.models.find((candidate) => candidate.model === entry.model);
+      return priced && priced.cost > entry.cost ? { ...entry, cost: priced.cost } : entry;
+    });
+  }
+  return result;
+}
+
+/** "surplus/deepseek-4.1" -> "deepseek-4.1": the model identity without its provider. */
+export function modelDisplayName(model: string): string {
+  const slash = model.indexOf("/");
+  return slash >= 0 ? model.slice(slash + 1) : model;
+}
+
+/**
+ * Distinct models from a per-model list, volume-ordered, capped with
+ * "+N more". Empty when no model was observed ("unknown" is not a name).
+ * `full` keeps the provider-qualified id for admin views.
+ */
+export function modelNameSummary(models: ModelUsage[], limit = 2, full = false): string {
+  const names = [...new Set(models
+    .filter((entry) => entry.model && entry.model !== "unknown")
+    .map((entry) => (full ? entry.model : modelDisplayName(entry.model))))];
+  if (!names.length) return "";
+  return names.length > limit ? `${names.slice(0, limit).join(", ")} +${names.length - limit} more` : names.join(", ");
+}
+
+/** Distinct models a whole turn used; see modelNameSummary. */
+export function turnModelSummary(usage: TurnUsage, limit = 2): string {
+  return modelNameSummary(usage.models, limit);
 }
 
 /** Public turn-usage line: context size, cumulative billed tokens, cache share, model steps. */
@@ -183,6 +245,7 @@ export function addUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): Tu
       ? { generationMs, timedOutputTokens, outputTokensPerSecond: (timedOutputTokens * 1000) / generationMs }
       : {}),
     models: mergeModelUsage([...(a.models ?? []), ...(b.models ?? [])]),
+    ...(a.sessions || b.sessions ? { sessions: mergeSessionUsage([...(a.sessions ?? []), ...(b.sessions ?? [])]) } : {}),
   };
 }
 
@@ -199,6 +262,83 @@ export function mergeModelUsage(entries: ModelUsage[]): ModelUsage[] {
     merged.set(entry.model, current);
   }
   return [...merged.values()].sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens));
+}
+
+/** Sum per-session usage lists: a repair pass continues the same sessions it reconciles. */
+export function mergeSessionUsage(entries: SessionUsage[]): SessionUsage[] {
+  const merged = new Map<string, SessionUsage>();
+  for (const entry of entries) {
+    const current = merged.get(entry.sessionID)
+      ?? { sessionID: entry.sessionID,
+        ...(entry.agent ? { agent: entry.agent } : {}),
+        ...(entry.root ? { root: true as const } : {}),
+        inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, steps: 0 };
+    current.inputTokens += entry.inputTokens;
+    current.outputTokens += entry.outputTokens;
+    current.cacheTokens += entry.cacheTokens;
+    current.cost += entry.cost;
+    current.steps += entry.steps;
+    if (entry.models) current.models = mergeModelUsage([...(current.models ?? []), ...entry.models]);
+    merged.set(entry.sessionID, current);
+  }
+  return [...merged.values()].sort((a, b) =>
+    (b.root ? 1 : 0) - (a.root ? 1 : 0) || (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens));
+}
+
+/**
+ * Split a turn's assistant messages into per-session usage — the root session
+ * plus each subagent child — with the same window, dedupe and token semantics
+ * as usageFromMessages, so the split sums to the turn's totals.
+ */
+export function sessionUsageFromMessages(
+  messages: SessionMessage[],
+  rootSessionID: string,
+  agentOf: (sessionID: string) => string | undefined,
+  since = 0,
+  until = Infinity,
+  excludeIds = new Set<string>(),
+): SessionUsage[] {
+  const seen = new Set<string>();
+  const bySession = new Map<string, SessionUsage & { modelMap: Map<string, ModelUsage> }>();
+  for (const message of [...messages].sort((a, b) => (a.info?.time?.created ?? 0) - (b.info?.time?.created ?? 0))) {
+    const info = message.info;
+    if (info?.role !== "assistant" || !info.id || seen.has(info.id) || excludeIds.has(info.id)) continue;
+    const created = info.time?.created;
+    if (created === undefined || created < since || created > until) continue;
+    seen.add(info.id);
+    if (!info.tokens) continue;
+    const id = info.sessionID ?? rootSessionID;
+    let bucket = bySession.get(id);
+    if (!bucket) {
+      bucket = { sessionID: id,
+        ...(id === rootSessionID ? { root: true as const } : { agent: agentOf(id) || "subagent" }),
+        inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, steps: 0, modelMap: new Map() };
+      bySession.set(id, bucket);
+    }
+    const cacheTokens = Number(info.tokens.cache?.read ?? 0) + Number(info.tokens.cache?.write ?? 0);
+    const inputTokens = Number(info.tokens.input ?? 0) + cacheTokens;
+    const outputTokens = Number(info.tokens.output ?? 0) + Number(info.tokens.reasoning ?? 0);
+    const cost = Number(info.cost ?? 0);
+    bucket.inputTokens += inputTokens;
+    bucket.outputTokens += outputTokens;
+    bucket.cacheTokens += cacheTokens;
+    bucket.cost += cost;
+    bucket.steps += 1;
+    // Each step carries the model that actually ran it, so a mid-session
+    // switch or failover attributes to the model that spent the tokens.
+    const modelKey = info.providerID && info.modelID ? info.providerID + "/" + info.modelID : "unknown";
+    const model = bucket.modelMap.get(modelKey)
+      ?? { model: modelKey, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0 };
+    model.inputTokens += inputTokens;
+    model.outputTokens += outputTokens;
+    model.cacheTokens += cacheTokens;
+    model.cost += cost;
+    bucket.modelMap.set(modelKey, model);
+  }
+  return [...bySession.values()]
+    .map(({ modelMap, ...session }) => ({ ...session, models: mergeModelUsage([...modelMap.values()]) }))
+    .sort((a, b) =>
+      (b.root ? 1 : 0) - (a.root ? 1 : 0) || (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens));
 }
 
 export function describeTool(tool: string, input: any, status: string, title?: string, directory?: string): { text: string; detail?: string; command?: boolean } | undefined {

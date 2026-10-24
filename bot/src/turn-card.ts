@@ -13,7 +13,7 @@ import {
 import { addCardDivider, addCardField, addCardHeader, addCardTitle, addCardLinks, cardLink, cardMessage, cardTextLength, CARD_TEXT_LIMIT, KIND_COLORS, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
 import { subagentSummaryLines } from "./progress-view.js";
-import type { TurnUsage } from "./opencode.js";
+import { turnModelSummary, type TurnUsage } from "./opencode.js";
 import type { ProgressSubagent } from "./progress.js";
 import type { ProjectKind } from "./types.js";
 import { formatShortDuration, formatTokens, stripSummaryPreamble, truncate } from "./util.js";
@@ -194,7 +194,11 @@ function technicalCard(state: TurnCardState): ContainerBuilder {
     if (state.usage.inputTokens || state.usage.outputTokens) {
       usage.push(`${formatTokens(state.usage.inputTokens)} in · ${formatTokens(state.usage.outputTokens)} out`);
     }
-    if (state.usage.steps) usage.push(`${state.usage.steps} model step${state.usage.steps === 1 ? "" : "s"}`);
+    // Model identities are public, provider-stripped, and ride the step count;
+    // spend deliberately is not (admin-only in the turn details panel).
+    const models = turnModelSummary(state.usage);
+    if (state.usage.steps) usage.push(`${state.usage.steps} model step${state.usage.steps === 1 ? "" : "s"}${models ? ` (${models})` : ""}`);
+    else if (models) usage.push(models);
     if (state.usage.compactions) usage.push(`context compacted ${state.usage.compactions}×`);
     if (!state.usage.inputTokens && !state.usage.outputTokens) usage.push("Token counts unavailable");
     if (state.usage.cacheTokens) usage.push(`${formatTokens(state.usage.cacheTokens)} cached`);

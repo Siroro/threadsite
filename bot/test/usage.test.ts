@@ -3,12 +3,12 @@ import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { SessionMessage } from "../src/opencode.js";
+import type { SessionMessage, TurnUsage } from "../src/opencode.js";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { UsageLog } = await import("../src/usage.js");
-const { usageFromMessages, reconcileUsage } = await import("../src/opencode.js");
+const { usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage } = await import("../src/opencode.js");
 
 function message(id: string, created: number, input = 100, output = 20): SessionMessage {
   return { info: { id, role: "assistant", providerID: "test", modelID: "model", time: { created },
@@ -40,6 +40,82 @@ test("saved history never contributes a tok/s rate: without live anchors the win
   assert.equal(recovered.outputTokensPerSecond, undefined);
   assert.equal(recovered.generationMs, undefined);
   assert.equal(recovered.timedOutputTokens, undefined);
+});
+
+test("reconcile keeps either side's spend when the fuller token snapshot is unpriced", () => {
+  // A surplus-style provider: the stream's step events quote real spend while
+  // the saved message records report none — and either side can be the one
+  // with the fuller token counts.
+  const step = (id: string, input: number, output: number, cost: number): SessionMessage => ({
+    info: { id, role: "assistant", providerID: "surplus", modelID: "deepseek-4.1", time: { created: 1000 },
+      tokens: { input, output, cache: { read: 0, write: 0 } }, cost }, parts: [],
+  });
+  const stream = usageFromMessages([step("s1", 1_000, 200, 0.4)])!;
+  const unpricedHistory = usageFromMessages([step("h1", 1_500, 300, 0)])!;
+  const reconciled = reconcileUsage(stream, unpricedHistory)!;
+  assert.equal(reconciled.inputTokens, 1_500, "the fuller token counts still win");
+  assert.equal(reconciled.outputTokens, 300);
+  assert.equal(reconciled.cost, 0.4, "an unpriced snapshot does not erase stream-reported spend");
+  assert.equal(reconciled.models.find((entry) => entry.model === "surplus/deepseek-4.1")!.cost, 0.4);
+
+  const unpricedStream = usageFromMessages([step("s2", 2_000, 400, 0)])!;
+  const pricedHistory = usageFromMessages([step("h2", 100, 20, 0.2)])!;
+  assert.equal(reconcileUsage(unpricedStream, pricedHistory)!.cost, 0.2,
+    "an unpriced stream does not erase history-reported spend either");
+});
+
+test("the session split attributes root and subagent figures that sum to the turn totals", () => {
+  const step = (id: string, sessionID: string, created: number, input: number, output: number, cost = 0, modelID = "deepseek-4.1"): SessionMessage => ({
+    info: { id, sessionID, role: "assistant", providerID: "surplus", modelID, time: { created },
+      tokens: { input, output, cache: { read: 0, write: 0 } }, cost }, parts: [],
+  });
+  const turn = [
+    step("old", "ses_root", 500, 900, 100),            // before the turn's window
+    step("base", "ses_root", 900, 800, 80),            // baseline message of a recovered turn
+    step("r1", "ses_root", 1000, 1_000, 200, 0.3),
+    step("r1", "ses_root", 1000, 1_000, 200, 0.3),     // replayed history counts once
+    step("r2", "ses_root", 1050, 500, 100, 0.1, "glm-5.3"), // mid-session failover to another model
+    step("e1", "ses_explore", 1100, 300, 40, 0.05, "glm-5.3"),
+    step("q1", "ses_qa", 1200, 100, 10, 0.01),
+    { info: { id: "untimed", sessionID: "ses_root", role: "assistant", time: { created: 1300 } }, parts: [] }, // no provider counts
+  ];
+  const totals = usageFromMessages(turn, 1000, Infinity, new Set(["base"]))!;
+  const agents = new Map([["ses_explore", "explore"], ["ses_qa", "browser-qa"]]);
+  const split = sessionUsageFromMessages(turn, "ses_root", (id) => agents.get(id), 1000, Infinity, new Set(["base"]));
+  assert.deepEqual(split.map((entry) => entry.sessionID), ["ses_root", "ses_explore", "ses_qa"],
+    "the root session leads, then children by volume");
+  assert.equal(split[0].root, true);
+  assert.equal(split[0].agent, undefined);
+  assert.equal(split[0].steps, 2, "the windowed, non-baseline root steps are the only ones attributed");
+  assert.equal(split[1].agent, "explore");
+  assert.equal(split[2].agent, "browser-qa");
+  for (const field of ["inputTokens", "outputTokens", "cost"] as const) {
+    assert.equal(split.reduce((sum, entry) => sum + entry[field], 0), totals[field],
+      `the split's ${field} sums to the turn totals`);
+  }
+  // The failover is attributed per model, inside the session that ran it.
+  assert.deepEqual(split[0].models?.map((entry) => [entry.model, entry.inputTokens]),
+    [["surplus/deepseek-4.1", 1_000], ["surplus/glm-5.3", 500]]);
+  assert.deepEqual(split[1].models?.map((entry) => entry.model), ["surplus/glm-5.3"]);
+  // An unobserved child still gets a bucket, labeled as a generic subagent.
+  assert.equal(sessionUsageFromMessages([step("x", "ses_ghost", 1500, 10, 1)], "ses_root", () => undefined)[0].agent, "subagent");
+});
+
+test("addUsage merges repair passes without double-counting a session", () => {
+  const usage = (sessions: TurnUsage["sessions"], inputTokens: number, steps: number, cost: number): TurnUsage => ({
+    inputTokens, outputTokens: 10, cacheTokens: 0, contextTokens: 0, compactions: 0, steps, cost, models: [], sessions,
+  });
+  const root = (inputTokens: number, steps: number): TurnUsage["sessions"] =>
+    [{ sessionID: "ses_root", root: true, inputTokens, outputTokens: 10, cacheTokens: 0, cost: 0.1, steps }];
+  const first = usage(root(100, 2), 100, 2, 0.2);
+  const repair = usage([...root(150, 3),
+    { sessionID: "ses_fix", agent: "general", inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, steps: 0 }], 150, 3, 0.3);
+  const merged = addUsage(first, repair)!;
+  assert.equal(merged.inputTokens, 250);
+  assert.deepEqual(merged.sessions?.map((entry) => [entry.sessionID, entry.inputTokens, entry.steps]),
+    [["ses_root", 250, 5], ["ses_fix", 0, 0]], "the root session sums across passes; children keep their own");
+  assert.equal(merged.sessions?.[0].root, true);
+  assert.equal(addUsage(first, undefined)!.sessions?.length, 1, "a pass without a split keeps the other's");
 });
 
 test("turn revisions survive reopening the ledger, concurrent appends and a torn final line", async (t) => {

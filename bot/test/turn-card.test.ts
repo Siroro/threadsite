@@ -60,6 +60,24 @@ test("the technical card keeps the agent's whole report", () => {
   assert.ok(card.description!.includes(report), "a long report is not cut for the card");
 });
 
+test("the technical card names the turn's models without their providers and carries no spend", () => {
+  const usage: TurnCardState["usage"] = {
+    ...state().usage!, cost: 3.42,
+    models: [
+      { model: "surplus/deepseek-4.1", inputTokens: 10_000, outputTokens: 3_500, cacheTokens: 0, cost: 2.1 },
+      { model: "opencode/glm-5.3", inputTokens: 2_000, outputTokens: 500, cacheTokens: 0, cost: 1.32 },
+    ],
+  };
+  const field = (message: ReturnType<typeof renderTechnicalCard>) =>
+    cardView(message).fields!.find((entry) => entry.name === "Usage")!;
+  assert.match(field(renderTechnicalCard(state({ usage }))).value, /18 model steps \(deepseek-4\.1, glm-5\.3\)/);
+  assert.doesNotMatch(field(renderTechnicalCard(state({ usage }))).value, /\$/, "the public card never shows spend");
+  const crowded = [...usage.models, { model: "surplus/glm-5.3-flash", inputTokens: 100, outputTokens: 10, cacheTokens: 0, cost: 0 }];
+  assert.match(field(renderTechnicalCard(state({ usage: { ...usage, models: crowded } }))).value,
+    /18 model steps \(deepseek-4\.1, glm-5\.3 \+1 more\)/, "a long model roster is capped, not listed in full");
+  assert.doesNotMatch(field(renderTechnicalCard(state())).value, /\(/, "a turn without observed models adds no parenthetical");
+});
+
 test("the technical card lists the turn's subagents and only offers shortcuts with details behind them", () => {
   const subagents = [
     { id: "ses_child", agent: "explore", steps: 4, status: "finished" as const, activity: "📚 Reading · site/src/arena.ts" },
