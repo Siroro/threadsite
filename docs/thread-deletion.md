@@ -15,7 +15,7 @@ The relay's authenticated deletion endpoint disconnects players and removes the 
 Deploy the bot, relay, and preview changes together:
 
 ```bash
-cd /home/ubuntu/threadsite-opencode
+cd ~/threadsite
 git pull --ff-only
 docker compose up -d --build gameserver preview opencode bot
 ```

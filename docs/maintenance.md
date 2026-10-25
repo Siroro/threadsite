@@ -95,7 +95,7 @@ From `bot/`:
 
 From `preview/`: `npm test` for preview regression checks.
 
-From `gameserver/`: `npm run build`, then the applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, `test:stall`, `test:storage`, or `test:persistence` scripts. `test:relay` and `test:client` need a local test relay listening on port 8090 (or set `GAMESERVER_TEST_PORT` for an isolated relay); restart, durability, stall and persistence tests launch their own relay processes. Give restart/stall checks an isolated `GAMESERVER_STATE_DIR`; storage, durability and persistence checks create temporary state themselves. Player persistence checks cover save conflicts, quotas, leaderboard ordering, crash recovery and project deletion.
+From `gameserver/`: `npm run build`, then the applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, `test:stall`, `test:storage`, `test:persistence`, `test:delete`, or `test:leaderboards` scripts. `test:relay` and `test:client` need a local test relay listening on port 8090 (or set `GAMESERVER_TEST_PORT` for an isolated relay); restart, durability, stall, persistence, deletion and leaderboard tests launch their own relay processes. Give restart/stall checks an isolated `GAMESERVER_STATE_DIR`; storage, durability and persistence checks create temporary state themselves. Player persistence checks cover save conflicts, quotas, leaderboard ordering, crash recovery and project deletion.
 
 Networking client changes: from `bot/`, `npm run build:net` regenerates `bot/assets/threadsite-net.js` and `.d.ts`; never edit those generated assets directly.
 

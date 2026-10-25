@@ -48,4 +48,4 @@ Use Node 24 and run commands in the component directory; there is no root npm pa
 | Preview / provider adapter | `npm test` in `preview/`; relevant browser/Docker checks for integration changes |
 | Docs/instructions | Check referenced paths/commands and generated variants; `git diff --check` |
 
-Relay/client tests need a test relay on port 8090; every other relay test launches its own isolated relay with temporary state. Use isolated state.
+Relay/client tests need a test relay on port 8090; the other relay tests launch their own. Give restart/stall checks an isolated `GAMESERVER_STATE_DIR`; storage, durability and persistence checks create temporary state themselves.
