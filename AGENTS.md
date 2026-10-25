@@ -43,9 +43,9 @@ Use Node 24 and run commands in the component directory; there is no root npm pa
 | Bot | `npm test` |
 | Discord commands | Also `node --import tsx --test test/commands.test.ts` |
 | Networking client | Relevant relay/client checks |
-| Relay | Applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, `test:stall` |
+| Relay | Applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, `test:stall`, `test:storage`, `test:persistence`, `test:leaderboards`, `test:delete` |
 | OpenCode v2 | `npm test` in `opencode/` |
 | Preview / provider adapter | `npm test` in `preview/`; relevant browser/Docker checks for integration changes |
 | Docs/instructions | Check referenced paths/commands and generated variants; `git diff --check` |
 
-Relay/client tests need a test relay on port 8090; restart/durability/stall tests launch their own. Use isolated state.
+Relay/client tests need a test relay on port 8090; every other relay test launches its own isolated relay with temporary state. Use isolated state.
