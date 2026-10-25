@@ -20,7 +20,6 @@ COPY runtime-config.mjs /opt/threadsite/runtime-config.mjs
 COPY healthcheck.mjs /opt/threadsite/healthcheck.mjs
 COPY provider-config.mjs /opt/threadsite/provider-config.mjs
 COPY providers.json /opt/threadsite/providers.json
-COPY surplus-adapter.mjs /opt/threadsite/surplus-adapter.mjs
 COPY package.json package-lock.json /opt/threadsite/
 COPY v2/ /opt/threadsite/v2/
 COPY tools/ /opt/threadsite/tools/
