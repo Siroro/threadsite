@@ -80,7 +80,7 @@ export const config = {
   // durable state). A turn that ended above SESSION_CONTEXT_COMPACT_THRESHOLD
   // of the context window compacts the session before the next turn starts.
   // Either rule can be disabled with 0.
-  sessionIdleResetMs: msEnv("SESSION_IDLE_RESET_MS", 2 * 60 * 60 * 1000),
+  sessionIdleResetMs: msEnv("SESSION_IDLE_RESET_MS", 60 * 60 * 1000),
   sessionCompactThreshold: fractionEnv("SESSION_CONTEXT_COMPACT_THRESHOLD", 0.5),
 
   forgejoPublicUrl: env("FORGEJO_PUBLIC_URL", "http://localhost:3000").replace(/\/$/, ""),

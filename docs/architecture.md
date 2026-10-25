@@ -96,7 +96,7 @@ Automatic compaction is enabled in the agent platform config (`opencode/opencode
 
 Project files plus `AGENTS.md` are the durable source of truth, so after compaction the agent re-reads the workspace. `/site compact` forces compaction on demand.
 
-Additionally, a thread idle longer than `SESSION_IDLE_RESET_MS` (default 2 h) gets a fresh agent session on its next message, and a turn ending with the context more than `SESSION_CONTEXT_COMPACT_THRESHOLD` (default 0.5) full compacts before the next turn starts.
+Additionally, a thread idle longer than `SESSION_IDLE_RESET_MS` (default 1 h) gets a fresh agent session on its next message, and a turn ending with the context more than `SESSION_CONTEXT_COMPACT_THRESHOLD` (default 0.5) full compacts before the next turn starts.
 
 ## Persistence and recovery
 
