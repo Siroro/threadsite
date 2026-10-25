@@ -293,16 +293,22 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   const metrics = state.metrics;
   const rate = metrics?.liveTokensPerSecond ?? metrics?.outputTokensPerSecond;
   // The step count carries the provider-stripped model identity in its
-  // parentheses — one fragment, and the same wording on the finished card.
+  // parentheses — the same summary fragment the finished card's usage shows.
   const model = metrics?.models ? modelNameSummary(metrics.models) : "";
-  const steps = metrics?.steps ? `${metrics.steps} model step${metrics.steps === 1 ? "" : "s"}${model ? ` (${model})` : ""}` : model;
+  const steps = metrics?.steps ? `${metrics.steps} step${metrics.steps === 1 ? "" : "s"}${model ? ` (${model})` : ""}` : model;
+  // Billed tokens stand in for the tool-error count: input with its cache
+  // share, then the total output — failures already headline the activity line.
+  // The triangles are text-presentation glyphs, so they render at text size
+  // next to the counts instead of the subtext-shrunken emoji.
+  const cacheShare = metrics?.cacheTokens && metrics?.inputTokens ? ` (${Math.round(Math.min(1, metrics.cacheTokens / metrics.inputTokens) * 100)}%)` : "";
+  const tokens = metrics && (metrics.inputTokens || metrics.outputTokens) ? `▼ ${formatTokens(metrics.inputTokens ?? 0)}${cacheShare} ▲ ${formatTokens(metrics.outputTokens ?? 0)}` : "";
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${[
-    `Elapsed ${elapsed(state.now - state.startedAt)}`,
+    `⏱️ ${elapsed(state.now - state.startedAt)}`,
     steps,
     metrics?.contextTokens ? metrics.contextLimit ? `${formatTokens(metrics.contextTokens)}/${formatTokens(metrics.contextLimit)} context` : `${formatTokens(metrics.contextTokens)} context` : "",
-    rate && rate > 0 ? `${metrics?.liveTokensPerSecond ? "~" : "avg ~"}${formatTokensPerSecond(rate)} tok/s` : "",
+    rate && rate > 0 ? `⚡~${formatTokensPerSecond(rate)}t/s` : "",
     state.activeTools ? `${state.activeTools} running` : "",
-    state.toolErrors ? `${state.toolErrors} tool error${state.toolErrors === 1 ? "" : "s"}` : "",
+    tokens,
     stalled ? `No progress for ${elapsed(stalled)}` : "",
   ].filter(Boolean).join(" · ")}`));
   return cardMessage(card);
@@ -381,7 +387,7 @@ export function progressDetailSections(state: ProgressSnapshot): PanelSection[] 
     { key: "overview", label: "Overview", text: overview },
     detailSections.plan(state),
     detailSections.files(state),
-    detailSections.usage(metrics, state.stats),
+    detailSections.usage(metrics, state.stats, state.toolErrors),
     detailSections.updates(updates, state.startedAt),
     state.reasoning?.length ? { key: "thinking", label: "Thinking trace", text: state.reasoning.map((item) => `**${elapsed(item.at - state.startedAt)}**\n${item.text}`).join("\n\n") } : undefined,
     { key: "activity", label: "Activity history", text: [...state.history, state.latest].filter((item) => item.text.trim()).map((item) => `${elapsed(item.at - state.startedAt)} · ${item.text}${item.detail ? `\n${item.detail}` : ""}`).join("\n\n") },
@@ -462,8 +468,15 @@ const detailSections = {
     ].filter(Boolean).join("\n");
     return text.trim() ? { key: "files", label: "Changed files", text } : undefined;
   },
-  usage(metrics: ProgressMetrics | undefined, stats: string | undefined): PanelSection | undefined {
-    const text = [hasUsageData(metrics) && metrics ? usageDetailText(metrics) : "", stats ?? ""].filter(Boolean).join("\n\n");
+  usage(metrics: ProgressMetrics | undefined, stats: string | undefined, toolErrors = 0): PanelSection | undefined {
+    // The tool-error count left the public footer for concision; this private
+    // page is its home, beside the turn's other figures. The finished turn's
+    // panel reuses this text as its "last live reading" block.
+    const text = [
+      hasUsageData(metrics) && metrics ? usageDetailText(metrics) : "",
+      stats ?? "",
+      toolErrors ? `⚠️ ${toolErrors} tool error${toolErrors === 1 ? "" : "s"}` : "",
+    ].filter(Boolean).join("\n\n");
     return text.trim() ? { key: "usage", label: "Usage & context", text } : undefined;
   },
   updates(updates: Array<{ text: string; at: number }>, startedAt: number): PanelSection | undefined {

@@ -266,13 +266,22 @@ test("the live public card names the running model without provider or spend; ad
     { model: "surplus/glm-5.3", inputTokens: 12_300, outputTokens: 800, cacheTokens: 5_840, cost: 0.02 },
   ] };
   const live = cardView(renderProgressCard(state));
-  assert.match(live.text, /12 model steps \(deepseek-4\.1, glm-5\.3\)/, "the step count carries the model identity");
+  assert.match(live.text, /12 steps \(deepseek-4\.1, glm-5\.3\)/, "the step count carries the model identity");
   assert.doesNotMatch(live.text, /surplus\//, "the public live card never shows provider routing");
   assert.doesNotMatch(live.text, /\$/, "the public live card never shows spend");
 
   const bare = cardView(renderProgressCard({ ...state, metrics: { contextTokens: 28_400, contextLimit: 100_000, steps: 12 } }));
-  assert.match(bare.text, /12 model steps/, "a snapshot without per-model attribution keeps the bare step count");
+  assert.match(bare.text, /12 steps\b/, "a snapshot without per-model attribution keeps the bare step count");
   assert.doesNotMatch(bare.text, /\(/, "no per-model attribution adds no parenthetical");
+});
+
+test("tool errors leave the public footer for the private usage page", () => {
+  const state = buildingSnapshot();
+  state.toolErrors = 2;
+  const footer = cardView(renderProgressCard(state)).text.split("\n").at(-1)!;
+  assert.doesNotMatch(footer, /tool error/, "the public footer stays compact: tokens replaced the error count");
+  const usage = progressDetailSections(state).find((section) => section.key === "usage")!;
+  assert.match(usage.text, /2 tool errors/, "the count keeps a home on the private details page");
 });
 
 
