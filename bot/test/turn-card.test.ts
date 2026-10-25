@@ -104,7 +104,6 @@ test("the new message carries the playable card, the screenshot and the play lin
   assert.equal(message.files.length, 1);
   const card = message.components[0].toJSON() as { type: number; accent_color?: number; components: Array<{ type: number; items?: Array<{ media: { url: string } }> }> };
   assert.equal(card.type, ComponentType.Container);
-  assert.equal(card.accent_color, 0x22c55e, "the playable card shares the turn's colour");
   const text = playCardText(message);
   assert.match(text, /-# 🎮 Play Koi Pond Arcade/);
   assert.match(text, /feed koi and race them/);

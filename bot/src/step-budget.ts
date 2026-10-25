@@ -15,7 +15,7 @@ export class TurnStepBudget {
   private refreshing = false;
   private sent = false;
   private retryAt = 0;
-  readonly threshold: number;
+  private readonly threshold: number;
 
   constructor(private readonly options: {
     limit: number;

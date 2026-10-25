@@ -15,7 +15,6 @@ process.env.DISCORD_APPLICATION_ID ||= "test";
 const binary = process.env.OPENCODE_V2_BINARY;
 assert.ok(binary, "Set OPENCODE_V2_BINARY to the OpenCode 2.1.4 executable");
 const { buildV2Config } = await import("../../opencode/v2/config.mjs");
-const { buildSurplusProvider } = await import("../../opencode/surplus-adapter.mjs");
 const { applyProviderConfig, readProviderConfig } = await import("../../opencode/provider-config.mjs");
 const { OpenCodeV2Harness } = await import("../src/opencode-v2.js");
 const { config } = await import("../src/config.js");
@@ -180,10 +179,14 @@ base.providers = { "threadsite-test": { package: "@ai-sdk/openai-compatible", na
     child: { name: "Child test", limit: { context: 32000, output: 2048 }, capabilities: { tools: true, input: ["text"], output: ["text"] } },
     vision: { name: "Vision QA test", limit: { context: 32000, output: 2048 }, capabilities: { tools: true, input: ["text", "image"], output: ["text"] } },
   } } };
-const surplus = await buildSurplusProvider({ config: { providers: { surplus: { settings: { baseURL: `http://127.0.0.1:${providerPort}/v1` } } } },
-  fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "glm-5.3",
-    supported_parameters: ["tools", "reasoning_effort"], architecture: { input_modalities: ["text"] } }] }) }) });
-base.providers.surplus = surplus.provider;
+// Production loads the same bundled defaults and discovers catalogs through the shared loader.
+const surplusDefaults = JSON.parse(await fs.readFile(new URL("../../opencode/providers.json", import.meta.url), "utf8"));
+const surplus = await applyProviderConfig({ providers: surplusDefaults.providers },
+  { providers: { surplus: { settings: { baseURL: `http://127.0.0.1:${providerPort}/v1` } } } }, {
+    defaultCatalogs: surplusDefaults.catalogs, defaultContextCaps: surplusDefaults.contextCaps,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "glm-5.3",
+      supported_parameters: ["tools", "reasoning_effort"], architecture: { input_modalities: ["text"] } }] }) }) });
+base.providers.surplus = surplus.providers.surplus;
 base.providers.openai = { models: { "host-context-alias": { modelID: "gpt-5.2" } } };
 const providerFile = path.join(root, "providers.json");
 await fs.writeFile(providerFile, JSON.stringify({ providers: base.providers, contextCaps: {

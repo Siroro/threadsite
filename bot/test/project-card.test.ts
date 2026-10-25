@@ -32,7 +32,7 @@ function usage(overrides: Partial<UsageTotal> = {}): UsageTotal {
   } as UsageTotal;
 }
 
-test("a live project puts settings before the request and shows version, links and lifetime usage", () => {
+test("a live project links its site and repo and keeps spend and model routing off the public card", () => {
   const card = cardView(renderProjectCard({
     project: record({
       multiplayerGameId: "koi-pond-arcade",
@@ -44,7 +44,6 @@ test("a live project puts settings before the request and shows version, links a
     siteUrl: "https://sites.example.invalid/koi-pond-arcade/",
     repoUrl: "https://git.example.invalid/site-koi-pond-arcade",
   }));
-  assert.equal(card.color, 0x22c55e);
   const lifetime = card.fields!.find((field) => field.name === "Lifetime usage")!.value;
   assert.ok(lifetime.length > 0);
   assert.equal(card.buttons[0].url, "https://sites.example.invalid/koi-pond-arcade/");

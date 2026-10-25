@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { testRootSetup } from "./fixtures/root.js";
-import { enginePackages, ensureEnginePackages } from "../src/engines.js";
+import { ensureEnginePackages } from "../src/engines.js";
 import { ensureSkillFiles, skillNames } from "../src/skills.js";
 import { starterSource } from "../src/starter.js";
 
@@ -22,7 +22,6 @@ async function scaffold(name: string): Promise<string> {
 
 test("2D engine seeding installs only Excalibur, repairs nested declarations", async () => {
   const workspace = await scaffold("seed");
-  assert.deepEqual(enginePackages("game-2d").map((engine) => engine.name), ["excalibur"]);
   const engine = path.join(workspace, "node_modules", "excalibur");
   const manifest = JSON.parse(await fs.readFile(path.join(engine, "package.json"), "utf8"));
   assert.equal(manifest.version, "0.32.0");

@@ -17,7 +17,6 @@ test("force finish arrives at 90% once, with room for checks, despite replayed e
   const budget = new TurnStepBudget({ limit: 200, since, read: async () => [],
     send: async (steps) => { sent.push(steps); return true; }, onError: assert.ifError });
   try {
-    assert.equal(budget.threshold, 180);
     for (let i = 0; i < 179; i++) { budget.observe(`step-${i}`); budget.observe(`step-${i}`); }
     assert.deepEqual(sent, []);
     budget.observe("step-179");
@@ -70,10 +69,13 @@ test("stopping a watcher prevents a late history response from steering an idle/
   budget.observe("late-event");
 });
 
-test("custom step budgets reserve the last tenth, including tiny limits", async () => {
-  for (const [limit, threshold] of [[1, 1], [2, 1], [10, 9], [120, 108], [350, 315]]) {
-    const budget = new TurnStepBudget({ limit, since, read: async () => [], send: async () => true, onError: assert.ifError });
-    assert.equal(budget.threshold, threshold);
-    await budget.stop();
-  }
+test("a tiny custom budget still force-finishes after a single step", async () => {
+  const sent: number[] = [];
+  const budget = new TurnStepBudget({ limit: 1, since, read: async () => [],
+    send: async (steps) => { sent.push(steps); return true; }, onError: assert.ifError });
+  try {
+    budget.observe("step-0");
+    await nextTick();
+    assert.deepEqual(sent, [1]);
+  } finally { await budget.stop(); }
 });

@@ -70,19 +70,24 @@ test("compatible catalog fetch uses auth, translates pricing, caps context and p
 });
 
 test("Surplus remains publicly discoverable with saved auth and offline fallback is conservative", async () => {
-  const host = { providers: { surplus: { models: { "glm-5.3": {}, "offline-vision": {} } } }, catalogs: { surplus: { contextCap: 0 } } };
+  const host = { providers: { surplus: { models: { "glm-5.3": {}, "effort-plain": {}, "offline-vision": {} } } }, catalogs: { surplus: { contextCap: 0 } } };
   let calls = 0;
   const config = await applyProviderConfig({ providers: bundled.providers }, host, {
     defaultCatalogs: bundled.catalogs, env: {}, fetchImpl: async (_url, options) => {
       calls++;
       assert.equal(options.headers.Authorization, undefined);
       return { ok: true, json: async () => ({ data: [{ id: "glm-5.3", supported_parameters: ["tools", "reasoning_effort"],
-        supported_features: ["vision"], context_length: 250000 }] }) };
+        supported_features: ["vision"], context_length: 250000 },
+      { id: "effort-plain", supported_parameters: ["tools", "reasoning_effort"], architecture: { input_modalities: ["text"] } }] }) };
     },
   });
   assert.equal(calls, 1);
   assert.equal(config.providers.surplus.models["glm-5.3"].limit.context, 250000);
   assert.equal(config.providers.surplus.models["glm-5.3"].variants.find((item) => item.id === "medium").body.reasoning_effort, "high");
+  // Non-GLM catalogs accept every effort verbatim; only the GLM routes alias.
+  const plain = config.providers.surplus.models["effort-plain"].variants;
+  assert.deepEqual(plain.find((item) => item.id === "medium").body, { reasoning_effort: "medium" });
+  assert.deepEqual(plain.find((item) => item.id === "high").body, { reasoning_effort: "high" });
   assert.deepEqual(config.providers.surplus.models["glm-5.3"].capabilities.input, ["text", "image"]);
   assert.deepEqual(config.providers.surplus.models["offline-vision"].capabilities.input, ["text"]);
   const warnings = [];

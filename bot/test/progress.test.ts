@@ -161,7 +161,7 @@ test("progress edits are serialized and close waits before the final result can 
   assert.equal(edits.length, 1);
 });
 
-test("running/completed duplicates count as one tool action, and Stop remains available", async () => {
+test("running/completed duplicates count as one tool action and stay out of the feed", async () => {
   const progress = new DiscordProgress({ id: "status", edit: async () => {} } as unknown as Message, "Updating");
   try {
     progress.enableStopButton();
@@ -175,7 +175,7 @@ test("running/completed duplicates count as one tool action, and Stop remains av
   } finally { await progress.close(); }
 });
 
-test("progress needs no embed permission and nests Turn details and a red Stop in the V2 card", async () => {
+test("progress needs no embed permission and upgrades the acknowledgement into a V2 card", async () => {
   const edits: MessageEditOptions[] = [];
   const message = { id: "v2", edit: async (options: MessageEditOptions) => {
     assert.ok(!options.embeds?.length);
