@@ -7,3 +7,4 @@ Use installed **Excalibur 0.32.0**: `import * as ex from "excalibur"`. Read the 
 - Update-hook elapsed time is milliseconds; actor velocity is pixels/second. Do not integrate movement twice.
 - Use `suppressPlayButton: true`, `FillContainer` (explicitly sized) or `FillScreen`, and automatic HiDPI. Resize the layout rather than CSS-stretching a low-resolution canvas.
 - For pixel art, use nearest-neighbor filtering, `antialiasing: false`, `snapToPixel: true` and integer zoom; avoid the blended `pixelArt: true` preset.
+- Hold one facing convention: sprites are drawn facing right unless the design says otherwise, mirrored in code (negative x scale) for leftward motion — never separate mirrored art. Verify in the running game that every entity visually faces the way it moves, shoots or steers.
