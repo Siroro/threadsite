@@ -749,8 +749,6 @@ async function shutdown(): Promise<void> {
     Promise.allSettled(flushDurableRooms()),
     new Promise((resolve) => setTimeout(resolve, SHUTDOWN_FLUSH_TIMEOUT_MS).unref()),
   ]);
-  const bye = { t: "bye", reason: "shutdown" };
-  for (const rooms of games.values()) for (const room of rooms.values()) broadcast(room, bye);
   for (const socket of wss.clients) socket.close(1001, "server shutdown");
   server.close(() => process.exit(0));
   // Idle keep-alive HTTP connections (health checks) would otherwise keep
