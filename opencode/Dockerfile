@@ -1,6 +1,6 @@
 FROM node:24-bookworm-slim
 
-ARG OPENCODE_VERSION=2.1.3
+ARG OPENCODE_VERSION=2.1.4
 RUN npm install -g "@opencode/cli@${OPENCODE_VERSION}" \
     && mkdir -p /opencode-data /workspace /opt/threadsite
 

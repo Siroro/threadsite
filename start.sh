@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
     --no-update) UPDATE=0 ;;
     --force) FORCE=1 ;;
     -h|--help) usage; exit 0 ;;
-    bot|opencode|forgejo|gameserver|preview|httpd|caddy) SERVICE="$1" ;;
+    bot|opencode|forgejo|gameserver|preview|static-web|caddy) SERVICE="$1" ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
   shift
