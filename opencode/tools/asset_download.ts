@@ -4,6 +4,7 @@ import dns from "node:dns/promises";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
+import { normalizeDestination, positiveInt } from "../lib/asset-inputs.js";
 import { queueSourceRecord } from "../lib/asset-sources.js";
 
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
@@ -51,14 +52,6 @@ export default tool({
   },
 });
 
-function normalizeDestination(input: string): string {
-  let value = input.trim().replaceAll("\\", "/");
-  value = value.replace(/^\.?\/?site\/assets\//i, "").replace(/^\/?assets\//i, "");
-  if (!value || value.startsWith("/") || value.split("/").some((part) => !part || part === "." || part === ".." || part.startsWith("."))) {
-    throw new Error("Destination must be a normal relative path below site/assets with no dot/path-traversal segments");
-  }
-  return value;
-}
 
 async function fetchPublicAsset(
   input: string,
@@ -156,9 +149,4 @@ function isPrivateAddress(address: string): boolean {
       normalized.startsWith("ff") || normalized.startsWith("2001:db8:");
   }
   return true;
-}
-
-function positiveInt(raw: string | undefined, fallback: number): number {
-  const value = Number.parseInt(raw || "", 10);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
 }

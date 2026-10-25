@@ -2,6 +2,7 @@ import { tool } from "../v2/tool-definition.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { normalizeDestination, positiveInt } from "../lib/asset-inputs.js";
 import { queueSourceRecord } from "../lib/asset-sources.js";
 
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
@@ -47,17 +48,3 @@ export default tool({
     return `Saved ${sourceRecord.file} (${bytes.length} bytes). Source metadata was recorded in ASSET_SOURCES.json. The copy under scratch/uploads remains; remove it once the file is installed.`;
   },
 });
-
-function normalizeDestination(input: string): string {
-  let value = input.trim().replaceAll("\\", "/");
-  value = value.replace(/^\.?\/?site\/assets\//i, "").replace(/^\/?assets\//i, "");
-  if (!value || value.startsWith("/") || value.split("/").some((part) => !part || part === "." || part === ".." || part.startsWith("."))) {
-    throw new Error("Destination must be a normal relative path below site/assets with no dot/path-traversal segments");
-  }
-  return value;
-}
-
-function positiveInt(raw: string | undefined, fallback: number): number {
-  const value = Number.parseInt(raw || "", 10);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
-}
