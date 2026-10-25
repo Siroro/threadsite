@@ -103,6 +103,7 @@ async function bundle(workspaceRoot, project, view) {
     bundle: true, format: "esm", splitting: true, target: "es2022",
     legalComments: "eof", sourcemap: false, minify: true, metafile: true, logLevel: "silent",
     chunkNames: "chunks/[name]-[hash]", assetNames: "assets/[name]-[hash]", write: false,
+    loader: { ".glb": "file", ".gltf": "file" },
     preserveSymlinks: true,
     plugins: [{
       name: "preview-boundary",

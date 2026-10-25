@@ -37,7 +37,7 @@ interface EnginePackage {
   /** package.json content; the marker file for cheap per-turn freshness checks. */
   manifest: string;
   /** Files copied verbatim from the bot's node_modules, [bot-relative, package-relative]. */
-  files: Array<{ from: string; to: string }>;
+  files: Array<{ from: string; to: string; content?: string }>;
   /** Recursive trees; declarationsOnly excludes runtime builds beside .d.ts files. */
   dirs: Array<{ from: string; to: string; declarationsOnly?: boolean }>;
   /** Package-relative path of the TypeScript declaration entry. */
@@ -60,16 +60,36 @@ const THREE_PACKAGE: EnginePackage = {
         types: "./index.d.ts",
         import: "./build/three.module.js",
       },
+      // The seeded addons subset (glTF/Draco loaders, meshopt decoder) keeps
+      // the canonical three import paths working for model loading.
+      "./addons/*": "./examples/jsm/*",
+      "./examples/jsm/*": "./examples/jsm/*",
     },
   }, null, 2) + "\n",
   // Runtime: the module build plus its internal core dependency (0.186+ ships
   // no minified builds; the harness bundle minifies). Types: the
   // DefinitelyTyped tree, which is a src/**/*.d.ts graph reached from index.d.ts.
+  // Addons: exactly the glTF loading graph (GLTFLoader + the utils it imports,
+  // DRACOLoader, the meshopt decoder) with matching declarations, so 3D
+  // projects load models without vendoring loaders by hand. KTX2Loader ships
+  // types only — GLTFLoader.d.ts imports it; skipLibCheck leaves its body
+  // unchecked and GLTFLoader.js never imports it at runtime.
   files: [
     { from: "three/build/three.module.js", to: "build/three.module.js" },
     { from: "three/build/three.core.js", to: "build/three.core.js" },
     { from: "three/LICENSE", to: "LICENSE" },
     { from: "@types/three/index.d.ts", to: "index.d.ts" },
+    { from: "three/examples/jsm/loaders/GLTFLoader.js", to: "examples/jsm/loaders/GLTFLoader.js" },
+    { from: "three/examples/jsm/loaders/DRACOLoader.js", to: "examples/jsm/loaders/DRACOLoader.js" },
+    { from: "three/examples/jsm/utils/BufferGeometryUtils.js", to: "examples/jsm/utils/BufferGeometryUtils.js" },
+    { from: "three/examples/jsm/utils/SkeletonUtils.js", to: "examples/jsm/utils/SkeletonUtils.js" },
+    { from: "three/examples/jsm/libs/meshopt_decoder.module.js", to: "examples/jsm/libs/meshopt_decoder.module.js" },
+    { from: "@types/three/examples/jsm/loaders/GLTFLoader.d.ts", to: "examples/jsm/loaders/GLTFLoader.d.ts" },
+    { from: "@types/three/examples/jsm/loaders/DRACOLoader.d.ts", to: "examples/jsm/loaders/DRACOLoader.d.ts" },
+    { from: "@types/three/examples/jsm/loaders/KTX2Loader.d.ts", to: "examples/jsm/loaders/KTX2Loader.d.ts" },
+    { from: "@types/three/examples/jsm/utils/BufferGeometryUtils.d.ts", to: "examples/jsm/utils/BufferGeometryUtils.d.ts" },
+    { from: "@types/three/examples/jsm/utils/SkeletonUtils.d.ts", to: "examples/jsm/utils/SkeletonUtils.d.ts" },
+    { from: "@types/three/examples/jsm/libs/meshopt_decoder.module.d.ts", to: "examples/jsm/libs/meshopt_decoder.module.d.ts" },
   ],
   dirs: [{ from: "@types/three/src", to: "src" }],
   typesEntry: "three/index.d.ts",
@@ -185,8 +205,36 @@ const EXCALIBUR_PACKAGE: EnginePackage = {
 };
 
 /** The engine packages a project kind depends on; sites get none. */
+/**
+ * Types-only companion for three's glTF addons: @types/three's
+ * meshopt_decoder declaration re-exports `meshoptimizer/decoder`, which needs
+ * this package beside three for authored code and the type gate to resolve.
+ * The runtime decoder is three's own self-contained module; only the
+ * declaration ships here.
+ */
+const MESHOPT_TYPES_PACKAGE: EnginePackage = {
+  name: "meshoptimizer",
+  version: "1.1.1",
+  manifest: JSON.stringify({
+    name: "meshoptimizer",
+    version: "1.1.1",
+    description: "meshoptimizer (harness-seeded, declarations for three/addons decoder imports)",
+    type: "module",
+    license: "MIT",
+    types: "./meshopt_decoder.d.ts",
+    exports: {
+      "./decoder": { types: "./meshopt_decoder.d.ts", default: "./meshopt_decoder.mjs" },
+    },
+  }, null, 2) + "\n",
+  files: [
+    { from: "meshoptimizer/meshopt_decoder.d.ts", to: "meshopt_decoder.d.ts" },
+  ],
+  dirs: [],
+  typesEntry: "meshoptimizer/meshopt_decoder.d.ts",
+};
+
 export function enginePackages(kind: ProjectKind): EnginePackage[] {
-  if (kind === "game-3d") return [THREE_PACKAGE, RAPIER_PACKAGE, THREE_MESH_BVH_PACKAGE];
+  if (kind === "game-3d") return [THREE_PACKAGE, MESHOPT_TYPES_PACKAGE, RAPIER_PACKAGE, THREE_MESH_BVH_PACKAGE];
   if (kind === "game-2d") return [EXCALIBUR_PACKAGE];
   return [];
 }
@@ -234,12 +282,20 @@ async function copyEngineDirectory(sourceRoot: string, targetRoot: string, dir: 
 }
 
 /** Bare import name → bundled declaration for every engine the harness can
- * seed, kind-independent; callers probe for the packages they care about. */
+ * seed, kind-independent; callers probe for the packages they care about.
+ * The three entry also maps its seeded addon subpaths (three/addons/*,
+ * three/examples/jsm/*) onto the workspace package so the validation gate's
+ * tsconfig paths resolve glTF loader imports the way the exports map does at
+ * runtime — the gate's mirror directory has no node_modules to walk. */
 export function engineTypeEntries(workspacePath: string): Array<{ importName: string; declaration: string }> {
-  return [THREE_PACKAGE, RAPIER_PACKAGE, THREE_MESH_BVH_PACKAGE, EXCALIBUR_PACKAGE].map((engine) => ({
+  return [THREE_PACKAGE, MESHOPT_TYPES_PACKAGE, RAPIER_PACKAGE, THREE_MESH_BVH_PACKAGE, EXCALIBUR_PACKAGE].map((engine) => ({
     importName: engine.name,
     declaration: safeChild(workspacePath, "node_modules", ...engine.typesEntry.split("/")),
-  }));
+  })).concat([
+    { importName: "three/addons/*", declaration: safeChild(workspacePath, "node_modules", "three", "examples", "jsm", "*") },
+    { importName: "three/examples/jsm/*", declaration: safeChild(workspacePath, "node_modules", "three", "examples", "jsm", "*") },
+    { importName: "meshoptimizer/decoder", declaration: safeChild(workspacePath, "node_modules", "meshoptimizer", "meshopt_decoder.d.ts") },
+  ]);
 }
 
 /**
@@ -287,10 +343,10 @@ export async function ensureEnginePackages(workspacePath: string, kind: ProjectK
     await fs.rm(packageDir, { recursive: true, force: true });
     await fs.mkdir(packageDir, { recursive: true });
     for (const file of engine.files) {
-      const source = path.join(sourceRoot, ...file.from.split("/"));
       const target = path.join(packageDir, ...file.to.split("/"));
       await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.copyFile(source, target);
+      if (file.content !== undefined) await fs.writeFile(target, file.content, "utf8");
+      else await fs.copyFile(path.join(sourceRoot, ...file.from.split("/")), target);
     }
     for (const dir of engine.dirs) {
       await copyEngineDirectory(sourceRoot, packageDir, dir);
@@ -351,10 +407,10 @@ export async function stageEngineSeed(targetDir: string, sourceRoot: string = BO
       await fs.rm(safeChild(targetDir, ...top.split("/")), { recursive: true, force: true });
     }
     for (const file of engine.files) {
-      const source = path.join(sourceRoot, ...file.from.split("/"));
       const target = safeChild(targetDir, ...file.from.split("/"));
       await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.copyFile(source, target);
+      if (file.content !== undefined) await fs.writeFile(target, file.content, "utf8");
+      else await fs.copyFile(path.join(sourceRoot, ...file.from.split("/")), target);
     }
     for (const dir of engine.dirs) {
       await copyEngineDirectory(sourceRoot, targetDir, { ...dir, to: dir.from });

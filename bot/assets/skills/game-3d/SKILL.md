@@ -126,25 +126,34 @@ renderer.setAnimationLoop((time) => update(time));              // one loop, sta
 
 - Fetch licensed GLB/GLTF models, PBR textures, and audio with `asset_download`
   into `site/assets/` (Kenney, Quaternius, Poly Haven are reliable CC0 sources);
-  record provenance. Prefer compact GLB with embedded or alongside PNG/JPG
-  textures. KTX2/Draco-compressed assets need extra loader addons and decoder
-  WASM — skip them for a static-site game.
-- Load models with the vendored `GLTFLoader`; wrap loads in a `LoadingManager`
+  record provenance — or delegate sourcing and creation to the `asset-forge`
+  subagent. Prefer compact GLB with embedded or alongside PNG/JPG
+  textures. KTX2-compressed assets need loader addons that are not seeded —
+  skip them for a static-site game.
+- Load models with the seeded loader addons; wrap loads in a `LoadingManager`
   with a visible progress bar and a boot state — never a blank screen:
 
   ```ts
-  import { GLTFLoader } from "../assets/vendor/addons/GLTFLoader.js";
-  const loader = new GLTFLoader();
-  loader.load("assets/robot.glb", (gltf) => scene.add(gltf.scene));
+  import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+  import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+  import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+  const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+  // Draco models additionally need decoder files under site/assets/ and
+  // setDecoderPath with a page-relative URL; uncompressed GLB needs none.
+  loader.load(importedModelUrl, (gltf) => scene.add(gltf.scene));
   ```
 
-- **Addons** (`OrbitControls`, `GLTFLoader`, `PointerLockControls`,
-  `BufferGeometryUtils`, `RoomEnvironment` for cheap PBR ambient via
-  `PMREMGenerator`) are not in the installed package. Download the specific
-  addon file with `asset_download` into `site/assets/vendor/addons/` and import
-  it relatively — its bare `import ... from "three"` resolves through the
-  workspace package at build time (see AGENTS.md's engine-packages section).
-  Subpath imports like `"three/addons/*"` do **not** resolve; adapt them.
+- Import `.glb`/`.gltf` files from `site/src` like other media — the import
+  value is the emitted, hashed asset URL — or fetch at runtime with a relative
+  URL that survives any publication path prefix.
+- **Other addons** (`OrbitControls`, `PointerLockControls`, `RoomEnvironment`
+  for cheap PBR ambient via `PMREMGenerator`) are not in the installed
+  package. Download the specific addon file with `asset_download` into
+  `site/assets/vendor/addons/` and import it relatively — its bare
+  `import ... from "three"` resolves through the workspace package at build
+  time (see AGENTS.md's engine-packages section). Subpath imports beyond the
+  seeded loaders, e.g. `"three/addons/controls/*"`, do **not** resolve; adapt
+  them.
 
 ## Picking, collision, and physics
 

@@ -2,7 +2,8 @@
 
 Use installed `three`, `@dimforge/rapier3d-compat` and `three-mesh-bvh`; never add another renderer/physics engine. Read `game-3d` and relevant `threejs-game-studio` references for implementation.
 
-- Import `three` by bare name. Addons are not seeded: download needed files into `site/assets/vendor/addons/`, keeping bare `"three"` imports; adapt unsupported `three/addons/*` imports.
+- Import `three` by bare name. The glTF loading addons are seeded with types: `GLTFLoader` and `DRACOLoader` from `three/addons/loaders/*.js`, `MeshoptDecoder` from `three/addons/libs/meshopt_decoder.module.js` — no vendoring needed. Load models with `GLTFLoader` (plus `setDRACOLoader`/`setMeshoptDecoder` when the asset needs them; Draco also requires decoder files installed under `site/assets/` and `setDecoderPath` with a page-relative URL). Import `.glb`/`.gltf` files like other media — the import binds the emitted asset URL — or fetch them at runtime by relative URL.
+- Other addons are not seeded: download needed files into `site/assets/vendor/addons/`, keeping bare `"three"` imports; adapt unsupported `three/addons/*` imports.
 - Coordinate convention: yaw = `atan2(dx, dz)`, forward = `(sin yaw, 0, cos yaw)`; model `rotation.y` and net `facing` use that yaw. Left increases yaw. Map controls through the camera basis when it rotates; north-up top-down cameras use `camera.up.set(0, 0, -1)`.
 - Use Rapier for rigid bodies/robust character collision; simple arcade overlap tests may use three math. Never simulate the same objects with both. Initialize Rapier once, fixed-step physics, then copy body transforms to meshes; characters use its kinematic controller.
 - Retire physics entities once, removing both bodies and tracking entries. Never swallow Rapier exceptions or reuse removed handles.

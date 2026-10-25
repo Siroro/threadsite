@@ -10,7 +10,7 @@ import { ensureGitignoreLines, safeChild } from "./util.js";
  * it is small, stable, harness-authored input, and stays in the tree so the
  * repo shows the multiplayer wiring.
  */
-export const GENERATED_GITIGNORE = [".opencode/", "node_modules/", "scratch/", "site/js/", "build-manifest.json"] as const;
+export const GENERATED_GITIGNORE = [".opencode/", "node_modules/", "scratch/", "site/js/", "site/src/media.d.ts", "build-manifest.json"] as const;
 
 export interface BuildResult {
   /** True when the workspace has no site/src TypeScript — a plain static site. */
@@ -83,6 +83,7 @@ export async function buildSite(workspacePath: string): Promise<BuildResult> {
     await writeManifest(manifestFile, new Set());
     return { skipped: false, emitted: 0, pruned };
   }
+  await ensureMediaDeclarations(srcDir);
 
   const outputs = await bundle(siteDir, entries);
   const pruned = await prune(siteDir, previous, outputs);
@@ -111,6 +112,9 @@ async function bundle(siteDir: string, entries: string[]): Promise<Set<string>> 
       logLevel: "silent",
       chunkNames: "chunks/[name]-[hash]",
       assetNames: "assets/[name]-[hash]",
+      // Models join the other media imports: importing a .glb/.gltf binds the
+      // emitted, hashed asset URL, so glTF loading needs no hand-built paths.
+      loader: { ".glb": "file", ".gltf": "file" },
       write: false,
       preserveSymlinks: true,
       plugins: [buildBoundary(path.dirname(siteDir), siteDir)],
@@ -158,6 +162,35 @@ async function bundle(siteDir: string, entries: string[]): Promise<Set<string>> 
 function inside(root: string, file: string): boolean {
   const relative = path.relative(root, file);
   return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+/**
+ * Ambient URL types for media imports, seeded beside the authored source. The
+ * bundler resolves imported media with its file loader and emits each file's
+ * hashed URL as the default export; without these declarations the type gate
+ * rejects every media import (TS2307), pushing agents toward fragile
+ * hand-built paths instead. Harness-owned and content-compared; agents never
+ * need to write (or edit) their own module declarations for media.
+ */
+const MEDIA_DECLARATIONS = [
+  "// Harness-owned (reseeded each build): imported media resolves to its emitted URL.",
+  "// Do not edit; add unrelated declarations in your own .d.ts file.",
+  ...[
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif", "*.bmp", "*.ico", "*.svg",
+    "*.mp3", "*.ogg", "*.wav", "*.m4a", "*.flac",
+    "*.mp4", "*.webm",
+    "*.glb", "*.gltf",
+    "*.woff", "*.woff2", "*.ttf", "*.otf",
+  ].map((pattern) =>
+    `declare module "${pattern}" {\n  const url: string;\n  export default url;\n}`),
+  "",
+].join("\n");
+
+async function ensureMediaDeclarations(srcDir: string): Promise<void> {
+  const file = path.join(srcDir, "media.d.ts");
+  if (await fs.readFile(file, "utf8").catch(() => undefined) === MEDIA_DECLARATIONS) return;
+  await fs.mkdir(srcDir, { recursive: true });
+  await fs.writeFile(file, MEDIA_DECLARATIONS, "utf8");
 }
 
 async function checkBuildPath(workspace: string, relative: string, allowMissing = false): Promise<void> {

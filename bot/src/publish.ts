@@ -369,7 +369,11 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
       const mirrored = path.join(mirrorRoot, ...relative.split("/"));
       await fs.mkdir(path.dirname(mirrored), { recursive: true });
       await fs.writeFile(mirrored, await fs.readFile(absolute, "utf8"), "utf8");
-      if (!/\.d\.[cm]?ts$/.test(relative)) inputs.push(relative);
+      // Authored src/ declarations join the program: ambient declarations
+      // (the harness-seeded media.d.ts, or agent-written wildcard modules)
+      // only take effect as inputs, while module-shaped declarations under
+      // net/ or assets/ keep resolving through their import paths.
+      if (!/\.d\.[cm]?ts$/.test(relative) || relative.startsWith("src/")) inputs.push(relative);
     }
 
     // Harness-owned net files stay real so authored imports resolve: the
@@ -408,7 +412,10 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
     const workspacePath = path.resolve(root, "..");
     const paths: Record<string, string[]> = {};
     for (const engine of engineTypeEntries(workspacePath)) {
-      if (await fs.access(engine.declaration).then(() => true, () => false)) {
+      // Wildcard entries (three/addons/*) substitute per-import; probe the
+      // directory they map onto rather than the literal star path.
+      const probe = engine.declaration.endsWith("*") ? path.dirname(engine.declaration) : engine.declaration;
+      if (await fs.access(probe).then(() => true, () => false)) {
         paths[engine.importName] = [engine.declaration.replaceAll(path.sep, "/")];
       }
     }

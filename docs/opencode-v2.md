@@ -56,7 +56,10 @@ reviewing delivered assets.
 The agent is told to study what the project already has — listing
 `site/assets`, reading `ASSET_SOURCES.json`, previewing existing images and
 checking how `site/src` loads them — so new assets match the established
-style, palette, scale and quality bar instead of arriving as strangers. With
+style, palette, scale and quality bar instead of arriving as strangers. Its
+step budget is 100, and its instructions require batched work — one
+parameterized generator script per asset family, consolidated save/preview
+passes — so a full brief finishes well inside that budget. With
 browser tools it opens the harness asset viewer at
 `<preview>/<guild-id>/<thread-id>/__assets/` to see the whole set together,
 and the game itself to see its assets in play; its report states what was

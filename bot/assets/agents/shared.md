@@ -35,7 +35,7 @@ Delegate assets to `agent: "asset-forge"` instead of hand-authoring media or hun
 
 ## Build and checks
 
-Each top-level `site/src/*.ts` becomes `site/js/<name>.js`; nested files are imported modules. HTML loads `js/main.js`, never TypeScript. Relative imports such as `"./player.js"` resolve `player.ts`; installed packages use bare imports. JSON imports inline data; imported media emits asset URLs. Prefer linked CSS.
+Each top-level `site/src/*.ts` becomes `site/js/<name>.js`; nested files are imported modules. HTML loads `js/main.js`, never TypeScript. Relative imports such as `"./player.js"` resolve `player.ts`; installed packages use bare imports. JSON imports inline data; imported media — images, audio, video, glTF/GLB models, fonts — emits the file's hashed URL as its default export. The harness seeds `site/src/media.d.ts` so those imports type-check; leave it as-is. Prefer linked CSS.
 
 Use `js_syntax_check` on changed deliverable files. Before finishing, run the same full TypeScript check as the harness and fix its errors:
 

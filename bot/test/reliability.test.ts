@@ -61,6 +61,48 @@ test("production accepts local modules and the real seeded engine package graph"
   assert.ok((await buildSite(dir)).emitted > 0);
 });
 
+test("seeded glTF addons and model media imports build, type-check and emit hashed asset URLs", async () => {
+  const dir = await workspace("models");
+  await ensureEnginePackages(dir, "game-3d");
+  // The seeded addons must resolve through the workspace package — no vendored copy.
+  await fs.writeFile(path.join(dir, "site/src/main.ts"),
+    'import * as THREE from "three";\n'
+    + 'import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";\n'
+    + 'import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";\n'
+    + 'import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";\n'
+    + 'import robotUrl from "../assets/models/robot.glb";\n'
+    + 'const loader = new GLTFLoader().setDRACOLoader(new DRACOLoader()).setMeshoptDecoder(MeshoptDecoder);\n'
+    + 'loader.load(robotUrl, (gltf) => console.log(new THREE.Vector3(), gltf.scene));\n');
+  const positions = new Float32Array([-1, -1, 0, 1, -1, 0, 0, 1, 0]);
+  await fs.mkdir(path.join(dir, "site/assets/models"), { recursive: true });
+  const gltf = JSON.stringify({
+    asset: { version: "2.0" }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: 3, type: "VEC3", min: [-1, -1, 0], max: [1, 1, 0] }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: positions.byteLength }],
+    buffers: [{ byteLength: positions.byteLength }],
+  });
+  const jsonPad = " ".repeat((4 - (gltf.length % 4)) % 4);
+  const u32 = (value: number) => Buffer.from(new Uint32Array([value]).buffer);
+  await fs.writeFile(path.join(dir, "site/assets/models/robot.glb"), Buffer.concat([
+    u32(0x46546c67), u32(2), u32(12 + 8 + gltf.length + jsonPad.length + 8 + positions.byteLength),
+    u32(gltf.length + jsonPad.length), u32(0x4e4f534a), Buffer.from(gltf + jsonPad),
+    u32(positions.byteLength), u32(0x004e4942), Buffer.from(positions.buffer as ArrayBuffer),
+  ]));
+  // The harness seeds the ambient URL types; drift (or deletion) is repaired.
+  await fs.rm(path.join(dir, "site/src/media.d.ts"), { force: true });
+  const result = await buildSite(dir);
+  assert.ok(result.emitted > 0);
+  assert.match(await fs.readFile(path.join(dir, "site/src/media.d.ts"), "utf8"), /declare module "\*\.glb"/);
+  // The model is emitted as a hashed asset beside the bundle and referenced by URL.
+  const main = await fs.readFile(path.join(dir, "site/js/main.js"), "utf8");
+  const match = main.match(/assets\/robot-[\w-]+\.glb/);
+  assert.ok(match, "the bundled code references the hashed model URL");
+  await fs.access(path.join(dir, "site/js", match[0]));
+  // The full validation gate (including the tsc type-check) accepts media imports.
+  await validateSite(path.join(dir, "site"));
+});
+
 test("broken scratch experiments stay outside production builds, validation, Git and publication", async () => {
   const f = await projectFixture("scratch-boundary");
   const experiment = path.join(f.dir, "scratch", "car");

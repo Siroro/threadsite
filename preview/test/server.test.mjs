@@ -325,3 +325,35 @@ test("the asset manifest stops at 1,000 files and reports truncation", async (t)
   assert.equal(manifest.files.length, 1000);
   assert.equal(manifest.truncated, true);
 });
+
+test("preview emits imported glb models as hashed assets, matching production", async (t) => {
+  const { site, get } = await fixture(t);
+  const positions = new Float32Array([-1, -1, 0, 1, -1, 0, 0, 1, 0]);
+  await fs.mkdir(path.join(site, "assets", "models"), { recursive: true });
+  const gltf = JSON.stringify({
+    asset: { version: "2.0" }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: 3, type: "VEC3", min: [-1, -1, 0], max: [1, 1, 0] }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: positions.byteLength }],
+    buffers: [{ byteLength: positions.byteLength }],
+  });
+  const jsonPad = " ".repeat((4 - (gltf.length % 4)) % 4);
+  const u32 = (value) => Buffer.from(new Uint32Array([value]).buffer);
+  const glb = Buffer.concat([
+    u32(0x46546c67), u32(2), u32(12 + 8 + gltf.length + jsonPad.length + 8 + positions.byteLength),
+    u32(gltf.length + jsonPad.length), u32(0x4e4f534a), Buffer.from(gltf + jsonPad),
+    u32(positions.byteLength), u32(0x004e4942), Buffer.from(positions.buffer),
+  ]);
+  await fs.writeFile(path.join(site, "assets", "models", "robot.glb"), glb);
+  await fs.writeFile(path.join(site, "src", "main.ts"),
+    'import robotUrl from "../assets/models/robot.glb"; document.title = robotUrl;');
+  const page = await get();
+  assert.equal(page.status, 200);
+  const main = await (await get("js/main.js")).text();
+  const match = main.match(/assets\/robot-[\w-]+\.glb/);
+  assert.ok(match, `preview bundle must reference the hashed model URL: ${main.slice(0, 200)}`);
+  const asset = await get(`js/${match[0]}`);
+  assert.equal(asset.status, 200);
+  assert.equal(asset.headers.get("content-type"), "model/gltf-binary");
+  assert.ok(Buffer.from(await asset.arrayBuffer()).equals(glb), "the emitted asset carries the original bytes");
+});
