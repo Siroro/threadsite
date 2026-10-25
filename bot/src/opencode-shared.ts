@@ -368,6 +368,14 @@ export function describeTool(tool: string, input: any, status: string, title?: s
     const destination = typeof input?.destination === "string" ? path.basename(input.destination) : undefined;
     return { text: status === "running" ? "📤 Installing an uploaded file" : "📦 Upload installed into the site", detail: destination };
   }
+  if (normalized === "asset_save") {
+    const destination = typeof input?.destination === "string" ? path.basename(input.destination) : undefined;
+    return { text: status === "running" ? "🎨 Creating an asset" : "🖼️ Asset added to the site", detail: destination };
+  }
+  if (normalized === "asset_preview") {
+    const file = typeof input?.file === "string" ? path.basename(input.file) : undefined;
+    return { text: status === "running" ? "👀 Reviewing an asset" : "👀 Asset reviewed", detail: file };
+  }
   if (["edit", "write", "apply_patch"].includes(normalized)) {
     const target = input?.filePath ?? input?.file_path ?? input?.path ?? input?.file;
     const detail = typeof target === "string" ? projectFileLabel(target, directory) : undefined;

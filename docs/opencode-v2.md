@@ -10,11 +10,11 @@ Agent state is stored in `/opencode-data/v2`. Workspaces, repositories, static p
 
 ## V2 runtime and commands
 
-`opencode/v2/config.mjs` applies deployment settings to the native policy, including the independent general/explore models, step limit, project brief, MCP timeouts and compaction limits. `opencode/provider-config.mjs` loads host provider overrides and optional compatible catalogs. The Surplus public model fetcher remains enabled by `opencode/providers.json`; its credentials, endpoint, fallback models and context cap are configured through host JSON. See [host provider setup and pricing](deployment.md#opencode-providers-and-credentials). `snapshots` are disabled: the harness owns Git and rollback. The native plugin supplies the four guarded tools (`asset_download`, `asset_import`, `js_syntax_check`, `project_notes`) and `todoread`; v2's experimental `todowrite` is explicitly enabled. Unknown built-in tools, including worktree and terminal management, are removed. Shell commands and general/explore subagents run in the foreground. The inspection-only `browser-qa` subagent also supports `background: true`.
+`opencode/v2/config.mjs` applies deployment settings to the native policy, including the independent general/explore models, step limit, project brief, MCP timeouts and compaction limits. `opencode/provider-config.mjs` loads host provider overrides and optional compatible catalogs. The Surplus public model fetcher remains enabled by `opencode/providers.json`; its credentials, endpoint, fallback models and context cap are configured through host JSON. See [host provider setup and pricing](deployment.md#opencode-providers-and-credentials). `snapshots` are disabled: the harness owns Git and rollback. The native plugin supplies the six guarded tools (`asset_download`, `asset_import`, `asset_save`, `asset_preview`, `js_syntax_check`, `project_notes`) and `todoread`; v2's experimental `todowrite` is explicitly enabled. Unknown built-in tools, including worktree and terminal management, are removed. Shell commands and general/explore subagents run in the foreground. The inspection-only `browser-qa` subagent and the asset-creating `asset-forge` subagent also support `background: true`.
 
 The shell policy permits `rg`, scoped `find` and `rm` for explicit editable paths inside `site/` or `scratch/`. The plugin rejects destructive find actions, traversal, rm shell operators/globs, symlinks, and removal of harness inputs such as `site/net/` or generated `site/js/`. The harness enforces dependency seeding, Git ownership, build validation, publication exclusions, symlink checks and static-site limits. These command permissions are application policy, not an operating-system sandbox.
 
-Browser tools are absent for text-only or unknown models, checked both through session permissions and at each native model request. General/explore agents always have browser access disabled. Harness browser QA is independent and remains advisory.
+Browser tools are absent for text-only or unknown models, checked both through session permissions and at each native model request. General/explore agents always have browser access disabled. The `asset-forge` agent earns browser tools when its own model accepts images, so a vision fallback can inspect assets even under a text-only builder. Harness browser QA is independent and remains advisory.
 
 Set `OPENCODE_BROWSER_QA_MODEL=provider/model-id` to enable a dedicated `browser-qa`
 subagent. Blank disables it. The selected model must advertise image input and
@@ -31,6 +31,69 @@ open until QA finishes and the parent handles its report, so publication and
 billing include the result. Recovery resumes a parked result using its original
 message ID. Stop interrupts the child and drains its notification before the final
 parent interrupt, preventing a late result from restarting the stopped turn.
+The same ownership, recovery and draining apply to background `asset-forge`
+children.
+
+## Asset creation (`asset-forge`)
+
+The `asset-forge` subagent is the project's asset specialist for both 2D and
+3D. Builders delegate a concrete asset brief — paths under `site/assets/`,
+subject, style, palette, sizes and formats — and it delivers the files: it
+searches the web and downloads existing reusable media (`websearch` +
+`asset_download`, with provenance/license notes), or creates originals in code
+(SVG, rasters and PCM WAV via `node` scripts, glTF/GLB for 3D models), keeping
+generator scripts in `scratch/`. New originals enter `site/assets` only through
+the guarded `asset_save` tool, which enforces destination and size limits and
+records `origin: generated` provenance in `ASSET_SOURCES.json`.
+
+`asset_preview` gives the agent eyes on its own work: images return as
+rendered vision input, SVG/glTF/GLB return their structure (GLB via its
+embedded JSON) and WAV returns duration/channels/sample-rate, so every asset
+is reviewed against the brief before it counts as finished. The tool requires
+an image-advertising model and is also offered to the sitebuilder for
+reviewing delivered assets.
+
+The agent is told to study what the project already has — listing
+`site/assets`, reading `ASSET_SOURCES.json`, previewing existing images and
+checking how `site/src` loads them — so new assets match the established
+style, palette, scale and quality bar instead of arriving as strangers. With
+browser tools it opens the harness asset viewer at
+`<preview>/<guild-id>/<thread-id>/__assets/` to see the whole set together,
+and the game itself to see its assets in play; its report states what was
+verified visually and in-game.
+
+Its permissions stay broader than its edits: it may edit text assets under
+`site/assets/**` and everything under `scratch/`, run scoped shell commands
+(including `rm`, still constrained by the command-policy hook to explicit
+`site/`/`scratch/` paths), use `websearch`/`webfetch` for sourcing, and
+adopt user uploads with `asset_import`. Game source, documents, questions,
+delegation and `.env` files remain out of reach, and the native context hook
+strips every other tool from its requests. Binaries still enter
+`site/assets` only through the guarded tools.
+
+The viewer itself is harness-owned: the preview image bundles it once with
+three.js and the glTF loader (Draco and meshopt decoders included;
+KTX2-compressed textures are not), then prunes `three` back out of the
+runtime image. It serves `<project>/__assets/` (page), a generated
+`manifest.json` capped at 1,000 files, and the shared `/__viewer/*` bundle —
+never workspace files. It reflects the workspace live and is never published.
+
+Model selection defaults to the turn's selected model — including its variant —
+so delegation follows whatever the thread selected. `OPENCODE_ASSET_MODEL`
+pins a specific `provider/model-id` instead, and when the pinned or selected
+model is unavailable or text-only, delegation falls back to the first healthy
+`OPENCODE_ASSET_FALLBACK_MODELS` entry (comma-separated). Every candidate must
+be enabled and advertise image input; with none, the delegation fails with
+guidance and the builder creates the assets itself. The parent cannot override
+the resolved model through the tool call. `OPENCODE_ASSET_MODEL=off` (or
+`disable`/`false`/`none`) removes the agent. Malformed model references fail
+service startup. Recreate the `opencode` service after changing any of these.
+
+The agent edits only `site/assets/**` text and `scratch/` plus the guarded
+asset tools; its permissions deny project source, documents, questions and
+delegation, and the native context hook strips every other tool from its
+requests. Its quota retries interrupt the child — the failure report reaches
+the parent, which adapts — and never block or switch the builder's provider.
 
 Set `OPENCODE_SUBAGENT_MODEL=provider/model-id` in `.env` to select the model for
 both `general` and `explore` subagents independently of the builder.

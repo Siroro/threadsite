@@ -162,12 +162,58 @@ try {
   await fs.writeFile(path.join(scratch, "src", "main.ts"), 'document.title="Rebuilt scratch";');
   await call("browser_navigate", { url: "http://127.0.0.1:8080/100/200/__scratch/car/" });
   assert.match(text(await call("browser_evaluate", { function: "() => document.title" })), /Rebuilt scratch/);
+
+  // --- Harness asset viewer: 2D, audio and a real GLB render through SwiftShader.
+  const assets = path.join(site, "assets");
+  await fs.mkdir(path.join(assets, "sprites"), { recursive: true });
+  await fs.writeFile(path.join(assets, "sprites", "hero.png"),
+    Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
+  await fs.writeFile(path.join(assets, "logo.svg"), '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#fca311"/></svg>');
+  const positions = new Float32Array([-1, -1, 0, 1, -1, 0, 0, 1, 0]);
+  const gltf = JSON.stringify({
+    asset: { version: "2.0" }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 }, material: 0 }] }],
+    materials: [{ pbrMetallicRoughness: { baseColorFactor: [0.95, 0.35, 0.1, 1] } }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: 3, type: "VEC3", min: [-1, -1, 0], max: [1, 1, 0] }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: positions.byteLength, target: 34962 }],
+    buffers: [{ byteLength: positions.byteLength }],
+  });
+  const jsonPad = " ".repeat((4 - (gltf.length % 4)) % 4);
+  const binPad = (4 - (positions.byteLength % 4)) % 4;
+  const u32 = (value) => { const b = Buffer.alloc(4); b.writeUInt32LE(value); return b; };
+  const glb = Buffer.concat([
+    u32(0x46546c67), u32(2), u32(12 + 8 + gltf.length + jsonPad.length + 8 + positions.byteLength + binPad),
+    u32(gltf.length + jsonPad.length), u32(0x4e4f534a), Buffer.from(gltf + jsonPad),
+    u32(positions.byteLength + binPad), u32(0x004e4942), Buffer.from(positions.buffer, positions.byteOffset, positions.byteLength), Buffer.alloc(binPad),
+  ]);
+  await fs.mkdir(path.join(assets, "models"), { recursive: true });
+  await fs.writeFile(path.join(assets, "models", "tri.glb"), glb);
+  await call("browser_navigate", { url: "http://127.0.0.1:8080/100/200/__assets/" });
+  assert.match(text(await call("browser_snapshot")), /ThreadSite asset viewer/);
+  const manifestFiles = text(await call("browser_evaluate", { function: "async () => (await (await fetch('manifest.json')).json()).files.map((file) => file.path).join(',')" }));
+  assert.match(manifestFiles, /sprites\/hero\.png/);
+  assert.match(manifestFiles, /models\/tri\.glb/);
+  assert.match(manifestFiles, /logo\.svg/);
+  // Images and the GLB thumbnail all land as rendered <img> elements.
+  const thumbText = text(await call("browser_evaluate", { function:
+    "async () => { for (let i = 0; i < 150; i++) { if (document.querySelectorAll('.frame img').length >= 3) break; await new Promise((resolve) => setTimeout(resolve, 100)); } return document.querySelectorAll('.frame img').length; }" }));
+  const thumbs = Number(thumbText.match(/### Result\s*\n\s*(\d+)/)?.[1] ?? 0);
+  assert.ok(thumbs >= 3, `expected at least 3 rendered previews, got ${thumbs}`);
+  const errorCards = Number(text(await call("browser_evaluate", { function: "() => document.querySelectorAll('.card .error').length" }))
+    .match(/### Result\s*\n\s*(\d+)/)?.[1] ?? 1);
+  assert.equal(errorCards, 0, "no asset card may report a load/render failure");
+  assert.doesNotMatch(text(await call("browser_console_messages", { level: "error" })), /Uncaught/);
+  const viewerShot = await call("browser_take_screenshot");
+  const viewerPicture = viewerShot.content.find((part) => part.type === "image");
+  assert.ok(viewerPicture, "the viewer must screenshot");
+  await fs.writeFile(path.join(artifactRoot, "assets-viewer.png"), Buffer.from(viewerPicture.data, "base64"));
+
   const blocked = await call("browser_evaluate", { function: "async () => { try { await fetch('https://example.com'); return 'escaped'; } catch { return 'blocked'; } }" });
   assert.match(text(blocked), /blocked/);
   await assert.rejects(fs.stat(path.join(site, "js")), { code: "ENOENT" });
   await call("browser_close");
   await call("browser_close", {}, second);
-  console.log("PASS: inline images, WebGL, canvas interaction, keyboard, diagnostics, mobile, isolation, fresh builds, independent scratch component rendering and blocked external fetch.");
+  console.log("PASS: inline images, WebGL, canvas interaction, keyboard, diagnostics, mobile, isolation, fresh builds, independent scratch component rendering, the asset viewer (2D + GLB) and blocked external fetch.");
   if (process.env.PREVIEW_TEST_OPENCODE_IMAGE) {
     const { checkOpenCodeImageDelivery } = await import("./opencode-wire.mjs");
     await checkOpenCodeImageDelivery({ docker, network, root });

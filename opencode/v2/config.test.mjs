@@ -64,6 +64,49 @@ test("browser QA has an independent opt-in model and never inherits a text build
   }
 });
 
+test("asset-forge exists by default, inherits the selected model and pins an optional override", () => {
+  const original = structuredClone(base);
+  const defaults = buildV2Config(base, { env: {} });
+  const agent = defaults.agents["asset-forge"];
+  assert.equal(agent.mode, "subagent");
+  assert.equal(agent.model, undefined, "unset model lets the child inherit the parent session model");
+  assert.equal(defaults.plugins[0].options.assetModel, undefined);
+  assert.deepEqual(defaults.plugins[0].options.assetFallbacks, []);
+  const allows = (action, resource) => agent.permissions.filter((rule) => rule.action === action && rule.effect === "allow"
+    && (resource === undefined || rule.resource === resource));
+  for (const action of ["asset_save", "asset_preview", "asset_download", "asset_import", "websearch", "webfetch",
+    "threadsite_browser", "playwright_*"]) assert.ok(allows(action).length, `${action} allowed`);
+  // Creation edits assets and scratch, never game source; rm is scoped by the
+  // command-policy hook to explicit site/scratch paths.
+  assert.deepEqual(allows("edit").map((rule) => rule.resource).sort(), ["*/scratch/**", "*/site/assets/**", "scratch/**", "site/assets/**"]);
+  assert.ok(allows("shell", "rm").length && allows("shell", "rm *").length);
+  assert.equal(allows("shell", "git *").length + allows("shell", "npm *").length + allows("shell", "curl *").length, 0);
+  assert.ok(agent.permissions[0].action === "*" && agent.permissions[0].effect === "deny");
+  assert.deepEqual(defaults.plugins[0].options.assetPermissions, agent.permissions,
+    "the prompt hook re-applies exactly the configured profile");
+
+  const pinned = buildV2Config(base, { env: { OPENCODE_ASSET_MODEL: " test/vision#high " } });
+  assert.equal(pinned.agents["asset-forge"].model, "test/vision#high");
+  assert.equal(pinned.plugins[0].options.assetModel, "test/vision#high");
+
+  const fallbacks = buildV2Config(base, { env: { OPENCODE_ASSET_FALLBACK_MODELS: " a/b , surplus/vendor/m , c/d#low " } });
+  assert.deepEqual(fallbacks.plugins[0].options.assetFallbacks, ["a/b", "surplus/vendor/m", "c/d#low"]);
+  assert.deepEqual(buildV2Config(base, { env: {} }).agents["asset-forge"].permissions, defaults.agents["asset-forge"].permissions);
+  assert.deepEqual(base, original);
+});
+
+test("asset-forge can be disabled and rejects malformed model references at startup", () => {
+  for (const off of ["off", " disable ", "DISABLED", "false", "None"]) {
+    const config = buildV2Config(base, { env: { OPENCODE_ASSET_MODEL: off } });
+    assert.equal(config.agents["asset-forge"], undefined, off);
+    assert.equal(config.plugins[0].options.assetModel, false, off);
+  }
+  for (const model of ["model-only", "/model", "provider/", "provider/model with spaces"]) {
+    assert.throws(() => buildV2Config(base, { env: { OPENCODE_ASSET_MODEL: model } }), /OPENCODE_ASSET_MODEL/);
+  }
+  assert.throws(() => buildV2Config(base, { env: { OPENCODE_ASSET_FALLBACK_MODELS: "a/b, nope" } }), /OPENCODE_ASSET_FALLBACK_MODELS/);
+});
+
 test("v2 supplies trusted LSP settings and optional Context7 credentials without mutating its input", () => {
   const original = structuredClone(base);
   const config = buildV2Config(base, { env: {} });

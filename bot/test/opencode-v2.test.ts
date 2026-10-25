@@ -159,16 +159,16 @@ test("stopping cancels queued inputs and questions before interrupting without r
   assert.equal(await f.harness.steer("/w", "ses_root", "Do more"), false);
 });
 
-function backgroundQa(): SessionMessageInfo {
+function backgroundChild(agent = "browser-qa", childID = "ses_qa"): SessionMessageInfo {
   return { ...assistant("msg_qa_start", 100, ""), content: [{ type: "tool", id: "call_qa", name: "subagent",
     time: { created: Date.now(), completed: Date.now() }, state: { status: "completed",
-      input: { agent: "browser-qa", background: true }, output: "QA running",
-      metadata: { sessionID: "ses_qa", status: "running" } } }] } as SessionMessageInfo;
+      input: { agent, background: true }, output: "child running",
+      metadata: { sessionID: childID, status: "running" } } }] } as SessionMessageInfo;
 }
 
-function qaReceipt(id = "msg_qa_result"): any {
-  return { id, type: "synthetic", time: { created: Date.now() }, text: "QA found a clipped button",
-    metadata: { source: "subagent", childID: "ses_qa", agent: "browser-qa", state: "completed" } };
+function childReceipt(agent = "browser-qa", childID = "ses_qa", id = "msg_qa_result"): any {
+  return { id, type: "synthetic", time: { created: Date.now() }, text: "child finished",
+    metadata: { source: "subagent", childID, agent, state: "completed" } };
 }
 
 test("background QA keeps a finished parent turn open until its result is reviewed", async () => {
@@ -179,7 +179,7 @@ test("background QA keeps a finished parent turn open until its result is review
   let polls = 0;
   f.client.session.prompt = async (input: any) => {
     f.calls.push({ name: "prompt", input });
-    f.history.push({ id: input.id, type: "user", text: input.text, time: { created: Date.now() } }, backgroundQa(),
+    f.history.push({ id: input.id, type: "user", text: input.text, time: { created: Date.now() } }, backgroundChild(),
       assistant("msg_independent", 100, "Independent edits finished"),
       { id: "msg_parent_idle", type: "idle", outcome: "succeeded", time: { created: Date.now() } });
     submitted = true;
@@ -187,7 +187,7 @@ test("background QA keeps a finished parent turn open until its result is review
   f.client.session.active = async () => {
     if (submitted) {
       polls++;
-      if (polls === 2) f.history.push(qaReceipt());
+      if (polls === 2) f.history.push(childReceipt());
       if (polls === 4) f.history.push(assistant("msg_review", 100, "QA reviewed"),
         { id: "msg_review_idle", type: "idle", outcome: "succeeded", time: { created: Date.now() } });
     }
@@ -201,25 +201,62 @@ test("background QA keeps a finished parent turn open until its result is review
   } finally { config.opencodeReconcilePollMs = oldPoll; }
 });
 
+test("a background asset-forge child holds the turn open until its report is integrated", async () => {
+  const f = fixture();
+  const oldPoll = config.opencodeReconcilePollMs;
+  config.opencodeReconcilePollMs = 1;
+  let submitted = false;
+  let polls = 0;
+  f.client.session.prompt = async (input: any) => {
+    f.calls.push({ name: "prompt", input });
+    f.history.push({ id: input.id, type: "user", text: input.text, time: { created: Date.now() } },
+      backgroundChild("asset-forge", "ses_forge"),
+      assistant("msg_build", 100, "Game code finished"),
+      { id: "msg_parent_idle", type: "idle", outcome: "succeeded", time: { created: Date.now() } });
+    submitted = true;
+  };
+  f.client.session.active = async () => {
+    if (submitted) {
+      polls++;
+      if (polls === 2) f.history.push(childReceipt("asset-forge", "ses_forge", "msg_forge_result"));
+      if (polls === 4) f.history.push(assistant("msg_integrated", 100, "Assets integrated"),
+        { id: "msg_done_idle", type: "idle", outcome: "succeeded", time: { created: Date.now() } });
+    }
+    return {};
+  };
+  try {
+    const result = await f.harness.prompt("/w", "ses_root", "Build", "test/text");
+    assert.equal(result.text, "Assets integrated");
+    assert.ok(polls >= 4, "the turn waits through the asset child's notification gap");
+    assert.equal(f.calls.filter((call) => call.name === "prompt").length, 1);
+  } finally { config.opencodeReconcilePollMs = oldPoll; }
+});
+
 test("pending QA remains busy across the native completion-notification gap", async () => {
   const f = fixture();
-  f.history.push(backgroundQa());
+  const clock = Date.now();
+  f.history.push(backgroundChild());
   assert.equal(await f.harness.isBusy("/w", "ses_root"), true, "parent idle and child absent from active is insufficient");
-  f.history.push(qaReceipt());
+  f.history.push({ ...childReceipt(), time: { created: clock + 10 } });
   assert.equal(await f.harness.isBusy("/w", "ses_root"), false);
-  f.history.push({ ...backgroundQa(), id: "msg_qa_recheck", time: { created: Date.now() + 10, completed: Date.now() + 11 } });
+  f.history.push({ ...backgroundChild(), id: "msg_qa_recheck", time: { created: clock + 20, completed: clock + 21 } });
   assert.equal(await f.harness.isBusy("/w", "ses_root"), true, "a previous report cannot settle a new inspection in the same child session");
+  f.history.push({ ...childReceipt("browser-qa", "ses_qa", "msg_qa_recheck_result"), time: { created: clock + 30 } });
+  f.history.push({ ...backgroundChild("asset-forge", "ses_forge"), id: "msg_forge_start", time: { created: clock + 40, completed: clock + 41 } });
+  assert.equal(await f.harness.isBusy("/w", "ses_root"), true, "asset-forge children keep the turn busy too");
+  f.history.push({ ...childReceipt("asset-forge", "ses_forge", "msg_forge_result"), time: { created: clock + 50 } });
+  assert.equal(await f.harness.isBusy("/w", "ses_root"), false);
 });
 
 test("stop drains background QA notifications and durably cancels them before the final parent interrupt", async () => {
   const f = fixture();
-  f.history.push(backgroundQa());
+  f.history.push(backgroundChild());
   f.session.metadata = { other: "preserved" };
   f.client.session.get = async ({ sessionID }: any) => sessionID === "ses_qa"
     ? { ...f.session, id: "ses_qa", parentID: "ses_root", agent: "browser-qa" } : f.session;
   const interrupt = f.client.session.interrupt;
   f.client.session.interrupt = async (input: any) => {
-    if (input.sessionID === "ses_qa") f.setInbox([{ ...qaReceipt(), payload: qaReceipt(), delivery: "queue" }]);
+    if (input.sessionID === "ses_qa") f.setInbox([{ ...childReceipt(), payload: childReceipt(), delivery: "queue" }]);
     return interrupt(input);
   };
   assert.equal(await f.harness.abortTurn("/w", "ses_root"), true);
@@ -230,16 +267,34 @@ test("stop drains background QA notifications and durably cancels them before th
   assert.equal(f.session.metadata.other, "preserved");
   const restarted = new OpenCodeV2Harness(f.client);
   assert.equal(await restarted.isBusy("/w", "ses_root"), false, "a cancelled inbox result must not leave stale QA pending after restart");
-  f.history.push({ ...backgroundQa(), id: "msg_qa_after_stop", time: { created: Date.now() + 10, completed: Date.now() + 11 } });
+  f.history.push({ ...backgroundChild(), id: "msg_qa_after_stop", time: { created: Date.now() + 10, completed: Date.now() + 11 } });
   assert.equal(await restarted.isBusy("/w", "ses_root"), true, "cancellation receipts apply to the old call, not all future QA in that session");
   assert.equal(await f.harness.steer("/w", "ses_root", "Continue"), false);
+});
+
+test("stop drains a background asset-forge child through the same durable cancellation path", async () => {
+  const f = fixture();
+  f.history.push(backgroundChild("asset-forge", "ses_forge"));
+  f.client.session.get = async ({ sessionID }: any) => sessionID === "ses_forge"
+    ? { ...f.session, id: "ses_forge", parentID: "ses_root", agent: "asset-forge" } : f.session;
+  const interrupt = f.client.session.interrupt;
+  f.client.session.interrupt = async (input: any) => {
+    if (input.sessionID === "ses_forge") f.setInbox([{ ...childReceipt("asset-forge", "ses_forge"),
+      payload: childReceipt("asset-forge", "ses_forge"), delivery: "queue" }]);
+    return interrupt(input);
+  };
+  assert.equal(await f.harness.abortTurn("/w", "ses_root"), true);
+  assert.deepEqual(f.calls.map((call) => call.name), ["interrupt", "update", "cancel", "interrupt"]);
+  assert.equal(f.calls[0].input.sessionID, "ses_forge");
+  const restarted = new OpenCodeV2Harness(f.client);
+  assert.equal(await restarted.isBusy("/w", "ses_root"), false, "the cancelled asset child cannot resurface as pending after restart");
 });
 
 test("stop never interrupts a QA session owned by another parent or workspace", async () => {
   for (const child of [{ parentID: "other", location: { directory: "/w" } },
     { parentID: "ses_root", location: { directory: "/other" } }]) {
     const f = fixture();
-    f.history.push(backgroundQa());
+    f.history.push(backgroundChild());
     f.client.session.get = async ({ sessionID }: any) => sessionID === "ses_qa" ? { ...f.session, ...child } : f.session;
     await assert.rejects(f.harness.abortTurn("/w", "ses_root"), /different parent|different project/);
     assert.deepEqual(f.calls, []);
@@ -248,7 +303,7 @@ test("stop never interrupts a QA session owned by another parent or workspace", 
 
 test("restart recovery wakes the persisted QA receipt only for an attached, unstopped turn", async () => {
   const f = fixture();
-  const receipt = qaReceipt();
+  const receipt = childReceipt();
   f.setInbox([{ id: receipt.id, type: "synthetic", payload: { text: receipt.text, metadata: receipt.metadata }, delivery: "queue" }]);
   assert.equal(await f.harness.isBusy("/w", "ses_root"), true);
   assert.deepEqual(f.calls, [], "status checks without a recovery owner cannot wake a session");
@@ -267,7 +322,7 @@ test("restart recovery wakes the persisted QA receipt only for an attached, unst
   } finally { await stop(); }
 });
 
-test("a long browser QA provider retry cancels only optional inspection and leaves the builder running", async () => {
+test("a long background-child provider retry cancels only the optional child and leaves the builder running", async () => {
   const f = fixture();
   f.setActive(true);
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", undefined, 0);
@@ -275,11 +330,15 @@ test("a long browser QA provider retry cancels only optional inspection and leav
     const internal = f.harness;
     const watch = internal.watches.get("ses_root")!;
     internal.event({ type: "session.created", data: { sessionID: "ses_qa", parentID: "ses_root", agent: "browser-qa" } }, "/w", "ses_root", watch);
+    internal.event({ type: "session.created", data: { sessionID: "ses_forge", parentID: "ses_root", agent: "asset-forge" } }, "/w", "ses_root", watch);
     internal.event({ type: "session.retry.scheduled", data: { sessionID: "ses_qa",
       at: Date.now() + config.opencodeQuotaBlockMinRetryMs + 10_000, error: { message: "QA provider quota exhausted" } } }, "/w", "ses_root", watch);
-    assert.equal(watch.quota, undefined, "optional QA does not set the root turn's quota block");
+    internal.event({ type: "session.retry.scheduled", data: { sessionID: "ses_forge",
+      at: Date.now() + config.opencodeQuotaBlockMinRetryMs + 10_000, error: { message: "asset model quota exhausted" } } }, "/w", "ses_root", watch);
+    assert.equal(watch.quota, undefined, "background children never set the root turn's quota block");
     assert.equal(internal.quotas.size, 0);
-    assert.deepEqual(f.calls.filter((call) => call.name === "interrupt").map((call) => call.input), [{ sessionID: "ses_qa", resume: false }]);
+    assert.deepEqual(f.calls.filter((call) => call.name === "interrupt").map((call) => call.input),
+      [{ sessionID: "ses_qa", resume: false }, { sessionID: "ses_forge", resume: false }]);
     assert.equal(internal.stopped.has("ses_root"), false);
   } finally { await stop(); }
 });

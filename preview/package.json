@@ -10,13 +10,15 @@
     "test:warmup": "node test/warmup-check.mjs",
     "test:docker": "node test/docker-compose-smoke.mjs",
     "test:free-models": "node test/free-model-e2e.mjs",
-    "test:docker:pixels": "node test/docker-compose-smoke.mjs --pixels-only"
+    "test:docker:pixels": "node test/docker-compose-smoke.mjs --pixels-only",
+    "build:viewer": "node build-viewer.mjs"
   },
   "dependencies": {
     "@playwright/mcp": "0.0.83",
     "esbuild": "0.28.2"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.27.1"
+    "@modelcontextprotocol/sdk": "1.27.1",
+    "three": "0.181.0"
   }
 }

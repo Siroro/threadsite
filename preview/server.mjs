@@ -1,9 +1,11 @@
 import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
 
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
+const MAX_MANIFEST_FILES = 1000;
 const TYPES = {
   ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
@@ -14,6 +16,18 @@ const TYPES = {
   ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".wav": "audio/wav", ".mp4": "video/mp4",
   ".webm": "video/webm", ".glb": "model/gltf-binary", ".gltf": "model/gltf+json",
   ".wasm": "application/wasm", ".txt": "text/plain; charset=utf-8",
+  ".m4a": "audio/mp4", ".flac": "audio/flac", ".aac": "audio/aac",
+};
+
+// Manifest kinds mirror what the asset viewer can render.
+const MANIFEST_KINDS = {
+  ".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image", ".webp": "image",
+  ".avif": "image", ".bmp": "image", ".svg": "image",
+  ".glb": "model", ".gltf": "model",
+  ".wav": "audio", ".mp3": "audio", ".ogg": "audio", ".m4a": "audio", ".flac": "audio", ".aac": "audio",
+  ".mp4": "video", ".webm": "video",
+  ".woff": "font", ".woff2": "font", ".ttf": "font", ".otf": "font",
+  ".json": "data", ".txt": "data", ".csv": "data", ".xml": "data",
 };
 
 function inside(root, file) {
@@ -29,6 +43,41 @@ async function checkedPath(root, parts) {
     if ((await fs.lstat(target)).isSymbolicLink()) throw new Error("Preview does not follow symlinks.");
   }
   return target;
+}
+
+/** Recursive site/assets listing for the viewer manifest, symlink-free. */
+async function assetManifest(workspaceRoot, project) {
+  const root = await checkedPath(workspaceRoot, [...project.split("/"), "site", "assets"])
+    .catch((error) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+      throw error;
+    });
+  const files = [];
+  let truncated = false;
+  const walk = async (directory, prefix) => {
+    const entries = await fs.readdir(directory, { withFileTypes: true }).catch((error) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (files.length >= MAX_MANIFEST_FILES) { truncated = true; return; }
+      if (entry.isSymbolicLink() || entry.name.startsWith(".")) continue;
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(path.join(directory, entry.name), relative);
+      else if (entry.isFile()) {
+        const stat = await fs.stat(path.join(directory, entry.name));
+        if (stat.size > MAX_FILE_BYTES) continue;
+        files.push({ path: relative, bytes: stat.size,
+          kind: MANIFEST_KINDS[path.extname(entry.name).toLowerCase()] || "other" });
+      }
+    }
+  };
+  try {
+    if (root) await walk(root, "");
+  } catch (error) {
+    if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+  }
+  return { project, files, truncated };
 }
 
 async function bundle(workspaceRoot, project, view) {
@@ -89,8 +138,11 @@ const BUILD_QUEUE_TIMEOUT_MS = Number(process.env.PREVIEW_BUILD_QUEUE_TIMEOUT_MS
 // another thread's assets mid-load.
 const SNAPSHOT_CACHE_SIZE = Number(process.env.PREVIEW_SNAPSHOT_CACHE || 16);
 
-export function createPreviewServer({ workspaceRoot }) {
+export function createPreviewServer({ workspaceRoot, viewerDist } = {}) {
   const root = path.resolve(workspaceRoot);
+  // Harness-owned viewer bundle (viewer.html/app.js/draco), built by
+  // build-viewer.mjs; absent in bare checkouts, which serves a clear error.
+  const dist = path.resolve(viewerDist || path.join(path.dirname(fileURLToPath(import.meta.url)), "dist"));
   const snapshots = new Map();
   const pending = new Map();
   let activeBuilds = 0;
@@ -148,6 +200,19 @@ export function createPreviewServer({ workspaceRoot }) {
     if (req.url === "/health") { res.writeHead(200); res.end(req.method === "HEAD" ? undefined : "ok"); return; }
     try {
       const pathname = decodeURIComponent((req.url || "/").split("?")[0]);
+      // The harness viewer bundle is project-independent and shared by every
+      // __assets page; serve it from the built dist, never from a workspace.
+      if (pathname === "/__viewer" || pathname.startsWith("/__viewer/")) {
+        const parts = pathname.split("/").slice(2).filter(Boolean);
+        if (!parts.length || parts.some((part) => part.startsWith("."))) { res.writeHead(404); res.end(); return; }
+        const file = await checkedPath(dist, parts).catch(() => undefined);
+        const stat = file && await fs.stat(file).catch(() => undefined);
+        if (!stat?.isFile()) { res.writeHead(404); res.end(); return; }
+        if (stat.size > MAX_FILE_BYTES) throw new Error("Viewer file exceeds 32 MiB.");
+        res.writeHead(200, { "Content-Type": TYPES[path.extname(file).toLowerCase()] || "application/octet-stream" });
+        res.end(req.method === "HEAD" ? undefined : await fs.readFile(file));
+        return;
+      }
       const segments = pathname.split("/").slice(1);
       // Workspaces use <Discord guild id>/<Discord thread id>.
       if (!/^\d{1,24}$/.test(segments[0]) || !/^\d{1,24}$/.test(segments[1])) {
@@ -169,6 +234,33 @@ export function createPreviewServer({ workspaceRoot }) {
         throw error;
       }
       const parts = segments.slice(2);
+      // Harness asset viewer: one page per project showing every site/assets
+      // file. The HTML and JS come from the shared bundle; the manifest and
+      // the assets themselves come from this project.
+      if (parts[0] === "__assets") {
+        parts.shift();
+        if (!parts.length && !pathname.endsWith("/")) {
+          res.writeHead(302, { Location: `${pathname}/` }); res.end(); return;
+        }
+        if (parts.length === 1 && parts[0] === "manifest.json") {
+          const manifest = await assetManifest(root, project);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(req.method === "HEAD" ? undefined : `${JSON.stringify(manifest)}\n`);
+          return;
+        }
+        if (parts.length && !(parts.length === 1 && parts[0] === "index.html")) {
+          res.writeHead(404); res.end("The asset viewer serves only its page and manifest."); return;
+        }
+        const page = await fs.readFile(path.join(dist, "viewer.html")).catch(() => undefined);
+        if (page === undefined) {
+          res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("ThreadSite preview: asset viewer bundle is not built (run node build-viewer.mjs).");
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(req.method === "HEAD" ? undefined : page);
+        return;
+      }
       let view;
       if (parts[0] === "__scratch") {
         view = parts[1];

@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import dns from "node:dns/promises";
-import { asset_download, asset_import } from "../dist/tools.mjs";
+import { asset_download, asset_import, asset_preview, asset_save } from "../dist/tools.mjs";
 
 test("a download times out while its response body is stalled, then a later download succeeds", { timeout: 5000 }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-asset-timeout-"));
@@ -94,6 +94,110 @@ test("concurrent imports and downloads retain all provenance and replace only th
     const updated = JSON.parse(await fs.readFile(metadata, "utf8"));
     assert.equal(updated.length, records.length);
     assert.equal(updated.find((record) => record.file === "site/assets/0.txt").uploadedFrom, "scratch/uploads/file.txt");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+// Minimal valid 1x1 transparent PNG.
+const DOT_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+
+test("asset_save installs generated content and scratch output with provenance, rejecting anything else", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-asset-save-"));
+  try {
+    await fs.mkdir(path.join(root, "scratch/gen"), { recursive: true });
+    await fs.mkdir(path.join(root, "site/assets"), { recursive: true });
+    await fs.writeFile(path.join(root, "scratch/gen/dot.png"), DOT_PNG);
+    await fs.writeFile(path.join(root, "site/assets/pre-existing.txt"), "harness");
+    await fs.writeFile(path.join(root, "outside.bin"), "nope");
+
+    await asset_save.execute({ destination: "sprites/dot.png", source: "scratch/gen/dot.png", note: "procedural dot" }, { directory: root });
+    assert.deepEqual(await fs.readFile(path.join(root, "site/assets/sprites/dot.png")), DOT_PNG);
+    const text = await asset_save.execute({ destination: "images/logo.svg", content: '<svg xmlns="http://www.w3.org/2000/svg"/>' }, { directory: root });
+    assert.match(text, /site\/assets\/images\/logo\.svg/);
+    const records = JSON.parse(await fs.readFile(path.join(root, "ASSET_SOURCES.json"), "utf8"));
+    assert.deepEqual(records.map((record) => [record.file, record.origin]).sort(), [
+      ["site/assets/images/logo.svg", "generated"], ["site/assets/sprites/dot.png", "generated"],
+    ]);
+    assert.equal(records.find((record) => record.file === "site/assets/sprites/dot.png").generatedFrom, "scratch/gen/dot.png");
+
+    for (const rejected of [
+      { destination: "a.svg", content: "x", source: "scratch/gen/dot.png" },
+      { destination: "a.svg" },
+      { destination: "empty.svg", content: "" },
+      { destination: "a.png", source: "outside.bin" },
+      { destination: "a.png", source: "scratch/gen/missing.png" },
+      { destination: "../escape.png", content: "x" },
+    ]) {
+      await assert.rejects(asset_save.execute(rejected, { directory: root }), Error, JSON.stringify(rejected));
+    }
+    // The site/assets/ destination prefix is accepted, like the other asset tools.
+    await asset_save.execute({ destination: "site/assets/nested.png", source: "scratch/gen/dot.png" }, { directory: root });
+    assert.ok(await fs.readFile(path.join(root, "site/assets/nested.png")));
+    assert.equal(await fs.readFile(path.join(root, "site/assets/pre-existing.txt"), "utf8"), "harness");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("asset_preview returns rendered images, SVG/glTF structure and WAV metadata, staying inside asset roots", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-asset-preview-"));
+  try {
+    await fs.mkdir(path.join(root, "site/assets/sprites"), { recursive: true });
+    await fs.mkdir(path.join(root, "site/assets/models"), { recursive: true });
+    await fs.mkdir(path.join(root, "site/assets/audio"), { recursive: true });
+    await fs.mkdir(path.join(root, "scratch/gen"), { recursive: true });
+    await fs.writeFile(path.join(root, "site/assets/sprites/dot.png"), DOT_PNG);
+    await fs.writeFile(path.join(root, "site/assets/sprites/logo.svg"), '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>');
+    await fs.writeFile(path.join(root, "package.json"), "{}");
+    await fs.writeFile(path.join(root, "scratch/gen/wip.png"), DOT_PNG);
+
+    const json = JSON.stringify({ asset: { version: "2.0" }, meshes: [{ primitives: [] }] });
+    const padded = json + " ".repeat((4 - (json.length % 4)) % 4);
+    const chunk = Buffer.alloc(8);
+    chunk.writeUInt32LE(Buffer.byteLength(padded), 0);
+    chunk.writeUInt32LE(0x4e4f534a, 4);
+    const header = Buffer.alloc(12);
+    header.writeUInt32LE(0x46546c67, 0);
+    header.writeUInt32LE(2, 4);
+    header.writeUInt32LE(12 + 8 + Buffer.byteLength(padded), 8);
+    await fs.writeFile(path.join(root, "site/assets/models/cube.glb"), Buffer.concat([header, chunk, Buffer.from(padded)]));
+
+    const dataBytes = 8000 * 4;
+    const riff = (size) => { const b = Buffer.alloc(4); b.writeUInt32LE(size); return b; };
+    const fmt = Buffer.alloc(16);
+    fmt.writeUInt16LE(1, 0); fmt.writeUInt16LE(1, 2); fmt.writeUInt32LE(8000, 4); fmt.writeUInt32LE(16000, 8); fmt.writeUInt16LE(2, 12); fmt.writeUInt16LE(16, 14);
+    await fs.writeFile(path.join(root, "site/assets/audio/loop.wav"), Buffer.concat([
+      Buffer.from("RIFF", "ascii"), riff(36 + dataBytes), Buffer.from("WAVE", "ascii"),
+      Buffer.from("fmt ", "ascii"), riff(16), fmt, Buffer.from("data", "ascii"), riff(dataBytes), Buffer.alloc(dataBytes),
+    ]));
+
+    const raster = await asset_preview.execute({ file: "sprites/dot.png" }, { directory: root });
+    assert.equal(raster[0].type, "file");
+    assert.equal(raster[0].mime, "image/png");
+    assert.equal(raster[0].uri, `data:image/png;base64,${DOT_PNG.toString("base64")}`);
+    assert.match(raster[1].text, /sprites\/dot\.png/);
+
+    const prefixed = await asset_preview.execute({ file: "site/assets/sprites/dot.png" }, { directory: root });
+    assert.equal(prefixed[0].uri, raster[0].uri, "the destination convention and full path preview the same file");
+
+    const wip = await asset_preview.execute({ file: "scratch/gen/wip.png" }, { directory: root });
+    assert.equal(wip[0].type, "file");
+
+    const svg = await asset_preview.execute({ file: "sprites/logo.svg" }, { directory: root });
+    assert.equal(svg.length, 1);
+    assert.match(svg[0].text, /SVG source/);
+    assert.match(svg[0].text, /<svg/);
+
+    const glb = await asset_preview.execute({ file: "models/cube.glb" }, { directory: root });
+    assert.match(glb[0].text, /"meshes"/);
+
+    const wav = await asset_preview.execute({ file: "audio/loop.wav" }, { directory: root });
+    assert.match(wav[0].text, /8000 Hz · 16-bit · 2\.00s/);
+
+    for (const rejected of ["package.json", "../outside.png", "missing.png", "site/assets/../secret.png"]) {
+      await assert.rejects(asset_preview.execute({ file: rejected }, { directory: root }), Error, rejected);
+    }
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

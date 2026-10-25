@@ -173,3 +173,142 @@ test("browser QA delegation rejects unavailable, text-only and unconfigured mode
     } finally { await cleanup(); }
   }
 });
+
+function assetDelegationFixture(options, sessionModel, catalog) {
+  const hooks = {};
+  const registration = () => ({ dispose: async () => {} });
+  return plugin.setup({ location: { directory: "/workspace/project" }, options,
+    tool: { transform: async () => registration(), hook: async (name, callback) => { hooks[name] = callback; return registration(); } },
+    session: { hook: async () => registration(), get: async () => ({ agent: "sitebuilder", ...(sessionModel ? { model: sessionModel } : {}) }) },
+    model: { list: async () => ({ data: catalog ?? [
+      { id: "text", providerID: "test", enabled: true, capabilities: { input: ["text"] } },
+      { id: "vision", providerID: "test", enabled: true, capabilities: { input: ["text", "image"] },
+        variants: [{ id: "high" }, { id: "low" }] },
+      { id: "surplus", providerID: "paid", enabled: true, capabilities: { input: ["text", "image"] } },
+      { id: "disabled", providerID: "test", enabled: false, capabilities: { input: ["text", "image"] } },
+    ] }) },
+  }).then((cleanup) => ({ hooks, cleanup }));
+}
+
+test("asset-forge delegation defaults to the selected model, then falls back; the parent cannot choose", async () => {
+  // Selected model is image-capable: it is pinned with its variant.
+  {
+    const { hooks, cleanup } = await assetDelegationFixture({}, { providerID: "test", id: "vision", variant: "high" });
+    try {
+      const input = { agent: "asset-forge", model: "test/text", background: true };
+      await hooks["execute.before"]({ tool: "subagent", sessionID: "ses_root", input });
+      assert.equal(input.model, "test/vision#high");
+      assert.equal(input.background, true, "asset creation may run while the builder continues");
+    } finally { await cleanup(); }
+  }
+  // Text-only selection: the first healthy fallback takes over.
+  {
+    const { hooks, cleanup } = await assetDelegationFixture({ assetFallbacks: ["test/disabled", "paid/surplus"] },
+      { providerID: "test", id: "text" });
+    try {
+      const input = { agent: "asset-forge" };
+      await hooks["execute.before"]({ tool: "subagent", sessionID: "ses_root", input });
+      assert.equal(input.model, "paid/surplus");
+    } finally { await cleanup(); }
+  }
+  // A configured pin wins over the selected model, even when both are usable.
+  {
+    const { hooks, cleanup } = await assetDelegationFixture({ assetModel: "paid/surplus" }, { providerID: "test", id: "vision" });
+    try {
+      const input = { agent: "asset-forge", model: "test/text" };
+      await hooks["execute.before"]({ tool: "subagent", sessionID: "ses_root", input });
+      assert.equal(input.model, "paid/surplus");
+    } finally { await cleanup(); }
+  }
+  // No image-capable candidate anywhere: delegation fails with guidance.
+  {
+    const { hooks, cleanup } = await assetDelegationFixture({}, { providerID: "test", id: "text" });
+    try {
+      await assert.rejects(hooks["execute.before"]({ tool: "subagent", sessionID: "ses_root", input: { agent: "asset-forge" } }),
+        /asset-forge unavailable/);
+    } finally { await cleanup(); }
+  }
+  // Explicitly disabled.
+  {
+    const { hooks, cleanup } = await assetDelegationFixture({ assetModel: false }, { providerID: "test", id: "vision" });
+    try {
+      await assert.rejects(hooks["execute.before"]({ tool: "subagent", sessionID: "ses_root", input: { agent: "asset-forge" } }),
+        /asset-forge is disabled/);
+    } finally { await cleanup(); }
+  }
+});
+
+test("asset-forge keeps sourcing and creation tools while research agents and text models get none", async () => {
+  const hooks = {};
+  const registration = () => ({ dispose: async () => {} });
+  const cleanup = await plugin.setup({ location: { directory: "/workspace/project" },
+    tool: { transform: async () => registration(), hook: async () => registration() },
+    session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); } },
+    model: { list: async () => ({ data: [
+      { id: "text", providerID: "test", enabled: true, capabilities: { input: ["text"] } },
+      { id: "vision", providerID: "test", enabled: true, capabilities: { input: ["text", "image"] } },
+    ] }) },
+  });
+  try {
+    const event = (agent, id, extra = {}) => ({ agent, model: { providerID: "test", id }, tools: {
+      read: {}, write: {}, edit: {}, apply_patch: {}, glob: {}, grep: {}, list: {}, shell: {},
+      asset_save: {}, asset_preview: {}, asset_download: {}, asset_import: {}, websearch: {},
+      webfetch: {}, subagent: {}, question: {}, project_notes: {}, todowrite: {}, lsp: {},
+      playwright_browser_navigate: {},
+    }, ...extra });
+    const creator = event("asset-forge", "vision");
+    await hooks.context(creator);
+    assert.deepEqual(Object.keys(creator.tools).sort(), ["apply_patch", "asset_download", "asset_import",
+      "asset_preview", "asset_save", "edit", "glob", "grep", "list", "playwright_browser_navigate",
+      "read", "shell", "webfetch", "websearch", "write"]);
+    const blindCreator = event("asset-forge", "text");
+    await hooks.context(blindCreator);
+    assert.equal(blindCreator.tools.asset_preview, undefined, "a text-only creator cannot review visuals");
+    assert.equal(blindCreator.tools.playwright_browser_navigate, undefined, "a text-only creator gets no browser");
+    assert.ok(blindCreator.tools.asset_save);
+    assert.ok(blindCreator.tools.webfetch);
+    for (const [agent, id] of [["sitebuilder", "vision"], ["sitebuilder", "text"], ["general", "vision"], ["explore", "vision"]]) {
+      const item = event(agent, id);
+      await hooks.context(item);
+      assert.equal(item.tools.asset_save, undefined, `${agent} never installs generated assets directly`);
+      assert.equal("asset_preview" in item.tools, agent === "sitebuilder" && id === "vision", `${agent}/${id} preview gating`);
+    }
+  } finally { await cleanup(); }
+});
+
+test("asset-forge children re-apply their creator profile and earn browser rules on vision models", async () => {
+  const hooks = {};
+  const updates = [];
+  const profile = [{ action: "*", resource: "*", effect: "deny" },
+    { action: "asset_save", resource: "*", effect: "allow" },
+    { action: "edit", resource: "site/assets/**", effect: "allow" }];
+  let session = { id: "child", parentID: "root", agent: "asset-forge", model: { providerID: "test", id: "vision" } };
+  const registration = () => ({ dispose: async () => {} });
+  const cleanup = await plugin.setup({ location: { directory: "/workspace/project" },
+    options: { assetPermissions: profile },
+    mcp: { list: async () => ({ data: [] }) },
+    tool: { transform: async () => registration(), hook: async () => registration(), reload: async () => {} },
+    session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); },
+      get: async () => session, update: async (input) => { updates.push(input); } },
+    model: { list: async () => ({ data: [
+      { providerID: "test", id: "vision", enabled: true, capabilities: { input: ["text", "image"] } },
+      { providerID: "test", id: "text", enabled: true, capabilities: { input: ["text"] } },
+    ] }) },
+  });
+  try {
+    await hooks.prompt({ sessionID: "child" });
+    const visionRules = updates[0].permissions;
+    assert.deepEqual(visionRules.slice(0, profile.length), structuredClone(profile), "the configured creator profile is re-applied verbatim");
+    assert.ok(visionRules.slice(profile.length).every((rule) => ["threadsite_browser", "playwright_*", "playwright.*"].includes(rule.action) && rule.effect === "allow"),
+      "a vision creator also earns browser rules");
+    session = { ...session, model: { providerID: "test", id: "text" } };
+    await hooks.prompt({ sessionID: "child" });
+    assert.deepEqual(updates[1].permissions, structuredClone(profile), "a text creator gets the profile without browser rules");
+    session = { ...session, agent: "asset-forge", parentID: undefined };
+    await hooks.prompt({ sessionID: "root" });
+    assert.equal(updates.length, 2, "parent sessions are never rewritten");
+    session = { ...session, parentID: "root", agent: "general" };
+    await hooks.prompt({ sessionID: "general" });
+    assert.equal(updates.length, 2, "research children keep inherited rules");
+  } finally { await cleanup(); }
+});

@@ -230,3 +230,98 @@ test("concurrent projects queue their builds instead of failing as busy", async 
   const bodies = await Promise.all(responses.map((response) => response.text()));
   for (const body of bodies) assert.doesNotMatch(body, /Preview is busy/);
 });
+
+async function viewerFixture(t) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-viewer-"));
+  const site = path.join(root, "100", "200", "site");
+  const dist = path.join(root, "bundle");
+  await fs.mkdir(path.join(site, "src"), { recursive: true });
+  await fs.mkdir(path.join(dist, "draco"), { recursive: true });
+  await fs.writeFile(path.join(site, "index.html"), "<p>game</p>");
+  await fs.writeFile(path.join(dist, "viewer.html"), "<!doctype html><title>viewer-stub</title>");
+  await fs.writeFile(path.join(dist, "app.js"), "console.log('viewer')");
+  await fs.writeFile(path.join(dist, "draco", "draco_decoder.wasm"), "wasm-bytes");
+  const server = createPreviewServer({ workspaceRoot: root, viewerDist: dist });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  return { root, site, dist, origin };
+}
+
+test("the asset viewer serves its page from the bundle and its manifest from the project", async (t) => {
+  const { site, origin } = await viewerFixture(t);
+  await fs.mkdir(path.join(site, "assets", "sprites"), { recursive: true });
+  await fs.mkdir(path.join(site, "assets", "models"), { recursive: true });
+  await fs.writeFile(path.join(site, "assets", "sprites", "hero.png"), Buffer.from([1, 2, 3]));
+  await fs.writeFile(path.join(site, "assets", "models", "cube.glb"), Buffer.from([4, 5]));
+  await fs.writeFile(path.join(site, "assets", "jump.wav"), Buffer.from([6]));
+  await fs.writeFile(path.join(site, "assets", ".hidden.png"), Buffer.from([7]));
+  await fs.writeFile(path.join(site, "assets", "readme.txt"), Buffer.from([8, 9]));
+
+  const manifest = await (await fetch(`${origin}/100/200/__assets/manifest.json`)).json();
+  assert.equal(manifest.project, "100/200");
+  assert.deepEqual(manifest.files, [
+    { path: "jump.wav", bytes: 1, kind: "audio" },
+    { path: "models/cube.glb", bytes: 2, kind: "model" },
+    { path: "readme.txt", bytes: 2, kind: "data" },
+    { path: "sprites/hero.png", bytes: 3, kind: "image" },
+  ]);
+  assert.equal(manifest.truncated, false);
+
+  const page = await fetch(`${origin}/100/200/__assets/`);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type"), /text\/html/);
+  assert.match(await page.text(), /viewer-stub/);
+  assert.equal((await fetch(`${origin}/100/200/__assets/index.html`)).status, 200);
+  const redirect = await fetch(`${origin}/100/200/__assets`, { redirect: "follow" });
+  assert.equal(redirect.url.endsWith("/__assets/"), true);
+  assert.equal((await fetch(`${origin}/100/200/__assets/other.txt`)).status, 404);
+  assert.equal((await fetch(`${origin}/100/999/__assets/`)).status, 404, "unknown projects have no viewer");
+});
+
+test("the asset viewer explains a missing bundle instead of failing silently", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-viewer-missing-"));
+  const site = path.join(root, "100", "200", "site");
+  await fs.mkdir(site, { recursive: true });
+  const server = createPreviewServer({ workspaceRoot: root, viewerDist: path.join(root, "absent") });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const manifest = await (await fetch(`${origin}/100/200/__assets/manifest.json`)).json();
+  assert.deepEqual(manifest.files, []);
+  const page = await fetch(`${origin}/100/200/__assets/`);
+  assert.equal(page.status, 500);
+  assert.match(await page.text(), /build-viewer/);
+  assert.equal((await fetch(`${origin}/__viewer/app.js`)).status, 404);
+});
+
+test("/__viewer serves only built bundle files with their real types", async (t) => {
+  const { origin } = await viewerFixture(t);
+  const app = await fetch(`${origin}/__viewer/app.js`);
+  assert.equal(app.status, 200);
+  assert.match(app.headers.get("content-type"), /javascript/);
+  const wasm = await fetch(`${origin}/__viewer/draco/draco_decoder.wasm`);
+  assert.equal(wasm.status, 200);
+  assert.equal(wasm.headers.get("content-type"), "application/wasm");
+  assert.equal((await fetch(`${origin}/__viewer/missing.js`)).status, 404);
+  for (const traversal of ["__viewer/../server.mjs", "__viewer/..%2Fserver.mjs"]) {
+    const response = await fetch(`${origin}/${traversal}`);
+    assert.equal(response.status, 404, traversal);
+  }
+});
+
+test("the asset manifest stops at 1,000 files and reports truncation", async (t) => {
+  const { site, origin } = await viewerFixture(t);
+  const assets = path.join(site, "assets");
+  await fs.mkdir(assets, { recursive: true });
+  for (let index = 0; index < 1005; index++) await fs.writeFile(path.join(assets, `a${String(index).padStart(4, "0")}.png`), "x");
+  const manifest = await (await fetch(`${origin}/100/200/__assets/manifest.json`)).json();
+  assert.equal(manifest.files.length, 1000);
+  assert.equal(manifest.truncated, true);
+});

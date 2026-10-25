@@ -68,7 +68,13 @@ Map<string, StepTiming> {
   return samples;
 }
 
-function pendingBrowserQa(history: SessionMessageInfo[], cancelled: unknown = []): Set<string> {
+/** Subagents that may be delegated with background: true. The bot keeps the
+ * parent turn open (and billing/stop/recovery ownership) until each finishes
+ * and the parent has handled its report. */
+const BACKGROUND_AGENTS = new Set(["browser-qa", "asset-forge"]);
+const isBackgroundAgent = (agent: unknown): agent is string => typeof agent === "string" && BACKGROUND_AGENTS.has(agent);
+
+function pendingBackgroundAgents(history: SessionMessageInfo[], cancelled: unknown = []): Set<string> {
   const ignored = new Set(Array.isArray(cancelled) ? cancelled.filter((id): id is string => typeof id === "string") : []);
   const pending = new Set<string>();
   for (const message of history) {
@@ -76,7 +82,7 @@ function pendingBrowserQa(history: SessionMessageInfo[], cancelled: unknown = []
       && typeof message.metadata.childID === "string" && message.metadata.state !== "running") pending.delete(message.metadata.childID);
     if (message.type === "assistant") for (const part of message.content) {
       if (part.type !== "tool" || part.name !== "subagent" || part.state.status !== "completed"
-        || part.state.input.agent !== "browser-qa" || part.state.input.background !== true) continue;
+        || !isBackgroundAgent(part.state.input.agent) || part.state.input.background !== true) continue;
       const id = part.state.metadata?.sessionID;
       if (typeof id === "string" && part.state.metadata?.status === "running" && !ignored.has(`${message.id}:${part.id}`)) pending.add(id);
     }
@@ -95,7 +101,7 @@ interface Watch {
   /** Per-child detail for the card's subagent lines; keyed by child session id. */
   subagents: Map<string, { agent: string; steps: Set<string>; startedAt?: number; activity?: { text: string; at: number } }>;
   callback?: ProgressCallback;
-  browserQaChildren: Set<string>;
+  backgroundChildren: Set<string>;
   lastProgress: number;
   questionIds: Set<string>;
   progressKeys: Map<string, string>;
@@ -321,14 +327,14 @@ export class OpenCodeV2Harness {
         this.restoreSubagents(watch, active);
         // Native background results can wake an idle parent. Keep ownership of
         // this turn until those results are delivered and the parent finishes.
-        const busy = !!active[sessionID] || pendingBrowserQa(fresh).size > 0;
-        if (!active[sessionID]) await this.resumeBrowserQaResult(sessionID, inbox);
+        const busy = !!active[sessionID] || pendingBackgroundAgents(fresh).size > 0;
+        if (!active[sessionID]) await this.resumeBackgroundResult(sessionID, inbox);
         const newest = [...fresh].reverse();
         const idle = newest.find((message) => message.type === "idle");
-        const qaResult = newest.find((message) => message.type === "synthetic" && message.metadata?.source === "subagent"
-          && message.metadata.agent === "browser-qa");
-        const finishedAfterQa = !qaResult || (idle && newest.indexOf(idle) < newest.indexOf(qaResult));
-        if (!busy && !inbox.length && accepted && idle?.type === "idle" && finishedAfterQa) {
+        const backgroundResult = newest.find((message) => message.type === "synthetic" && message.metadata?.source === "subagent"
+          && isBackgroundAgent(message.metadata.agent));
+        const finishedAfterBackground = !backgroundResult || (idle && newest.indexOf(idle) < newest.indexOf(backgroundResult));
+        if (!busy && !inbox.length && accepted && idle?.type === "idle" && finishedAfterBackground) {
           if (idle.outcome === "succeeded") {
             return this.summary(fresh);
           }
@@ -481,18 +487,20 @@ export class OpenCodeV2Harness {
     ]);
     const watch = this.watches.get(sessionID);
     if (watch) this.restoreSubagents(watch, active);
-    if (!active[sessionID]) await this.resumeBrowserQaResult(sessionID, inbox);
+    if (!active[sessionID]) await this.resumeBackgroundResult(sessionID, inbox);
     if (active[sessionID] || inbox.length || forms.length) return true;
-    return pendingBrowserQa(await this.rawMessages(sessionID), session.metadata?.threadsiteCancelledBrowserQa).size > 0;
+    // The persisted marker predates asset-forge; its call-ID list covers every
+    // background agent so a cancelled child stays settled across restarts.
+    return pendingBackgroundAgents(await this.rawMessages(sessionID), session.metadata?.threadsiteCancelledBrowserQa).size > 0;
   }
 
-  private async resumeBrowserQaResult(sessionID: string, inbox: SessionInboxInfo[]): Promise<void> {
+  private async resumeBackgroundResult(sessionID: string, inbox: SessionInboxInfo[]): Promise<void> {
     // Native restart recovery can park a job's result without resuming its
     // parent. Wake only an attached turn and reuse the persisted input ID:
     // retries admit the same receipt, never duplicate the model's prompt.
     if (!this.watches.has(sessionID) || this.stopped.has(sessionID)) return;
     for (const item of inbox) if (item.type === "synthetic" && item.payload.metadata?.source === "subagent"
-      && item.payload.metadata.agent === "browser-qa") {
+      && isBackgroundAgent(item.payload.metadata.agent)) {
       if (this.stopped.has(sessionID)) return;
       await this.client.session.synthetic({ sessionID, id: item.id, ...item.payload, delivery: item.delivery, resume: true }, requestOptions());
     }
@@ -508,20 +516,21 @@ export class OpenCodeV2Harness {
     this.stopped.add(sessionID); // Mark before I/O so no concurrent watcher can resurrect it.
     let session = await this.session(directory, sessionID);
     const initialHistory = await this.rawMessages(sessionID);
-    const pending = pendingBrowserQa(initialHistory, session.metadata?.threadsiteCancelledBrowserQa);
+    // Same legacy marker key as isBusy: cancelled background-subagent call IDs.
+    const pending = pendingBackgroundAgents(initialHistory, session.metadata?.threadsiteCancelledBrowserQa);
     if (pending.size) {
       for (const childID of pending) {
         const child = await this.session(directory, childID);
-        if (child.parentID !== sessionID) throw new Error("Browser QA session belongs to a different parent");
+        if (child.parentID !== sessionID) throw new Error("Background subagent session belongs to a different parent");
         this.stopped.add(childID);
         await this.client.session.interrupt({ sessionID: childID, resume: false }, requestOptions());
       }
       // Drain the native job notifications before the final parent interrupt;
-      // otherwise a late QA result could resurrect a deliberately stopped turn.
+      // otherwise a late background result could resurrect a deliberately stopped turn.
       const deadline = Date.now() + 10_000;
       for (;;) {
         const [history, inbox] = await Promise.all([this.rawMessages(sessionID), this.client.session.inbox.list({ sessionID }, requestOptions())]);
-        const outstanding = pendingBrowserQa(history);
+        const outstanding = pendingBackgroundAgents(history);
         for (const item of inbox) if (item.type === "synthetic" && typeof item.payload.metadata?.childID === "string") {
           outstanding.delete(item.payload.metadata.childID);
         }
@@ -692,7 +701,7 @@ export class OpenCodeV2Harness {
   }
 
   private watch(directory: string, sessionID: string, callback: ProgressCallback | undefined, since: number, baseline: Set<string>, budgeted: boolean): Watch {
-    const watch: Watch = { since, baseline, controller: new AbortController(), done: Promise.resolve(), children: new Set(), activeChildren: new Set(), subagents: new Map(), callback, browserQaChildren: new Set(),
+    const watch: Watch = { since, baseline, controller: new AbortController(), done: Promise.resolve(), children: new Set(), activeChildren: new Set(), subagents: new Map(), callback, backgroundChildren: new Set(),
       lastProgress: Date.now(), questionIds: new Set(), progressKeys: new Map(), steps: new Map(), models: new Map(),
       tools: new Map(), text: new Map(), started: new Map(), streamed: new Map(), timings: new Map(), compactions: 0,
       liveSamples: [], lastMeterAt: 0 };
@@ -721,7 +730,7 @@ export class OpenCodeV2Harness {
             for (const child of sessions) if (child.parentID && (child.parentID === sessionID || watch.children.has(child.parentID))
               && !watch.children.has(child.id) && sameDirectory(child.location.directory, directory)) {
               watch.children.add(child.id); changed = true;
-              if (child.agent === "browser-qa") watch.browserQaChildren.add(child.id);
+              if (isBackgroundAgent(child.agent)) watch.backgroundChildren.add(child.id);
               const info = watch.subagents.get(child.id);
               if (!info) watch.subagents.set(child.id, { agent: child.agent || "subagent", steps: new Set(), startedAt: Date.now() });
               else if (child.agent) info.agent = child.agent;
@@ -909,7 +918,7 @@ export class OpenCodeV2Harness {
       const info = watch.subagents.get(event.data.sessionID);
       if (!info) watch.subagents.set(event.data.sessionID, { agent: event.data.agent || "subagent", steps: new Set(), startedAt: event.created });
       else if (event.data.agent) info.agent = event.data.agent;
-      if (event.data.agent === "browser-qa") watch.browserQaChildren.add(event.data.sessionID);
+      if (isBackgroundAgent(event.data.agent)) watch.backgroundChildren.add(event.data.sessionID);
       return;
     }
     const data = event.data;
@@ -1014,7 +1023,7 @@ export class OpenCodeV2Harness {
         break;
       case "session.status":
         if (event.data.status.type === "retry") this.retry(watch, event.data.status, callback,
-          watch.browserQaChildren.has(event.data.sessionID) ? event.data.sessionID : undefined);
+          watch.backgroundChildren.has(event.data.sessionID) ? event.data.sessionID : undefined);
         // Status is a heartbeat, never evidence of agent progress — and never a
         // headline: the status stream repeats on every event, and its technical
         // text would bury the real activity line between tools.
@@ -1022,7 +1031,7 @@ export class OpenCodeV2Harness {
         break;
       case "session.retry.scheduled":
         this.retry(watch, { next: event.data.at, message: event.data.error.message }, callback,
-          watch.browserQaChildren.has(event.data.sessionID) ? event.data.sessionID : undefined); break;
+          watch.backgroundChildren.has(event.data.sessionID) ? event.data.sessionID : undefined); break;
       case "session.execution.interrupted":
         if (!child && event.data.reason !== "shutdown") this.stopped.add(sessionID);
         break;
@@ -1034,15 +1043,16 @@ export class OpenCodeV2Harness {
     }
   }
 
-  private retry(watch: Watch, status: { next: number; message: string; action?: { provider: string; reason: string; title: string } }, callback?: ProgressCallback, browserQaSessionID?: string): void {
-    if (browserQaSessionID) {
-      // Optional QA quota cannot fail or switch the builder's provider. Native
-      // cancellation delivers an advisory result to the parent as usual.
+  private retry(watch: Watch, status: { next: number; message: string; action?: { provider: string; reason: string; title: string } }, callback?: ProgressCallback, backgroundSessionID?: string): void {
+    if (backgroundSessionID) {
+      // A background child's quota cannot fail or switch the builder's
+      // provider. Native cancellation delivers the child's failure report to
+      // the parent, which decides how to proceed without the asset/QA result.
       if (status.next - Date.now() >= config.opencodeQuotaBlockMinRetryMs) {
-        void this.client.session.interrupt({ sessionID: browserQaSessionID, resume: false }, requestOptions())
-          .catch((error) => log("warn", "opencode.v2_qa_interrupt_failed", { sessionID: browserQaSessionID, error: serializeError(error) }));
+        void this.client.session.interrupt({ sessionID: backgroundSessionID, resume: false }, requestOptions())
+          .catch((error) => log("warn", "opencode.v2_background_interrupt_failed", { sessionID: backgroundSessionID, error: serializeError(error) }));
       }
-      emit(callback, { kind: "heartbeat", text: "Browser QA provider retry", detail: status.message });
+      emit(callback, { kind: "heartbeat", text: "Background subagent provider retry", detail: status.message });
       return;
     }
     if (status.next - Date.now() >= config.opencodeQuotaBlockMinRetryMs) {

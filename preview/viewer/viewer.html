@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThreadSite asset viewer</title>
+<style>
+  :root { color-scheme: dark; --line: #2a2f36; --ink: #e8eaed; --dim: #9aa3ad; --panel: #16191d; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: #0e1013; color: var(--ink); }
+  header { position: sticky; top: 0; z-index: 2; display: flex; gap: 16px; align-items: baseline;
+    padding: 10px 18px; background: rgba(14, 16, 19, .92); border-bottom: 1px solid var(--line); backdrop-filter: blur(4px); }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
+  header .meta { color: var(--dim); font-size: 12px; }
+  main { padding: 18px; max-width: 1180px; margin: 0 auto; }
+  section { margin: 0 0 28px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+    border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .frame { height: 128px; display: flex; align-items: center; justify-content: center; position: relative;
+    background: repeating-conic-gradient(#1b1f24 0% 25%, #22272e 0% 50%) 0 0 / 20px 20px; }
+  .frame.plain { background: var(--panel); }
+  .frame img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .frame canvas { width: 100%; height: 100%; display: block; }
+  .card .label { padding: 6px 8px; font-size: 12px; }
+  .card .label .path { font-family: ui-monospace, monospace; word-break: break-all; }
+  .card .label .size { color: var(--dim); font-size: 11px; }
+  .card .error { color: #ff9d9d; font-size: 11px; padding: 0 8px 8px; white-space: pre-wrap; }
+  audio { width: 100%; padding: 8px; }
+  .note { color: var(--dim); font-size: 12px; margin: 8px 0; }
+  #lightbox, #stage { position: fixed; inset: 0; z-index: 10; display: none; align-items: center; justify-content: center;
+    background: rgba(8, 9, 11, .93); }
+  #lightbox.open, #stage.open { display: flex; }
+  #lightbox img { max-width: 94vw; max-height: 92vh; background: repeating-conic-gradient(#1b1f24 0% 25%, #22272e 0% 50%) 0 0 / 24px 24px; }
+  #stage .holder { width: min(92vw, 1000px); height: 82vh; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+  #stage canvas { width: 100%; height: 100%; display: block; cursor: grab; }
+  #stage .title { position: absolute; top: 14px; left: 18px; font-family: ui-monospace, monospace; font-size: 13px; color: var(--dim); }
+  #stage .hint { position: absolute; bottom: 12px; right: 18px; font-size: 12px; color: var(--dim); }
+  .close { position: fixed; top: 12px; right: 18px; z-index: 11; font-size: 22px; color: var(--dim);
+    background: none; border: none; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ThreadSite asset viewer</h1>
+  <span class="meta" id="meta">loading…</span>
+</header>
+<main id="main"><p class="note">Loading the asset manifest…</p></main>
+<div id="lightbox"><img alt=""><button class="close" data-close="lightbox" title="Close">✕</button></div>
+<div id="stage">
+  <div class="holder"></div>
+  <span class="title"></span>
+  <span class="hint">drag to orbit · scroll to zoom</span>
+  <button class="close" data-close="stage" title="Close">✕</button>
+</div>
+<script type="module" src="/__viewer/app.js"></script>
+</body>
+</html>

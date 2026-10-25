@@ -30,6 +30,8 @@
     { "action": "webfetch", "resource": "*", "effect": "allow" },
     { "action": "asset_download", "resource": "*", "effect": "allow" },
     { "action": "asset_import", "resource": "*", "effect": "allow" },
+    { "action": "asset_save", "resource": "*", "effect": "allow" },
+    { "action": "asset_preview", "resource": "*", "effect": "allow" },
     { "action": "js_syntax_check", "resource": "*", "effect": "allow" },
     { "action": "project_notes", "resource": "*", "effect": "allow" },
     { "action": "playwright_*", "resource": "*", "effect": "allow" },

@@ -24,4 +24,13 @@ Stopping drains the child notification before the final parent interrupt. QA
 remains advisory, including when unavailable. General/explore delegation stays
 in the foreground.
 
+The `asset-forge` subagent may also run in the background under the same
+turn-ownership, billing, recovery and stop-draining rules, but its results are
+load-bearing: the parent must integrate the delivered assets (or replace them)
+before the turn finishes. Its model defaults to the turn's selected model, with
+`OPENCODE_ASSET_MODEL` to pin a choice and `OPENCODE_ASSET_FALLBACK_MODELS`
+for text-only selections; see [OpenCode runtime](opencode-v2.md). On an
+image-capable model it also gets browser tools: the harness asset viewer page
+(`<preview>/__assets/`) and the running game, so assets are checked in context.
+
 Generated game `AGENTS.md` rules and initial prompts require a concrete core action, genre-appropriate challenges, meaningful decisions/skill and a complete playable round before optional polish. A generic collect-N-pickups loop is not the default. Explicit collection-game and sandbox requests remain supported, and existing mechanics are preserved on revisions. Existing projects receive the refreshed rules when the harness next prepares their workspace.
