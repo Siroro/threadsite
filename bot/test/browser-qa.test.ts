@@ -84,7 +84,7 @@ test("environment noise is stripped while concrete defects and confirmed blank r
 
 test("relay WebSocket connection failures are expected offline behavior and never findings", () => {
   const result = classifyBrowserDiagnostics([
-    { type: "ERROR", text: "WebSocket connection to 'wss://gameserver.siroro.co.uk/ws' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ http://127.0.0.1:8080/83572303320842240/1562538228630954164/js/main.js:4147" },
+    { type: "ERROR", text: "WebSocket connection to 'wss://gameserver.example.co.uk/ws' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ http://127.0.0.1:8080/83572303320842240/1562538228630954164/js/main.js:4147" },
     { type: "ERROR", text: "WebSocket connection to 'ws://localhost:8090/world/x' failed: WebSocket is closed before the connection is established." },
   ], []);
   assert.deepEqual(result.findings, []);

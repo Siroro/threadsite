@@ -177,8 +177,8 @@ test("interactive setup needs no flags for custom hostnames, optional games host
       ? 'export PATH="$PWD/bin:$PATH"; cat scripts/caddy-quickstart.sh | bash'
       : 'export PATH="$PWD/bin:$PATH"; bash scripts/caddy-quickstart.sh';
     const output = await runInteractive(t, f, [
-      ["Sites hostname (", "lab.siroro.co.uk"],
-      ["Git hostname (", "git.siroro.co.uk"],
+      ["Sites hostname (", "lab.example.co.uk"],
+      ["Git hostname (", "git.example.co.uk"],
       ["Games hostname (", gamesHost],
       ["Discord bot token (", token],
       ["Discord server ID (", "223456789012345678"],
@@ -186,9 +186,9 @@ test("interactive setup needs no flags for custom hostnames, optional games host
       ["Builder model (", "openai/coder"],
       ["API key for openai (", key],
     ], command);
-    assert.equal(await f.setting("PUBLIC_SITES_BASE_URL"), "https://lab.siroro.co.uk");
-    assert.equal(await f.setting("FORGEJO_PUBLIC_URL"), "https://git.siroro.co.uk");
-    assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), `wss://${gamesHost || "lab.siroro.co.uk"}/ws`);
+    assert.equal(await f.setting("PUBLIC_SITES_BASE_URL"), "https://lab.example.co.uk");
+    assert.equal(await f.setting("FORGEJO_PUBLIC_URL"), "https://git.example.co.uk");
+    assert.equal(await f.setting("GAMESERVER_PUBLIC_URL"), `wss://${gamesHost || "lab.example.co.uk"}/ws`);
     assert.equal(await f.setting("DISCORD_ADMIN_USER_IDS"), "323456789012345678");
     assert.equal(await f.setting("OPENCODE_DEFAULT_MODEL"), "openai/coder");
     assert.equal(await f.setting("OPENAI_API_KEY"), key);
