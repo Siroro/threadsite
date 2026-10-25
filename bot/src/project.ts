@@ -1257,7 +1257,7 @@ export class ProjectService {
    * status heartbeats never count. Shared by the reattach wait and the
    * continuation prompt so both run on identical inactivity semantics.
    */
-  private attachTracker(onProgress: ProgressCallback | undefined, onActivity?: () => void): TurnActivity {
+  attachTracker(onProgress: ProgressCallback | undefined, onActivity?: () => void): TurnActivity {
     const questions = new Set<string>();
     const toolStates = new Map<string, string>();
     let lastMetrics = "";
@@ -1289,7 +1289,7 @@ export class ProjectService {
    * bounds inactivity, excluding time spent waiting for a user's answer.
    * Status heartbeats alone must not keep a wedged turn alive forever.
    */
-  private async recoveryPrompt(
+  async recoveryPrompt(
     workspacePath: string,
     sessionId: string,
     instruction: string,
@@ -1355,7 +1355,7 @@ export class ProjectService {
    * of being cut down mid-work, while a silent one is still stopped rather than
    * left burning tokens unsupervised.
    */
-  private async waitForIdleTurn(workspacePath: string, sessionId: string, onProgress: ProgressCallback | undefined,
+  async waitForIdleTurn(workspacePath: string, sessionId: string, onProgress: ProgressCallback | undefined,
       tracker: TurnActivity, timeoutMs = config.opencodeReconcileTimeoutMs): Promise<void> {
     const startedAt = Date.now();
     const stalled = () => !tracker.questionsPending() && Date.now() - tracker.lastProgressAt() > timeoutMs;

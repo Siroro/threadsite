@@ -119,10 +119,10 @@ interface Watch {
 export class OpenCodeV2Harness {
   private readonly client: OpenCodeClient;
   private readonly catalogs = new Map<string, { expires: number; promise: Promise<ModelInfo[]> }>();
-  private readonly watches = new Map<string, Watch>();
-  private readonly stopped = new Set<string>();
+  readonly watches = new Map<string, Watch>();
+  readonly stopped = new Set<string>();
   private readonly prompts = new Set<string>();
-  private readonly quotas = new Map<string, QuotaBlock>();
+  readonly quotas = new Map<string, QuotaBlock>();
   failoverModelSource: (() => string[] | null) | undefined;
 
   constructor(client?: OpenCodeClient) {
@@ -427,7 +427,7 @@ export class OpenCodeV2Harness {
     return (await this.usageHistory(directory, sessionID)).map(({ sessionID: id, message }) => applicationMessage(message, id));
   }
 
-  private async finalUsage(directory: string, sessionID: string, since: number, baseline: Set<string>, watch: Watch): Promise<TurnUsage> {
+  async finalUsage(directory: string, sessionID: string, since: number, baseline: Set<string>, watch: Watch): Promise<TurnUsage> {
     const streamSteps = [...watch.steps.values()];
     const observed = usageFromMessages(streamSteps, since) ?? emptyUsage();
     observed.contextLimit = watch.contextLimit;
@@ -610,7 +610,7 @@ export class OpenCodeV2Harness {
     return this.sweep(sessions);
   }
 
-  private async sweep(sessions: Array<{ id: string; directory: string; parentID?: string }>): Promise<{ sessions: number; aborted: number }> {
+  async sweep(sessions: Array<{ id: string; directory: string; parentID?: string }>): Promise<{ sessions: number; aborted: number }> {
     let aborted = 0;
     const parents = new Map(sessions.map((session) => [session.id, session.parentID]));
     const depth = (id: string): number => {
@@ -898,7 +898,7 @@ export class OpenCodeV2Harness {
     }
   }
 
-  private event(event: V2Event, directory: string, sessionID: string, watch: Watch, callback?: ProgressCallback): void {
+  event(event: V2Event, directory: string, sessionID: string, watch: Watch, callback?: ProgressCallback): void {
     if (event.location && !sameDirectory(event.location.directory, directory)) return;
     if (event.type === "form.created" && event.data.form.sessionID === sessionID) {
       watch.questionIds.add(event.data.form.id);

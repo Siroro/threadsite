@@ -22,7 +22,7 @@ function recovery(t: TestContext) {
     }, abortTurn: async () => { aborted += 1; return true; } } as any,
     {} as any, {} as any,
   );
-  const result = (service as any).recoveryPrompt("workspace", "session", "Continue", undefined, "thread") as Promise<PromptResult>;
+  const result = service.recoveryPrompt("workspace", "session", "Continue", undefined, "thread") as Promise<PromptResult>;
   // Attach immediately so a mocked deadline rejection is always observed.
   const outcome = result.then((value) => ({ value, error: undefined }), (error: Error) => ({ value: undefined, error }));
   return { outcome, progress: (update: Parameters<ProgressCallback>[0]) => callback?.(update), complete, aborted: () => aborted };
@@ -75,8 +75,8 @@ test("the reattached busy poll never speaks over the live activity render", asyn
         isBusy: async () => { polls += 1; return polls <= 2; } } as any,
       {} as any, {} as any,
     );
-    const tracker = (service as any).attachTracker((update) => { beats.push(update); });
-    await (service as any).waitForIdleTurn("workspace", "session", (update) => { beats.push(update); }, tracker);
+    const tracker = service.attachTracker((update) => { beats.push(update); });
+    await service.waitForIdleTurn("workspace", "session", (update) => { beats.push(update); }, tracker);
     // While the interrupted turn runs, the poll reports the busy flag only: the
     // reattached event stream owns the visible feed, and a repeated technical
     // "still running" line would bury the live tool activity under it.
@@ -104,12 +104,12 @@ test("a reattached turn that keeps making progress outlives the recovery window"
         abortTurn: async () => { aborted += 1; return true; } } as any,
       {} as any, {} as any,
     );
-    const tracker = (service as any).attachTracker(undefined);
+    const tracker = service.attachTracker(undefined);
     // Streamed narration keeps arriving well past the window: once the agent is
     // confirmed working there is no wall clock, only the inactivity deadline.
     const feeding = setInterval(() => { tracker.progress({ kind: "thought", text: `Working ${Date.now()}` }); }, 8);
     try {
-      await (service as any).waitForIdleTurn("workspace", "session", undefined, tracker);
+      await service.waitForIdleTurn("workspace", "session", undefined, tracker);
     } finally { clearInterval(feeding); }
     assert.equal(aborted, 0, "a progressing turn is never cut down mid-work");
     assert.ok(polls > 30, "the wait ran well past the window before the turn finished");
@@ -133,8 +133,8 @@ test("a reattached turn that falls silent is stopped, and a pending question pau
         abortTurn: async () => { aborted += 1; return true; } } as any,
       {} as any, {} as any,
     );
-    const tracker = (service as any).attachTracker(undefined);
-    const outcome = (service as any).waitForIdleTurn("workspace", "session", undefined, tracker)
+    const tracker = service.attachTracker(undefined);
+    const outcome = service.waitForIdleTurn("workspace", "session", undefined, tracker)
       .then(() => { throw new Error("the silent turn must be stopped, not awaited to idle"); }, (error: Error) => error);
     // A pending user question legitimately idles the agent: the stall clock
     // pauses, so several windows may pass without an abort.

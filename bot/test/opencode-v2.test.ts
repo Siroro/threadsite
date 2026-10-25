@@ -272,8 +272,8 @@ test("a long browser QA provider retry cancels only optional inspection and leav
   f.setActive(true);
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", undefined, 0);
   try {
-    const internal = f.harness as any;
-    const watch = internal.watches.get("ses_root");
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
     internal.event({ type: "session.created", data: { sessionID: "ses_qa", parentID: "ses_root", agent: "browser-qa" } }, "/w", "ses_root", watch);
     internal.event({ type: "session.retry.scheduled", data: { sessionID: "ses_qa",
       at: Date.now() + config.opencodeQuotaBlockMinRetryMs + 10_000, error: { message: "QA provider quota exhausted" } } }, "/w", "ses_root", watch);
@@ -329,7 +329,7 @@ test("every persisted v2 model step is billed once, including child usage", asyn
   assert.equal(usage?.steps, 3);
   assert.equal(usage?.inputTokens, 660);
   assert.equal(usage?.outputTokens, 36);
-  const final = await (f.harness as any).finalUsage("/w", "ses_root", 0, new Set(), {
+  const final = await (f.harness).finalUsage("/w", "ses_root", 0, new Set(), {
     steps: new Map(), timings: new Map(), compactions: 0 });
   assert.equal(final.timedOutputTokens, 36);
   assert.equal(final.generationMs, 5_000, "overlapping child/provider windows exclude tool execution time");
@@ -449,22 +449,22 @@ test("native session removal stops descendants before a cascading parent delete"
     sessions.delete(sessionID);
     if (sessionID === "ses_root") sessions.delete("ses_child");
   };
-  await (f.harness as any).sweep([
+  await (f.harness).sweep([
     { id: "ses_root", directory: "/w" }, { id: "ses_child", directory: "/w", parentID: "ses_root" },
   ]);
   assert.deepEqual(f.calls.map((call) => call.input.sessionID), ["ses_child", "ses_root"]);
   f.client.session.remove = async () => { throw new Error("403 permission denied"); };
   sessions.set("ses_root", f.session);
-  await assert.rejects((f.harness as any).sweep([{ id: "ses_root", directory: "/w" }]), /403/);
+  await assert.rejects((f.harness).sweep([{ id: "ses_root", directory: "/w" }]), /403/);
 });
 
 test("a native user interruption cannot be resurrected by steering or the recovery watcher", async () => {
   const f = fixture();
   f.setActive(true);
   const stop = await f.harness.watchExistingTurn("/w", "ses_root");
-  const internal = f.harness as any;
+  const internal = f.harness;
   internal.event({ type: "session.execution.interrupted", data: { sessionID: "ses_root", reason: "user" } },
-    "/w", "ses_root", internal.watches.get("ses_root"));
+    "/w", "ses_root", internal.watches.get("ses_root")!);
   assert.equal(await f.harness.steer("/w", "ses_root", "Continue"), false);
   await stop();
   assert.ok(!f.calls.some((call) => call.name === "steer"));
@@ -487,8 +487,8 @@ test("root tool events retain their targets while child work stays out of the pu
   const updates: any[] = [];
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); });
   try {
-    const internal = f.harness as any;
-    const watch = internal.watches.get("ses_root");
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
     const send = (type: string, data: object) => internal.event({ type, created: Date.now(), data: {
       sessionID: "ses_root", ...data } }, "/w", "ses_root", watch, (update: any) => { updates.push(update); });
     send("session.tool.input.started", { id: "tool_edit", name: "edit" });
@@ -527,8 +527,8 @@ test("the live card counts executing children and removes the section after all 
   progress.callback({ text: "Editing the main scene" });
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress.callback);
   try {
-    const internal = f.harness as any;
-    const watch = internal.watches.get("ses_root");
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
     const send = (id: string, type: string, data: object = {}) => internal.event({ type, created: Date.now(),
       data: { sessionID: id, ...data } }, "/w", "ses_root", watch, progress.callback);
     const initial = progress.readSnapshot();
@@ -581,8 +581,8 @@ test("the subagent lines name each child, its steps and its current tool", async
   const progress = new DiscordProgress({ id: "subdetail", edit: async () => {} } as any, "Updating");
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress.callback);
   try {
-    const internal = f.harness as any;
-    const watch = internal.watches.get("ses_root");
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
     const send = (id: string, type: string, data: object = {}) => internal.event({ type, created: Date.now(),
       data: { sessionID: id, ...data } }, "/w", "ses_root", watch, progress.callback);
     send("ses_child", "session.created", { parentID: "ses_root", agent: "explore" });
@@ -638,8 +638,8 @@ test("native text and reasoning with the same ordinal never share streamed buffe
   const updates: any[] = [];
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); });
   try {
-    const internal = f.harness as any;
-    const watch = internal.watches.get("ses_root");
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
     const send = (type: string, content: object) => internal.event({ type, created: Date.now(), data: {
       sessionID: "ses_root", assistantMessageID: "msg_stream", ordinal: 0, ...content,
     } }, "/w", "ses_root", watch, (update: any) => { updates.push(update); });
@@ -662,8 +662,8 @@ test("average tok/s pairs streamed windows and tokens: retries re-anchor and unt
   const updates: any[] = [];
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); });
   try {
-    const internal = f.harness as any;
-    const watch = internal.watches.get("ses_root");
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
     const send = (type: string, created: number, content: object) => internal.event({ type, created, data: {
       sessionID: "ses_root", ...content } }, "/w", "ses_root", watch, (update: any) => { updates.push(update); });
     const model = { id: "text", providerID: "test" };
@@ -721,7 +721,7 @@ test("persisted streamed windows rate the turn even when live events were never 
     tokens: { input: 100, output, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0.01 } as SessionMessageInfo);
   f.history.push(step("msg_p1", now, now + 2_000, 300));
   f.history.push(step("msg_p2", now + 3_000, now + 4_000, 50));
-  const internal = f.harness as any;
+  const internal = f.harness;
   const usage = await internal.finalUsage("/w", "ses_root", now - 1, new Set(), {
     since: now - 1, baseline: new Set(), steps: new Map(), timings: new Map(), compactions: 0 });
   assert.equal(usage.generationMs, 3_000);
@@ -736,8 +736,8 @@ test("a 100-step Surplus turn never divides untimed output by another step's dur
   const progress = (update: any) => { updates.push(update); };
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress, 0);
   try {
-    const internal = f.harness as any;
-    const watch = internal.watches.get("ses_root");
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
     const model = { id: "deepseek", providerID: "surplus" };
     for (let index = 0; index < 100; index++) {
       const id = `msg_rate_${index}`;
@@ -781,8 +781,8 @@ test("live averages recover all 100 measured steps from history and deduplicate 
   const progress = (update: any) => { updates.push(update); };
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress, 0);
   try {
-    const internal = f.harness as any;
-    const watch = internal.watches.get("ses_root");
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
     const recovered = updates.filter((update) => update.kind === "metrics").at(-1)?.metrics;
     assert.equal(recovered?.steps, 100);
     assert.equal(recovered?.outputTokensPerSecond, 150);
@@ -805,8 +805,8 @@ test("a completed provider window replaces a burst live estimate on the actual p
   const progress = (update: any) => card.callback(update);
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress, 0);
   try {
-    const internal = f.harness as any;
-    const watch = internal.watches.get("ses_root");
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
     const send = (type: string, created: number, data: object) => internal.event({ type, created,
       data: { sessionID: "ses_root", assistantMessageID: "msg_burst", ...data } }, "/w", "ses_root", watch, progress);
     send("session.step.started", 1_000, { model: { id: "deepseek", providerID: "surplus" }, started: 1_000 });
@@ -826,8 +826,8 @@ test("session status beats carry the busy flag without claiming the activity lin
   const updates: any[] = [];
   const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); });
   try {
-    const internal = f.harness as any;
-    const watch = internal.watches.get("ses_root");
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
     const send = (type: string, content: object) => internal.event({ type, created: Date.now(), data: {
       sessionID: "ses_root", ...content } }, "/w", "ses_root", watch, (update: any) => { updates.push(update); });
     send("session.text.delta", { assistantMessageID: "msg_n", ordinal: 0, delta: "Composing the hero section" });
