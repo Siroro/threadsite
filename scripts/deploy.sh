@@ -6,7 +6,7 @@
 #   scripts/deploy.sh           # update tracked files to origin/main
 #   scripts/deploy.sh --force   # also discard local edits to tracked files
 #
-# .env, secrets/ and data/ are untracked and never touched — NEVER run
+# .env, secrets/ and data/ are untracked and never touched; NEVER run
 # `git clean` in this repo. Rebuilds and recreates only the containers whose
 # code actually changed since the deployed commit.
 #
@@ -68,7 +68,7 @@ fi
 
 # Main-only: force the checkout to origin/main. -f discards the (already
 # vetted) local edits and overwrites stale untracked copies of files that are
-# tracked upstream — the state a copied or pre-rewrite checkout ends up in.
+# tracked upstream, the state a copied or pre-rewrite checkout ends up in.
 git checkout -f -B "$BRANCH" "origin/$BRANCH" >/dev/null
 git branch --set-upstream-to="origin/$BRANCH" HEAD >/dev/null 2>&1 || true
 
@@ -78,7 +78,7 @@ for stale in $(git for-each-ref --format='%(refname:short)' refs/heads/ | grep -
 done
 
 if [[ "$old_head" == "$new_head" ]]; then
-  echo "Already at $new_head ($BRANCH) — nothing to update."
+  echo "Already at $new_head ($BRANCH): nothing to update."
   exit 0
 fi
 
@@ -92,7 +92,7 @@ mapfile -t services < <( {
 } || true )
 
 if [[ ${#services[@]} -eq 0 ]]; then
-  echo "No service code changed — nothing to rebuild. Deployed commit: $new_head"
+  echo "No service code changed: nothing to rebuild. Deployed commit: $new_head"
   exit 0
 fi
 
@@ -101,7 +101,7 @@ docker compose build "${services[@]}"
 docker compose up -d "${services[@]}"
 
 if git diff --name-only "$old_head" "$new_head" | grep -qE '^docker-compose\.yml'; then
-  echo "NOTE: docker-compose.yml changed — consider 'docker compose up -d' for all services."
+  echo "NOTE: docker-compose.yml changed; consider 'docker compose up -d' for all services."
 fi
 
 echo "Done. Deployed $new_head ($BRANCH)."

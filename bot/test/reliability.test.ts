@@ -970,7 +970,7 @@ test("switching multiplayer rewrites the wiring and runs a question-first agent 
   assert.match(instruction, /switched from shared-arena multiplayer to invite-code rooms/);
   assert.match(instruction, /MUST call the question tool/);
   // Harness wiring followed the new mode before the agent ran.
-  assert.match(await fs.readFile(path.join(f.dir, "AGENTS.md"), "utf8"), /Session mode — rooms/);
+  assert.match(await fs.readFile(path.join(f.dir, "AGENTS.md"), "utf8"), /Session mode \(rooms\)/);
   assert.ok(await fs.access(path.join(f.dir, "site/net/net-config.js")).then(() => true, () => false), "net config is in place for rooms");
   const boardsConfig = await fs.readFile(path.join(f.dir, "site/leaderboards/leaderboards-config.js"), "utf8");
   const stableGameId = f.store.getProject(f.project.threadId)!.multiplayerGameId;

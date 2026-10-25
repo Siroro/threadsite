@@ -11,7 +11,7 @@ injected into every future turn, even after a session reset or compaction.
 
 Write concise, durable facts only: user preferences, deliberate design
 decisions, known constraints, and things future turns must not break.
-Do not log per-turn changelogs — git history already covers those.
+Do not log per-turn changelogs; git history already covers those.
 <!-- threadsite:harness-owned-header:end -->
 `;
 const MAX_NOTES_BYTES = 32 * 1024;

@@ -216,7 +216,7 @@ export class ProjectService {
     projectKind: ProjectKind;
     pendingTurn?: ProjectRecord["pendingTurn"];
   }): Promise<{ text: string; usage?: TurnUsage } | undefined> {
-    emit(input.onProgress, "🏷️ The project was delivered unnamed — asking the agent to name it");
+    emit(input.onProgress, "🏷️ The project was delivered unnamed, asking the agent to name it");
     try {
       const result = await this.mutate(project.threadId, "Name the project", false, input.onProgress, input.author,
         input.pendingTurn?.statusMessageId, undefined, [], undefined, undefined, namingFixInstruction(input.projectKind), true);
@@ -432,7 +432,7 @@ export class ProjectService {
       emit(onProgress, multiplayerMode === "rooms" ? "🕹️ Provisioning the multiplayer client (invite-code rooms)" : "🕹️ Provisioning the multiplayer client (shared arena)");
       await ensureMultiplayerFiles(workspacePath, multiplayer, projectKind);
     } else if (projectKind !== "site") {
-      emit(onProgress, "🕹️ Singleplayer game — no multiplayer client");
+      emit(onProgress, "🕹️ Singleplayer game, no multiplayer client");
       await fs.writeFile(path.join(workspacePath, "AGENTS.md"), await projectAgents(projectKind, undefined, true), "utf8");
     } else {
       emit(onProgress, "🧭 Writing project-specific AGENTS.md");
@@ -541,7 +541,7 @@ export class ProjectService {
     if (!intent) return project;
     emit(onProgress, "🏷️ Updating the project name, repository and live links");
     await this.forgejo.renameRepository(intent.fromRepoName, intent.repoName,
-      `${projectKindLabel(project.projectKind)} — ${intent.displayName}`, intent.repoId);
+      `${projectKindLabel(project.projectKind)}: ${intent.displayName}`, intent.repoId);
     // Persist a successful remote rename immediately, even if later delivery fails.
     project = await this.store.patchProject(threadId, { repoName: intent.repoName });
     await ensureGitRepository(project.workspacePath, intent.repoName, this.forgejo);
@@ -693,7 +693,7 @@ export class ProjectService {
         const accepts = parsed ? await this.opencode.modelAcceptsAttachments(parsed.providerID, parsed.modelID, project.workspacePath) : undefined;
         if (accepts !== true) {
           turnImages = undefined;
-          emit(onProgress, "⚠️ The current model can't see images — the attachment(s) were dropped");
+          emit(onProgress, "⚠️ The current model can't see images, the attachment(s) were dropped");
           log("info", "project.images_dropped", { threadId, count: images.length, model: parsed ? `${parsed.providerID}/${parsed.modelID}` : "unknown" });
           if (!prompt.trim()) throw new Error("The model this thread runs on cannot see images and the message had no text.");
         }
@@ -734,7 +734,7 @@ export class ProjectService {
       updateChanges();
       const changesTimer = onProgress ? setInterval(updateChanges, 3000) : undefined;
       stopChangesTimer = () => { if (changesTimer) clearInterval(changesTimer); };
-      emit(onProgress, initial ? "✨ Building the first version" : "🧠 Applying your requested revision", undefined, "working");
+      emit(onProgress, initial ? "🏗️ Building the first version" : "🧠 Applying your requested revision", undefined, "working");
       // Contribution tally inputs, read before the claim consumes the queue:
       // every distinct requester whose request this turn is about to absorb.
       // Restart recovery replays the claimed marker without re-entering here,
@@ -790,7 +790,7 @@ export class ProjectService {
         // Keep whatever the agent wrote — the failed turn's edits stay in the
         // working tree so the next turn can build on or fix them.
         if ((error as any)?.mayStillBeRunning) {
-          emit(onProgress, "⚠️ The agent may still be running — preserving the workspace");
+          emit(onProgress, "⚠️ The agent may still be running, preserving the workspace");
           log("error", "project.rollback_skipped_active_opencode", {
             threadId,
             sessionId: project.sessionId,
@@ -900,7 +900,7 @@ export class ProjectService {
       if (qa) qaFindings = { checkedAt: new Date().toISOString(), findings: qaFindingsList };
       if (qaFindingsList.length) {
         log("warn", "browserqa.advisory_findings", { threadId, ...qaFindings });
-        emit(input.onProgress, `⚠️ Browser QA: ${truncate(qaFindingsList[0], 240)} — continuing publication; details saved for the next update`);
+        emit(input.onProgress, `⚠️ Browser QA: ${truncate(qaFindingsList[0], 240)}; continuing publication, details saved for the next update`);
       }
       return validated;
     };
@@ -917,7 +917,7 @@ export class ProjectService {
         // One repair attempt: feed the validation error back to the same agent
         // session, which can see the files it just wrote, then re-validate.
         log("warn", "project.validation_javascript_retry", { threadId, error: firstError });
-        emit(input.onProgress, "🔧 Validation errors found — asking the agent to repair them", undefined, "working");
+        emit(input.onProgress, "🔧 Validation errors found, asking the agent to repair them", undefined, "working");
         try {
           const repaired = await this.opencode.prompt(
             workspacePath,
@@ -957,7 +957,7 @@ export class ProjectService {
     let commitStats: Awaited<ReturnType<typeof commitAndPush>> | undefined;
 
     if (validationError) {
-      emit(input.onProgress, "⚠️ Validation failed — committing the work without publishing it");
+      emit(input.onProgress, "⚠️ Validation failed, committing the work without publishing it");
     } else {
       emit(input.onProgress, "📝 Updating project metadata");
     }
@@ -971,7 +971,7 @@ export class ProjectService {
       // A validated turn that only fails later keeps a clean subject; a turn
       // that never validated says so in git history.
       const subject = validationError
-        ? `${commitSubjectFor(input.prompt, input.initial, input.projectKind)} — failed validation, not published`
+        ? `${commitSubjectFor(input.prompt, input.initial, input.projectKind)} (failed validation, not published)`
         : commitSubjectFor(input.prompt, input.initial, input.projectKind);
       try {
         commitStats = await commitAndPush(workspacePath, subject, this.forgejo, input.author);
@@ -1244,8 +1244,8 @@ export class ProjectService {
       const quota = (error as { quotaBlock?: unknown }).quotaBlock;
       log("warn", "project.model_failover_retry", { sessionId, from: requestedModel || "default", to: retryModel, reason: quota ? "quota" : "provider-blip", error: serializeError(error) });
       emit(onProgress, quota
-        ? `⚠️ The provider quota ran out mid-turn — retrying with \`${retryModel}\``
-        : `⚠️ \`${requestedModel || "The model"}\` keeps failing upstream — retrying with \`${retryModel}\``);
+        ? `⚠️ The provider quota ran out mid-turn, retrying with \`${retryModel}\``
+        : `⚠️ \`${requestedModel || "The model"}\` keeps failing upstream, retrying with \`${retryModel}\``);
       return this.opencode.prompt(workspacePath, sessionId, instruction, retryModel, onProgress, "sitebuilder", this.store.getEffort(), images);
     }
   }
@@ -1323,7 +1323,7 @@ export class ProjectService {
       return await Promise.race([pending, inactivity]);
     } catch (error) {
       if (timedOut) {
-        emit(onProgress, "🛑 Recovery window exhausted — stopping the orphaned agent turn");
+        emit(onProgress, "🛑 Recovery window exhausted, stopping the orphaned agent turn");
         await this.opencode.abortTurn(workspacePath, sessionId).catch((abortError) => {
           log("warn", "project.recovery_abort_failed", { threadId, error: serializeError(abortError) });
         });
@@ -1363,7 +1363,7 @@ export class ProjectService {
     let lastHeartbeatAt = 0;
     for (;;) {
       if (sawBusy && stalled()) {
-        emit(onProgress, "🛑 No agent progress in the recovery window — stopping the stalled agent turn");
+        emit(onProgress, "🛑 No agent progress in the recovery window, stopping the stalled agent turn");
         await this.opencode.abortTurn(workspacePath, sessionId).catch((error) => {
           log("warn", "project.recovery_wait_abort_failed", { sessionId, error: serializeError(error) });
         });
@@ -1442,7 +1442,7 @@ export class ProjectService {
     if (config.sessionIdleResetMs > 0 && project.lastTurnAt) {
       const idleMs = Date.now() - Date.parse(project.lastTurnAt);
       if (Number.isFinite(idleMs) && idleMs > config.sessionIdleResetMs) {
-        emit(onProgress, "🧹 Previous context expired — starting a fresh agent session");
+        emit(onProgress, "🧹 Previous context expired, starting a fresh agent session");
         const sessionId = await this.opencode.createSession(project.workspacePath, `ThreadSite: ${project.displayName}`);
         const patched = await this.store.patchProject(threadId, { sessionId, lastTurnUsage: undefined });
         log("info", "project.session_auto_reset", {
@@ -1462,7 +1462,7 @@ export class ProjectService {
     if (usage.contextTokens <= threshold * usage.contextLimit) return undefined;
 
     const percent = Math.round((usage.contextTokens / usage.contextLimit) * 100);
-    emit(onProgress, `🧹 Context was ${percent}% full after the last turn — compacting before this one`);
+    emit(onProgress, `🧹 Context was ${percent}% full after the last turn, compacting before this one`);
     try {
       const model = (await this.opencode.lastAssistantModel(project.workspacePath, project.sessionId))
         ?? parseModel(this.store.getModel());
@@ -1524,7 +1524,7 @@ export class ProjectService {
     const project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
     const kind = project.projectKind ?? "site";
-    if (kind === "site") throw new Error("This project is a website — multiplayer architectures apply to games only.");
+    if (kind === "site") throw new Error("This project is a website; multiplayer architectures apply to games only.");
     const from = project.multiplayerMode ?? "arena";
     if (from === mode) throw new Error(`This game already runs ${multiplayerModeLabel(mode)}.`);
 
@@ -1536,7 +1536,7 @@ export class ProjectService {
       emit(onProgress, `🕹️ Rewiring the harness client for ${multiplayerModeLabel(mode)}`);
       await ensureMultiplayerFiles(project.workspacePath, multiplayer, kind);
     } else {
-      emit(onProgress, "🕹️ Removing the multiplayer client — this game is going singleplayer");
+      emit(onProgress, "🕹️ Removing the multiplayer client, this game is going singleplayer");
       await removeMultiplayerFiles(project.workspacePath);
     }
     log("info", "project.multiplayer_switch", { threadId, from, to: mode });

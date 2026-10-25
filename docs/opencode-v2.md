@@ -73,7 +73,7 @@ The `websearch` tool's provider is pre-selected from `OPENCODE_WEBSEARCH_PROVIDE
 consent form that the question flow would surface to Discord users, who cannot
 pick a provider or supply its credentials; the remembered choice also does not
 survive a server restart. Provider keys (`EXA_API_KEY`, `TAVILY_API_KEY`,
-`FIRECRAWL_API_KEY`, `PARALLEL_API_KEY`, `TINYFISH_API_KEY`) are optional —
+`FIRECRAWL_API_KEY`, `PARALLEL_API_KEY`, `TINYFISH_API_KEY`) are optional:
 Tavily and TinyFish fall back to keyless access, and empty variables are
 ignored. An invalid provider name fails service startup with the allowed values.
 Recreate `opencode` after changing these settings.

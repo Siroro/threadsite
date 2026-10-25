@@ -77,12 +77,12 @@ export async function validateSite(siteDir: string): Promise<SiteStats> {
         // that no browser executes. Repairable, so it rides the type-check
         // error channel into the one-shot repair round-trip.
         if (!relative.startsWith("src/")) {
-          throw new Error(`JavaScript type-check error: TypeScript file site/${relative} is outside site/src/ — only the src/ tree is compiled. Move it below site/src/.`);
+          throw new Error(`JavaScript type-check error: TypeScript file site/${relative} is outside site/src/, and only the src/ tree is compiled. Move it below site/src/.`);
         }
         tsSources.push(absolute);
       }
       if (/\.(?:tsx|cts|jsx)$/.test(extension)) {
-        throw new Error(`JavaScript type-check error: site/${relative} uses unsupported script type '${extension}' — write plain TypeScript (.ts) under site/src/.`);
+        throw new Error(`JavaScript type-check error: site/${relative} uses unsupported script type '${extension}'; write plain TypeScript (.ts) under site/src/.`);
       }
       files += 1;
       bytes += stat.size;
@@ -200,11 +200,11 @@ async function validateAssetReferences(root: string): Promise<void> {
       if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) continue;
       if (url.includes("${")) continue;
       if (reference.kind === "<script src>" && /\.(?:ts|mts)$/i.test(url.split("#")[0].split("?")[0])) {
-        throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" points at TypeScript source, which browsers cannot execute — reference the compiled bundle (js/<name>.js) instead.`);
+        throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" points at TypeScript source, which browsers cannot execute; reference the compiled bundle (js/<name>.js) instead.`);
       }
       if (url.startsWith("/")) {
         if (reference.enforceRelative) {
-          throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" is a site-root-absolute path, but the site is served under a path prefix — use a relative URL.`);
+          throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" is a site-root-absolute path, but the site is served under a path prefix; use a relative URL.`);
         }
         continue;
       }
@@ -295,12 +295,12 @@ async function validateModuleResolution(root: string): Promise<void> {
       const via = path.relative(root, item.from).replaceAll(path.sep, "/") || "index.html";
       if (!resolved.startsWith(`${root}${path.sep}`)) {
         throw new Error(
-          `Broken local reference in ${rel}: ${item.kind}, loaded from site/${via}, resolves to site/${relative} — outside the site directory, which is never published (workspace files such as node_modules/). Import the engine from site/src/ TypeScript so it is bundled, or move the referenced file under site/.`,
+          `Broken local reference in ${rel}: ${item.kind}, loaded from site/${via}, resolves to site/${relative}, which is outside the site directory and never published (workspace files such as node_modules/). Import the engine from site/src/ TypeScript so it is bundled, or move the referenced file under site/.`,
         );
       }
       if (!await fs.access(resolved).then(() => true, () => false)) {
         throw new Error(
-          `Broken local reference in ${rel}: ${item.kind}, loaded from site/${via}, resolves to missing file site/${relative}. If this is a split library (an ESM wrapper re-exporting sibling builds), vendor every file it imports — or import the harness-vendored copy instead.`,
+          `Broken local reference in ${rel}: ${item.kind}, loaded from site/${via}, resolves to missing file site/${relative}. If this is a split library (an ESM wrapper re-exporting sibling builds), vendor every file it imports, or import the harness-vendored copy instead.`,
         );
       }
       if (visited.has(resolved) || visited.size > 200) continue;
@@ -901,7 +901,7 @@ function updateCheckerSnippet(version: string, versionUrl: string): string {
     if (!overlay) {
       overlay = document.createElement("div");
       overlay.setAttribute("style", "position:fixed;right:16px;bottom:16px;z-index:2147483647;background:rgba(17,17,17,.92);color:#eee;font:13px/1.5 system-ui,ui-sans-serif,sans-serif;padding:10px 14px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.35);pointer-events:none");
-      overlay.textContent = "New version available — updating…";
+      overlay.textContent = "New version available, updating…";
       (document.body || document.documentElement).appendChild(overlay);
       setTimeout(function () { location.reload(); }, 1200);
     }

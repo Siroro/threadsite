@@ -9,8 +9,8 @@
     </Directory>
 
     # ThreadSite appends ?v=<content-hash> to every local asset reference on
-    # publish — HTML src/href attributes and ES module import specifiers inside
-    # the published JS — so URLs carrying ?v= are content-addressed and safe to
+    # publish (HTML src/href attributes and ES module import specifiers inside
+    # the published JS), so URLs carrying ?v= are content-addressed and safe to
     # cache immutably. Assets requested WITHOUT a version (dynamically built
     # URLs, worker constructions, references the rewriter cannot see) must
     # revalidate instead, so a republished site is picked up immediately via a

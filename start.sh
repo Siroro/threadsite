@@ -59,7 +59,7 @@ command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }
 compose() { docker compose "$@"; }
 
 if [[ ! -f .env ]]; then
-  echo "No .env found — run ./scripts/setup.sh, fill in the values, then start." >&2
+  echo "No .env found: run ./scripts/setup.sh, fill in the values, then start." >&2
   exit 1
 fi
 
@@ -81,7 +81,7 @@ wait_healthy() {
     if (( ready )); then say "All services healthy."; return 0; fi
     sleep 3
   done
-  warn "Some services are not healthy yet — check ./start.sh logs"
+  warn "Some services are not healthy yet; check ./start.sh logs"
   return 1
 }
 
@@ -222,7 +222,7 @@ case "$COMMAND" in
     # are always checked — Docker's layer cache makes an unchanged service a
     # cheap no-op, never a rebuild.
     if (( UPDATE )) && [[ -f "$IMAGE_STAMP" && "$(image_inputs_digest)" == "$(cat "$IMAGE_STAMP")" ]]; then
-      say "Images already built for this code — starting the stack without rebuilding."
+      say "Images already built for this code: starting the stack without rebuilding."
       compose up -d --remove-orphans
     else
       say "Checking image builds and bringing the stack up…"

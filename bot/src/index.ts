@@ -351,7 +351,7 @@ async function deliverExternalPushPrompt(project: ProjectRecord, sha: string, so
   }
   try {
     await thread.send(renderStatusCard(
-      `📥 **External push detected** on \`${project.repoName}\` · commit \`${sha.slice(0, 10)}\` — pushed with a repo push key.\n` +
+      `📥 **External push detected** on \`${project.repoName}\` · commit \`${sha.slice(0, 10)}\` · pushed with a repo push key.\n` +
       "Publish it to the live site, or dismiss it (the commit stays in git history either way).",
       [externalPushRow()],
     ));
@@ -513,7 +513,7 @@ async function recoverInterruptedTurns(): Promise<void> {
         } catch (error) {
           await progress?.close();
           if (error instanceof TurnStoppedError) {
-            await deliver("🛑 **Stopped at your request** — the recovered turn's partial edits are preserved in the workspace.");
+            await deliver("🛑 **Stopped at your request**: the recovered turn's partial edits are preserved in the workspace.");
             return;
           }
           const incident = await reportFailure(error, {
@@ -524,7 +524,7 @@ async function recoverInterruptedTurns(): Promise<void> {
             model: store.getModel() || "the model default",
           });
           await deliver(
-            `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Could not recover the interrupted turn from the last restart · reference \`${incident.id}\`. Partial edits were kept — send a message to try again.`,
+            `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Could not recover the interrupted turn from the last restart · reference \`${incident.id}\`. Partial edits were kept: send a message to try again.`,
           );
         } finally {
           void recheckExternalPush(project.threadId);
@@ -716,13 +716,13 @@ client.on(Events.MessageCreate, async (message) => {
     // Acknowledge instead of dropping the message on the floor.
     if (creatingThreads.has(message.channel.id)) {
       await message
-        .reply("⏳ This thread is still being set up — please send that again once the first build starts.")
+        .reply("⏳ This thread is still being set up: please send that again once the first build starts.")
         .catch(() => undefined);
     }
     return;
   }
   if (shuttingDown) {
-    await message.reply("♻️ The bot is restarting — please send this again in a moment.").catch(() => undefined);
+    await message.reply("♻️ The bot is restarting: please send this again in a moment.").catch(() => undefined);
     return;
   }
   const content = message.content.trim();
@@ -851,7 +851,7 @@ async function enqueueUserRequest(threadId: string, status: Message, prompt: str
     await setStatusMessage(status, error instanceof CollaborationError ? `🚫 ${error.message}` : "❌ Could not save this request. Please send it again.").catch(() => undefined);
     throw error;
   }
-  await status.edit(cardEdit(renderStatusCard("✅ Request saved — queued for the next update pass."))).catch(() => undefined);
+  await status.edit(cardEdit(renderStatusCard("✅ Request saved: queued for the next update pass."))).catch(() => undefined);
   let pending = pendingUpdates.get(threadId);
   if (!pending) { pending = { entries: [], scheduled: false }; pendingUpdates.set(threadId, pending); }
   if (!pending.entries.some((entry) => (entry.requestStatusId ?? entry.status.id) === status.id)) pending.entries.push({ prompt, displayPrompt, images, author, requesterId, status });
@@ -998,7 +998,7 @@ function mergedDisplay(requests: readonly string[]): string | undefined {
 
 function composeMergedPrompt(head: string, rest: string[]): string {
   if (!rest.length) return head;
-  return `${head}\n\nWhile updates were queued, the user sent ${rest.length} more message${rest.length === 1 ? "" : "s"} — apply all of them in this same pass:\n${rest.join("\n")}`;
+  return `${head}\n\nWhile updates were queued, the user sent ${rest.length} more message${rest.length === 1 ? "" : "s"}: apply all of them in this same pass:\n${rest.join("\n")}`;
 }
 
 async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpdate[]): Promise<void> {
@@ -1041,7 +1041,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
     if (error instanceof TurnStoppedError) {
       await setStatusMessage(
         first.status,
-        "🛑 **Stopped at your request** — the agent's partial edits are preserved in the workspace. Reply here to build on them, or roll them back below.",
+        "🛑 **Stopped at your request**: the agent's partial edits are preserved in the workspace. Reply here to build on them, or roll them back below.",
         (await offerEditsChoice(store.getProject(threadId), error)) ? [failureEditsRow()] : undefined,
       );
       return;
@@ -1137,7 +1137,7 @@ async function startProjectThread(
   const prompt = interaction.options.getString("prompt", true).trim();
   const requestedName = interaction.options.getString("name")?.trim();
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  if (shuttingDown) throw new Error("The bot is restarting — try again in a moment.");
+  if (shuttingDown) throw new Error("The bot is restarting: try again in a moment.");
 
   const { thread, created } = await resolveOrCreateThread(interaction, requestedName || prompt,
     options.projectKind === "site" ? undefined : "game");
@@ -1211,7 +1211,7 @@ async function startProjectThread(
       if (error instanceof TurnStoppedError) {
         await setStatusMessage(
           status,
-          "🛑 **Stopped at your request** — the partial first build is preserved in the workspace. Reply here to continue from it.",
+          "🛑 **Stopped at your request**: the partial first build is preserved in the workspace. Reply here to continue from it.",
         );
         return;
       }
@@ -1271,25 +1271,25 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
   if (sub === "help") {
     await interaction.reply({
       content:
-        "**ThreadSite** — by default, every normal message in a project thread edits its site or game. The owner can restrict editing through Collaboration on the project card.\n" +
+        "**ThreadSite**: by default, every normal message in a project thread edits its site or game. The owner can restrict editing through Collaboration on the project card.\n" +
         "Use Discord Reply on the **running turn's status message** to steer it live. Other messages queue for the next update; several queued requests may merge into one update. Attachments always queue: images reach the model when it can see them, and any other files are saved into the project for the agent to read or use. " +
         "The live status message carries a **Stop** button while a turn runs; `/site stop` works even if that message is gone. " +
         "A turn with no progress for a few minutes is flagged on the card. Failures offer rollback or keep.\n\n" +
-        "**/site start** — create a site (works in any channel)\n" +
-        "**/makegam** — create a 2D or 3D game thread\n" +
-        "**/site info** — links, project type, model, usage\n" +
-        "**/site collaboration** — choose contributors and review requests (owner/admin)\n" +
-        "**/site rename name:…** — change the project name and links (old site links redirect)\n" +
-        "**/site sync** — adopt commits pushed to the repo from outside the bot\n" +
-        "**/site republish** — rebuild and republish without the model\n" +
-        "**/site compact** — summarize the session context now\n" +
-        "**/site multiplayer** — switch a game between arena, rooms, and singleplayer (the agent asks how, then rewrites the netcode; you get pinged when it asks)\n" +
-        "**/site stop** — interrupt the running turn without dropping its session\n" +
-        "**/site queue** — show queued messages and cancel individual entries\n" +
-        "**/site revert** — undo the last accepted turn\n" +
-        "**/site reset** — stop the running turn and drop the agent session (site kept)\n" +
-        "**/site pushkey** — issue repo-scoped git push credentials\n" +
-        "**/site-admin** — admin: model, effort, usage, errors, reset (Manage Server)\n\n" +
+        "**/site start**: create a site (works in any channel)\n" +
+        "**/makegam**: create a 2D or 3D game thread\n" +
+        "**/site info**: links, project type, model, usage\n" +
+        "**/site collaboration**: choose contributors and review requests (owner/admin)\n" +
+        "**/site rename name:…**: change the project name and links (old site links redirect)\n" +
+        "**/site sync**: adopt commits pushed to the repo from outside the bot\n" +
+        "**/site republish**: rebuild and republish without the model\n" +
+        "**/site compact**: summarize the session context now\n" +
+        "**/site multiplayer**: switch a game between arena, rooms, and singleplayer (the agent asks how, then rewrites the netcode; you get pinged when it asks)\n" +
+        "**/site stop**: interrupt the running turn without dropping its session\n" +
+        "**/site queue**: show queued messages and cancel individual entries\n" +
+        "**/site revert**: undo the last accepted turn\n" +
+        "**/site reset**: stop the running turn and drop the agent session (site kept)\n" +
+        "**/site pushkey**: issue repo-scoped git push credentials\n" +
+        "**/site-admin** (admin only, Manage Server): model, effort, usage, errors, reset\n\n" +
         "Deleting the Discord thread deletes the project, workspace, repository, and published site.",
       flags: MessageFlags.Ephemeral,
     });
@@ -1315,7 +1315,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       : "";
     await interaction.reply({
       content:
-        `**${project.displayName}** — ${project.status}\n` +
+        `**${project.displayName}**: ${project.status}\n` +
         `[open site](${projects.siteLink(project)}) · [source](${projects.repoLink(project)})\n` +
         `Type: ${projectKindLabel(project.projectKind)}${project.multiplayerMode && project.projectKind !== "site" ? ` (${project.multiplayerMode === "arena" ? "arena multiplayer" : project.multiplayerMode === "rooms" ? "invite-code rooms" : "singleplayer"})` : ""}\n` +
         `Model: \`${store.getModel() || "the model default"}\` · Effort: \`${store.getEffort() || "auto"}\`` +
@@ -1357,16 +1357,16 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       await progress?.close();
       if (result.validationError) {
         await interaction.editReply(
-          `⚠️ Synced to \`${result.commit}\`, but validation failed — the live site keeps the previous version.\n` +
+          `⚠️ Synced to \`${result.commit}\`, but validation failed: the live site keeps the previous version.\n` +
           `${truncate(result.validationError, 1200)}\n` +
           "The commits remain in the repository; reply in this thread to have the agent fix them.",
         );
       } else {
         const detail = result.behind === 0 && result.ahead === 0
-          ? "the repository had nothing new — republished the checked-in tree"
+          ? "the repository had nothing new: republished the checked-in tree"
           : `pulled ${result.behind} commit${result.behind === 1 ? "" : "s"}, rebased ${result.ahead} local commit${result.ahead === 1 ? "" : "s"}`;
         await interaction.editReply(
-          `✅ **${result.project.displayName}** synced on \`${result.commit}\` — ${detail}.\n` +
+          `✅ **${result.project.displayName}** synced on \`${result.commit}\`: ${detail}.\n` +
           `[open site](${projects.siteLink(result.project)}) · [source](${projects.repoLink(result.project)})`,
         );
       }
@@ -1399,7 +1399,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       await interaction.editReply(`This game already runs ${multiplayerModeLabel(mode)}.`);
       return;
     }
-    const status = await interaction.channel?.send(`🕹️ Switching the multiplayer architecture to **${multiplayerModeLabel(mode)}** — the agent will inspect the netcode, then ask about anything it finds tricky…`).catch(() => undefined);
+    const status = await interaction.channel?.send(`🕹️ Switching the multiplayer architecture to **${multiplayerModeLabel(mode)}**: the agent will inspect the netcode, then ask about anything it finds tricky…`).catch(() => undefined);
     if (!status) throw new Error("Could not post a status message in this thread.");
     const progress = new DiscordProgress(status, `🕹️ Rewiring ${project.displayName}`);
     registerQuestionButtons(status, progress);
@@ -1416,7 +1416,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
           guildId: interaction.guildId,
           requesterId: interaction.user.id,
         });
-        await interaction.editReply(`The switch to ${multiplayerModeLabel(mode)} did not land cleanly — see the status message. The architecture setting is already switched; reply here to have the agent finish the rewrite.`);
+        await interaction.editReply(`The switch to ${multiplayerModeLabel(mode)} did not land cleanly: see the status message. The architecture setting is already switched; reply here to have the agent finish the rewrite.`);
       } else {
         await publishTurnResult(status, result, true, `The game now runs **${multiplayerModeLabel(mode)}**.`);
         await interaction.editReply(`Switched to ${multiplayerModeLabel(mode)}.`);
@@ -1424,7 +1424,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     } catch (error) {
       await progress.close();
       if (error instanceof TurnStoppedError) {
-        await setStatusMessage(status, "🛑 **Stopped at your request** — the half-finished network rewrite is preserved in the workspace. Reply here to continue it.");
+        await setStatusMessage(status, "🛑 **Stopped at your request**: the half-finished network rewrite is preserved in the workspace. Reply here to continue it.");
         await interaction.editReply("Stopped. The architecture setting is switched; reply in the thread to finish the rewrite.");
         return;
       }
@@ -1440,7 +1440,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         status,
         `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Multiplayer switch failed · reference \`${incident.id}\`. The architecture setting is switched; reply here to have the agent finish or revert the rewrite.`,
       );
-      await interaction.editReply(`The switch failed — reference \`${incident.id}\`.`);
+      await interaction.editReply(`The switch failed: reference \`${incident.id}\`.`);
     } finally {
       void refreshProjectCard(project.threadId);
     }
@@ -1480,12 +1480,12 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       unregisterQuestionButtons(stoppedStatusId);
       const stopped = await interaction.channel?.messages.fetch(stoppedStatusId).catch(() => undefined);
       if (stopped && stopped.author.id === client.user?.id) {
-        await setStatusMessage(stopped, "🛑 This turn was stopped by `/site reset` — its agent session was dropped. Send a new message to continue.").catch(() => undefined);
+        await setStatusMessage(stopped, "🛑 This turn was stopped by `/site reset`: its agent session was dropped. Send a new message to continue.").catch(() => undefined);
       }
     }
     await interaction.editReply(
-      `🔄 Agent session dropped${stoppedTurn ? " — the running turn was stopped and will report a failure in this thread" : ""}. ` +
-      "Anything waiting in this thread's queue was released, and the next message starts a fresh conversation — " +
+      `🔄 Agent session dropped${stoppedTurn ? ": the running turn was stopped and will report a failure in this thread" : ""}. ` +
+      "Anything waiting in this thread's queue was released, and the next message starts a fresh conversation: " +
       "the site, git history, and project notes are all kept.",
     );
     void refreshProjectCard(project.threadId);
@@ -1584,7 +1584,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     const breakdown = await usageLog.modelBreakdown();
     const header = `🎛️ Active model: \`${store.getModel() || "the model default"}\` · effort \`${store.getEffort() || "auto"}\``;
     const modelLines = breakdown.models.map((model) =>
-      `\`${model.model}\` — ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)} · ${formatCost(model.cost)}`,
+      `\`${model.model}\`: ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)} · ${formatCost(model.cost)}`,
     );
     const projectLines = breakdown.threads.map(({ threadId, project, turns, models }) => {
       const context = store.getProject(threadId)?.lastTurnUsage;
@@ -1592,7 +1592,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
         ? ` · ctx ${Math.round((context.contextTokens / context.contextLimit) * 100)}%`
         : "";
       const used = models.slice(0, 3).map((model) => `\`${model.model}\` (${model.turns})`).join(", ");
-      return `**${truncate(project, 40)}** — ${turns} turn${turns === 1 ? "" : "s"}${contextBit}${used ? `\n· ${used}` : ""}`;
+      return `**${truncate(project, 40)}**: ${turns} turn${turns === 1 ? "" : "s"}${contextBit}${used ? `\n· ${used}` : ""}`;
     });
     const body = modelLines.length
       ? `**Models (lifetime, all projects)**\n${modelLines.join("\n")}${projectLines.length ? `\n\n**Per project**\n${projectLines.join("\n")}` : ""}`
@@ -1620,7 +1620,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
       const source = current ? "set via command" : "from OPENCODE_FAILOVER_MODELS";
       await interaction.editReply(list.length
         ? `Backup models (${source}): ${list.map((model) => `\`${model}\``).join(", ")}`
-        : "No backup models configured — turns that hit quota blocks or persistent upstream errors fail without failing over.");
+        : "No backup models configured: turns that hit quota blocks or persistent upstream errors fail without failing over.");
       return;
     }
     let models: string[] | null = null;
@@ -1636,7 +1636,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
       ? "Backup models now follow `OPENCODE_FAILOVER_MODELS`."
       : models.length
         ? `Backup models: ${models.map((model) => `\`${model}\``).join(", ")}. Quota-blocked or persistently failing turns retry once on the first entry that is not the model just attempted.`
-        : "Model failover is disabled — failing turns stop at the active model.");
+        : "Model failover is disabled: failing turns stop at the active model.");
     return;
   }
 
@@ -1672,13 +1672,13 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     const summary = await projects.resetAllSessions();
     log("info", "admin.reset_all", { userId: interaction.user.id, ...summary });
     if (!summary.total && !summary.aborted) {
-      await interaction.editReply("Nothing to reset — no projects exist and no agent sessions were active.");
+      await interaction.editReply("Nothing to reset: no projects exist and no agent sessions were active.");
       return;
     }
     await interaction.editReply(
       `🛑 Hard reset complete: aborted ${summary.aborted} running turn(s) and deleted every agent session on the service. ` +
       `Fresh sessions were started for ${summary.stopped}/${summary.total} project(s).` +
-      `${summary.failed ? ` ${summary.failed} project(s) could not be re-sessioned — see the bot log.` : ""}\n`
+      `${summary.failed ? ` ${summary.failed} project(s) could not be re-sessioned: see the bot log.` : ""}\n`
       ,
     );
     return;
@@ -1755,7 +1755,7 @@ async function handleAutocomplete(interaction: AutocompleteInteraction): Promise
 function successMessageText(result: MutationResult, isGame: boolean, note?: string, headOverride?: string): string {
   const head = headOverride
     ?? (result.noChanges
-      ? `ℹ️ **${result.project.displayName}** — no changes to the site this turn`
+      ? `ℹ️ **${result.project.displayName}**: no changes to the site this turn`
       : `✅ **${result.project.displayName}** · commit \`${result.commit}\` · ${commitStatsText(result)}`);
   const stats = turnStatsText(result);
   const notes = [note, result.browserQaFindings?.length ? `⚠️ Browser QA: ${truncate(result.browserQaFindings[0], 220)} · findings saved for the next update` : undefined].filter(Boolean);
@@ -1774,12 +1774,12 @@ function finishedWithErrorsMessageText(result: MutationResult, note?: string): s
   const head = !result.commit
     ? result.noChanges
       ? result.validationError
-        ? `ℹ️ **${result.project.displayName}** — nothing changed this turn; validation errors persist and the live site still shows the older version`
-        : `ℹ️ **${result.project.displayName}** — answered without changing the project · nothing to commit`
-      : `⚠️ **${result.project.displayName}** — the agent finished, but committing failed · edits preserved in the workspace`
+        ? `ℹ️ **${result.project.displayName}**: nothing changed this turn; validation errors persist and the live site still shows the older version`
+        : `ℹ️ **${result.project.displayName}**: answered without changing the project · nothing to commit`
+      : `⚠️ **${result.project.displayName}**: the agent finished, but committing failed · edits preserved in the workspace`
     : result.validationError
-      ? `⚠️ **${result.project.displayName}** · validation failed — committed \`${result.commit}\`, not published · ${commitStatsText(result)}`
-      : `⚠️ **${result.project.displayName}** · committed \`${result.commit}\`, but publishing failed — not live · ${commitStatsText(result)}`;
+      ? `⚠️ **${result.project.displayName}** · validation failed: committed \`${result.commit}\`, not published · ${commitStatsText(result)}`
+      : `⚠️ **${result.project.displayName}** · committed \`${result.commit}\`, but publishing failed: not live · ${commitStatsText(result)}`;
   const stats = turnStatsText(result);
   const noteLine = note ? `\n${note}\n` : "\n";
   const links = `[git](<${projects.repoLink(result.project)}>)`;
@@ -1823,10 +1823,10 @@ async function sendOutcomeFollowUp(
   if (result.validationError) {
     blocks.push(
       `⚠️ **Validation errors**${result.commit
-        ? ` — the work is committed as \`${result.commit}\` but **not published**; the live version is unchanged`
+        ? `: the work is committed as \`${result.commit}\` but **not published**; the live version is unchanged`
         : result.noChanges
-          ? " — and nothing changed this turn, so there is no new work to fix; the live site still shows the older version"
-          : " — and the work could not be committed"}.\n`
+          ? ", and nothing changed this turn, so there is no new work to fix; the live site still shows the older version"
+          : ", and the work could not be committed"}.\n`
         + `${truncate(result.validationError, 900)}\n`
         + "Reply in this thread to have the agent fix these errors.",
     );
@@ -1843,8 +1843,8 @@ async function sendOutcomeFollowUp(
       model: store.getModel() || "the model default",
     });
     blocks.push(!result.commit
-      ? `❌ Committing the finished work failed · reference \`${incident.id}\`.\n${truncate(result.deliveryError ?? "", 600)}\nThe agent's edits are preserved in the workspace — reply in this thread to try again.`
-      : `❌ Publishing failed after commit \`${result.commit}\` · reference \`${incident.id}\`.\n${truncate(result.deliveryError ?? "", 600)}\nThe live site keeps the previous version — try \`/site republish\` once the server issue is resolved.`);
+      ? `❌ Committing the finished work failed · reference \`${incident.id}\`.\n${truncate(result.deliveryError ?? "", 600)}\nThe agent's edits are preserved in the workspace: reply in this thread to try again.`
+      : `❌ Publishing failed after commit \`${result.commit}\` · reference \`${incident.id}\`.\n${truncate(result.deliveryError ?? "", 600)}\nThe live site keeps the previous version; try \`/site republish\` once the server issue is resolved.`);
   }
   if (!blocks.length) return;
   await channel.send({ content: truncate(blocks.join("\n\n"), MAX_DISCORD_MESSAGE_CHARS) }).catch(() => undefined);
@@ -1861,7 +1861,7 @@ function threadUsageText(total: UsageTotal, includeCost: boolean): string {
   const models = [...total.models.values()]
     .sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens))
     .slice(0, 8)
-    .map((model) => `\`${model.model}\` — ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)}${includeCost ? ` · ${formatCost(model.cost)}` : ""}`);
+    .map((model) => `\`${model.model}\`: ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)}${includeCost ? ` · ${formatCost(model.cost)}` : ""}`);
   const more = total.models.size - 8;
   return `Usage: ${total.turns} model turns${failed} · in ${formatTokens(total.inputTokens)}${cached} · out ${formatTokens(total.outputTokens)} tok${cost}\n`
     + `Models:\n${models.join("\n")}${more > 0 ? `\n+${more} more model${more === 1 ? "" : "s"}` : ""}`;
@@ -1901,7 +1901,7 @@ async function projectDetailSections(project: ProjectRecord): Promise<PanelSecti
   const status = project.status === "creating"
     ? "🛠️ Building the first version"
     : project.status === "error"
-      ? "⚠️ The last turn failed — the published version is unchanged"
+      ? "⚠️ The last turn failed: the published version is unchanged"
       : "✅ Live";
   return [
     { key: "overview", label: "Project overview", text: [
@@ -2287,7 +2287,7 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
   }
   const publish = interaction.customId === "threadsite:extpub";
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  if (shuttingDown) throw new Error("The bot is restarting — try again in a moment.");
+  if (shuttingDown) throw new Error("The bot is restarting: try again in a moment.");
   if (await projects.agentBusy(interaction.channel.id)) {
     throw new Error("An agent turn is currently running in this thread. Wait for it to finish before deciding.");
   }
@@ -2298,13 +2298,13 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
     const result = await enqueueContributorAction(interaction.channel.id, interactionActor(interaction, config.adminUserIds.has(interaction.user.id)), () => projects.publishExternalPush(interaction.channel!.id));
     if (result.validationError) {
       await interaction.editReply(
-        `⚠️ The pushed commit \`${result.commit}\` failed validation and was **not** published — the live site keeps the previous version.\n` +
+        `⚠️ The pushed commit \`${result.commit}\` failed validation and was **not** published: the live site keeps the previous version.\n` +
         `${truncate(result.validationError, 1200)}\n` +
         "The commit remains in the repository; reply in this thread to have the agent fix it.",
       );
     } else {
       await interaction.editReply(
-        `✅ Published external commit \`${result.commit}\` — [open site](${projects.siteLink(result.project)})`,
+        `✅ Published external commit \`${result.commit}\` · [open site](${projects.siteLink(result.project)})`,
       );
     }
   } else {
@@ -2321,7 +2321,7 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
  * interruptible. */
 function stopOutcomeText(outcome: StopTurnOutcome): string {
   if (outcome.stopped) {
-    return "🛑 Stop requested — the running update is being interrupted. Its partial edits are kept; the status message will show the outcome.";
+    return "🛑 Stop requested: the running update is being interrupted. Its partial edits are kept; the status message will show the outcome.";
   }
   if (outcome.queueFreed) {
     return "⚠️ The agent service is not answering, so the running update could not be aborted. " +
@@ -2424,7 +2424,7 @@ async function handleFailureButton(interaction: ButtonInteraction): Promise<void
 function quotaNotice(error: unknown): string | undefined {
   const block = (error as { quotaBlock?: QuotaBlock } | undefined)?.quotaBlock;
   if (!block || block.until <= Date.now()) return undefined;
-  return `🚫 The AI provider is unavailable until ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())}) — new requests will fail fast until then. An admin has been notified with the details; try again after the reset.`;
+  return `🚫 The AI provider is unavailable until ~${formatUtcClock(block.until)} (in ${formatShortDuration(block.until - Date.now())}): new requests will fail fast until then. An admin has been notified with the details; try again after the reset.`;
 }
 
 // One admin DM per quota block (provider -> block.until): later fail-fast

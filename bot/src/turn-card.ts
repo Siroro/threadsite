@@ -155,8 +155,8 @@ export function renderPlayCard(state: TurnCardState): PlayCardMessage {
   const title = state.changelog?.title?.trim();
   const entry = state.changelog?.body ? clip(prose(state.changelog.body), CHANGELOG_CHARS) : undefined;
   const details: string[] = [];
-  if (entry) details.push(`**${title ? clip(title, 60) : "What's new"}** — ${entry}`);
-  else if (title) details.push(`**What's new** — ${clip(title, 200)}`);
+  if (entry) details.push(`**${title ? clip(title, 60) : "What's new"}**: ${entry}`);
+  else if (title) details.push(`**What's new**: ${clip(title, 200)}`);
   if (details.length) {
     if (blurb) container.addSeparatorComponents(new SeparatorBuilder());
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent(details.join("\n")));
@@ -212,7 +212,7 @@ function technicalCard(state: TurnCardState): ContainerBuilder {
   }
 
   if (state.findings?.length) {
-    addCardField(card, "Browser QA", `Advisory · ${state.findings.length} finding${state.findings.length === 1 ? "" : "s"} — ${truncate(state.findings[0], 220)}`);
+    addCardField(card, "Browser QA", `Advisory · ${state.findings.length} finding${state.findings.length === 1 ? "" : "s"}: ${truncate(state.findings[0], 220)}`);
   }
 
   if (state.note) addCardField(card, "Note", truncate(state.note, 900));

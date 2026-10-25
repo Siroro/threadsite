@@ -147,7 +147,7 @@ export class CardInteractions {
     if (action === "rollback" || action === "keep" || action === "confirm") {
       const version = this.checkFailure(project, resource);
       await this.begin(interaction, route.action);
-      if (action === "keep") { await this.respond(interaction, renderStatusCard("🗂️ Keeping the partial edits — the next message will build on them.")); return; }
+      if (action === "keep") { await this.respond(interaction, renderStatusCard("🗂️ Keeping the partial edits. The next message will build on them.")); return; }
       if (action === "rollback") {
         const card = new ContainerBuilder().setAccentColor(0xef4444);
         addCardHeader(card, "CONFIRM", "Discard partial edits?", "This restores the workspace to the last published commit. The partial edits will be discarded.");
@@ -229,7 +229,7 @@ export class CardInteractions {
         if (delivery.status === "answered") {
           await this.services.store.addContribution(project.threadId, interaction.user.id, "answers").catch(() => undefined);
         }
-        await this.respond(interaction, renderStatusCard(delivery.status === "answered" ? "✅ All answers were delivered to the agent." : "⏭️ Skipped — the agent will decide."));
+        await this.respond(interaction, renderStatusCard(delivery.status === "answered" ? "✅ All answers were delivered to the agent." : "⏭️ Skipped; the agent will decide."));
         return;
       }
     }
@@ -291,11 +291,11 @@ export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: Pr
       || [result.changelog?.title, result.changelog?.body].filter(Boolean).join("\n\n");
     const finished = [
       result.summary?.trim() ? { key: "report", label: "Full agent report", text: result.summary } : undefined,
-      result.findings?.length ? { key: "qa", label: "Browser findings", text: `Advisory — publication is not blocked.\n\n${result.findings.join("\n\n")}` } : undefined,
+      result.findings?.length ? { key: "qa", label: "Browser findings", text: `Advisory; publication is not blocked.\n\n${result.findings.join("\n\n")}` } : undefined,
       description ? { key: "description", label: "About & how to play", text: description } : undefined,
       changelog ? { key: "changelog", label: "Changelog", text: changelog } : undefined,
       { key: "outcome", label: "Outcome & commit", text: [
-        result.published ? "**✅ Published**" : result.commit ? "**⚠️ Committed — not published**" : "**❌ Not published**",
+        result.published ? "**✅ Published**" : result.commit ? "**⚠️ Committed, not published**" : "**❌ Not published**",
         result.commit ? `Commit \`${result.commit}\`` : "No commit recorded",
         `${result.commitFiles} files · **+${result.additions} / −${result.deletions}** lines · ${elapsed(result.durationMs)}`,
         result.note,
@@ -316,7 +316,7 @@ export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: Pr
     const spend = admin
       ? result.usage.cost > 0
         ? `**Cost**\nTurn spend **${formatCost(result.usage.cost)}**`
-        : `**Cost**\n$0 — the provider's pricing is not reported for these models`
+        : `**Cost**\n$0; the provider's pricing is not reported for these models`
       : "";
     const finalUsage: PanelSection = { key: "usage", label: "Usage & context", text: [
       `**Final provider counts**\n${usageDetailText(result.usage)}`,

@@ -43,7 +43,7 @@ export default tool({
     for (const file of files.slice(0, 50)) {
       const size = (await fs.stat(file)).size;
       if (size > MAX_FILE_BYTES) {
-        results.push(`⚠️ ${path.relative(root, file)} — skipped (${size} bytes exceeds ${MAX_FILE_BYTES})`);
+        results.push(`⚠️ ${path.relative(root, file)}: skipped (${size} bytes exceeds ${MAX_FILE_BYTES})`);
         continue;
       }
       try {

@@ -853,7 +853,7 @@ export class OpenCodeV2Harness {
     const described = this.describeToolState(watch, id, status, directory);
     // Describe the activity as a named action with its target, not a bare tool id.
     if (!tool || !described) return;
-    const label = child ? "🤖 Subagent — " : "";
+    const label = child ? "🤖 Subagent: " : "";
     this.publish(watch, `tool:${id}`, { text: `${label}${described.text}`, detail: described.detail, command: described.command,
       tool: { id: `${sessionID}:${id}`, name: tool.name, status } }, callback);
   }
@@ -1011,7 +1011,7 @@ export class OpenCodeV2Harness {
         break;
       }
       case "session.compaction.ended":
-        if (!child) { watch.compactions++; this.publish(watch, "compactions", { text: "🧠 Context compacted — continuing automatically" }, callback); }
+        if (!child) { watch.compactions++; this.publish(watch, "compactions", { text: "🧠 Context compacted, continuing automatically" }, callback); }
         break;
       case "session.status":
         if (event.data.status.type === "retry") this.retry(watch, event.data.status, callback,

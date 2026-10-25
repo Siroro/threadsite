@@ -54,10 +54,10 @@ async function multiplayerAgents(mp: MultiplayerContext): Promise<string> {
 }
 
 const ARENA_GUIDANCE =
-  "**Session mode — arena:** one shared world, `mode: \"single\"`. No room/lobby/invite UI unless requested.";
+  "**Session mode (arena):** one shared world, `mode: \"single\"`. No room/lobby/invite UI unless requested.";
 
 const ROOMS_GUIDANCE =
-  "**Session mode — rooms:** isolated invite-code worlds, `mode: \"rooms\"` with `createRoom`/`room`. "
+  "**Session mode (rooms):** isolated invite-code worlds, `mode: \"rooms\"` with `createRoom`/`room`. "
   + "Use `ThreadSiteNet.roomFromUrl()` for invites; provide create/share/join UI and a host per room.";
 
 function singleplayerAgents(): string {
@@ -69,7 +69,7 @@ function singleplayerAgents(): string {
 export function notesSection(notes: string | undefined): string {
   const trimmed = notes?.trim();
   if (!trimmed) return "";
-  return `\n\nPROJECT NOTES (long-term memory from earlier turns — respect these):\n${trimmed}`;
+  return `\n\nPROJECT NOTES (long-term memory from earlier turns; respect these):\n${trimmed}`;
 }
 
 /**
@@ -79,7 +79,7 @@ export function notesSection(notes: string | undefined): string {
 export function renameNoteInstruction(note: { from: string; to: string }): string {
   return `\n\nPROJECT RENAME (requested by the user): "${note.from}" is now called "${note.to}". `
     + "The title heading of DESCRIPTION.md and the repository README already say the new name. "
-    + "Carry it through everything a player or visitor sees — the on-screen title, page titles, headings and HUD text — and remove stale uses of the old name. "
+    + "Carry it through everything a player or visitor sees: the on-screen title, page titles, headings and HUD text. Remove stale uses of the old name. "
     + "Keep file names, identifiers and the injected multiplayer/leaderboard game identity unchanged: they are stable across renames.";
 }
 
@@ -91,10 +91,10 @@ export function renameNoteInstruction(note: { from: string; to: string }): strin
 export function namingFixInstruction(kind: ProjectKind): string {
   const noun = kind === "site" ? "website" : "game";
   return `The ${noun} was delivered without a project name: the \`# \` title heading of DESCRIPTION.md still carries its placeholder. Fix that now. `
-    + "Choose a distinctive, memorable name for what you built — not a restatement of the original request and not a generic label; "
+    + "Choose a distinctive, memorable name for what you built, not a restatement of the original request and not a generic label; "
     + `if the ${noun} already presents a title on screen, use exactly that name. `
     + "Write it as the `# ` title heading of DESCRIPTION.md and change nothing else: the harness adopts that heading as the project's public name, repository and thread title. "
-    + "Then reply with a short summary of the project for the person who requested it: its name, what it is, and what they can do — a few sentences in visitor words, no file lists.";
+    + "Then reply with a short summary of the project for the person who requested it: its name, what it is, and what they can do, in a few sentences of visitor words, no file lists.";
 }
 
 /**
@@ -103,9 +103,9 @@ export function namingFixInstruction(kind: ProjectKind): string {
  * the long-form repository README. All are agent-maintained, so the prompt has
  * to ask for them by name.
  */
-const documentsInstruction = "Three documents in the project root are shown to everyone who opens the project, so keep them true and tight. DESCRIPTION.md: a `# ` title heading carrying the project's name — choose a distinctive, memorable name for what you built by the end of the first turn and keep it unless the user asks for a new one; the harness adopts that heading as the project's public name, repository and thread title, so never leave the seeded placeholder or a generic label like 'My Game' there — then a headline of one sentence, at most 25 words, in a visitor's words (no file names, no code, no jargon) — the card shows the headline alone — plus a 'How to play' section of up to four short paragraphs (about 120 words): the goal first, then the controls, then one or two tips; it opens from the card's How to play view. CHANGELOG.md: one new section per turn, newest at the top — a heading of at most six words, then one sentence of at most 30 words on what a visitor will notice. README.agent.md: the long-form repository README appended to README.md at the end of every turn — what the project is, how to play or use it, the controls, and useful development notes; use ## headings and keep it under 6,000 characters. Never edit README.md itself: the harness owns its title, ownership marker, live link, original request and attribution. Write each paragraph on a single line; never break a sentence across lines by hand. Write DESCRIPTION.md when the project first exists and whenever its shape changes, add the CHANGELOG.md section before your final summary, and keep README.agent.md current.";
+const documentsInstruction = "Three documents in the project root are shown to everyone who opens the project, so keep them true and tight. DESCRIPTION.md: a `# ` title heading carrying the project's name. Choose a distinctive, memorable name for what you built by the end of the first turn and keep it unless the user asks for a new one; the harness adopts that heading as the project's public name, repository and thread title, so never leave the seeded placeholder or a generic label like 'My Game' there. Below it, a headline of one sentence, at most 25 words, in a visitor's words (no file names, no code, no jargon); the card shows the headline alone. Then a 'How to play' section of up to four short paragraphs (about 120 words): the goal first, then the controls, then one or two tips; it opens from the card's How to play view. CHANGELOG.md: one new section per turn, newest at the top: a heading of at most six words, then one sentence of at most 30 words on what a visitor will notice. README.agent.md: the long-form repository README appended to README.md at the end of every turn: what the project is, how to play or use it, the controls, and useful development notes; use ## headings and keep it under 6,000 characters. Never edit README.md itself: the harness owns its title, ownership marker, live link, original request and attribution. Write each paragraph on a single line; never break a sentence across lines by hand. Write DESCRIPTION.md when the project first exists and whenever its shape changes, add the CHANGELOG.md section before your final summary, and keep README.agent.md current.";
 
-const planningInstruction = "For any request that needs multiple steps or changes across multiple files, call the todowrite tool before the first edit: create 3–6 concrete, checkable steps. Keep exactly one step in_progress, and mark a step completed as soon as it is finished while promoting the next one — the user watches this list live, so a list left behind misreports your progress. Before your final summary, mark every finished step completed and every dropped step cancelled. A prose plan does not replace the todo list. Skip todowrite only for a truly single-step change.";
+const planningInstruction = "For any request that needs multiple steps or changes across multiple files, call the todowrite tool before the first edit: create 3–6 concrete, checkable steps. Keep exactly one step in_progress, and mark a step completed as soon as it is finished while promoting the next one; the user watches this list live, so a list left behind misreports your progress. Before your final summary, mark every finished step completed and every dropped step cancelled. A prose plan does not replace the todo list. Skip todowrite only for a truly single-step change.";
 
 /** How the game connects, phrased for the initial-build instruction. */
 function multiplayerPhrase(mode: MultiplayerMode): string {
@@ -115,7 +115,7 @@ function multiplayerPhrase(mode: MultiplayerMode): string {
 }
 
 /** Naming is part of the deliverable: a project with its own name reads as intentional. */
-const namingInstruction = "Give what you build a name of its own: a distinctive, memorable title a visitor would recall — never a restatement of the request or a generic label. Set it as the `# ` title heading of DESCRIPTION.md by the end of this build (the harness adopts that heading as the project's public name, repository and thread title) and make it the on-screen identity: the title or landing screen and the page title should say it.";
+const namingInstruction = "Give what you build a name of its own: a distinctive, memorable title a visitor would recall, never a restatement of the request or a generic label. Set it as the `# ` title heading of DESCRIPTION.md by the end of this build (the harness adopts that heading as the project's public name, repository and thread title) and make it the on-screen identity: the title or landing screen and the page title should say it.";
 
 export function initialProjectInstruction(kind: ProjectKind, userPrompt: string, notes?: string, mode: MultiplayerMode = "arena"): string {
   const common = `Inspect the starter files. ${planningInstruction} Research the web when it will materially improve the result, and implement the deliverable rather than only describing it. Browser code is authored in TypeScript under site/src/; the harness compiles and bundles it after your reply. Prefer a clear multi-file structure over one giant index.html.`;
@@ -168,13 +168,13 @@ function modeTarget(mode: MultiplayerMode): string {
  */
 export function multiplayerSwapInstruction(from: MultiplayerMode, to: MultiplayerMode, userNote?: string): string {
   const investigating = from === "singleplayer"
-    ? "Inspect the current implementation: where game state lives, which modules read it, and how input/update/render are wired — the networking will be introduced around that structure."
+    ? "Inspect the current implementation: where game state lives, which modules read it, and how input/update/render are wired; the networking will be introduced around that structure."
     : "Inspect the current networking implementation first: how sessions are created (site/net usage), which state is shared vs. local, how the host and solo fallback work, and which modules touch the net client.";
   const note = userNote?.trim()
-    ? `\n\nThe user added this note for the switch — treat it as part of the request and honor it over defaults where they conflict, but still ask about genuine difficulties it does not resolve:\n${userNote.trim()}`
+    ? `\n\nThe user added this note for the switch; treat it as part of the request and honor it over defaults where they conflict, but still ask about genuine difficulties it does not resolve:\n${userNote.trim()}`
     : "";
-  return `The multiplayer architecture of this game is being switched from ${multiplayerModeLabel(from)} to ${multiplayerModeLabel(to)}. The project instructions and harness-owned net files under site/net/ already reflect the new architecture — read NETWORKING.md at the project root, when it exists, before editing. ${investigating}\n\n`
-    + `Then, from what you found, work out where this transition is genuinely difficult or ambiguous for THIS game: the seams the old architecture is baked into, state whose owner changes, flows that appear or disappear, and anything where a wrong guess would ship the wrong game. You MUST call the question tool and put exactly those difficulties to the user — one question per real decision point, each with 2–4 concrete options — and wait for the answers. Ask only about real difficulties; do not ask what the code, project instructions, the original request, or your note below already answers, and do not guess your way past a decision the user should make.${note}\n\n`
+  return `The multiplayer architecture of this game is being switched from ${multiplayerModeLabel(from)} to ${multiplayerModeLabel(to)}. The project instructions and harness-owned net files under site/net/ already reflect the new architecture; read NETWORKING.md at the project root, when it exists, before editing. ${investigating}\n\n`
+    + `Then, from what you found, work out where this transition is genuinely difficult or ambiguous for THIS game: the seams the old architecture is baked into, state whose owner changes, flows that appear or disappear, and anything where a wrong guess would ship the wrong game. You MUST call the question tool and put exactly those difficulties to the user, one question per real decision point, each with 2–4 concrete options, and wait for the answers. Ask only about real difficulties; do not ask what the code, project instructions, the original request, or your note below already answers, and do not guess your way past a decision the user should make.${note}\n\n`
     + `After the answers, rewrite the networking so the game runs as ${multiplayerModeLabel(to)}: ${modeTarget(to)}. Keep gameplay, presentation, and audio modules untouched where possible; change only the session/state/networking seams. ${to === "singleplayer" ? "Remove every import of ../net/* and all gameplay host/guest/relay branches; preserve rankings using the dedicated site/leaderboards/ client and the same injected game identity." : "Keep the solo fallback working (one player must be able to play alone), preserve as much existing gameplay logic as possible, and leave no room/arena remnants of the old architecture."} Use todowrite to plan the rewrite, mark steps as you finish them, and leave a complete buildable deliverable.`;
 }
 
@@ -185,11 +185,11 @@ export function multiplayerSwapInstruction(from: MultiplayerMode, to: Multiplaye
  */
 export function steeringInstruction(texts: readonly string[]): string {
   const list = texts.map((text, index) => `${index + 1}. ${text}`).join("\n");
-  return `The user sent ${texts.length === 1 ? "this message" : `${texts.length} messages`} while you were working. It is a steering update for the CURRENT task, not a new request: fold it into what you are building right now and continue — do not start over, and do not treat it as a separate piece of work.\n\nSTEERING:\n${list}`;
+  return `The user sent ${texts.length === 1 ? "this message" : `${texts.length} messages`} while you were working. It is a steering update for the CURRENT task, not a new request: fold it into what you are building right now and continue. Do not start over, and do not treat it as a separate piece of work.\n\nSTEERING:\n${list}`;
 }
 
 export function repairInstruction(validationError: string): string {
-  return `Automated validation rejected the previous output with a build or type error. Fix it now: open the listed file(s) under site/src/ and correct every reported syntax, type, resolution, and DOM id error. For a repair spanning multiple files or steps, use todowrite before editing and mark each fix completed as you finish it. Errors naming a site/js/ file point at compiled output — fix the site/src/ module it was built from; the harness rebuilds after your reply. Make the whole import graph resolve (every import names an existing file and a real export of it). Use js_syntax_check on the affected files before finishing. Do not change anything unrelated and do not remove or stub working functionality to make the error go away.\n\nVALIDATION ERROR:\n${validationError}`;
+  return `Automated validation rejected the previous output with a build or type error. Fix it now: open the listed file(s) under site/src/ and correct every reported syntax, type, resolution, and DOM id error. For a repair spanning multiple files or steps, use todowrite before editing and mark each fix completed as you finish it. Errors naming a site/js/ file point at compiled output; fix the site/src/ module it was built from; the harness rebuilds after your reply. Make the whole import graph resolve (every import names an existing file and a real export of it). Use js_syntax_check on the affected files before finishing. Do not change anything unrelated and do not remove or stub working functionality to make the error go away.\n\nVALIDATION ERROR:\n${validationError}`;
 }
 
 /** Nudge used by boot recovery when a turn was interrupted by a restart. */

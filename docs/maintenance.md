@@ -60,7 +60,7 @@ Inventory is strict: if the agent, relay, or Forgejo inventory is unavailable th
 
 ### Standalone stale-registration script
 
-Deleting a repository directly in Forgejo does not remove its Discord project registration from SQLite, so a webhook warning for that repository can persist across bot restarts. A 404 can also mean lost access — confirm the repository was intentionally deleted before removing its registration.
+Deleting a repository directly in Forgejo does not remove its Discord project registration from SQLite, so a webhook warning for that repository can persist across bot restarts. A 404 can also mean lost access; confirm the repository was intentionally deleted before removing its registration.
 
 The maintenance script previews exact repository-name matches by default and runs inside the existing bot image (no host Node needed):
 
@@ -89,15 +89,15 @@ Both workflows use Node 24 and need no Discord or model credentials. Relay check
 
 From `bot/`:
 
-- `npm test` — production import containment, restart-safe queue handoff, naming, collisions, interrupted renames, revert coverage
-- `npm run build` — bot compiler check
-- `node --import tsx --test test/commands.test.ts` — validates the slash-command registration payload (required/optional ordering at every level); run for any command-definition change
+- `npm test`: production import containment, restart-safe queue handoff, naming, collisions, interrupted renames, revert coverage
+- `npm run build`: bot compiler check
+- `node --import tsx --test test/commands.test.ts`: validates the slash-command registration payload (required/optional ordering at every level); run for any command-definition change
 
 From `preview/`: `npm test` for preview regression checks.
 
 From `gameserver/`: `npm run build`, then the applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, `test:stall`, `test:storage`, or `test:persistence` scripts. `test:relay` and `test:client` need a local test relay listening on port 8090 (or set `GAMESERVER_TEST_PORT` for an isolated relay); restart, durability, stall and persistence tests launch their own relay processes. Give restart/stall checks an isolated `GAMESERVER_STATE_DIR`; storage, durability and persistence checks create temporary state themselves. Player persistence checks cover save conflicts, quotas, leaderboard ordering, crash recovery and project deletion.
 
-Networking client changes: from `bot/`, `npm run build:net` regenerates `bot/assets/threadsite-net.js` and `.d.ts` — never edit those generated assets directly.
+Networking client changes: from `bot/`, `npm run build:net` regenerates `bot/assets/threadsite-net.js` and `.d.ts`; never edit those generated assets directly.
 
 Tests use temporary files, local git repositories, and a fake agent/Forgejo service; no Discord login or paid inference is needed.
 

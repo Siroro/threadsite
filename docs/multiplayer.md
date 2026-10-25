@@ -1,9 +1,9 @@
 # Multiplayer games
 
-Games default to **shared-arena multiplayer** (or invite-code **rooms**, or none at all — chosen at `/makegam` and switchable with `/site multiplayer`). Networked games share one `gameserver` container for the whole deployment; there is no per-game instance, process, or provisioning step. Multi-tenancy is addressed by two ids the harness controls:
+Games default to **shared-arena multiplayer** (or invite-code **rooms**, or none at all, chosen at `/makegam` and switchable with `/site multiplayer`). Networked games share one `gameserver` container for the whole deployment; there is no per-game instance, process, or provisioning step. Multi-tenancy is addressed by two ids the harness controls:
 
-- **game id** — the stable harness tenant key, initially derived from the published site slug and retained across renames;
-- **room code** — a short code (for example `AB3CK`) namespaced per game, so the same code in two games is two different rooms.
+- **game id**: the stable harness tenant key, initially derived from the published site slug and retained across renames;
+- **room code**: a short code (for example `AB3CK`) namespaced per game, so the same code in two games is two different rooms.
 
 A single relay therefore serves any number of games and rooms per game, bounded only by configured caps.
 
@@ -19,10 +19,10 @@ Gameplay remains playable offline. Score requests time out, never automatically 
 
 ## Gameplay wiring for multiplayer projects
 
-On creation — and re-checked before every mutation, in case the agent removed them:
+On creation (and re-checked before every mutation, in case the agent removed them):
 
-- the committed `site/net/threadsite-net.js` + declarations — regenerated from the harness's TypeScript networking source (`bot/networking/threadsite-net.ts`, built with `npm run build:net`) and bundled into the minified game output. The zero-dependency client owns reconnects, half-open detection, bounded backpressure, expiring reliable events, relay clocks, transform interpolation/extrapolation, room generations, authority epochs and safe host handoff. `createAuthoritativeSession()` and the typed `world`, `transforms`, `intents`, `events`, `presence`, `clock`, `run`, and `entities` facades remove routine synchronization decisions and stable-ID reconciliation from generated games. `net-config.js` carries the game's tenant identity. The unbundled client and config stay visible in the Forgejo repo but are never copied to Apache.
-- the engine packages in the harness-managed workspace `node_modules/` — three.js + Rapier compat + three-mesh-bvh for 3D projects, Excalibur for 2D projects — imported by bare package name and type-checked against their real declarations.
+- the committed `site/net/threadsite-net.js` + declarations, regenerated from the harness's TypeScript networking source (`bot/networking/threadsite-net.ts`, built with `npm run build:net`) and bundled into the minified game output. The zero-dependency client owns reconnects, half-open detection, bounded backpressure, expiring reliable events, relay clocks, transform interpolation/extrapolation, room generations, authority epochs and safe host handoff. `createAuthoritativeSession()` and the typed `world`, `transforms`, `intents`, `events`, `presence`, `clock`, `run`, and `entities` facades remove routine synchronization decisions and stable-ID reconciliation from generated games. `net-config.js` carries the game's tenant identity. The unbundled client and config stay visible in the Forgejo repo but are never copied to Apache.
+- the engine packages in the harness-managed workspace `node_modules/` (three.js + Rapier compat + three-mesh-bvh for 3D projects, Excalibur for 2D projects), imported by bare package name and type-checked against their real declarations.
 - a concise `AGENTS.md` multiplayer section covering the selected mode, state ownership, safe world lifecycle and offline fallback. The companion `NETWORKING.md` holds API usage, budgets, recovery details and troubleshooting; agents read it when implementing or debugging networking.
 
 The first-turn prompt and the `sitebuilder` agent configuration both reinforce this: use the provided client, never write server code, never invent other runtime network endpoints.
@@ -69,7 +69,7 @@ GAMESERVER_MAX_SAVE_BYTES_PER_GAME=16777216
 
 ## Durability: arenas persist, rooms do not
 
-The relay periodically snapshots the latest authoritative world of each game's single-mode arena (one small JSON file per game under `GAMESERVER_STATE_DIR`, written atomically via temp-file + rename) and replays it to the first joiner after the room empties or the relay restarts. Only the opaque game snapshot is kept — peer ids, authority epochs, generations and sequences die with the session that created them, so stale pre-restart frames never validate. The compose file binds `./data/gameserver` so arena worlds survive container recreation. Room-code sessions stay in-memory only and recover through the client's auto-reconnect plus snapshot resync, or fall back to solo play.
+The relay periodically snapshots the latest authoritative world of each game's single-mode arena (one small JSON file per game under `GAMESERVER_STATE_DIR`, written atomically via temp-file + rename) and replays it to the first joiner after the room empties or the relay restarts. Only the opaque game snapshot is kept: peer ids, authority epochs, generations and sequences die with the session that created them, so stale pre-restart frames never validate. The compose file binds `./data/gameserver` so arena worlds survive container recreation. Room-code sessions stay in-memory only and recover through the client's auto-reconnect plus snapshot resync, or fall back to solo play.
 
 ## Personal saves and leaderboards
 
@@ -148,7 +148,7 @@ A separate games hostname is optional. Pass `--games-domain games.example.com` t
    </Location>
    ```
 
-   Do **not** use Virtualmin's "Proxy Website" feature for this host — it generates a blanket `ProxyPass /` that would shadow `/ws` and expose `/health` and `/stats`.
+   Do **not** use Virtualmin's "Proxy Website" feature for this host: it generates a blanket `ProxyPass /` that would shadow `/ws` and expose `/health` and `/stats`.
 4. Set in `.env` and recreate the relay:
 
    ```dotenv
@@ -162,7 +162,7 @@ A separate games hostname is optional. Pass `--games-domain games.example.com` t
 
 Cloudflare's proxy (orange cloud) works for the relay: WebSockets are supported on every plan, and the net client's 10-second heartbeat keeps connections alive below Cloudflare's idle cutoff. Requirements:
 
-- SSL/TLS mode **Full (strict)** — Flexible terminates at port 80 and never reaches the `/ws` directives in the HTTPS vhost.
+- SSL/TLS mode **Full (strict)**; Flexible terminates at port 80 and never reaches the `/ws` directives in the HTTPS vhost.
 - The public URL must use standard port 443 (Cloudflare does not proxy port 8090).
 - Proxied hostnames complicate Let's Encrypt HTTP-01 renewal; use a bypass rule for `/.well-known/acme-challenge/*`, DNS-01 validation via the Cloudflare API, or a Cloudflare Origin CA certificate.
 

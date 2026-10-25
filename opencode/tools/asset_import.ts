@@ -44,7 +44,7 @@ export default tool({
     };
     await queueSourceRecord(root, sourceRecord);
 
-    return `Saved ${sourceRecord.file} (${bytes.length} bytes). Source metadata was recorded in ASSET_SOURCES.json. The copy under scratch/uploads remains — remove it once the file is installed.`;
+    return `Saved ${sourceRecord.file} (${bytes.length} bytes). Source metadata was recorded in ASSET_SOURCES.json. The copy under scratch/uploads remains; remove it once the file is installed.`;
   },
 });
 

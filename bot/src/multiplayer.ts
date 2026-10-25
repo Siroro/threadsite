@@ -60,7 +60,7 @@ export async function ensureMultiplayerFiles(
 
   const netConfig = [
     "// Harness-owned multiplayer configuration for this game.",
-    "// The ThreadSite bot rewrites this file every turn — import it, never edit it.",
+    "// The ThreadSite bot rewrites this file every turn; import it, never edit it.",
     // Like NET_STATUS in the client: the JSDoc type keeps Object.freeze from
     // pinning literal types onto authored copies of these values.
     "/** @type {{protocol: number, game: string, url: string}} */",

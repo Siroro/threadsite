@@ -293,22 +293,22 @@ export class UsageLog {
     const dayLines = dayTotals.map((day) => {
       const date = day.date === todayKey ? `Today · ${day.date}` : day.date;
       const failed = day.failedTurns > 0 ? ` (${day.failedTurns} failed)` : "";
-      return `**${date}** — ${day.turns} turn${day.turns === 1 ? "" : "s"}${failed} · ${figuresLine(day)}`;
+      return `**${date}**: ${day.turns} turn${day.turns === 1 ? "" : "s"}${failed} · ${figuresLine(day)}`;
     });
     if (!dayTotals.some((day) => day.date === todayKey)) {
-      dayLines.unshift(`**Today · ${todayKey}** — no turns yet`);
+      dayLines.unshift(`**Today · ${todayKey}**: no turns yet`);
     }
 
     const modelLines = [...total.models.values()]
       .sort((a, b) => b.cost - a.cost || (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens))
       .map((model) =>
-        `\`${model.model}\` — ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)} · ${formatCost(model.cost)}`
+        `\`${model.model}\`: ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)} · ${formatCost(model.cost)}`
       );
     const shownModels = modelLines.slice(0, 8);
     const hiddenModels = modelLines.length - shownModels.length;
 
     const footer =
-      `**${days}-day total** — ${total.turns} turn${total.turns === 1 ? "" : "s"}${total.failedTurns > 0 ? ` (${total.failedTurns} failed)` : ""} · ${figuresLine(total)}\n\n`
+      `**${days}-day total**: ${total.turns} turn${total.turns === 1 ? "" : "s"}${total.failedTurns > 0 ? ` (${total.failedTurns} failed)` : ""} · ${figuresLine(total)}\n\n`
       + `**Models**\n${shownModels.join("\n")}${hiddenModels > 0 ? `\n+${hiddenModels} more model${hiddenModels === 1 ? "" : "s"}` : ""}`
       + (total.cost === 0 && (total.inputTokens || total.outputTokens) > 0
         ? "\n-# Costs show $0 because the provider's pricing is not reported for these models."
@@ -317,7 +317,7 @@ export class UsageLog {
     // Ephemeral replies cap at 2000 chars: reserve the footer and the possible
     // elision note, then fit as many day lines as possible (newest first) and
     // elide the oldest with a note.
-    const header = `📊 **Model usage — last ${days} day${days === 1 ? "" : "s"}**\n`;
+    const header = `📊 **Model usage, last ${days} day${days === 1 ? "" : "s"}**\n`;
     const budget = 1950 - header.length - footer.length - 64;
     const fitted: string[] = [];
     let omitted = 0;

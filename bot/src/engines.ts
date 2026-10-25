@@ -337,7 +337,7 @@ export async function stageEngineSeed(targetDir: string, sourceRoot: string = BO
     }
   }
   if (missing.length) {
-    throw new Error(`engine seed sources missing from ${sourceRoot} — the engines.ts spec no longer matches the installed packages: ${missing.join(", ")}`);
+    throw new Error(`engine seed sources missing from ${sourceRoot}: the engines.ts spec no longer matches the installed packages. Missing: ${missing.join(", ")}`);
   }
 
   for (const engine of engines) {

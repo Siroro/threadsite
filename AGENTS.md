@@ -6,7 +6,7 @@ Discord threads become static sites and browser games. This repo runs the bot, O
 
 - Check `git status` first; preserve unrelated edits and deletions. Use TypeScript/ESM with `.js` imports and follow nearby code.
 - Keep changes focused. Update tests for meaningful behavior, and update README / `.env.example` when commands or configuration change.
-- No low-quality tests. Do not add tests that assert prose, labels or wording rendered elsewhere, restate constants the code sets, or otherwise pass by construction (tautological). Tests must exercise behavior: state transitions, limits, routing, failure and recovery paths — not echo text the code already owns.
+- No low-quality tests. Do not add tests that assert prose, labels or wording rendered elsewhere, restate constants the code sets, or otherwise pass by construction (tautological). Tests must exercise behavior: state transitions, limits, routing, failure and recovery paths, not echo text the code already owns.
 - Report the result, checks and material limitations concisely. Omit deployment reminders and commands unless deployment is requested.
 - Preserve `data/`, secrets, volumes and live workspaces. On Windows, use literal PowerShell paths and verify recursive deletion/move targets.
 

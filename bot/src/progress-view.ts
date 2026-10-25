@@ -135,7 +135,7 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   if (stalledForMs) {
     description.push(state.agentReportedActive
       ? `🔌 **OpenCode still reports this turn running** · no new agent event for ${elapsed(stalledForMs)}. Run \`/site stop\` to interrupt it.`
-      : `⚠️ **No progress for ${elapsed(stalledForMs)}** — run \`/site stop\` to interrupt this turn.`);
+      : `⚠️ **No progress for ${elapsed(stalledForMs)}**: run \`/site stop\` to interrupt this turn.`);
   } else if (state.waitingReason && !state.questions?.length) {
     // Only the service wait needs its own line: a failed tool already headlines
     // the activity line with ⚠️, so a second generic line would just repeat it.
@@ -153,7 +153,7 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   if (state.questions?.length) {
     state.questions.slice(0, 5).forEach((question, index) => fields.push({
       name: index ? `❓ Question ${index + 1}` : "❓ Your input is needed",
-      value: `${plain(question.question, 180)}\n${question.options.slice(0, 4).map((option) => `**${plain(option.label, 55)}**${option.description ? ` — ${plain(option.description, 90)}` : ""}`).join("\n")}`,
+      value: `${plain(question.question, 180)}\n${question.options.slice(0, 4).map((option) => `**${plain(option.label, 55)}**${option.description ? `: ${plain(option.description, 90)}` : ""}`).join("\n")}`,
     }));
   } else if (state.questionPin) {
     fields.push({ name: "Decision", value: `${plain(state.questionPin.question, 200)}${state.questionPin.resolution ? `\n${plain(state.questionPin.resolution, 200)}` : ""}` });
@@ -244,7 +244,7 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   const lines = [rail, "", ...activityLines(state, 260)];
   if (stalled) lines.push(state.agentReportedActive
     ? `🔌 **OpenCode still reports this turn running** · no new agent event for ${elapsed(stalled)}. Run \`/site stop\` to interrupt it.`
-    : `⚠️ **No progress for ${elapsed(stalled)}** — run \`/site stop\` to interrupt this turn.`);
+    : `⚠️ **No progress for ${elapsed(stalled)}**: run \`/site stop\` to interrupt this turn.`);
   else if (state.waitingReason && !state.questions?.length) lines.push(`⚠️ ${plain(state.waitingReason, 180)}`);
   else if (!state.waiting && state.now - state.latest.at >= 15_000 && state.phase !== "queued" && !state.questions?.length) lines.push(`${state.metrics?.liveTokensPerSecond ? "Generating" : state.activeTools ? "Running" : "Idle"} · ${elapsed(state.now - state.latest.at)}`);
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join("\n")));
@@ -349,7 +349,7 @@ const PLAN_MARKS: Record<ProgressPlanItem["status"], string> = { completed: "✓
 export function modelUsageLines(models: ModelUsage[], admin = false): string {
   return models
     .filter((entry) => entry.model && entry.model !== "unknown")
-    .map((entry) => `\`${admin ? entry.model : modelDisplayName(entry.model)}\` — in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)}`
+    .map((entry) => `\`${admin ? entry.model : modelDisplayName(entry.model)}\`: in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)}`
       + (admin && entry.cost > 0 ? ` · ${formatCost(entry.cost)}` : ""))
     .join("\n");
 }
@@ -365,7 +365,7 @@ export function sessionUsageLines(sessions: SessionUsage[], admin = false): stri
     .map((entry) => {
       const models = entry.models ? modelNameSummary(entry.models, 2, admin) : "";
       return `${entry.root ? "Root turn" : `🤖 ${entry.agent ?? "subagent"}`}${models ? ` (${models})` : ""}`
-        + ` — in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)} · ${entry.steps} step${entry.steps === 1 ? "" : "s"}`
+        + `: in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)} · ${entry.steps} step${entry.steps === 1 ? "" : "s"}`
         + (admin && entry.cost > 0 ? ` · ${formatCost(entry.cost)}` : "");
     })
     .join("\n");
@@ -472,7 +472,7 @@ const detailSections = {
   },
   questions(state: ProgressSnapshot): PanelSection | undefined {
     const text = [state.questionPin ? `${state.questionPin.question}\n${state.questionPin.resolution ?? ""}` : "",
-      ...(state.questions ?? []).map((question) => `${question.question}\n${question.options.map((option) => `${option.label}${option.description ? ` — ${option.description}` : ""}`).join("\n")}`),
+      ...(state.questions ?? []).map((question) => `${question.question}\n${question.options.map((option) => `${option.label}${option.description ? `: ${option.description}` : ""}`).join("\n")}`),
     ].filter(Boolean).join("\n\n");
     return text.trim() ? { key: "questions", label: "Questions & decisions", text } : undefined;
   },

@@ -26,7 +26,7 @@ export async function renderGallery(projects: GalleryProject[]): Promise<string>
   return `<!doctype html>
 <html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="Browser games and websites created in Discord. Browse projects, play games and save your favourites.">
-<meta name="theme-color" content="#101319"><meta name="color-scheme" content="dark light"><title>ThreadSite — websites and browser games</title>
+<meta name="theme-color" content="#101319"><meta name="color-scheme" content="dark light"><title>ThreadSite · websites and browser games</title>
 <style>${css}</style></head><body>
 <a class="skip-link" href="#collection">Skip to projects</a>
 <aside class="sidebar" aria-label="Gallery navigation"><a class="brand" href="./" aria-label="ThreadSite home"><span class="brand-symbol">${icon("spark")}</span>ThreadSite</a>

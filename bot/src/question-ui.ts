@@ -33,7 +33,7 @@ export function questionControls(resource: string, request: AgentQuestion, statu
   }
   rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
     button(cardId("other", resource, revision, 0), "Write another answer"),
-    button(cardId("skip", resource, revision), "Skip — let the agent decide"),
+    button(cardId("skip", resource, revision), "Skip, let the agent decide"),
   ));
   return rows;
 }

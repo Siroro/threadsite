@@ -99,7 +99,7 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   const statusLine = project.status === "creating"
     ? "🛠️ Building the first version…"
     : project.status === "error"
-      ? "⚠️ The last turn failed — reply here to retry; the previously published version is unchanged."
+      ? "⚠️ The last turn failed: reply here to retry; the previously published version is unchanged."
       : `✅ Live${project.lastCommit ? ` · version \`${project.lastCommit}\`` : ""}${relative(project.lastTurnAt) ? ` · updated ${relative(project.lastTurnAt)}` : ""}`;
 
   const card = new ContainerBuilder().setAccentColor(color);

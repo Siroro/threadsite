@@ -296,7 +296,7 @@ export class DiscordProgress {
   /** Pin that the pinned question was skipped and by whom. */
   recordSkip(requestID: string, responder: string): void {
     if (this.questionPin?.requestID !== requestID) return;
-    this.questionPin.resolution = `⏭️ ${singleLine(responder)} skipped — the agent uses its best judgment`;
+    this.questionPin.resolution = `⏭️ ${singleLine(responder)} skipped; the agent uses its best judgment`;
     this.schedule();
   }
 
@@ -397,7 +397,7 @@ export class DiscordProgress {
       agentReportedActive: this.agentReportedActive,
       // The errored tool already headlines the activity line with ⚠️, so only a
       // provider retry needs its own explanatory line.
-      waitingReason: !latestToolFailed && serviceWaiting ? "Waiting on the agent service — it will retry automatically" : undefined,
+      waitingReason: !latestToolFailed && serviceWaiting ? "Waiting on the agent service; it will retry automatically" : undefined,
       questions: this.question?.questions, questionStatus: this.questionStatus, narration: this.narration, reasoning: this.reasoning,
       stalledForMs: config.turnStallWarnMs > 0 && idleMs >= config.turnStallWarnMs ? idleMs : undefined,
     };

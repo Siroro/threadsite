@@ -380,7 +380,7 @@ export class ThreadSiteNet {
   constructor(options: ThreadSiteNetOptions = {}) {
     const game = String(options.game ?? "").trim();
     if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(game)) {
-      throw new ThreadSiteNetError(`Invalid game id '${game}' — use NET_CONFIG.game unchanged.`, "bad_config");
+      throw new ThreadSiteNetError(`Invalid game id '${game}': use NET_CONFIG.game unchanged.`, "bad_config");
     }
     this.game = game;
     this.playerIdentity = playerIdentity(game, options.playerToken);
@@ -745,7 +745,7 @@ export class ThreadSiteNet {
       const now = Date.now();
       if (now - this.lastBudgetWarnAt > 5000) {
         this.lastBudgetWarnAt = now;
-        console.warn(`[threadsite-net] send budget reached (${SEND_BUDGET_PER_SECOND}/s sustained): dropping ${frame.t} frames — reduce transformHz/publishHz or event volume`);
+        console.warn(`[threadsite-net] send budget reached (${SEND_BUDGET_PER_SECOND}/s sustained): dropping ${frame.t} frames; reduce transformHz/publishHz or event volume`);
       }
       return;
     }

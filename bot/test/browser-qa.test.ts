@@ -42,7 +42,7 @@ test("network failures parse from numbered request lines and stay origin-scoped"
 });
 
 test("render sanity describes a blank page while text or a canvas passes", () => {
-  assert.equal(renderSanityProblem({ textLength: 0, canvases: 0, visibleElements: 1, title: "App" }), "preview rendered a blank page — no visible text or canvas (title: \"App\")");
+  assert.equal(renderSanityProblem({ textLength: 0, canvases: 0, visibleElements: 1, title: "App" }), "preview rendered a blank page: no visible text or canvas (title: \"App\")");
   assert.equal(renderSanityProblem({ textLength: 120, canvases: 0, visibleElements: 8 }), undefined);
   assert.equal(renderSanityProblem({ textLength: 0, canvases: 1, visibleElements: 1 }), undefined);
   assert.equal(renderSanityProblem({ textLength: 0, canvases: 0, visibleElements: 1, mediaElements: 1 }), undefined);

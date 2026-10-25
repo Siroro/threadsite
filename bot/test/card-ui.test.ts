@@ -222,19 +222,19 @@ test("turn details show every viewer the models it used, but spend only to site 
   };
   const member = turnPanelSections({ result }, undefined, "turn").find((section) => section.key === "usage")!;
   assert.ok(member, "a turn with provider counts has a usage page");
-  assert.match(member.text, /`deepseek-4\.1` — in 1M · out 40k/);
-  assert.match(member.text, /`glm-5\.3` — in 200k · out 5k/);
-  assert.match(member.text, /Root turn \(deepseek-4\.1, glm-5\.3\) — in 900k · out 38k · 14 steps/, "a mid-session failover names both models");
-  assert.match(member.text, /🤖 explore \(glm-5\.3\) — in 200k · out 5k · 3 steps/);
-  assert.match(member.text, /🤖 browser-qa \(glm-5\.3-flash\) — in 100k · out 2k · 1 step/);
+  assert.match(member.text, /`deepseek-4\.1`: in 1M · out 40k/);
+  assert.match(member.text, /`glm-5\.3`: in 200k · out 5k/);
+  assert.match(member.text, /Root turn \(deepseek-4\.1, glm-5\.3\): in 900k · out 38k · 14 steps/, "a mid-session failover names both models");
+  assert.match(member.text, /🤖 explore \(glm-5\.3\): in 200k · out 5k · 3 steps/);
+  assert.match(member.text, /🤖 browser-qa \(glm-5\.3-flash\): in 100k · out 2k · 1 step/);
   assert.doesNotMatch(member.text, /surplus|opencode\//, "a non-admin viewer sees model names without their providers");
   assert.doesNotMatch(member.text, /\$/, "a non-admin viewer never sees spend figures");
 
   const admin = turnPanelSections({ result }, undefined, "turn", true).find((section) => section.key === "usage")!;
   assert.match(admin.text, /Turn spend \*\*\$3\.42\*\*/);
-  assert.match(admin.text, /`surplus\/deepseek-4\.1` — in 1M · out 40k · \$2\.10/, "admins see the provider routing and per-model spend");
-  assert.match(admin.text, /Root turn \(surplus\/deepseek-4\.1, surplus\/glm-5\.3\) — in 900k · out 38k · 14 steps · \$1\.90/, "the split carries per-session models and spend for admins");
-  assert.match(admin.text, /🤖 browser-qa \(opencode\/glm-5\.3-flash\) — in 100k · out 2k · 1 step · \$0\.52/);
+  assert.match(admin.text, /`surplus\/deepseek-4\.1`: in 1M · out 40k · \$2\.10/, "admins see the provider routing and per-model spend");
+  assert.match(admin.text, /Root turn \(surplus\/deepseek-4\.1, surplus\/glm-5\.3\): in 900k · out 38k · 14 steps · \$1\.90/, "the split carries per-session models and spend for admins");
+  assert.match(admin.text, /🤖 browser-qa \(opencode\/glm-5\.3-flash\): in 100k · out 2k · 1 step · \$0\.52/);
 
   const unpriced = { ...result, usage: { ...result.usage, cost: 0, models: result.usage.models.map((entry) => ({ ...entry, cost: 0 })) } };
   const explained = turnPanelSections({ result: unpriced }, undefined, "turn", true).find((section) => section.key === "usage")!;

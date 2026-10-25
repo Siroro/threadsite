@@ -1,13 +1,13 @@
 # Networking: gotchas, budgets, and debugging
 
-Harness-owned reference, regenerated every turn — never edit. Read it before writing netcode and whenever sync, authority, or snapshots misbehave.
+Harness-owned reference, regenerated every turn; never edit. Read it before writing netcode and whenever sync, authority, or snapshots misbehave.
 
 The client is `site/net/threadsite-net.js` (typed by `threadsite-net.d.ts`); identity comes from `../net/net-config.js`. It assumes the rules in AGENTS.md's multiplayer section; this file covers what goes wrong when they are bent.
 
 ## Budgets and numbers (defaults)
 
-* Player transforms coalesce to **25 Hz** (`transformHz`, 1–60). Complete worlds publish at **10 Hz** by default (`publishHz`, 1–30) — choose that rate deliberately; see "Choosing rates and the latency budget" below.
-* One client frame must stay under **256 KB** — `publishWorld` throws `frame_too_large` beyond it. The relay accepts up to 264 KiB by default; the lower client cap provides headroom so an oversized world fails locally instead of dropping the relay connection.
+* Player transforms coalesce to **25 Hz** (`transformHz`, 1–60). Complete worlds publish at **10 Hz** by default (`publishHz`, 1–30), so choose that rate deliberately; see "Choosing rates and the latency budget" below.
+* One client frame must stay under **256 KB**; `publishWorld` throws `frame_too_large` beyond it. The relay accepts up to 264 KiB by default; the lower client cap provides headroom so an oversized world fails locally instead of dropping the relay connection.
 * The relay compresses with **permessage-deflate** (1 KB threshold; `GAMESERVER_PERMESSAGE_DEFLATE=0` disables): repetitive complete-world snapshots typically shrink **~5×** on the wire for ~1 ms added transit, while small high-rate frames (transforms, events, pings) skip compression entirely. Browsers negotiate it automatically; the size caps and `frame_too_large` apply to the uncompressed payload.
 * The relay rate-limits every connection to **60 frames/s** (burst 120), shared by *all* sends. `transformHz` + `publishHz` + events must stay comfortably below it. 60 Hz transforms plus 30 Hz worlds will trip `rate_limited` and updates will start dropping.
 * The client also paces itself at **55 frames/s sustained** (burst 100): when the budget is exhausted it drops the periodic frames (transforms, worlds) with a console warning and counts them in `net.stats.budgetDroppedFrames`, so a misconfigured rate degrades gracefully instead of colliding with the relay's limiter.
@@ -50,9 +50,9 @@ const top = await boards.list("points-v1", { limit: 10 });
 ### Board shape
 
 - A board is one competition, not a run log. The relay keeps one personal best per persistent player per board, so render one row per `playerId`; attempts, detailed records and recent clears belong in a save slot or a separate local history view.
-- Use one board for a single comparable competition (`best-run-v1`, `fastest-clear-v1`) or a tabbed set for levels/operations/modes (`level-01-v1`, `career-v1`). A career aggregate gets its own career board and tab; never merge it with level boards or run history. Never concatenate boards into one table — that repeats players and compares incomparable scores.
+- Use one board for a single comparable competition (`best-run-v1`, `fastest-clear-v1`) or a tabbed set for levels/operations/modes (`level-01-v1`, `career-v1`). A career aggregate gets its own career board and tab; never merge it with level boards or run history. Never concatenate boards into one table: that repeats players and compares incomparable scores.
 - Keep the set within the 16-board cap, hide empty boards, show one board at a time with a clear title, and default to the most useful/populated board. Rotating challenges use a period key (`daily-2026-10-23`).
-- Board keys identify the competition and its scoring rules, not a player's progress: use stable descriptive keys and a new version when rules change; never derive keys from run IDs, player names or current level progress. Keep the injected game ID stable for every level/mode — separate board keys, never separate game identities, or the same browser becomes a different player.
+- Board keys identify the competition and its scoring rules, not a player's progress: use stable descriptive keys and a new version when rules change; never derive keys from run IDs, player names or current level progress. Keep the injected game ID stable for every level/mode: separate board keys, never separate game identities, or the same browser becomes a different player.
 - Names come from the dedicated score client's `setName()` and are sanitized, capped at 32 characters and not unique; never dedupe or merge by name. First submission fixes ascending/descending order. Equal scores keep their original timestamp; ties sort by timestamp then player ID. An equal or worse submission leaves the stored name untouched, so a rename takes effect only on the next improved score. List returns up to 100 entries. Both the scores and names are untrusted client input: render names as text and do not claim cheat-proof rankings.
 - Gameplay-connection storage allows 5 requests/s per connection (burst 10); the dedicated score API has the same budget per persistent player and game across short connections. Defaults: 10,000 persistent players, 16 boards and 16 MiB total save JSON per game. Capacity/rate/disk failures are explicit errors; keep solo play available and offer a later retry.
 
@@ -67,10 +67,10 @@ transform coalescing (1000/transformHz)
 + entity render delay your presenter adds (~1.25 × 1000/publishHz for smooth interpolation)
 ```
 
-* Real-time action games: `publishHz` 15–20 and `transformHz` 25–30. At `publishHz` 10 the smooth-interpolation delay alone is ~125 ms and players read the world as laggy even on a fast relay — this is the #1 cause of "multiplayer feels laggy" reports on otherwise clean builds.
+* Real-time action games: `publishHz` 15–20 and `transformHz` 25–30. At `publishHz` 10 the smooth-interpolation delay alone is ~125 ms and players read the world as laggy even on a fast relay; this is the #1 cause of "multiplayer feels laggy" reports on otherwise clean builds.
 * Budget the relay's per-connection limit: `transformHz + publishHz + headroom for events/pings` should stay under ~50 of the 60 frames/s cap.
 * Size-check the complete world while hosting: log `JSON.stringify` of the capture envelope every few seconds at peak entity counts. Keep it under ~200 KB of the 256 KB `frame_too_large` cap; slim the snapshot (round harder, drop derivable or cosmetic fields, cap collections) rather than lowering the rate.
-* Hosts validate guest contact and hits from `latest()` — add a small tolerance or grace window (contact must hold ~100 ms, or a slightly smaller damage radius than visual radius) so guests don't take hits a moment after visually escaping. Authority stays host-side; leniency is a feel decision.
+* Hosts validate guest contact and hits from `latest()`: add a small tolerance or grace window (contact must hold ~100 ms, or a slightly smaller damage radius than visual radius) so guests don't take hits a moment after visually escaping. Authority stays host-side; leniency is a feel decision.
 * Ship a small diagnostics readout from `net.stats` in the HUD (at minimum `rtt`). When a player reports lag it immediately separates "far from the relay / bad Wi-Fi" (high RTT) from "rates or presenter delay" (low RTT), and `budgetDroppedFrames`/`lastWorldBytes` catch rate and size problems on the spot.
 * Guest entity presentation itself is covered in "Smooth guest presentation of snapshot entities" below: interpolate between the last two snapshots, never extrapolate to now.
 
@@ -111,7 +111,7 @@ because `snapshot.state` is the world envelope.
 
 * Therefore, **generate a fresh `runId` for every run/reset**. Reusing a run ID while rewinding tick can cause guests to ignore the new run forever.
 
-* `schemaVersion` is the migration gate. If the snapshot shape changes, bump it. Older snapshots — including persisted ARENA state — are rejected and `onAuthorityStart` receives `recovered: false`.
+* `schemaVersion` is the migration gate. If the snapshot shape changes, bump it. Older snapshots (including persisted ARENA state) are rejected and `onAuthorityStart` receives `recovered: false`.
 
 * Do not partially apply incompatible persisted state. If recovery fails, initialise a fresh world.
 
@@ -121,9 +121,9 @@ because `snapshot.state` is the world envelope.
 
 * `capture()` runs at `publishHz` while host. Keep it synchronous and cheap.
 
-* **Boot order is fixed: initialize everything, then connect, then start.** Authority acquisition, world restore, and the publish loop all begin inside `createAuthoritativeSession()` / `connect()` — during the `await`, before any code after it runs. This yields one non-negotiable rule:
+* **Boot order is fixed: initialize everything, then connect, then start.** Authority acquisition, world restore, and the publish loop all begin inside `createAuthoritativeSession()` / `connect()`, during the `await`, before any code after it runs. This yields one non-negotiable rule:
 
-  **Every lifecycle callback must be fully working the moment the session is created.** `capture()` must return a valid world (`tick: 0` with fresh state is fine) from its very first call — never throw or depend on handlers installed later (e.g. on a Play-button click). `restore` / `present` / `onAuthorityStart` can also fire during that `await` (a recovered or persisted world restores before authority starts), so every value they touch — game scenes, UI refs, renderer state, module-level `const`s — must already be initialized **before** the `createAuthoritativeSession()` call, never after the `await`.
+  **Every lifecycle callback must be fully working the moment the session is created.** `capture()` must return a valid world (`tick: 0` with fresh state is fine) from its very first call; never throw or depend on handlers installed later (e.g. on a Play-button click). `restore` / `present` / `onAuthorityStart` can also fire during that `await` (a recovered or persisted world restores before authority starts), so every value they touch (game scenes, UI refs, renderer state, module-level `const`s) must already be initialized **before** the `createAuthoritativeSession()` call, never after the `await`.
 
   Concretely, write boot as:
 
@@ -131,7 +131,7 @@ because `snapshot.state` is the world envelope.
   2. `await` the session with all world options inline and final
   3. wire input, engine loop, and user-triggered start handlers
 
-  Never: declare scene/UI `const`s after the session `await` and use them inside `onSnapshot`/`present`/`restore` (a `ReferenceError: … before initialization` is logged as `world authority startup failed`, the controller yields host, and the game is left hostless — with no visible error, so validation passes), and never defer installing world handlers to a Play-button handler (`capture()` then fails every publish tick — again invisible to validation, and guests get no world). Because these failures produce only runtime console output that neither you nor the harness's checks can see, an apparently clean build proves nothing about them: the boot-order rule above is the only defense.
+  Never: declare scene/UI `const`s after the session `await` and use them inside `onSnapshot`/`present`/`restore` (a `ReferenceError: … before initialization` is logged as `world authority startup failed`, the controller yields host, and the game is left hostless with no visible error, so validation passes), and never defer installing world handlers to a Play-button handler (`capture()` then fails every publish tick, again invisible to validation, and guests get no world). Because these failures produce only runtime console output that neither you nor the harness's checks can see, an apparently clean build proves nothing about them: the boot-order rule above is the only defense.
 
 * Keep complete snapshots compact:
 
@@ -168,7 +168,7 @@ Authority can migrate after:
 * disconnect
 * `yield-host`
 * background-tab auto-yield
-* the relay's host-stall watchdog (a connected host stopped publishing while peers waited — e.g. a frozen or pre-watchdog tab whose socket still answers pings)
+* the relay's host-stall watchdog (a connected host stopped publishing while peers waited, e.g. a frozen or pre-watchdog tab whose socket still answers pings)
 
 It does not automatically return to the previous host.
 
@@ -221,7 +221,7 @@ Game snapshots must carry their own `schemaVersion`, `runId`, `tick` and whateve
 
 Only the latest complete authoritative world is durable. The relay does **not** persist peer IDs, host identity, presence, player transforms, sockets, event queues, interpolation buffers, or old authority metadata.
 
-Persistence is snapshot-based, not event-based. If an important action changes durable gameplay — for example a boss dies or a chest is claimed — that result must be reflected in `capture()` rather than existing only as an event.
+Persistence is snapshot-based, not event-based. If an important action changes durable gameplay (for example a boss dies or a chest is claimed), that result must be reflected in `capture()` rather than existing only as an event.
 
 ## Transforms
 
@@ -234,7 +234,7 @@ Silence for >2 s causes the remote player to disappear from `sampleAll()`-style 
 Transforms are transient/latest-wins state. Old movement is not replayed as durable gameplay after reconnect; rebuild remote movement from fresh post-reconnect transforms.
 
 * `sample()` / `sampleAll()` / `listAlive()` / `nearest()` are **rendering-only**. They return time-shifted presentation transforms, deliberately rendered **45–150 ms behind relay time** (adaptive to jitter) so motion stays smooth.
-* `latest(peerId)` / `latestAll()` return the **newest received** transform — no interpolation, extrapolation, or render delay. This is the intended freshness source for host-side player-position checks (AI targeting, range and interaction validation) when the game does not maintain its own canonical guest-player position. `latest()` returns `null` and `latestAll()` omits the peer until it has published a transform — including after reconnect, until the first fresh sample arrives.
+* `latest(peerId)` / `latestAll()` return the **newest received** transform, with no interpolation, extrapolation, or render delay. This is the intended freshness source for host-side player-position checks (AI targeting, range and interaction validation) when the game does not maintain its own canonical guest-player position. `latest()` returns `null` and `latestAll()` omits the peer until it has published a transform, including after reconnect, until the first fresh sample arrives.
 * Peer transforms are client-reported input either way. The host validates them with game-specific tolerances and remains authoritative over gameplay outcomes; never blindly trust a claimed position or outcome.
 
 Never resolve authoritative gameplay such as:
@@ -248,7 +248,7 @@ Never resolve authoritative gameplay such as:
 
 from time-shifted `sample()` reads; use `latest()` or host-owned world state for the position input, and let the host decide the outcome.
 
-The authoritative host should validate gameplay using the state it owns, allowing reasonable tolerance for network/interpolation delay where appropriate. If shared AI needs remote player positions beyond what the complete world state already carries, read them from `latestAll()` — never from sampled presentation transforms.
+The authoritative host should validate gameplay using the state it owns, allowing reasonable tolerance for network/interpolation delay where appropriate. If shared AI needs remote player positions beyond what the complete world state already carries, read them from `latestAll()`, never from sampled presentation transforms.
 
 * Numeric transform fields interpolate.
 
@@ -307,7 +307,7 @@ const enemiesSync = net.entities.syncCollection("enemies", {
 });
 ```
 
-Its `apply()` method creates missing IDs, updates existing IDs, and removes entities absent from the latest snapshot. With `smooth` set, the controller also interpolates the listed numeric keys between the last two snapshots and writes them onto each entity at render time — call `apply()` from `present()` and read positions from `controller.values()` / `get()` in the render loop; they never step at snapshot rate and never snap (only teleports past `snapDistance`, new entities, and missing history land unblended). With `smooth`, do not copy the smooth keys in `update()` — the controller owns them between snapshots; `update()` owns the discrete fields. The controller owns the entity map; do not create a second entity map unless the game truly needs one.
+Its `apply()` method creates missing IDs, updates existing IDs, and removes entities absent from the latest snapshot. With `smooth` set, the controller also interpolates the listed numeric keys between the last two snapshots and writes them onto each entity at render time: call `apply()` from `present()` and read positions from `controller.values()` / `get()` in the render loop; they never step at snapshot rate and never snap (only teleports past `snapDistance`, new entities, and missing history land unblended). With `smooth`, do not copy the smooth keys in `update()`: the controller owns them between snapshots; `update()` owns the discrete fields. The controller owns the entity map; do not create a second entity map unless the game truly needs one.
 
 Entity IDs must be stable strings or finite numbers. Duplicate IDs in one snapshot throw `duplicate_entity_id`.
 
@@ -317,11 +317,11 @@ Prefer it over hand-written create/update/remove/interpolation loops when presen
 
 ### Smooth guest presentation of snapshot entities
 
-How a guest moves entities between snapshots (arriving at `publishHz`, say 10–20 Hz) decides whether the game feels smooth or "laggy". **The default answer is the smooth `syncCollection` above — it implements everything in this section.** Hand-roll presentation only when a collection genuinely cannot flow through it, and then:
+How a guest moves entities between snapshots (arriving at `publishHz`, say 10–20 Hz) decides whether the game feels smooth or "laggy". **The default answer is the smooth `syncCollection` above; it implements everything in this section.** Hand-roll presentation only when a collection genuinely cannot flow through it, and then:
 
 * **Interpolate between the last two snapshots at a fixed render delay.** Render each entity at `now - renderDelayMs` where `renderDelayMs` is ~1 to 1.5 snapshot intervals (10 Hz → 100–150 ms), blending position between the previous and current snapshot by elapsed fraction. Both endpoints are authoritative, so motion is smooth by construction and never snaps.
-* **Never extrapolate to "now" from the newest snapshot as the default presentation.** Forward-predicting each entity by a full snapshot interval is wrong after every bounce, impulse, or turn — physics-driven and chasing entities then visibly snap at snapshot rate, which players read as severe lag even on a 10 ms connection.
-* **Do not disable interpolation for fast entities.** A speed cap is only meaningful for extrapolation beyond the newest snapshot; between two known positions any speed interpolates cleanly. Zeroing interpolation above a speed threshold makes the fastest entities — explosions, debris, knockbacks — step at discrete snapshot positions.
+* **Never extrapolate to "now" from the newest snapshot as the default presentation.** Forward-predicting each entity by a full snapshot interval is wrong after every bounce, impulse, or turn: physics-driven and chasing entities then visibly snap at snapshot rate, which players read as severe lag even on a 10 ms connection.
+* **Do not disable interpolation for fast entities.** A speed cap is only meaningful for extrapolation beyond the newest snapshot; between two known positions any speed interpolates cleanly. Zeroing interpolation above a speed threshold makes the fastest entities (explosions, debris, knockbacks) step at discrete snapshot positions.
 * The same trade-off already exists for remote players: `transforms.sample()` implements it; reuse it rather than re-deriving.
 
 ## Events, intents and signals
@@ -390,7 +390,7 @@ The host must still validate:
 
 The intent layer validates synchronization context, not game rules.
 
-**Fast-path the acting player's feedback.** A guest's accepted action normally becomes visible to *them* only in the next complete world snapshot — up to a full publish interval (~50–100 ms) after the host already decided it, which reads as input lag on the very player who acted. When the host accepts (or clearly rejects) an intent that deserves immediate feedback — a pickup, a purchase, a hit confirmation — send a small targeted reliable event back to the sender right away and let the world snapshot reconcile the rest:
+**Fast-path the acting player's feedback.** A guest's accepted action normally becomes visible to *them* only in the next complete world snapshot, up to a full publish interval (~50–100 ms) after the host already decided it, which reads as input lag on the very player who acted. When the host accepts (or clearly rejects) an intent that deserves immediate feedback (a pickup, a purchase, a hit confirmation), send a small targeted reliable event back to the sender right away and let the world snapshot reconcile the rest:
 
 ```ts
 // host, inside the intent handler, after validating:
@@ -499,14 +499,14 @@ When authority changes, the old host must stop shared simulation immediately and
 | ----------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | Remote players stop rendering                   | Transform silence >2 s                                                | Keep calling `transforms.publish()` from the player update loop             |
 | Guest world never updates                       | `capture` threw, invalid world, non-monotonic tick, or reused `runId` | Check console; use fresh `runId` and monotonically increasing integer tick  |
-| `[threadsite-net] world.capture failed` repeating from load/title screen | `capture()` (or state it reads) is installed only after a user action — the publish loop starts inside the session `await` | Make `capture()` valid from its first call (return an initial empty world) and install handlers before/just after the session resolves |
-| `world authority startup failed` with a `before initialization` ReferenceError, then no host | `restore`/`present`/`onSnapshot` callback read state declared after the session `await` (TDZ) — restore can fire during the await, and the controller yields host on the throw | Initialize everything lifecycle callbacks touch before creating the session; construct scenes/UI first, connect second |
+| `[threadsite-net] world.capture failed` repeating from load/title screen | `capture()` (or state it reads) is installed only after a user action; the publish loop starts inside the session `await` | Make `capture()` valid from its first call (return an initial empty world) and install handlers before/just after the session resolves |
+| `world authority startup failed` with a `before initialization` ReferenceError, then no host | `restore`/`present`/`onSnapshot` callback read state declared after the session `await` (TDZ); restore can fire during the await, and the controller yields host on the throw | Initialize everything lifecycle callbacks touch before creating the session; construct scenes/UI first, connect second |
 | A run reset is ignored by guests                | Tick rewound while reusing the same `runId`                           | Generate a new `runId` for every reset                                      |
 | World wiped after rejoin                        | Fresh state was published before restored state was processed         | Initialise worlds only from the authority lifecycle; respect `not_ready`    |
 | Snapshot rejected immediately after game update | `schemaVersion` mismatch                                              | Expected for incompatible persisted state; initialise a fresh world         |
 | Ghost/duplicate entities after host migration   | `restore` merged instead of replacing                                 | Fully replace authoritative shared state                                    |
 | `frame_too_large`                               | Serialized client frame exceeded 256 KB                               | Slim snapshot, round values, remove transient data, cap collections         |
-| Guest entities jitter, rubber-band or "fly around" at snapshot rate | Guest presentation extrapolates to now from the newest snapshot (wrong after every bounce/turn) or disables interpolation for fast entities | Use the smooth `syncCollection` (or, hand-rolled: interpolate between the last two snapshots at a fixed render delay — never zero interpolation for fast entities) |
+| Guest entities jitter, rubber-band or "fly around" at snapshot rate | Guest presentation extrapolates to now from the newest snapshot (wrong after every bounce/turn) or disables interpolation for fast entities | Use the smooth `syncCollection` (or, hand-rolled: interpolate between the last two snapshots at a fixed render delay; never zero interpolation for fast entities) |
 | Multiplayer "feels laggy" on an otherwise clean build | `publishHz` 10 left at default: smooth interpolation alone renders shared entities ~125 ms behind | Raise `publishHz` to 15–20 (size-check the snapshot first) and scale the entity render delay to ~1.25 snapshot intervals |
 | Guest's pickup/hit reacts only in the next snapshot (~a publish interval late) | Result was visible to the actor only via the complete world | Host sends a targeted reliable event to the actor on accept; the snapshot reconciles the durable state |
 | Guest takes a hit a moment after visually escaping | Host validates contact from `latest()` with no tolerance for guest latency | Add a small grace window or margin to host-side contact checks; authority stays host-side |
@@ -517,7 +517,7 @@ When authority changes, the old host must stop shared simulation immediately and
 | Every timer instantly ends after durable resume | Absolute deadline was persisted                                       | Store remaining/elapsed simulation time and rebase on restore               |
 | Remote player slides across map after teleport  | `publish()` used for discontinuity                                    | Use `transforms.teleport()`                                                 |
 | Game freezes when host tab hides                | Newly authoritative peer isn't advancing simulation                   | Drive simulation from authority lifecycle, never a cached startup-host flag |
-| World frozen for everyone; an old or hidden tab is (or was) connected | That tab held host authority while its JS was frozen — the socket still answers the relay's pings, so nothing dropped it | Relay-side: the host-stall watchdog re-elects a waiting peer within ~15 s of the host going silent; keep hosts publishing so it never triggers |
+| World frozen for everyone; an old or hidden tab is (or was) connected | That tab held host authority while its JS was frozen: the socket still answers the relay's pings, so nothing dropped it | Relay-side: the host-stall watchdog re-elects a waiting peer within ~15 s of the host going silent; keep hosts publishing so it never triggers |
 | `bad_world_sync` on startup                     | World lifecycle API mixed with raw world/authority callbacks          | Use one synchronization style; prefer the high-level lifecycle              |
 | Host sees nothing in `world.onSnapshot()`       | Own world acknowledgements are silent                                 | Expected; use local authoritative state / `net.run`                         |
 | Persisted ARENA restarts fresh                  | Snapshot schema rejected or capture never successfully persisted      | Check `schemaVersion`, `capture()` errors and relay persistence logs        |

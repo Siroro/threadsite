@@ -44,7 +44,7 @@ export interface ProjectChangelog {
 export function descriptionTemplate(name: string): string {
   return `# ${name}\n\n`
     + "<!-- The heading above is the project's public name: replace it with the distinctive name you chose for what you built. -->\n"
-    + "<!-- One sentence, at most 25 words, in words a visitor understands: what this is and what they can do. No file names, no code, no internals — and keep it on one line. Replace this line. -->\n\n"
+    + "<!-- One sentence, at most 25 words, in words a visitor understands: what this is and what they can do. No file names, no code, no internals, and keep it on one line. Replace this line. -->\n\n"
     + "## How to play\n\n"
     + "<!-- Up to four short paragraphs, about 120 words total: the goal first, then the controls, then a tip or two. Visitor words only. Replace this. -->\n";
 }

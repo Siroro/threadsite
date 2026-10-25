@@ -223,7 +223,7 @@ export function renderSanityProblem(state: RenderSanity | undefined): string | u
   if (state.textLength > 0 || state.canvases > 0 || (state.mediaElements ?? 0) > 0) return undefined;
   // Allow a shell of layout wrappers; an empty #app with nothing inside is blank.
   if (state.visibleElements > 2) return undefined;
-  return `preview rendered a blank page — no visible text or canvas${state.title ? ` (title: "${state.title}")` : ""}`;
+  return `preview rendered a blank page: no visible text or canvas${state.title ? ` (title: "${state.title}")` : ""}`;
 }
 
 /** The blank-render finding, or undefined when the page rendered something. */

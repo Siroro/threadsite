@@ -14,26 +14,26 @@ export function starterHtml(name: string): string {
  */
 export function starterSource(kind: ProjectKind): string {
   if (kind === "game-3d") {
-    return `// ThreadSite starter — site/src/main.ts.
+    return `// ThreadSite starter: site/src/main.ts.
 // The harness bundles each top-level src/*.ts entry into js/<name>.js when
 // your turn ends; index.html already loads js/main.js as a module. Import
 // siblings like "./player.js" and the engine package like "three" (see AGENTS.md).
 import * as THREE from "three";
 
-console.log(\`[boot] three.js r\${THREE.REVISION} — build the game in site/src/\`);
+console.log(\`[boot] three.js r\${THREE.REVISION}, build the game in site/src/\`);
 `;
   }
   if (kind === "game-2d") {
-    return `// ThreadSite starter — site/src/main.ts.
+    return `// ThreadSite starter: site/src/main.ts.
 // The harness bundles each top-level src/*.ts entry into js/<name>.js when
 // your turn ends; index.html already loads js/main.js as a module. Import
 // siblings like "./player.js" and the engine package like "excalibur" (see AGENTS.md).
 import * as ex from "excalibur";
 
-console.log(\`[boot] Excalibur \${ex.EX_VERSION} — build the game in site/src/\`);
+console.log(\`[boot] Excalibur \${ex.EX_VERSION}, build the game in site/src/\`);
 `;
   }
-  return `// ThreadSite starter — site/src/main.ts.
+  return `// ThreadSite starter: site/src/main.ts.
 // The harness bundles each top-level src/*.ts entry into js/<name>.js when
 // your turn ends; index.html already loads js/main.js as a module. Import
 // siblings like "./feature.js" and split by responsibility as the site grows.

@@ -39,7 +39,7 @@ export default tool({
       requestedUrl: args.url,
       finalUrl: result.finalUrl,
       sourcePage: args.source_page || undefined,
-      licenseNote: args.license_note || "unspecified — verify before redistribution if required",
+      licenseNote: args.license_note || "unspecified; verify before redistribution if required",
       contentType: result.contentType || undefined,
       bytes: result.bytes.length,
       sha256,

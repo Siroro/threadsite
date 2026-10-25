@@ -110,7 +110,7 @@ test("the new message carries the playable card, the screenshot and the play lin
   assert.match(text, /feed koi and race them/);
   // The changelog heading labels its own line: it says what changed far
   // better than a generic "What's new".
-  assert.match(text, /\*\*Leaderboard\*\* — Added a leaderboard for the top ten koi\./);
+  assert.match(text, /\*\*Leaderboard\*\*: Added a leaderboard for the top ten koi\./);
   assert.doesNotMatch(text, /How to play/, "the how-to-play lives behind the card's button, not inline");
   assert.match(text, /-# 2D · shared arena multiplayer/);
   const gallery = card.components.find((component) => component.type === ComponentType.MediaGallery)!;
