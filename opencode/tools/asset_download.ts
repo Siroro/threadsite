@@ -52,7 +52,6 @@ export default tool({
   },
 });
 
-
 async function fetchPublicAsset(
   input: string,
   options: { maxBytes: number; timeoutMs: number; allowHttp: boolean },

@@ -139,7 +139,7 @@ function scrubMarkdown(text, skillName) {
   text = text.replace(/ {2,}/g, " ");
   // A parenthetical that ended up containing only a scrub phrase adds
   // nothing ("the engine animation skill (the engine's equivalent API)").
-  text = text.replace(/\s*\((?:the engine's equivalent API|a GPU shader reference|a branching-dialogue reference|a rapid prototype|the platform's cloud-persistence docs)\)(?=[\s.,;:)]|$)/g, "");
+  text = text.replace(/\s*\(the engine's equivalent API\)(?=[\s.,;:)]|$)/g, "");
   return text;
 }
 
