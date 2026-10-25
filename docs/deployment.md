@@ -81,6 +81,7 @@ bash scripts/caddy-quickstart.sh \
 | `--admin-ids` | Optional comma-separated user IDs for extra admins |
 | `--model` | Builder model in `provider/model-id` format |
 | `--api-key`, `--api-key-file` | Provider key; also accepts `THREADSITE_API_KEY` or the provider's standard environment variable |
+| `THREADSITE_ORIGIN`, `THREADSITE_DIR` | curl\|bash overrides: repository to clone (default `https://github.com/Siroro/threadsite.git`) and clone directory (default `~/threadsite`) |
 | `--install-docker` | Install Docker and missing Git, curl and jq tools |
 | `--non-interactive` | Fail on missing settings instead of prompting |
 | `--wait-seconds` | Service and Discord readiness timeout; default 180 seconds |

@@ -15,6 +15,9 @@ after every turn. Two tiers:
   banners, validates frontmatter, and scrubs references to catalog skills
   ThreadSite does not ship. Do not hand-edit these; re-run the script instead.
 
-Invariants for both tiers: no npm/Vite/CDN/scaffold instructions (the harness
-runs the only build and preinstalls the engines), and cross-skill pointers
-must only name skills from the managed list in `bot/src/skills.ts`.
+Invariants: cross-skill pointers must only name skills from the managed list
+in `bot/src/skills.ts`, and no npm/Vite/CDN/scaffold instructions (the harness
+runs the only build and preinstalls the engines). The sole exception is the
+vendored `threejs-game-studio` fork: its upstream reference files still
+mention npm, and its SKILL.md banner tells agents the workspace has no
+npm/Vite and to skip those passages.

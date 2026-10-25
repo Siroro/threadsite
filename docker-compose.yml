@@ -188,6 +188,8 @@ services:
       GAMESERVER_ROOM_TTL_MS: ${GAMESERVER_ROOM_TTL_MS:-600000}
       # A host silent this long while another peer waits loses authority.
       GAMESERVER_HOST_STALL_MS: ${GAMESERVER_HOST_STALL_MS:-15000}
+      GAMESERVER_JOIN_TIMEOUT_MS: ${GAMESERVER_JOIN_TIMEOUT_MS:-10000}
+      GAMESERVER_SHUTDOWN_FLUSH_TIMEOUT_MS: ${GAMESERVER_SHUTDOWN_FLUSH_TIMEOUT_MS:-1000}
       GAMESERVER_ALLOWED_ORIGINS: ${GAMESERVER_ALLOWED_ORIGINS:-}
       # permessage-deflate kill switch (0 = off); 1 KB threshold keeps the
       # transform hot path uncompressed while world snapshots compress.
