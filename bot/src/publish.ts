@@ -289,7 +289,7 @@ async function validateModuleResolution(root: string): Promise<void> {
     const visited = new Set<string>();
     while (queue.length) {
       const item = queue.shift()!;
-      const resolved = resolveLocalSpecifier(root, item.from, item.specifier);
+      const resolved = resolveLocalSpecifier(item.from, item.specifier);
       if (resolved === undefined) continue;
       const relative = path.relative(root, resolved).replaceAll(path.sep, "/");
       const via = path.relative(root, item.from).replaceAll(path.sep, "/") || "index.html";
@@ -331,7 +331,7 @@ function staticRelativeImports(code: string): string[] {
 }
 
 /** Resolve a relative specifier against its importing file, contained to site/. */
-function resolveLocalSpecifier(root: string, fromFile: string, specifier: string): string | undefined {
+function resolveLocalSpecifier(fromFile: string, specifier: string): string | undefined {
   const clean = specifier.split("#")[0].split("?")[0];
   if (!clean.startsWith(".")) return undefined;
   let decoded: string;
@@ -1075,11 +1075,6 @@ export async function moveGalleryPreview(fromSlug: string, toSlug: string): Prom
   await fs.mkdir(path.dirname(to), { recursive: true });
   await fs.copyFile(from, to);
   await fs.rm(from, { force: true });
-}
-
-/** Forget a project's gallery card image during teardown. */
-export async function removeGalleryPreview(slug: string): Promise<void> {
-  await fs.rm(galleryPreviewPath(slug), { force: true });
 }
 
 /** Public documents must be small regular files, never workspace symlinks. */

@@ -8,7 +8,6 @@ import { log, serializeError } from "./logger.js";
 import { applicationMessage, formQuestion } from "./opencode-v2-messages.js";
 import { usageFromMessages, reconcileUsage, sessionUsageFromMessages, describeTool, toolLabel, type SessionMessage, type PromptImage,
   type PromptResult, type TurnUsage, type QuotaBlock } from "./opencode-shared.js";
-import type { OpenCodeHarness } from "./opencode.js";
 import type { ProgressCallback, ProgressUpdate, ProgressPlanItem, ProgressSubagent } from "./progress.js";
 import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
 import { steeringInstruction } from "./templates.js";

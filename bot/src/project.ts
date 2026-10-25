@@ -20,7 +20,7 @@ import { UsageLog } from "./usage.js";
 import type { ProgressCallback, ProgressPhase } from "./progress.js";
 import type { WorkingTreeStats } from "./git.js";
 import { log, logError, serializeError } from "./logger.js";
-import { errorText, formatShortDuration, formatTokens, parseModel, safeChild, slugify, truncate, withTimeout, sleep } from "./util.js";
+import { errorText, formatShortDuration, parseModel, safeChild, slugify, truncate, withTimeout, sleep } from "./util.js";
 import { browserQaFeedback, runBrowserQa as driveBrowserQa, type BrowserQaResult } from "./browser-qa.js";
 import { assertExclusiveResources, projectAccounts, projectRepos, removalPaths } from "./project-removal.js";
 import { deleteRelayGame } from "./relay-cleanup.js";
@@ -774,7 +774,7 @@ export class ProjectService {
           // reset deleted it) — recreating here would resurrect a turn the
           // reset just stopped.
           emit(onProgress, "♻️ Recreating a missing agent session");
-          const retry = await this.repromptOnVanishedSession(threadId, project!, error, instruction,
+          const retry = await this.repromptOnVanishedSession(threadId, project!, error,
             (sessionId) => this.promptWithFailover(project!.workspacePath, sessionId, instruction, onProgress, turnImages, requestedModel));
           project = retry.project;
           agentSummary = retry.text;
@@ -1178,7 +1178,7 @@ export class ProjectService {
           const instruction = pending.initial
             ? initialProjectInstruction(projectKind, pending.prompt, notes, project.multiplayerMode)
             : mutationInstruction(projectKind, pending.prompt, notes, project.multiplayerMode);
-          const retry = await this.repromptOnVanishedSession(threadId, project!, error, instruction,
+          const retry = await this.repromptOnVanishedSession(threadId, project!, error,
             (sessionId) => this.recoveryPrompt(project!.workspacePath, sessionId, instruction, onProgress, threadId, pending.images));
           project = retry.project;
           agentSummary = retry.text;
@@ -1990,7 +1990,7 @@ export class ProjectService {
    */
   private async repromptOnVanishedSession(
     threadId: string, project: ProjectRecord, error: unknown,
-    instruction: string, reprompt: (sessionId: string) => Promise<{ text: string; usage: TurnUsage }>,
+    reprompt: (sessionId: string) => Promise<{ text: string; usage: TurnUsage }>,
   ): Promise<{ text: string; usage: TurnUsage; project: ProjectRecord }> {
     if (!/404|not found|unknown session/i.test(errorText(error))) throw error;
     if (this.store.getProject(threadId)?.pendingDeletion || this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;

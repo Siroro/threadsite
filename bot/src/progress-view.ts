@@ -1,4 +1,4 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ContainerBuilder, escapeMarkdown, TextDisplayBuilder } from "discord.js";
+import { ButtonBuilder, ButtonStyle, ContainerBuilder, escapeMarkdown, TextDisplayBuilder } from "discord.js";
 import { addCardDivider, addCardField, addCardHeader, addCardLinks, addCardTitle, cardLink, cardMessage, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
 import type { PanelSection } from "./card-panels.js";

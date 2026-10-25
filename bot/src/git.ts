@@ -453,7 +453,6 @@ export async function commitAndPush(
     ...(author ? { GIT_AUTHOR_NAME: author.name, GIT_AUTHOR_EMAIL: author.email } : {}),
   };
   await git(workspace, ["commit", "--allow-empty", "-m", message], identity);
-  const commit = await git(workspace, ["rev-parse", "--short=10", "HEAD"]);
   // numstat gives per-file added/removed lines; binary files show "-".
   const numstat = await git(workspace, ["show", "--numstat", "--format=", "HEAD"]);
   let files = 0;
