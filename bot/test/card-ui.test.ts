@@ -285,6 +285,23 @@ test("tool errors leave the public footer for the private usage page", () => {
   assert.match(usage.text, /2 tool errors/, "the count keeps a home on the private details page");
 });
 
+test("while both rates exist the live footer swaps the streaming rate with the turn average", () => {
+  const state = buildingSnapshot();
+  state.metrics = { ...state.metrics, liveTokensPerSecond: 62 };
+  const footer = (now: number) => cardView(renderProgressCard({ ...state, now })).text.split("\n").at(-1)!;
+  // The two timestamps sit in adjacent six-second alternation windows.
+  assert.match(footer(1_128_000), /⚡~62t\/s/, "one window gives the slot to the streaming rate");
+  assert.match(footer(1_134_000), /⚡avg~54t\/s/, "the next swaps in the turn average");
+  assert.doesNotMatch(footer(1_134_000), /⚡~62/, "the slot holds one figure at a time");
+
+  const streaming = buildingSnapshot();
+  streaming.metrics = { contextTokens: 28_400, contextLimit: 100_000, steps: 1, liveTokensPerSecond: 18 };
+  assert.match(cardView(renderProgressCard(streaming)).text.split("\n").at(-1)!, /⚡~18t\/s/,
+    "before the first step completes only the streaming rate exists");
+  assert.match(cardView(renderProgressCard(buildingSnapshot())).text.split("\n").at(-1)!, /⚡avg~54t\/s/,
+    "outside a stream the average keeps its avg prefix");
+});
+
 
 test("detail panels paginate every character and keep section choice stable", () => {
   const sections = [

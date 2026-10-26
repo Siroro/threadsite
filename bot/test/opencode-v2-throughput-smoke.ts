@@ -127,7 +127,7 @@ try {
   const outputTokens = measured.reduce((sum, message) => sum + message.tokens!.output + message.tokens!.reasoning, 0);
   const expected = outputTokens * 1000 / generationMs;
   const rendered = renderProgressCard(card.readSnapshot());
-  const displayedRate = `⚡~${formatTokensPerSecond(expected)}t/s`;
+  const displayedRate = `⚡avg~${formatTokensPerSecond(expected)}t/s`;
   const report = { model: selected, steps: result.usage.steps, measuredSteps: measured.length, generationMs, outputTokens,
     expectedTokensPerSecond: expected, displayedRate, usage: result.usage, displayedMetrics: card.readSnapshot().metrics };
   await fs.writeFile(path.join(root, "report.json"), JSON.stringify(report, null, 2));

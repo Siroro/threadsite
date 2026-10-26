@@ -295,7 +295,16 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   } else if (stop) addCardLinks(card, [stop]);
   addCardLinks(card, [cardLink("Live site", state.context.siteUrl), cardLink("Source", state.context.repoUrl)]);
   const metrics = state.metrics;
-  const rate = metrics?.liveTokensPerSecond ?? metrics?.outputTokensPerSecond;
+  const liveRate = metrics?.liveTokensPerSecond;
+  const averageRate = metrics?.outputTokensPerSecond;
+  // While a response streams, the ⚡ slot alternates with the turn average on a
+  // six-second phase: the card already re-renders every few seconds, so the two
+  // figures take turns instead of widening the footer. Outside a stream only
+  // the average exists, and it keeps the avg prefix to name itself.
+  const showAverage = !(liveRate && liveRate > 0)
+    || (!!averageRate && averageRate > 0 && Math.floor(state.now / 6_000) % 2 === 1);
+  const rate = showAverage ? averageRate : liveRate;
+  const rateLabel = rate && rate > 0 ? `⚡${showAverage ? "avg" : ""}~${formatTokensPerSecond(rate)}t/s` : "";
   const steps = metrics?.steps ? `${metrics.steps} step${metrics.steps === 1 ? "" : "s"}` : "";
   // Billed tokens stand in for the tool-error count: input with its cache
   // share, then the total output — failures already headline the activity line.
@@ -307,7 +316,7 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
     `⏱️ ${elapsed(state.now - state.startedAt)}`,
     steps,
     metrics?.contextTokens ? metrics.contextLimit ? `${formatTokens(metrics.contextTokens)}/${formatTokens(metrics.contextLimit)} context` : `${formatTokens(metrics.contextTokens)} context` : "",
-    rate && rate > 0 ? `⚡~${formatTokensPerSecond(rate)}t/s` : "",
+    rateLabel,
     state.activeTools ? `${state.activeTools} running` : "",
     tokens,
     stalled ? `No progress for ${elapsed(stalled)}` : "",
