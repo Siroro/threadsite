@@ -18,7 +18,14 @@ export default tool({
     const root = path.resolve(context.directory);
     const uploadsRoot = path.join(root, "scratch", "uploads");
     const source = path.resolve(root, args.source);
-    if (source !== uploadsRoot && !source.startsWith(`${uploadsRoot}${path.sep}`)) throw new Error("Source must be a file under scratch/uploads");
+    if (source !== uploadsRoot && !source.startsWith(`${uploadsRoot}${path.sep}`)) {
+      // Name what is actually waiting so a wrong guess corrects in one retry.
+      const waiting = (await fs.readdir(uploadsRoot, { withFileTypes: true }).catch(() => []))
+        .filter((entry) => entry.isFile()).map((entry) => entry.name);
+      throw new Error(`Source must be a file under scratch/uploads (${waiting.length
+        ? `waiting: ${waiting.slice(0, 10).join(", ")}${waiting.length > 10 ? ` and ${waiting.length - 10} more` : ""}`
+        : "nothing has been uploaded yet"})`);
+    }
     const stat = await fs.lstat(source).catch(() => undefined);
     if (!stat?.isFile()) throw new Error(`Uploaded file not found: ${path.relative(root, source).replaceAll(path.sep, "/") || args.source}`);
 

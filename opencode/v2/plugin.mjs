@@ -104,6 +104,17 @@ export default {
         event.input.model = await resolveAssetModel(event.sessionID);
       }
       if (event.tool === "shell") await checkExpandedCommand(event.input.command, ctx.location.directory, event.input.workdir);
+      // Screenshot saves live in the preview container; the workspace is not
+      // writable from there, so a workspace path fails the whole call with
+      // EROFS/ENOENT after the browser already produced the image. Path-shaped
+      // targets are dropped — the screenshot still returns as image content.
+      if (/^playwright[._].*take_screenshot$/.test(event.tool)) {
+        if (typeof event.input.rawPath === "string" && event.input.rawPath) delete event.input.rawPath;
+        if (typeof event.input.filename === "string"
+          && (event.input.filename.includes("/") || event.input.filename.includes("\\") || /^[~.]/.test(event.input.filename))) {
+          delete event.input.filename;
+        }
+      }
     }));
     registrations.push(await ctx.shell.hook("create.before", async (event) => {
       // Spawned commands inherit the server's environment, which carries every

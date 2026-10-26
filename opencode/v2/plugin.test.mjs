@@ -158,6 +158,31 @@ test("the native plugin hides unsafe builtins and browser access on each text-on
   assert.equal(disposed, 5);
 });
 
+test("screenshot calls drop workspace-bound save targets instead of failing on the read-only mount", async () => {
+  const hooks = {};
+  const registration = () => ({ dispose: async () => {} });
+  const cleanup = await plugin.setup({ location: { directory: "/workspace/project" },
+    tool: { transform: async () => registration(), hook: async (name, callback) => { hooks[name] = callback; return registration(); } },
+    shell: { hook: async () => registration() },
+    session: { hook: async () => registration() },
+  });
+  try {
+    const shoot = async (input) => {
+      const event = { tool: "playwright_browser_take_screenshot", input: { ...input } };
+      await hooks["execute.before"](event);
+      return event.input;
+    };
+    // The observed failures: scratch/tmp/qa targets that EROFS/ENOENT in the
+    // preview container. The image still returns as content without them.
+    assert.equal((await shoot({ filename: "scratch/qa/ww-start.png" })).filename, undefined);
+    assert.equal((await shoot({ filename: "tmp/start.png" })).filename, undefined);
+    assert.equal((await shoot({ rawPath: "/workspace/project/tmp/shot.png" })).rawPath, undefined);
+    assert.equal((await shoot({ filename: "./x.png" })).filename, undefined);
+    assert.equal((await shoot({ filename: "shot.png" })).filename, "shot.png",
+      "a bare name saves into the MCP's own output dir and harms nothing");
+  } finally { await cleanup(); }
+});
+
 test("QA children replace inherited browser denials without changing the builder or trusting other models", async () => {
   const hooks = {};
   const updates = [];

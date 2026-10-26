@@ -20,7 +20,7 @@ const RASTER_MIME: Record<string, string> = {
 const COMPRESSED_AUDIO = new Set([".mp3", ".ogg", ".opus", ".flac", ".m4a"]);
 
 export default tool({
-  description: "Inspect an asset so you can judge it: images (PNG/JPG/GIF/WebP/AVIF/BMP) return the rendered picture, SVG and glTF return their source, GLB returns its embedded JSON, WAV returns its duration/channels/sample rate, and MP3/OGG/FLAC/M4A get a container check (use ffprobe for codec and duration). Use it to review every asset you create or install — generated site/assets files and scratch/ work in progress — before treating it as finished.",
+  description: "Inspect an asset so you can judge it: images (PNG/JPG/GIF/WebP/AVIF/BMP) return the rendered picture, SVG and glTF return their source, GLB returns its embedded JSON, JSON (atlas frames.json) returns its structure as one line per frame, WAV returns its duration/channels/sample rate, and MP3/OGG/FLAC/M4A get a container check (use ffprobe for codec and duration). Use it to review every asset you create or install — generated site/assets files and scratch/ work in progress — before treating it as finished.",
   args: {
     file: tool.schema.string().min(1).max(220).describe("Workspace-relative path of an asset under site/assets or scratch, for example site/assets/sprites/player.svg or sprites/player.svg"),
   },
@@ -77,8 +77,16 @@ export default tool({
     if (COMPRESSED_AUDIO.has(extension)) {
       return text("compressed audio (container check)", audioContainer(await fs.readFile(realTarget), extension));
     }
+    if (extension === ".json") {
+      let parsed: unknown;
+      try { parsed = JSON.parse(await fs.readFile(realTarget, "utf8")); }
+      catch { throw new Error("JSON is malformed (parse failed)"); }
+      const atlas = atlasFrameMap(parsed);
+      return text(atlas ? "JSON atlas frame map (name → x/y/w/h)" : "JSON structure",
+        atlas ?? JSON.stringify(parsed, null, 2));
+    }
     const mime = RASTER_MIME[extension];
-    if (!mime) throw new Error(`Unsupported preview type '${extension || "none"}'; supported: svg, ${Object.keys(RASTER_MIME).map((ext) => ext.slice(1)).join(", ")}, gltf, glb, wav, ${[...COMPRESSED_AUDIO].map((ext) => ext.slice(1)).join(", ")}`);
+    if (!mime) throw new Error(`Unsupported preview type '${extension || "none"}'; supported: svg, ${Object.keys(RASTER_MIME).map((ext) => ext.slice(1)).join(", ")}, gltf, glb, json, wav, ${[...COMPRESSED_AUDIO].map((ext) => ext.slice(1)).join(", ")}`);
     const bytes = await fs.readFile(realTarget);
     return [
       { type: "file", uri: `data:${mime};base64,${bytes.toString("base64")}`, mime, name: path.basename(realTarget) },
@@ -87,10 +95,25 @@ export default tool({
   },
 });
 
+/** An atlas frames.json maps each frame name to its x/y/w/h rectangle; that
+ * shape gets a one-line-per-frame listing, any other JSON pretty-prints. */
+function atlasFrameMap(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (!entries.length) return undefined;
+  const lines: string[] = [];
+  for (const [name, rect] of entries) {
+    const r = rect as Record<string, unknown>;
+    if (!rect || typeof rect !== "object" || Array.isArray(rect)
+      || !["x", "y", "w", "h"].every((key) => typeof r[key] === "number")) return undefined;
+    lines.push(`${name}: x=${r.x} y=${r.y} w=${r.w} h=${r.h}`);
+  }
+  return lines.join("\n");
+}
+
 /** Compressed audio has no cheap native parse like RIFF/WAVE; a container
  * magic check catches failed transcodes (raw text or a renamed PCM file) and
- * defers codec/duration detail to ffprobe in the shell. */
-function audioContainer(bytes: Buffer, extension: string): string {
+ * defers codec/duration detail to ffprobe in the shell. */function audioContainer(bytes: Buffer, extension: string): string {
   if (bytes.length >= 4 && bytes.toString("ascii", 0, 4) === "OggS") return "Ogg container (Vorbis/Opus payload)";
   if (bytes.length >= 3 && bytes.toString("ascii", 0, 3) === "ID3") return "MPEG audio stream (ID3 tag)";
   if (bytes.length >= 2 && (bytes[0]! & 0xff) === 0xff && (bytes[1]! & 0xe0) === 0xe0) return "MPEG audio stream (frame sync)";

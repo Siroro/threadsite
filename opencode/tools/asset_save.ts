@@ -13,7 +13,7 @@ export default tool({
     destination: tool.schema.string().min(1).max(180).describe("Path below site/assets, for example sprites/player.svg or audio/jump.wav"),
     content: tool.schema.string().max(2 * 1024 * 1024).optional().describe("Text content of the asset (SVG, JSON, ...). Exclusive with source."),
     source: tool.schema.string().min(1).max(220).optional().describe("Workspace-relative path of the generated file under scratch/, for example scratch/gen/player.png"),
-    note: tool.schema.string().max(300).optional().describe("What the asset depicts and how it was produced (technique/script), for provenance"),
+    note: tool.schema.string().max(500).optional().describe("What the asset depicts and how it was produced (technique/script), for provenance. Keep it under 500 characters — longer notes are rejected"),
   },
   async execute(args, context) {
     if ((args.content === undefined) === (args.source === undefined)) {

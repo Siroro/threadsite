@@ -17,8 +17,11 @@ test("native v2 config preserves builder features and isolated subagent models w
     assert.ok(config.agents[id].permissions.some((rule) => rule.action === "threadsite_browser" && rule.effect === "deny"));
   }
   assert.ok(config.permissions.some((rule) => rule.action === "shell" && rule.resource === "git *" && rule.effect === "deny"));
+  assert.ok(config.permissions.some((rule) => rule.action === "shell" && rule.resource === "cd *" && rule.effect === "allow"),
+    "the root profile allows the cd builtin so compound prefixes are not denied");
   assert.ok(config.permissions.some((rule) => rule.action === "edit" && rule.resource === "README.agent.md" && rule.effect === "allow"));
-  assert.equal(config.mcp.servers.playwright.timeout.execution, 90000);
+  // 150s covers two full 60s browser action timeouts before the client aborts.
+  assert.equal(config.mcp.servers.playwright.timeout.execution, 150000);
   assert.deepEqual(base, original);
 });
 
@@ -85,6 +88,16 @@ test("asset-forge exists by default, inherits the selected model and pins an opt
   for (const command of ["ffmpeg *", "ffprobe *", "gltfpack *", "svg2png *"]) {
     assert.ok(allows("shell", command).length, `${command} allowed`);
   }
+  // Read-only inspection mirrors the builder's root policy so asset review
+  // (sizes, atlas maps, regen diffs, palette greps) never dies on a denial.
+  for (const command of ["cat *", "sed -n *", "diff *", "stat *", "rg *", "find scratch *", "pwd"]) {
+    assert.ok(allows("shell", command).length, `${command} allowed`);
+  }
+  // Compound commands are permission-checked per part, so the cd builtin that
+  // models habitually prefix needs its own narrow allow — every other part of
+  // a compound still requires its own rule, so shell is never global.
+  assert.ok(allows("shell", "cd").length && allows("shell", "cd *").length);
+  assert.equal(allows("shell", "*").length, 0, "shell stays pattern-scoped, never global");
   assert.equal(allows("shell", "git *").length + allows("shell", "npm *").length + allows("shell", "curl *").length, 0);
   assert.ok(agent.permissions[0].action === "*" && agent.permissions[0].effect === "deny");
   assert.deepEqual(defaults.plugins[0].options.assetPermissions, agent.permissions,
