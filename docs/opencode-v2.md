@@ -49,6 +49,17 @@ identical bytes already installed under a different name (re-saving the same
 file unchanged is an idempotent no-op) so regeneration loops cannot smuggle in
 duplicates.
 
+The opencode image ships a media toolchain the agent drives from its scoped
+shell: `ffmpeg`/`ffprobe` transcode synthesized PCM into compact `.ogg`/`.mp3`
+(a minute of stereo PCM is ~10 MB raw) and convert or resize rasters;
+`gltfpack` compresses heavy glTF models under the size cap (`-cc`, producing
+`EXT_meshopt_compression` that loads through the seeded `MeshoptDecoder`); and a bundled `svg2png`
+command rasterizes SVG sprites at explicit sizes through resvg — the image
+carries only DejaVu fonts, so pixel-exact text is authored as paths. When a
+tool is absent, guidance falls back to the code-generated original format and
+the report says so. Compressed audio previews as a container check via
+`asset_preview`, with `ffprobe` for codec and duration detail.
+
 `asset_preview` gives the agent eyes on its own work: images return as
 rendered vision input, SVG/glTF/GLB return their structure (GLB via its
 embedded JSON) and WAV returns duration/channels/sample-rate, so every asset
@@ -76,7 +87,8 @@ verified visually and in-game.
 
 Its permissions stay broader than its edits: it may edit text assets under
 `site/assets/**` and everything under `scratch/`, run scoped shell commands
-(including `rm`, still constrained by the command-policy hook to explicit
+(including the image's media tools `ffmpeg`/`ffprobe`/`gltfpack`/`svg2png`,
+and `rm`, still constrained by the command-policy hook to explicit
 `site/`/`scratch/` paths), use `websearch`/`webfetch` for sourcing, and
 adopt user uploads with `asset_import`. Game source, documents, questions,
 delegation and `.env` files remain out of reach, and the native context hook

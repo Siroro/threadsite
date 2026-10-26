@@ -1,0 +1,13 @@
+{
+  "name": "svg2png",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SVG-to-PNG rasterizer for ThreadSite asset generation, wrapping resvg",
+  "bin": {
+    "svg2png": "bin/svg2png.mjs"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "2.6.2"
+  }
+}

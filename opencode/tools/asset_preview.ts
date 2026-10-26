@@ -17,8 +17,10 @@ const RASTER_MIME: Record<string, string> = {
   ".bmp": "image/bmp",
 };
 
+const COMPRESSED_AUDIO = new Set([".mp3", ".ogg", ".opus", ".flac", ".m4a"]);
+
 export default tool({
-  description: "Inspect an asset so you can judge it: images (PNG/JPG/GIF/WebP/AVIF/BMP) return the rendered picture, SVG and glTF return their source, GLB returns its embedded JSON, and WAV returns its duration/channels/sample rate. Use it to review every asset you create or install — generated site/assets files and scratch/ work in progress — before treating it as finished.",
+  description: "Inspect an asset so you can judge it: images (PNG/JPG/GIF/WebP/AVIF/BMP) return the rendered picture, SVG and glTF return their source, GLB returns its embedded JSON, WAV returns its duration/channels/sample rate, and MP3/OGG/FLAC/M4A get a container check (use ffprobe for codec and duration). Use it to review every asset you create or install — generated site/assets files and scratch/ work in progress — before treating it as finished.",
   args: {
     file: tool.schema.string().min(1).max(220).describe("Workspace-relative path of an asset under site/assets or scratch, for example site/assets/sprites/player.svg or sprites/player.svg"),
   },
@@ -72,8 +74,11 @@ export default tool({
       if (!stats) throw new Error("WAV header is malformed");
       return text("WAV metadata", stats);
     }
+    if (COMPRESSED_AUDIO.has(extension)) {
+      return text("compressed audio (container check)", audioContainer(await fs.readFile(realTarget), extension));
+    }
     const mime = RASTER_MIME[extension];
-    if (!mime) throw new Error(`Unsupported preview type '${extension || "none"}'; supported: svg, ${Object.keys(RASTER_MIME).map((ext) => ext.slice(1)).join(", ")}, gltf, glb, wav`);
+    if (!mime) throw new Error(`Unsupported preview type '${extension || "none"}'; supported: svg, ${Object.keys(RASTER_MIME).map((ext) => ext.slice(1)).join(", ")}, gltf, glb, wav, ${[...COMPRESSED_AUDIO].map((ext) => ext.slice(1)).join(", ")}`);
     const bytes = await fs.readFile(realTarget);
     return [
       { type: "file", uri: `data:${mime};base64,${bytes.toString("base64")}`, mime, name: path.basename(realTarget) },
@@ -81,6 +86,18 @@ export default tool({
     ];
   },
 });
+
+/** Compressed audio has no cheap native parse like RIFF/WAVE; a container
+ * magic check catches failed transcodes (raw text or a renamed PCM file) and
+ * defers codec/duration detail to ffprobe in the shell. */
+function audioContainer(bytes: Buffer, extension: string): string {
+  if (bytes.length >= 4 && bytes.toString("ascii", 0, 4) === "OggS") return "Ogg container (Vorbis/Opus payload)";
+  if (bytes.length >= 3 && bytes.toString("ascii", 0, 3) === "ID3") return "MPEG audio stream (ID3 tag)";
+  if (bytes.length >= 2 && (bytes[0]! & 0xff) === 0xff && (bytes[1]! & 0xe0) === 0xe0) return "MPEG audio stream (frame sync)";
+  if (bytes.length >= 4 && bytes.toString("ascii", 0, 4) === "fLaC") return "FLAC stream";
+  if (bytes.length >= 8 && bytes.toString("ascii", 4, 8) === "ftyp") return "ISO base media container (MP4/M4A)";
+  return `unrecognized audio data for ${extension} — the encode may have failed`;
+}
 
 /** GLB is a 12-byte header followed by chunks; the first must be the JSON chunk. */
 function glbJsonChunk(bytes: Buffer): string | undefined {

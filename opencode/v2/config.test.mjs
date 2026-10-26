@@ -80,6 +80,11 @@ test("asset-forge exists by default, inherits the selected model and pins an opt
   // command-policy hook to explicit site/scratch paths.
   assert.deepEqual(allows("edit").map((rule) => rule.resource).sort(), ["*/scratch/**", "*/site/assets/**", "scratch/**", "site/assets/**"]);
   assert.ok(allows("shell", "rm").length && allows("shell", "rm *").length);
+  // The image's media toolchain (ffmpeg/gltfpack/svg2png) reaches the agent
+  // only through these scoped commands.
+  for (const command of ["ffmpeg *", "ffprobe *", "gltfpack *", "svg2png *"]) {
+    assert.ok(allows("shell", command).length, `${command} allowed`);
+  }
   assert.equal(allows("shell", "git *").length + allows("shell", "npm *").length + allows("shell", "curl *").length, 0);
   assert.ok(agent.permissions[0].action === "*" && agent.permissions[0].effect === "deny");
   assert.deepEqual(defaults.plugins[0].options.assetPermissions, agent.permissions,

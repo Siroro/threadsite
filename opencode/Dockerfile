@@ -10,8 +10,11 @@ RUN npm install -g typescript-language-server "typescript@5.9.3" \
     vscode-langservers-extracted prettier
 
 # unzip for extracting downloaded asset archives (tar/gzip ship with the base image).
+# Media toolchain for asset-forge: ffmpeg/ffprobe transcode audio and convert
+# images, gltfpack compresses glTF models, and fonts-dejavu-core backs svg2png
+# text rendering (installed with the service files below).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends unzip ripgrep \
+    && apt-get install -y --no-install-recommends unzip ripgrep ffmpeg fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY opencode.json /opt/threadsite/opencode.base.json
@@ -23,8 +26,17 @@ COPY providers.json /opt/threadsite/providers.json
 COPY package.json package-lock.json /opt/threadsite/
 COPY v2/ /opt/threadsite/v2/
 COPY tools/ /opt/threadsite/tools/
+COPY svg2png/ /opt/threadsite/svg2png/
 COPY lib/ /opt/threadsite/lib/
 RUN cd /opt/threadsite && npm ci && npm run build
+
+# Media CLIs for asset-forge: model compression and the svg2png rasterizer
+# wrapper. npm -g on a folder symlinks instead of installing dependencies, so
+# the wrapper installs in place and links onto PATH itself.
+RUN npm install -g gltfpack@1.3.0 \
+    && cd /opt/threadsite/svg2png && npm install --omit=dev \
+    && chmod +x bin/svg2png.mjs \
+    && ln -s /opt/threadsite/svg2png/bin/svg2png.mjs /usr/local/bin/svg2png
 
 WORKDIR /workspace
 EXPOSE 4096

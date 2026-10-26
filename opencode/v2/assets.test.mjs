@@ -218,3 +218,26 @@ test("asset_preview returns rendered images, SVG/glTF structure and WAV metadata
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("asset_preview sanity-checks compressed audio containers", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-asset-audio-"));
+  try {
+    await fs.mkdir(path.join(root, "site/assets/audio"), { recursive: true });
+    await fs.writeFile(path.join(root, "site/assets/audio/jump.ogg"), Buffer.concat([Buffer.from("OggS", "ascii"), Buffer.alloc(32)]));
+    await fs.writeFile(path.join(root, "site/assets/audio/hit.mp3"), Buffer.concat([Buffer.from("ID3", "ascii"), Buffer.alloc(32)]));
+    // A renamed text file is the failed-transcode case the check exists for.
+    await fs.writeFile(path.join(root, "site/assets/audio/broken.mp3"), Buffer.from("not audio at all"));
+
+    const ogg = await asset_preview.execute({ file: "audio/jump.ogg" }, { directory: root });
+    assert.equal(ogg.length, 1);
+    assert.match(ogg[0].text, /Ogg container/);
+
+    const mp3 = await asset_preview.execute({ file: "site/assets/audio/hit.mp3" }, { directory: root });
+    assert.match(mp3[0].text, /MPEG audio/);
+
+    const broken = await asset_preview.execute({ file: "audio/broken.mp3" }, { directory: root });
+    assert.match(broken[0].text, /unrecognized audio data/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
