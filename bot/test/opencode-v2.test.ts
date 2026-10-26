@@ -576,6 +576,31 @@ test("root tool events retain their targets while child work stays out of the pu
   } finally { await stop(); }
 });
 
+test("shell activity labels lead with the command, not the implied workspace", async () => {
+  const { describeTool } = await import("../src/opencode-shared.js");
+  const workspace = "/workspace/83572303320842240/1564225654235467837";
+  const running = (command: string): string => describeTool("shell", { command }, "running", undefined, workspace)!.text;
+  // The cd into the thread's own workspace and the node_modules install path are noise.
+  assert.equal(running(`cd ${workspace} && node /usr/local/lib/node_modules/typescript/bin/tsc --noEmit`),
+    "node …/tsc --noEmit");
+  // Subdirectory targets and workspace-absolute arguments stay visible, but relative.
+  assert.equal(running(`cd ${workspace}/site && npm test`), "cd site && npm test");
+  assert.equal(running(`node ${workspace}/site/scripts/build.js`), "node site/scripts/build.js");
+  // Overflow cuts the middle: the program and the final flags survive, within budget.
+  const long = running("npx vitest run site/test/collision.test.ts site/test/render.test.ts site/test/net.test.ts site/test/audio.test.ts --reporter=dot");
+  assert.ok(long.length <= 90 && long.startsWith("npx vitest run") && long.endsWith("--reporter=dot") && long.includes("…"), long);
+  // A cd outside the workspace is real information and is kept.
+  assert.equal(running("cd /tmp && echo hi"), "cd /tmp && echo hi");
+  // The workspace directory never survives into a label, whatever position it
+  // appears in — flag values and quoted prose included, not just cd prefixes.
+  assert.equal(running(`node ${workspace}/tools/build.js --out=${workspace}/site/dist`),
+    "node tools/build.js --out=site/dist");
+  assert.ok(!running(`echo "copy from ${workspace}/scratch" > out.txt`).includes(workspace));
+  // Non-shell labels (the generic completed-tool title) get the same treatment.
+  const titled = describeTool("custom", {}, "completed", `checked ${workspace}/site/src/main.ts`, workspace)!.text;
+  assert.ok(/site\/src\/main\.ts$/.test(titled) && !titled.includes(workspace), titled);
+});
+
 test("the live card counts executing children and removes the section after all children stop", async () => {
   const { DiscordProgress } = await import("../src/progress.js");
   const { renderProgressCard, renderProgressOverview } = await import("../src/progress-view.js");

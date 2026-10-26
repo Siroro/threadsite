@@ -390,11 +390,61 @@ export function describeTool(tool: string, input: any, status: string, title?: s
     // The command is its own label; `command` keeps the service-wait
     // heuristics from ever matching command text.
     const command = typeof input?.command === "string" ? input.command : undefined;
-    return { text: command ? truncate(command, 90) : status === "running" ? "⚙️ Command" : "✓ Command", command: true };
+    return { text: command ? shellCommandLabel(command, directory) : status === "running" ? "⚙️ Command" : "✓ Command", command: true };
   }
   if (["todowrite", "todoread"].includes(normalized)) return { text: status === "running" ? "🗺️ Organising the build" : "🗺️ Plan updated" };
-  if (title) return { text: status === "running" ? `⚙️ ${toolLabel(tool)}` : `✅ ${truncate(String(title), 90)}` };
+  if (title) return { text: status === "running" ? `⚙️ ${toolLabel(tool)}` : `✅ ${truncate(stripWorkspaceDir(String(title), directory), 90)}` };
   return { text: status === "running" ? `⚙️ ${toolLabel(tool)}` : `✓ ${toolLabel(tool)} finished` };
+}
+
+const SHELL_LABEL_CHARS = 90;
+
+/**
+ * A shell command as a public activity label. Every command runs inside the
+ * thread's workspace, so a `cd` to that root is dropped (subdirectory targets
+ * stay, relativized) and absolute workspace paths become project-relative.
+ * Other long tool paths collapse to a basename hint (`…/tsc`), and a command
+ * that still overflows is cut from the middle so the program and its final
+ * arguments both stay visible.
+ */
+function shellCommandLabel(command: string, directory?: string): string {
+  const oneLine = command.replace(/\r?\n+/g, " ").replace(/\s+/g, " ").trim();
+  const insideWorkspace = (absolute: string): string | undefined => {
+    if (!directory) return undefined;
+    const relative = path.relative(path.resolve(directory), absolute).replaceAll(path.sep, "/");
+    return relative.startsWith("../") || relative === ".." || path.isAbsolute(relative) ? undefined : relative;
+  };
+  let body = oneLine;
+  const cd = /^cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*(?:&&|;)\s*/.exec(oneLine);
+  if (cd && directory) {
+    const relative = insideWorkspace(path.resolve(directory, cd[1] ?? cd[2] ?? cd[3]!));
+    const rest = oneLine.slice(cd[0].length);
+    body = relative === "" ? rest : relative ? `cd ${relative} && ${rest}` : body;
+  }
+  body = body.split(" ").map((token) => {
+    if (!token.startsWith("/")) return token;
+    const relative = insideWorkspace(path.resolve(token));
+    if (relative !== undefined) return relative || ".";
+    if (token.length > 32 && token.split("/").length >= 4) return `…/${token.split("/").at(-1)}`;
+    return token;
+  }).join(" ");
+  const stripped = stripWorkspaceDir(body, directory);
+  if (stripped.length <= SHELL_LABEL_CHARS) return stripped;
+  const head = stripped.slice(0, SHELL_LABEL_CHARS - 33).replace(/\s+\S*$/, "");
+  const tail = stripped.slice(-(SHELL_LABEL_CHARS - head.length - 1)).replace(/^\S+\s+/, "");
+  return head && tail ? `${head}…${tail}` : truncate(stripped, SHELL_LABEL_CHARS);
+}
+
+/** The thread's workspace path is internal bookkeeping: it must never reach a
+ * public label, wherever it appears — flag values (`--out=/workspace/…`),
+ * quoted prose, or any other position a token pass does not relativize. */
+function stripWorkspaceDir(text: string, directory?: string): string {
+  if (!directory) return text;
+  // POSIX-absolute directories are used verbatim: path.resolve would inject a
+  // drive prefix on Windows and the literal text would never match.
+  const normalized = directory.replaceAll("\\", "/");
+  const root = normalized.startsWith("/") ? normalized : path.resolve(normalized).replaceAll(path.sep, "/");
+  return text.split(`${root}/`).join("").split(root).join(".");
 }
 
 function projectFileLabel(file: string, directory?: string): string {
