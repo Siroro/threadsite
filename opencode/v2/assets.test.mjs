@@ -1,10 +1,50 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import http from "node:http";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import dns from "node:dns/promises";
+import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
 import { asset_download, asset_import, asset_preview, asset_save } from "../dist/tools.mjs";
+
+// Mimic the connect path net/tls would take: the lookup option resolves and
+// gates the host, and only a passing lookup delivers a response.
+function mockAssetTransport(t, respond) {
+  const requests = [];
+  t.mock.method(https, "request", (url, options, callback) => {
+    const target = new URL(String(url));
+    requests.push({ url: target, options });
+    const response = new Readable({ read() {} });
+    const request = new EventEmitter();
+    request.end = () => {
+      options.lookup(target.hostname, { family: 0, all: true }, (error) => {
+        if (error) request.emit("error", error);
+        else queueMicrotask(() => {
+          respond(response, target);
+          callback(response);
+        });
+      });
+    };
+    request.destroy = (error) => response.destroy(error);
+    options.signal.addEventListener("abort", () => response.destroy(options.signal.reason), { once: true });
+    return request;
+  });
+  return requests;
+}
+
+function delivered(status, headers, body = "") {
+  return (response) => {
+    response.statusCode = status;
+    response.headers = headers;
+    if (body !== null) {
+      response.push(Buffer.from(body));
+      response.push(null);
+    }
+  };
+}
 
 test("a download times out while its response body is stalled, then a later download succeeds", { timeout: 5000 }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-asset-timeout-"));
@@ -15,38 +55,27 @@ test("a download times out while its response body is stalled, then a later down
     if (previousTimeout === undefined) delete process.env.ASSET_DOWNLOAD_TIMEOUT_MS;
     else process.env.ASSET_DOWNLOAD_TIMEOUT_MS = previousTimeout;
   });
-  let stream;
-  let signal;
-  const fetch = t.mock.method(globalThis, "fetch", async (_url, options) => {
-    signal = options.signal;
-    return new Response(new ReadableStream({
-      start(controller) {
-        stream = controller;
-        options.signal.addEventListener("abort", () => controller.error(options.signal.reason), { once: true });
-        controller.enqueue(new TextEncoder().encode("partial"));
-      },
-    }));
+  let stalled = true;
+  const requests = mockAssetTransport(t, (response) => {
+    response.statusCode = 200;
+    response.headers = {};
+    response.push(Buffer.from(stalled ? "partial" : "complete"));
+    if (!stalled) response.push(null);
   });
   const request = asset_download.execute({ url: "https://assets.example/file", destination: "file.txt" }, { directory: root });
-  // Bound the regression's failure too: the original bug never aborts the body.
-  const watchdog = setTimeout(() => stream?.error(new Error("body timeout was not enforced")), 1000);
-  try {
-    await assert.rejects(request, /asset download timeout/);
-    assert.equal(signal.aborted, true);
-    await assert.rejects(fs.access(path.join(root, "site/assets/file.txt")), { code: "ENOENT" });
-    fetch.mock.mockImplementation(async () => new Response("complete"));
-    await asset_download.execute({ url: "https://assets.example/file", destination: "file.txt" }, { directory: root });
-    assert.equal(await fs.readFile(path.join(root, "site/assets/file.txt"), "utf8"), "complete");
-  } finally {
-    clearTimeout(watchdog);
-    await fs.rm(root, { recursive: true, force: true });
-  }
+  // Bound the regression's failure too: the original bug never aborted the body.
+  await assert.rejects(request, /asset download timeout/);
+  assert.equal(requests.at(-1).options.signal.aborted, true);
+  await assert.rejects(fs.access(path.join(root, "site/assets/file.txt")), { code: "ENOENT" });
+  stalled = false;
+  await asset_download.execute({ url: "https://assets.example/file", destination: "file.txt" }, { directory: root });
+  assert.equal(await fs.readFile(path.join(root, "site/assets/file.txt"), "utf8"), "complete");
 });
 
 test("a failed provenance write rejects its caller without blocking the next asset", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-asset-retry-"));
   t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
-  t.mock.method(globalThis, "fetch", async () => new Response("downloaded"));
+  mockAssetTransport(t, delivered(200, {}, "downloaded"));
   const rename = fs.rename;
   const failure = new Error("simulated metadata rename failure");
   let failNext = true;
@@ -73,7 +102,7 @@ test("a failed provenance write rejects its caller without blocking the next ass
 test("concurrent imports and downloads retain all provenance and replace only the matching asset", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-asset-sources-"));
   t.mock.method(dns, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
-  t.mock.method(globalThis, "fetch", async () => new Response("downloaded"));
+  mockAssetTransport(t, delivered(200, {}, "downloaded"));
   try {
     await fs.mkdir(path.join(root, "scratch/uploads"), { recursive: true });
     await fs.writeFile(path.join(root, "scratch/uploads/file.txt"), "uploaded");
@@ -94,6 +123,79 @@ test("concurrent imports and downloads retain all provenance and replace only th
     const updated = JSON.parse(await fs.readFile(metadata, "utf8"));
     assert.equal(updated.length, records.length);
     assert.equal(updated.find((record) => record.file === "site/assets/0.txt").uploadedFrom, "scratch/uploads/file.txt");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("downloads that resolve to mapped or NAT64-wrapped private addresses never dial out", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-asset-ssrf-"));
+  t.mock.method(dns, "lookup", async (hostname) => {
+    if (hostname === "mapped.example") return [{ address: "::ffff:10.0.0.9", family: 6 }];
+    if (hostname === "nat64.example") return [{ address: "64:ff9b::7f00:1", family: 6 }];
+    return [{ address: "93.184.216.34", family: 4 }];
+  });
+  const deliveredResponses = [];
+  const requests = mockAssetTransport(t, (response, url) => {
+    deliveredResponses.push(String(url));
+    delivered(200, {}, "internal")(response);
+  });
+  try {
+    for (const url of ["https://mapped.example/file", "https://nat64.example/file"]) {
+      await assert.rejects(asset_download.execute({ url, destination: "leak.txt" }, { directory: root }),
+        /Private\/reserved network address is blocked/);
+    }
+    assert.deepEqual(deliveredResponses, [], "a blocked host must never receive a response");
+    assert.equal(requests.length, 2);
+    await assert.rejects(fs.access(path.join(root, "site/assets/leak.txt")), { code: "ENOENT" });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a redirect to a rebinding host is re-validated on the dial for that hop", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-asset-rebind-"));
+  t.mock.method(dns, "lookup", async (hostname) => {
+    if (hostname === "shift.example") return [{ address: "93.184.216.34", family: 4 }];
+    return [{ address: "::ffff:169.254.169.254", family: 6 }];
+  });
+  const deliveredResponses = [];
+  mockAssetTransport(t, (response, url) => {
+    deliveredResponses.push(String(url));
+    if (url.hostname === "shift.example") delivered(302, { location: "https://pivot.example/file" }, "")(response);
+    else delivered(200, {}, "internal")(response);
+  });
+  try {
+    await assert.rejects(asset_download.execute({ url: "https://shift.example/file", destination: "leak.txt" }, { directory: root }),
+      /Private\/reserved network address is blocked \(::ffff:169\.254\.169\.254\)/);
+    assert.deepEqual(deliveredResponses, ["https://shift.example/file"]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("literal loopback and mapped-loopback URLs are blocked before any connection, even over HTTP", { timeout: 5000 }, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-asset-literal-"));
+  let served = 0;
+  const server = http.createServer((_request, response) => {
+    served++;
+    response.end("internal");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const previousAllowHttp = process.env.ASSET_ALLOW_HTTP;
+  process.env.ASSET_ALLOW_HTTP = "true";
+  t.after(() => {
+    if (previousAllowHttp === undefined) delete process.env.ASSET_ALLOW_HTTP;
+    else process.env.ASSET_ALLOW_HTTP = previousAllowHttp;
+  });
+  const port = server.address().port;
+  try {
+    for (const url of [`http://127.0.0.1:${port}/f`, `http://[::ffff:127.0.0.1]:${port}/f`, `http://[::1]:${port}/f`, "http://localhost/f"]) {
+      await assert.rejects(asset_download.execute({ url, destination: "leak.txt" }, { directory: root }), Error, url);
+    }
+    assert.equal(served, 0, "the internal listener must never be reached");
+    await assert.rejects(fs.access(path.join(root, "site/assets/leak.txt")), { code: "ENOENT" });
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -169,7 +271,7 @@ test("asset_preview returns rendered images, SVG/glTF structure and WAV metadata
     await fs.writeFile(path.join(root, "scratch/gen/wip.png"), DOT_PNG);
 
     const json = JSON.stringify({ asset: { version: "2.0" }, meshes: [{ primitives: [] }] });
-    const padded = json + " ".repeat((4 - (json.length % 4)) % 4);
+    const padded = json + " ".repeat((4 - (json.length % 4)) || 4);
     const chunk = Buffer.alloc(8);
     chunk.writeUInt32LE(Buffer.byteLength(padded), 0);
     chunk.writeUInt32LE(0x4e4f534a, 4);

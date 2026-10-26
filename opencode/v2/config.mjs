@@ -50,6 +50,8 @@ export function buildV2Config(base, { pluginPath = "/opt/threadsite/v2", env = p
       { action: "read", resource: "*", effect: "allow" },
       { action: "read", resource: "*.env", effect: "deny" },
       { action: "read", resource: "*.env.*", effect: "deny" },
+      { action: "read", resource: "*/.config/opencode/*", effect: "deny" },
+      { action: "read", resource: "/etc/threadsite/*", effect: "deny" },
       { action: "glob", resource: "*", effect: "allow" },
       { action: "grep", resource: "*", effect: "allow" },
       { action: "list", resource: "*", effect: "allow" },
@@ -69,7 +71,11 @@ export function buildV2Config(base, { pluginPath = "/opt/threadsite/v2", env = p
       ...["node", "node *", "ls", "ls *", "file", "file *", "wc", "wc *", "head *", "tail *",
         "grep", "grep *", "mkdir *", "cp *", "mv *", "echo", "echo *", "unzip *", "tar *",
         "rm", "rm *", "which *", "ffmpeg *", "ffprobe *", "gltfpack *", "svg2png *"]
-        .map((resource) => ({ action: "shell", resource, effect: "allow" }))],
+        .map((resource) => ({ action: "shell", resource, effect: "allow" })),
+      // Credential paths the creator's read/grep/node commands must not touch;
+      // last match wins, so these override every shell allow above.
+      ...["*/.config/opencode/*", "*/etc/threadsite/*", "*/proc/*environ*", "*$HOME*", "*${HOME}*", "*~/*"]
+        .map((resource) => ({ action: "shell", resource, effect: "deny" }))],
   };
 
   config.websearch = websearchSelection(env);

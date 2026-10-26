@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { applyProviderConfig, readProviderConfig } from "../provider-config.mjs";
+import { applyProviderConfig, readProviderConfig, scrubProviderCredentials } from "../provider-config.mjs";
 const bundled = JSON.parse(await fs.readFile(new URL("../providers.json", import.meta.url), "utf8"));
 
 test("host provider overrides retain policy and models, route requests, and isolate credentials", async () => {
@@ -142,4 +142,29 @@ test("catalog credentials support mounted key files and preserve explicit author
     assert.equal(requestHeaders[authorization ? "authorization" : "Authorization"], authorization ? "Basic host-auth" : "Bearer file-$&-key");
     assert.equal(requestHeaders["X-Trace"], "$&");
   }
+});
+
+test("literal provider credentials are scrubbed into environment references, references stay untouched", async () => {
+  const base = { providers: {} };
+  const host = { providers: { paid: {
+    package: "@ai-sdk/openai-compatible",
+    settings: { apiKey: "sk-live-literal", baseURL: "https://api.paid.example/v1" },
+    headers: { Authorization: "Bearer sk-live-literal", "X-Tenant": "private-tenant" },
+    models: { m1: {} },
+  }, keyed: { settings: { apiKey: "{env:HOST_KEY}" }, models: { m2: {} } } } };
+  const config = await applyProviderConfig(base, host, { env: { HOST_KEY: "from-env" } });
+  const env = scrubProviderCredentials(config);
+
+  const serialized = JSON.stringify(config);
+  assert.ok(!serialized.includes("sk-live-literal"), "no literal credential may remain in the written config");
+  assert.equal(config.providers.paid.settings.baseURL, "https://api.paid.example/v1");
+  assert.equal(config.providers.paid.headers["X-Tenant"], "private-tenant");
+  assert.equal(config.providers.paid.settings.apiKey, "{env:THREADSITE_PROVIDER_KEY_0}");
+  // Provider settings are merged into every model, so the merged copy must share the reference.
+  assert.equal(config.providers.paid.models.m1.settings.apiKey, "{env:THREADSITE_PROVIDER_KEY_0}");
+  assert.equal(config.providers.paid.headers.Authorization, "{env:THREADSITE_PROVIDER_KEY_1}");
+  assert.deepEqual(env, { THREADSITE_PROVIDER_KEY_0: "sk-live-literal", THREADSITE_PROVIDER_KEY_1: "Bearer sk-live-literal" });
+  // Existing native references pass through unchanged and produce no variables.
+  assert.equal(config.providers.keyed.settings.apiKey, "{env:HOST_KEY}");
+  assert.equal(config.providers.keyed.models.m2.settings.apiKey, "{env:HOST_KEY}");
 });

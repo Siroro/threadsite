@@ -2,6 +2,34 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import plugin from "./plugin.mjs";
 
+test("spawned shell commands receive only an allowlisted environment", async () => {
+  const hooks = {};
+  const registration = () => ({ dispose: async () => {} });
+  const cleanup = await plugin.setup({ location: { directory: "/workspace/project" },
+    tool: { transform: async () => registration(), hook: async () => registration() },
+    session: { hook: async () => registration() },
+    shell: { hook: async (name, callback) => { hooks[name] = callback; return registration(); } },
+  });
+  try {
+    const event = { command: "node scratch/gen.js", cwd: "/workspace/project", timeout: 0, shell: "bash",
+      env: {
+        PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/root", TERM: "xterm-256color", LANG: "C.UTF-8",
+        OPENCODE_TERMINAL: "1", OPENAI_API_KEY: "sk-test", ANTHROPIC_API_KEY: "sk-ant-test",
+        OPENCODE_SERVER_PASSWORD: "internal-password", THREADSITE_PROVIDER_KEY_0: "sk-live",
+        ASSET_MAX_BYTES: "8388608", EXA_API_KEY: "exa-test", OPENCODE_SESSION_ID: "ses_1",
+      } };
+    await hooks["create.before"](event);
+    assert.deepEqual(Object.keys(event.env).sort(), ["HOME", "LANG", "OPENCODE_TERMINAL", "PATH", "TERM"]);
+    // A second shell with an already-minimal environment stays intact.
+    const minimal = { command: "ls", cwd: "/workspace/project", timeout: 0, shell: "bash",
+      env: { PATH: "/usr/bin:/bin", TERM: "dumb" } };
+    await hooks["create.before"](minimal);
+    assert.deepEqual(minimal.env, { PATH: "/usr/bin:/bin", TERM: "dumb" });
+  } finally {
+    await cleanup();
+  }
+});
+
 test("concurrent first prompts cap inherited models after native config without accumulating transforms", async () => {
   const hooks = {};
   let transforms = 0;
@@ -16,6 +44,7 @@ test("concurrent first prompts cap inherited models after native config without 
     } },
     mcp: { list: async () => ({ data: [] }) },
     tool: { transform: async () => registration(), hook: async () => registration(), reload: async () => {} },
+    shell: { hook: async () => registration() },
     session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); }, get: async () => ({ agent: "sitebuilder" }) },
   });
   try {
@@ -43,6 +72,7 @@ test("first prompts wait for MCP discovery and refresh tools before selecting th
       return { data: [{ name: "playwright", status: { status } }, { name: "context7", status: { status: "failed", error: "offline" } }] };
     } },
     tool: { transform: async () => registration(), hook: async () => registration(), reload: async () => { calls.push("tools"); } },
+    shell: { hook: async () => registration() },
     session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); },
       get: async () => { calls.push("session"); return { agent: "sitebuilder" }; } },
   });
@@ -57,6 +87,7 @@ test("browser capability filtering queries the plugin workspace rather than the 
   const registration = () => ({ dispose: async () => {} });
   const cleanup = await plugin.setup({ location: { directory: "/second" },
     tool: { transform: async () => registration(), hook: async () => registration() },
+    shell: { hook: async () => registration() },
     session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); } },
     model: { list: async (input) => ({ data: [{ id: "vision", providerID: "test", enabled: true,
       capabilities: { input: input?.location?.directory === "/second" ? ["text", "image"] : ["text"] } }] }) },
@@ -85,6 +116,7 @@ test("the native plugin hides unsafe builtins and browser access on each text-on
         update: (id, callback) => callback(entries.get(id)), add: (entry) => entries.set(entry.name, entry) }); return registration(); },
       hook: async (name, callback) => { hooks[name] = callback; return registration(); },
     },
+    shell: { hook: async () => registration() },
     session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); } },
     model: { list: async () => ({ data: [{ id: "vision", providerID: "test", capabilities: { input: ["text", "image"] } }] }) },
   });
@@ -123,7 +155,7 @@ test("the native plugin hides unsafe builtins and browser access on each text-on
       ? ["playwright.browser_navigate", "playwright_browser_take_screenshot"] : []);
   }
   await cleanup();
-  assert.equal(disposed, 4);
+  assert.equal(disposed, 5);
 });
 
 test("QA children replace inherited browser denials without changing the builder or trusting other models", async () => {
@@ -134,6 +166,7 @@ test("QA children replace inherited browser denials without changing the builder
   const cleanup = await plugin.setup({ location: { directory: "/workspace/project" }, options: { browserQaModel: "test/vision" },
     mcp: { list: async () => ({ data: [] }) },
     tool: { transform: async () => registration(), hook: async () => registration(), reload: async () => {} },
+    shell: { hook: async () => registration() },
     session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); },
       get: async () => session, update: async (input) => { updates.push(input); } },
     model: { list: async () => ({ data: [{ providerID: "test", id: "vision", capabilities: { input: ["text", "image"] } }] }) },
@@ -161,6 +194,7 @@ test("browser QA delegation rejects unavailable, text-only and unconfigured mode
     const registration = () => ({ dispose: async () => {} });
     const cleanup = await plugin.setup({ location: { directory: "/workspace/project" }, options: { browserQaModel },
       tool: { transform: async () => registration(), hook: async (name, callback) => { hooks[name] = callback; return registration(); } },
+      shell: { hook: async () => registration() },
       session: { hook: async () => registration() },
       model: { list: async () => ({ data: [
         { id: "text", providerID: "test", enabled: true, capabilities: { input: ["text"] } },
@@ -179,6 +213,7 @@ function assetDelegationFixture(options, sessionModel, catalog) {
   const registration = () => ({ dispose: async () => {} });
   return plugin.setup({ location: { directory: "/workspace/project" }, options,
     tool: { transform: async () => registration(), hook: async (name, callback) => { hooks[name] = callback; return registration(); } },
+    shell: { hook: async () => registration() },
     session: { hook: async () => registration(), get: async () => ({ agent: "sitebuilder", ...(sessionModel ? { model: sessionModel } : {}) }) },
     model: { list: async () => ({ data: catalog ?? [
       { id: "text", providerID: "test", enabled: true, capabilities: { input: ["text"] } },
@@ -243,6 +278,7 @@ test("asset-forge keeps sourcing and creation tools while research agents and te
   const registration = () => ({ dispose: async () => {} });
   const cleanup = await plugin.setup({ location: { directory: "/workspace/project" },
     tool: { transform: async () => registration(), hook: async () => registration() },
+    shell: { hook: async () => registration() },
     session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); } },
     model: { list: async () => ({ data: [
       { id: "text", providerID: "test", enabled: true, capabilities: { input: ["text"] } },
@@ -288,6 +324,7 @@ test("asset-forge children re-apply their creator profile and earn browser rules
     options: { assetPermissions: profile },
     mcp: { list: async () => ({ data: [] }) },
     tool: { transform: async () => registration(), hook: async () => registration(), reload: async () => {} },
+    shell: { hook: async () => registration() },
     session: { hook: async (name, callback) => { hooks[name] = callback; return registration(); },
       get: async () => session, update: async (input) => { updates.push(input); } },
     model: { list: async () => ({ data: [

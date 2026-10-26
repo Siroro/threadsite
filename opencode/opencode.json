@@ -8,6 +8,8 @@
     { "action": "read", "resource": "*", "effect": "allow" },
     { "action": "read", "resource": "*.env", "effect": "deny" },
     { "action": "read", "resource": "*.env.*", "effect": "deny" },
+    { "action": "read", "resource": "*/.config/opencode/*", "effect": "deny" },
+    { "action": "read", "resource": "/etc/threadsite/*", "effect": "deny" },
     { "action": "glob", "resource": "*", "effect": "allow" },
     { "action": "grep", "resource": "*", "effect": "allow" },
     { "action": "list", "resource": "*", "effect": "allow" },
@@ -171,7 +173,13 @@
     { "action": "threadsite_browser", "resource": "*", "effect": "deny" },
     { "action": "threadsite_docs", "resource": "*", "effect": "allow" },
     { "action": "context7_resolve-library-id", "resource": "*", "effect": "allow" },
-    { "action": "context7_query-docs", "resource": "*", "effect": "allow" }
+    { "action": "context7_query-docs", "resource": "*", "effect": "allow" },
+    { "action": "shell", "resource": "*/.config/opencode/*", "effect": "deny" },
+    { "action": "shell", "resource": "*/etc/threadsite/*", "effect": "deny" },
+    { "action": "shell", "resource": "*/proc/*environ*", "effect": "deny" },
+    { "action": "shell", "resource": "*$HOME*", "effect": "deny" },
+    { "action": "shell", "resource": "*${HOME}*", "effect": "deny" },
+    { "action": "shell", "resource": "*~/*", "effect": "deny" }
   ],
   "agents": {
     "general": {

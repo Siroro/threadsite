@@ -143,3 +143,41 @@ export async function readProviderConfig(path) {
     throw new Error("Could not read provider config; expected valid JSON");
   }
 }
+
+const SECRET_FIELD = /(?:api[-_]?key|token|secret|password|authorization|bearer)/i;
+const NATIVE_REF = /^\{(?:env|file):[^}]+\}$/;
+
+/** Replace literal provider credentials in the config with {env:} references
+ * and return the variables holding the originals. OpenCode resolves the
+ * references natively at request time, so the config written to disk for the
+ * server user never stores a secret, while the values stay available to the
+ * server process — whose environment tool shells do not inherit. */
+export function scrubProviderCredentials(config) {
+  const env = {};
+  const byValue = new Map();
+  const replace = (value) => {
+    if (typeof value !== "string" || !value || NATIVE_REF.test(value)) return value;
+    let name = byValue.get(value);
+    if (!name) {
+      name = `THREADSITE_PROVIDER_KEY_${byValue.size}`;
+      byValue.set(value, name);
+      env[name] = value;
+    }
+    return `{env:${name}}`;
+  };
+  const walk = (node) => {
+    for (const [key, value] of Object.entries(node ?? {})) {
+      if (value && typeof value === "object") walk(value);
+      else if (SECRET_FIELD.test(key)) node[key] = replace(value);
+    }
+  };
+  for (const provider of Object.values(config.providers ?? {})) {
+    // Settings and headers are merged into every model too; model IDs and other
+    // provider keys must keep their exact values, so only these are walked.
+    walk(provider.settings);
+    walk(provider.headers);
+    walk(provider.options);
+    for (const model of Object.values(provider.models ?? {})) walk(model.settings);
+  }
+  return env;
+}

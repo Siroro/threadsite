@@ -183,6 +183,8 @@ ThreadSite uses OpenCode 2's native `providers` format, documented in [OpenCode 
 
 `OPENCODE_HOST_CONFIG_DIR` changes the host directory mounted read-only at `/etc/threadsite/opencode`. `OPENCODE_ENV_FILE` changes the optional extra environment-file path. The local defaults are Git-ignored, excluded from the OpenCode build context and outside generated workspaces. Restart OpenCode after changing `providers.json`; recreate it after changing environment variables. Provider overrides cannot replace ThreadSite's agents, permissions, plugins or publication policy.
 
+Credential handling: values may be written literally or as `{env:NAME}` / `{file:/path}` references resolved inside the OpenCode container. At startup, literal credentials are moved out of the generated OpenCode config into the server process environment, so the config file written inside the container never stores a secret. Agent tool shells run with a sanitized environment (no provider keys, no server password), and the permission policy denies reads of the server config and `/etc/threadsite` paths. For defense in depth, prefer `{env:NAME}` references with the variables in `.env.opencode`, and keep `opencode/host/providers.json` mode 600 on the host.
+
 For example, a custom compatible provider with explicit prices and conservative text-only capabilities:
 
 ```json

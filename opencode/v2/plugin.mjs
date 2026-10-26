@@ -105,6 +105,19 @@ export default {
       }
       if (event.tool === "shell") await checkExpandedCommand(event.input.command, ctx.location.directory, event.input.workdir);
     }));
+    registrations.push(await ctx.shell.hook("create.before", async (event) => {
+      // Spawned commands inherit the server's environment, which carries every
+      // provider credential and the server password; a prompt-injected command
+      // could print them regardless of file permissions. Rebuild the child
+      // environment from an allowlist so tools run with none of it.
+      if (!event.env) return;
+      const allowed = (key) => key === "PATH" || key === "HOME" || key === "TERM" || key === "LANG" || key === "TZ"
+        || key === "TMPDIR" || key === "SHELL" || key === "OPENCODE_TERMINAL" || key === "SSL_CERT_FILE"
+        || key === "SSL_CERT_DIR" || key.startsWith("LC_");
+      for (const key of Object.keys(event.env)) {
+        if (!allowed(key)) delete event.env[key];
+      }
+    }));
     // Native children inherit the parent's session rules, including a text
     // builder's browser denial. Replace those rules only on children that get
     // browser tools (QA and the asset creator) before their first tool
