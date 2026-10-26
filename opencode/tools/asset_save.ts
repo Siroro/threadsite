@@ -50,6 +50,16 @@ export default tool({
     const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
 
     const file = path.relative(root, output).replaceAll(path.sep, "/");
+    // Identical bytes already installed elsewhere is a generation bug (a retry
+    // or variant loop re-emitting the same file), not a second asset; the
+    // same destination with the same bytes is an idempotent no-op.
+    const existing = (await readSourceRecords(root)).find((record) => record.sha256 === sha256);
+    if (existing && existing.file !== file) {
+      throw new Error(`Identical asset is already installed at ${existing.file}; use that file or change the asset before saving to ${file}`);
+    }
+    if (existing && existing.file === file) {
+      return `Already installed ${file} (${bytes.length} bytes, unchanged).`;
+    }
     await queueSourceRecord(root, {
       file,
       origin: "generated",
@@ -63,3 +73,14 @@ export default tool({
     return `Saved ${file} (${bytes.length} bytes). Provenance was recorded in ASSET_SOURCES.json.`;
   },
 });
+
+/** Current provenance records; a missing or corrupt document reads as empty
+ * (the write queue owns recovery) so dedup never blocks a first save. */
+async function readSourceRecords(root: string): Promise<Array<{ file?: unknown; sha256?: unknown }>> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(path.join(root, "ASSET_SOURCES.json"), "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}

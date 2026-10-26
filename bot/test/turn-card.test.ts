@@ -115,13 +115,14 @@ test("the new message carries the playable card, the screenshot and the play lin
   const gallery = card.components.find((component) => component.type === ComponentType.MediaGallery)!;
   assert.equal(gallery.items![0].media.url, "attachment://preview.png");
   // Real link buttons, not a links field. The expanded how-to-play is one
-  // click away on the card itself.
+  // click away on the card itself, and the play/source links ride the very
+  // bottom row beneath the card's own actions.
   const buttons = playCardButtons(message);
   const howTo = buttons.find((button) => button.label === "How to play");
   assert.equal(howTo?.style, ButtonStyle.Secondary);
-  assert.equal(buttons[0].style, ButtonStyle.Link);
-  assert.equal(buttons[0].url, "https://games.example.co.uk/koi-pond-arcade/");
-  assert.equal(buttons[1].url, "https://git.example.co.uk/shane/site-koi-pond-arcade");
+  assert.equal(buttons.at(-2)!.style, ButtonStyle.Link);
+  assert.equal(buttons.at(-2)!.url, "https://games.example.co.uk/koi-pond-arcade/");
+  assert.equal(buttons.at(-1)!.url, "https://git.example.co.uk/shane/site-koi-pond-arcade");
 });
 
 test("the playable card still renders without a screenshot, a description or a changelog", () => {
@@ -135,7 +136,7 @@ test("the playable card still renders without a screenshot, a description or a c
   assert.doesNotMatch(text, /Leaderboard/);
   assert.match(text, /-# 🎮 Play Koi Pond Arcade/);
   // The play link is the one thing the card must never lose.
-  assert.equal(playCardButtons(message)[0].url, "https://games.example.co.uk/koi-pond-arcade/");
+  assert.equal(playCardButtons(message).at(-2)!.url, "https://games.example.co.uk/koi-pond-arcade/");
 });
 
 test("oversized reports keep their full text in an explicit V2 file component", () => {

@@ -235,13 +235,16 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   const stalled = state.phase !== "queued" && !state.questions?.length ? state.stalledForMs : undefined;
   const waiting = Boolean(state.questions?.length || state.waiting || stalled);
   const card = new ContainerBuilder().setAccentColor(waiting ? 0xf59e0b : COLORS[state.phase]);
-  // Turn details owns the header corner; Stop rides the bottom action row in
-  // the danger colour, far enough from the primary action to avoid misclicks.
+  // Turn details owns the header corner; Stop ends the turn-actions row in the
+  // danger colour, and the site/source links ride the very bottom row.
   const details = resource ? new ButtonBuilder().setCustomId(cardId("details", resource)).setLabel("Turn details").setStyle(ButtonStyle.Primary) : undefined;
   addCardTitle(card, state.title, state.questions?.length ? "❓ Waiting for your answer" : state.phase === "queued" ? "Waiting for a build slot" : undefined, details);
+  // The model identity rides a small line above the phase rail, keeping the
+  // footer metrics-only; the line has room for further turn facts beside it.
+  const model = state.metrics?.models ? modelNameSummary(state.metrics.models) : "";
   const current = PHASES.indexOf(state.phase);
   const rail = [...(state.phase === "queued" ? ["**● Queued**"] : []), ...PHASES.map((phase, index) => index < current ? `✓ ${LABELS[phase]}` : index === current ? `**● ${LABELS[phase]}**` : `○ ${LABELS[phase]}`)].join("  ›  ");
-  const lines = [rail, "", ...activityLines(state, 260)];
+  const lines = [...(model ? [`-# 🧠 ${model}`] : []), rail, "", ...activityLines(state, 260)];
   if (stalled) lines.push(state.agentReportedActive
     ? `🔌 **OpenCode still reports this turn running** · no new agent event for ${elapsed(stalled)}. Run \`/site stop\` to interrupt it.`
     : `⚠️ **No progress for ${elapsed(stalled)}**: run \`/site stop\` to interrupt this turn.`);
@@ -288,14 +291,12 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
     if (!state.questions?.length) buttons.push(new ButtonBuilder().setCustomId(cardId("steer", resource)).setLabel("Add instruction").setStyle(ButtonStyle.Primary));
     buttons.push(new ButtonBuilder().setCustomId(cardId("queue", resource)).setLabel(`Queue${state.queuedRequests ? ` · ${state.queuedRequests}` : ""}`).setStyle(ButtonStyle.Secondary));
     if (stop) buttons.push(stop);
-    addCardLinks(card, [...buttons, cardLink("Live site", state.context.siteUrl), cardLink("Source", state.context.repoUrl)]);
-  } else if (stop) addCardLinks(card, [stop, cardLink("Live site", state.context.siteUrl), cardLink("Source", state.context.repoUrl)]);
+    addCardLinks(card, buttons);
+  } else if (stop) addCardLinks(card, [stop]);
+  addCardLinks(card, [cardLink("Live site", state.context.siteUrl), cardLink("Source", state.context.repoUrl)]);
   const metrics = state.metrics;
   const rate = metrics?.liveTokensPerSecond ?? metrics?.outputTokensPerSecond;
-  // The step count carries the provider-stripped model identity in its
-  // parentheses — the same summary fragment the finished card's usage shows.
-  const model = metrics?.models ? modelNameSummary(metrics.models) : "";
-  const steps = metrics?.steps ? `${metrics.steps} step${metrics.steps === 1 ? "" : "s"}${model ? ` (${model})` : ""}` : model;
+  const steps = metrics?.steps ? `${metrics.steps} step${metrics.steps === 1 ? "" : "s"}` : "";
   // Billed tokens stand in for the tool-error count: input with its cache
   // share, then the total output — failures already headline the activity line.
   // The triangles are text-presentation glyphs, so they render at text size

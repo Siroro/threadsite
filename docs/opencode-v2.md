@@ -43,8 +43,11 @@ searches the web and downloads existing reusable media (`websearch` +
 `asset_download`, with provenance/license notes), or creates originals in code
 (SVG, rasters and PCM WAV via `node` scripts, glTF/GLB for 3D models), keeping
 generator scripts in `scratch/`. New originals enter `site/assets` only through
-the guarded `asset_save` tool, which enforces destination and size limits and
-records `origin: generated` provenance in `ASSET_SOURCES.json`.
+the guarded `asset_save` tool, which enforces destination and size limits,
+records `origin: generated` provenance in `ASSET_SOURCES.json`, and rejects
+identical bytes already installed under a different name (re-saving the same
+file unchanged is an idempotent no-op) so regeneration loops cannot smuggle in
+duplicates.
 
 `asset_preview` gives the agent eyes on its own work: images return as
 rendered vision input, SVG/glTF/GLB return their structure (GLB via its
@@ -54,9 +57,15 @@ an image-advertising model and is also offered to the sitebuilder for
 reviewing delivered assets.
 
 The agent is told to study what the project already has — listing
-`site/assets`, reading `ASSET_SOURCES.json`, previewing existing images and
-checking how `site/src` loads them — so new assets match the established
-style, palette, scale and quality bar instead of arriving as strangers. Its
+`site/assets`, reading `ASSET_SOURCES.json` and the forge-maintained
+`site/assets/STYLE.md` (palette, sprite sizes, facing conventions, formats,
+atlas policy, updated whenever a convention changes), previewing existing
+images and checking how `site/src` loads them — so new assets match the
+established style, palette, scale and quality bar instead of arriving as
+strangers. Sprite families beyond ~8 small frames are packed into one atlas
+with a `frames.json` rectangle map, and Draco models get the pinned decoder
+files downloaded once into `site/assets/draco/` (the preview blocks external
+origins, so a CDN decoder path fails QA). Its
 step budget is 100, and its instructions require batched work — one
 parameterized generator script per asset family, consolidated save/preview
 passes — so a full brief finishes well inside that budget. With

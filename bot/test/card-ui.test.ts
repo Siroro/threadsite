@@ -266,13 +266,14 @@ test("the live public card names the running model without provider or spend; ad
     { model: "surplus/glm-5.3", inputTokens: 12_300, outputTokens: 800, cacheTokens: 5_840, cost: 0.02 },
   ] };
   const live = cardView(renderProgressCard(state));
-  assert.match(live.text, /12 steps \(deepseek-4\.1, glm-5\.3\)/, "the step count carries the model identity");
+  assert.match(live.text, /-# 🧠 deepseek-4\.1, glm-5\.3/, "the model identity rides the small line above the phase rail");
+  assert.match(live.text, /12 steps\b/, "the footer's step count stays bare, without the model parenthetical");
   assert.doesNotMatch(live.text, /surplus\//, "the public live card never shows provider routing");
   assert.doesNotMatch(live.text, /\$/, "the public live card never shows spend");
 
   const bare = cardView(renderProgressCard({ ...state, metrics: { contextTokens: 28_400, contextLimit: 100_000, steps: 12 } }));
   assert.match(bare.text, /12 steps\b/, "a snapshot without per-model attribution keeps the bare step count");
-  assert.doesNotMatch(bare.text, /\(/, "no per-model attribution adds no parenthetical");
+  assert.doesNotMatch(bare.text, /🧠/, "no per-model attribution adds no model line");
 });
 
 test("tool errors leave the public footer for the private usage page", () => {

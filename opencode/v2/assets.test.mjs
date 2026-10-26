@@ -131,9 +131,25 @@ test("asset_save installs generated content and scratch output with provenance, 
     ]) {
       await assert.rejects(asset_save.execute(rejected, { directory: root }), Error, JSON.stringify(rejected));
     }
-    // The site/assets/ destination prefix is accepted, like the other asset tools.
-    await asset_save.execute({ destination: "site/assets/nested.png", source: "scratch/gen/dot.png" }, { directory: root });
+    // The site/assets/ destination prefix is accepted, like the other asset
+    // tools (distinct bytes; identical bytes elsewhere is a duplicate below).
+    await fs.writeFile(path.join(root, "scratch/gen/other.png"), Buffer.from("different bytes"));
+    await asset_save.execute({ destination: "site/assets/nested.png", source: "scratch/gen/other.png" }, { directory: root });
     assert.ok(await fs.readFile(path.join(root, "site/assets/nested.png")));
+    // Re-saving identical bytes to the same path is idempotent; the same bytes
+    // under a different name is a generation bug and fails with the existing path.
+    const again = await asset_save.execute({ destination: "nested.png", source: "scratch/gen/other.png" }, { directory: root });
+    assert.match(again, /unchanged/);
+    const recordsAfterIdempotent = JSON.parse(await fs.readFile(path.join(root, "ASSET_SOURCES.json"), "utf8"));
+    await assert.rejects(
+      asset_save.execute({ destination: "sprites/dot2.png", source: "scratch/gen/other.png" }, { directory: root }),
+      /already installed at site\/assets\/nested\.png/,
+    );
+    assert.equal((JSON.parse(await fs.readFile(path.join(root, "ASSET_SOURCES.json"), "utf8"))).length,
+      recordsAfterIdempotent.length, "a rejected duplicate writes no record");
+    // A regenerated, genuinely different sprite at a new path still lands.
+    await fs.writeFile(path.join(root, "scratch/gen/variant.png"), Buffer.from("variant bytes"));
+    await asset_save.execute({ destination: "sprites/dot2.png", source: "scratch/gen/variant.png" }, { directory: root });
     assert.equal(await fs.readFile(path.join(root, "site/assets/pre-existing.txt"), "utf8"), "harness");
   } finally {
     await fs.rm(root, { recursive: true, force: true });

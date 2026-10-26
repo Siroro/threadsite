@@ -162,12 +162,13 @@ export function renderPlayCard(state: TurnCardState): PlayCardMessage {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent(details.join("\n")));
   }
   addCardDivider(container);
-  addCardLinks(container, [cardLink(isGame ? "▶ Play game" : "▶ Open site", state.siteUrl), cardLink("Source", state.repoUrl)]);
   if (state.resource) addCardLinks(container, [
     new ButtonBuilder().setCustomId(cardId("doc", state.resource, "description")).setLabel(isGame ? "How to play" : "About this site").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(cardId("doc", state.resource, "changelog")).setLabel("Changelog").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(cardId("change", state.resource)).setLabel("Request a change").setStyle(ButtonStyle.Primary),
   ]);
+  // Play/source ride the very bottom row, matching the technical card above.
+  addCardLinks(container, [cardLink(isGame ? "▶ Play game" : "▶ Open site", state.siteUrl), cardLink("Source", state.repoUrl)]);
   if (state.meta) container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${escapeMarkdown(truncate(singleLine(state.meta), 200))}`));
   return { ...cardMessage(container), files };
 }
@@ -216,11 +217,6 @@ function technicalCard(state: TurnCardState): ContainerBuilder {
   }
 
   if (state.note) addCardField(card, "Note", truncate(state.note, 900));
-  addCardLinks(card, [
-    cardLink(state.kind === "site" ? "Open site" : "Play game", state.siteUrl),
-    cardLink("Source", state.repoUrl),
-    state.commit ? cardLink("View commit", `${state.repoUrl.replace(/\/$/, "")}/commit/${encodeURIComponent(state.commit)}`) : undefined,
-  ]);
   if (state.resource) {
     // Shortcuts only exist where the turn recorded the matching detail: a
     // button whose page says "none recorded" is a dead control.
@@ -234,6 +230,13 @@ function technicalCard(state: TurnCardState): ContainerBuilder {
       new ButtonBuilder().setCustomId(cardId("change", state.resource)).setLabel("Follow up").setStyle(ButtonStyle.Primary),
     ]);
   }
+  // Both cards of a turn end on the same bottom row: open the result, read
+  // the source. The detail shortcuts sit above it.
+  addCardLinks(card, [
+    cardLink(state.kind === "site" ? "Open site" : "Play game", state.siteUrl),
+    cardLink("Source", state.repoUrl),
+    state.commit ? cardLink("View commit", `${state.repoUrl.replace(/\/$/, "")}/commit/${encodeURIComponent(state.commit)}`) : undefined,
+  ]);
   return card;
 }
 

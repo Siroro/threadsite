@@ -138,8 +138,12 @@ renderer.setAnimationLoop((time) => update(time));              // one loop, sta
   import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
   import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
   const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
-  // Draco models additionally need decoder files under site/assets/ and
-  // setDecoderPath with a page-relative URL; uncompressed GLB needs none.
+  // Draco only — the decoder must be local (preview blocks external origins):
+  // asset_download the pinned files from
+  // https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/libs/draco/ into
+  // site/assets/draco/ once, then:
+  // loader.setDRACOLoader(new DRACOLoader().setDecoderPath("assets/draco/"));
+  // Uncompressed or meshopt-only GLB needs none of this.
   loader.load(importedModelUrl, (gltf) => scene.add(gltf.scene));
   ```
 
