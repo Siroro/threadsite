@@ -8,10 +8,13 @@
 #
 # .env, secrets/ and data/ are untracked and never touched; NEVER run
 # `git clean` in this repo. Rebuilds and recreates only the containers whose
-# code actually changed since the deployed commit.
+# code actually changed since the deployed commit (a docker-compose.yml
+# change rebuilds every service), and refreshes the shared build stamp when
+# it can prove every image current, so a following ./start.sh need not build.
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. scripts/lib.sh
 
 BRANCH="main"
 ORIGIN="${THREADSITE_ORIGIN:-https://github.com/Siroro/threadsite.git}"
@@ -66,6 +69,12 @@ if [[ "$old_head" != "$new_head" ]]; then
   git log --oneline "HEAD..origin/$BRANCH" | head -15
 fi
 
+# Whether every image was current for the inputs of the last stamped build.
+# Captured before the checkout moves HEAD and rewrites the compose files; it
+# decides below whether this deploy may re-stamp after rebuilding.
+images_were_current=0
+if images_stamped_current; then images_were_current=1; fi
+
 # Main-only: force the checkout to origin/main. -f discards the (already
 # vetted) local edits and overwrites stale untracked copies of files that are
 # tracked upstream, the state a copied or pre-rewrite checkout ends up in.
@@ -83,25 +92,38 @@ if [[ "$old_head" == "$new_head" ]]; then
 fi
 
 # Build and recreate only what changed. Assets, agent templates and commands
-# all live inside the bot image; the other services change rarely.
+# all live inside the bot image; the other services change rarely. A compose
+# change can move any build context, so it rebuilds everything.
+changed_files="$(git diff --name-only "$old_head" "$new_head")"
 mapfile -t services < <( {
-  git diff --name-only "$old_head" "$new_head" | grep -qE '^(bot/|scripts/)' && echo bot
-  git diff --name-only "$old_head" "$new_head" | grep -qE '^opencode/' && echo opencode
-  git diff --name-only "$old_head" "$new_head" | grep -qE '^gameserver/' && echo gameserver
-  git diff --name-only "$old_head" "$new_head" | grep -qE '^preview/' && echo preview
+  grep -qE '^(bot/|scripts/)' <<<"$changed_files" && echo bot
+  grep -qE '^opencode/' <<<"$changed_files" && echo opencode
+  grep -qE '^gameserver/' <<<"$changed_files" && echo gameserver
+  grep -qE '^preview/' <<<"$changed_files" && echo preview
 } || true )
+if grep -qE '^docker-compose(\.override)?\.yml$' <<<"$changed_files"; then
+  services=(bot opencode gameserver preview)
+fi
 
 if [[ ${#services[@]} -eq 0 ]]; then
   echo "No service code changed: nothing to rebuild. Deployed commit: $new_head"
+  if (( images_were_current )); then stamp_images_current; fi
   exit 0
 fi
 
 echo "Rebuilding: ${services[*]}"
 docker compose build "${services[@]}"
 docker compose up -d "${services[@]}"
+prune_dangling_images
 
-if git diff --name-only "$old_head" "$new_head" | grep -qE '^docker-compose\.yml'; then
-  echo "NOTE: docker-compose.yml changed; consider 'docker compose up -d' for all services."
+# Re-stamp only when every image is now current for the new inputs: the
+# services above were just rebuilt, and nothing the others build from changed
+# (a compose change rebuilds everything, and an older commit or .env would
+# have failed the check captured before the checkout). Otherwise leave the
+# mismatched stamp in place: the caller's full build — or the next
+# ./start.sh — reconciles and re-stamps instead of trusting the gap.
+if (( images_were_current )); then
+  stamp_images_current
 fi
 
 echo "Done. Deployed $new_head ($BRANCH)."
