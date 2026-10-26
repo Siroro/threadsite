@@ -112,6 +112,10 @@ interface Watch {
   started: Map<string, number>;
   streamed: Map<string, number>;
   timings: Map<string, StepTiming>;
+  /** Server-clock lag from a step's start to its first streamed token; live observation only — the server persists no first-token time, so a restored step has none. */
+  firstToken: Map<string, number>;
+  /** Newest anchored root step, driving the details panel's last-request figures. */
+  lastRequest?: { id: string; created: number; generationMs: number; firstTokenMs?: number };
   compactions: number;
   contextLimit?: number;
   quota?: QuotaBlock;
@@ -438,6 +442,8 @@ export class OpenCodeV2Harness {
     observed.contextLimit = watch.contextLimit;
     observed.compactions = watch.compactions;
     Object.assign(observed, timingTotals(watch.timings.values()));
+    if (watch.lastRequest) Object.assign(observed, { lastRequestMs: watch.lastRequest.generationMs,
+      ...(watch.lastRequest.firstTokenMs !== undefined ? { firstTokenMs: watch.lastRequest.firstTokenMs } : {}) });
     try {
       const entries = await this.usageHistory(directory, sessionID);
       const messages = entries.map(({ sessionID: id, message }) => applicationMessage(message, id));
@@ -449,6 +455,19 @@ export class OpenCodeV2Harness {
       const samples = new Map(watch.timings);
       for (const [id, timed] of turnTiming(entries, since, baseline)) samples.set(id, timed);
       Object.assign(result, timingTotals(samples.values()));
+      // Last-request figures describe whichever anchored root step is newest,
+      // live-observed or history-persisted; the first-token lag survives only
+      // when it was measured for that very step.
+      let newest = watch.lastRequest;
+      for (const { sessionID: id, message } of entries) {
+        if (id !== sessionID || message.type !== "assistant" || baseline.has(message.id)
+          || message.time.created < since || message.time.completed === undefined) continue;
+        const timed = stepTiming(message.time.created, message.time.streamed, message.tokens);
+        if (timed && (!newest || message.time.created > newest.created))
+          newest = { id: message.id, created: message.time.created, generationMs: timed.generationMs };
+      }
+      if (newest) Object.assign(result, { lastRequestMs: newest.generationMs,
+        ...(newest.firstTokenMs !== undefined ? { firstTokenMs: newest.firstTokenMs } : {}) });
       // Child billing is cumulative, but the context indicator belongs to root.
       result.contextTokens = usageFromMessages(messages.filter((message) => message.info?.sessionID === sessionID), since, Infinity, baseline)?.contextTokens
         ?? result.contextTokens;
@@ -703,7 +722,7 @@ export class OpenCodeV2Harness {
   private watch(directory: string, sessionID: string, callback: ProgressCallback | undefined, since: number, baseline: Set<string>, budgeted: boolean): Watch {
     const watch: Watch = { since, baseline, controller: new AbortController(), done: Promise.resolve(), children: new Set(), activeChildren: new Set(), subagents: new Map(), callback, backgroundChildren: new Set(),
       lastProgress: Date.now(), questionIds: new Set(), progressKeys: new Map(), steps: new Map(), models: new Map(),
-      tools: new Map(), text: new Map(), started: new Map(), streamed: new Map(), timings: new Map(), compactions: 0,
+      tools: new Map(), text: new Map(), started: new Map(), streamed: new Map(), timings: new Map(), firstToken: new Map(), compactions: 0,
       liveSamples: [], lastMeterAt: 0 };
     this.watches.set(sessionID, watch);
     if (budgeted) {
@@ -791,7 +810,7 @@ export class OpenCodeV2Harness {
   }
 
   private async restore(directory: string, sessionID: string, watch: Watch, callback: ProgressCallback | undefined, history: SessionMessageInfo[]): Promise<void> {
-    this.restoreUsage(watch, sessionID, history);
+    this.restoreUsage(watch, sessionID, history, true);
     this.metrics(watch, callback);
     const forms = (await this.forms(directory)).filter((form) => form.sessionID === sessionID);
     const pending = new Set(forms.map((form) => form.id));
@@ -822,7 +841,7 @@ export class OpenCodeV2Harness {
     }
   }
 
-  private restoreUsage(watch: Watch, sessionID: string, history: SessionMessageInfo[]): void {
+  private restoreUsage(watch: Watch, sessionID: string, history: SessionMessageInfo[], root = false): void {
     for (const message of history) {
       if (message.type !== "assistant" || watch.baseline.has(message.id) || message.time.created < watch.since
         || message.time.completed === undefined || !message.tokens) continue;
@@ -836,6 +855,12 @@ export class OpenCodeV2Harness {
       const timed = stepTiming(message.time.created, message.time.streamed, message.tokens);
       if (timed) watch.timings.set(message.id, timed);
       else watch.timings.delete(message.id);
+      // Restoring the root turn re-times its newest anchored step. The same
+      // message id keeps the live entry — it may still carry a first-token lag
+      // the server never persisted, and the restored copy cannot.
+      if (timed && root && watch.lastRequest?.id !== message.id
+        && (!watch.lastRequest || message.time.created > watch.lastRequest.created))
+        watch.lastRequest = { id: message.id, created: message.time.created, generationMs: timed.generationMs };
     }
   }
 
@@ -844,6 +869,8 @@ export class OpenCodeV2Harness {
     const timing = timingTotals(watch.timings.values());
     this.publish(watch, "metrics", { kind: "metrics", text: "Usage updated", metrics: {
       ...usage, ...timing, outputTokensPerSecond: timing.outputTokensPerSecond, liveTokensPerSecond: undefined,
+      ...(watch.lastRequest ? { lastRequestMs: watch.lastRequest.generationMs,
+        ...(watch.lastRequest.firstTokenMs !== undefined ? { firstTokenMs: watch.lastRequest.firstTokenMs } : {}) } : {}),
       contextLimit: watch.contextLimit, compactions: watch.compactions,
     } }, callback);
   }
@@ -939,6 +966,7 @@ export class OpenCodeV2Harness {
         // mirroring opencode's message updater.
         watch.streamed.delete(event.data.assistantMessageID);
         watch.timings.delete(event.data.assistantMessageID);
+        watch.firstToken.delete(event.data.assistantMessageID);
         watch.lastProgress = Date.now();
         if (!child) void this.models(directory).then((models) => {
           const selected = event.data.model;
@@ -958,6 +986,15 @@ export class OpenCodeV2Harness {
         const timed = stepTiming(watch.started.get(step.assistantMessageID), watch.streamed.get(step.assistantMessageID), step.tokens);
         if (timed) watch.timings.set(step.assistantMessageID, timed);
         else watch.timings.delete(step.assistantMessageID);
+        // The card is the root turn's: its "last request" figures describe the
+        // newest anchored root step, never a subagent child's.
+        if (!child && timed) {
+          const firstTokenMs = watch.firstToken.get(step.assistantMessageID);
+          watch.lastRequest = { id: step.assistantMessageID,
+            created: watch.started.get(step.assistantMessageID) ?? event.created,
+            generationMs: timed.generationMs,
+            ...(firstTokenMs !== undefined ? { firstTokenMs } : {}) };
+        }
         if (child) {
           const info = watch.subagents.get(data.sessionID);
           if (info && !info.steps.has(step.assistantMessageID)) {
@@ -986,6 +1023,14 @@ export class OpenCodeV2Harness {
         watch.text.set(key, text);
         const now = Date.now();
         const growth = "delta" in part ? part.delta : "";
+        // The step's first streamed token times the first-token lag the details
+        // panel shows; reasoning deltas count, and the server clock anchors it
+        // to the step's own start rather than event-arrival spacing.
+        if (growth) {
+          const startedAt = watch.started.get(part.assistantMessageID);
+          if (startedAt !== undefined && !watch.firstToken.has(part.assistantMessageID) && event.created > startedAt)
+            watch.firstToken.set(part.assistantMessageID, event.created - startedAt);
+        }
         if (growth) watch.liveSamples.push({ at: now, tokens: Math.max(1, Buffer.byteLength(growth) / 5) });
         watch.liveSamples = watch.liveSamples.filter((sample) => now - sample.at < 5_000);
         if (watch.liveSamples.length && now - watch.lastMeterAt > 3_000) {

@@ -121,12 +121,15 @@ export class CardInteractions {
       const prompt = interaction.fields.getTextInputValue("prompt").trim();
       const attachments = [...(interaction.fields.getUploadedFiles("images")?.values() ?? [])];
       if (!prompt) throw new CardUserError("Describe the change you want before submitting.");
-      if (!this.services.store.claimCardAction(threadId, `request:${nonce}`, { ...form, prompt, status: "submitting" })) {
+      // Modals opened before this checkbox existed still submit without it;
+      // a missing component is simply an unchecked box.
+      const claimed: RequestFormState = { ...form, prompt, restart: form.steer && (modalCheckbox(interaction, "restart") ?? false), status: "submitting" };
+      if (!this.services.store.claimCardAction(threadId, `request:${nonce}`, claimed)) {
         await this.respond(interaction, renderStatusCard("⏳ This request is already being submitted."));
         return;
       }
       try {
-        const text = await this.services.submit(interaction, project, form, nonce, prompt, attachments);
+        const text = await this.services.submit(interaction, project, claimed, nonce, prompt, attachments);
         this.services.store.patchCardState<RequestFormState>(threadId, `request:${nonce}`, { status: "accepted" });
         await this.respond(interaction, renderStatusCard(text));
       } catch (error) {
@@ -341,6 +344,10 @@ export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: Pr
 }
 
 export class CardUserError extends Error {}
+/** A modal checkbox's value, or undefined when the submitted form predates that component. */
+function modalCheckbox(interaction: ModalSubmitInteraction, customId: string): boolean | undefined {
+  try { return interaction.fields.getCheckbox(customId); } catch { return undefined; }
+}
 function indexArg(value?: string): number {
   if (value === undefined) return 0;
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new CardUserError("That page is invalid.");

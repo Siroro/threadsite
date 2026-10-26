@@ -24,6 +24,8 @@ export interface RequestFormState {
   userId: string;
   resource: string;
   steer: boolean;
+  /** Steer form only: stop the turn and restart it in the same card instead of steering mid-turn. */
+  restart?: boolean;
   status: "ready" | "submitting" | "accepted";
   statusMessageId?: string;
   prompt?: string;

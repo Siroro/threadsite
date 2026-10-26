@@ -198,6 +198,16 @@ export function recoveryInstruction(originalPrompt: string, notes?: string): str
   return `The previous turn was interrupted by a service restart before it could be committed and published. Inspect the workspace: it may already contain partial edits from that turn. Continue exactly where it left off and finish the requested change (do not start over). Call todoread first: if a todo list already exists, keep its steps as written and update their statuses as you work rather than replacing the list; if this is multi-step work with no list, create one with todowrite before making further edits. Mark completed steps as you finish them, then summarize what you did.${notesSection(notes)}\n\nORIGINAL REQUEST:\n${originalPrompt}`;
 }
 
+/**
+ * The stop-and-restart steer: the user interrupted the running pass on purpose
+ * to add an instruction, so its partial edits stay in the working tree and the
+ * session history is intact. The continuation must fold the new instruction
+ * into the SAME change, not treat it as a fresh request.
+ */
+export function restartInstruction(originalPrompt: string, newInstruction: string, notes?: string): string {
+  return `The user stopped the previous pass mid-work to add an instruction. Nothing was lost: every edit that pass had already made is still in the working tree, and the conversation history is intact. Continue that pass exactly where it stopped (do not start over) and fold the new instruction below into the same change. Call todoread first: if a todo list already exists, keep its steps as written and update their statuses as you work rather than replacing the list; if this is multi-step work with no list, create one with todowrite before making further edits. Mark completed steps as you finish them, then summarize what you did.${notesSection(notes)}\n\nNEW INSTRUCTION:\n${newInstruction}\n\nORIGINAL REQUEST:\n${originalPrompt}`;
+}
+
 export function projectKindLabel(kind: ProjectKind | undefined): string {
   if (kind === "game-2d") return "2D static web game";
   if (kind === "game-3d") return "3D static web game";

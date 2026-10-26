@@ -1507,6 +1507,17 @@ export class ProjectService {
   }
 
   /**
+   * The project's durable notes (PROJECT_NOTES.md), read for instructions —
+   * like recovery's continuation prompt — that compose their own text instead
+   * of going through mutate()'s default instruction builder.
+   */
+  async projectNotes(threadId: string): Promise<string | undefined> {
+    const project = this.store.getProject(threadId);
+    if (!project) return undefined;
+    return readProjectNotes(project.workspacePath);
+  }
+
+  /**
    * Swap a game's multiplayer architecture (/site multiplayer): persist the new
    * mode, swap the harness-owned wiring (net files + AGENTS.md guidance, or
    * their removal for singleplayer), then run a normal agent turn whose

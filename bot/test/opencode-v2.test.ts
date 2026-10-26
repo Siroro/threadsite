@@ -796,6 +796,57 @@ test("average tok/s pairs streamed windows and tokens: retries re-anchor and unt
   } finally { await stop(); }
 });
 
+test("last-request timing tracks the newest anchored root step and its live first token", async () => {
+  const f = fixture();
+  f.setActive(true);
+  const updates: any[] = [];
+  const progress = (update: any) => { updates.push(update); };
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", progress, 0);
+  try {
+    const internal = f.harness;
+    const watch = internal.watches.get("ses_root")!;
+    const send = (session: string, type: string, created: number, content: object) => internal.event({ type, created, data: {
+      sessionID: session, ...content } }, "/w", "ses_root", watch, progress);
+    const model = { id: "text", providerID: "test" };
+    const tokens = { input: 100, output: 400, reasoning: 100, cache: { read: 0, write: 0 } };
+    send("ses_root", "session.step.started", 1_000, { assistantMessageID: "msg_a", model, started: 1_000 });
+    send("ses_root", "session.reasoning.delta", 1_800, { assistantMessageID: "msg_a", ordinal: 0, delta: "thin" });
+    send("ses_root", "session.text.delta", 2_500, { assistantMessageID: "msg_a", ordinal: 0, delta: "Hi" });
+    send("ses_root", "session.step.streamed", 5_000, { assistantMessageID: "msg_a" });
+    send("ses_root", "session.step.ended", 5_050, { assistantMessageID: "msg_a", finish: "stop", cost: 0.01, tokens });
+    const live = updates.filter((update) => update.kind === "metrics").at(-1)!.metrics;
+    assert.equal(live.lastRequestMs, 4_000, "the anchored window times the last request");
+    assert.equal(live.firstTokenMs, 800, "the first streamed token — reasoning included — is the first token");
+
+    // A newer anchored step never seen streaming: its window takes over, and
+    // the older step's first-token lag must not ride along with it.
+    send("ses_root", "session.step.started", 10_000, { assistantMessageID: "msg_b", model, started: 10_000 });
+    send("ses_root", "session.step.streamed", 12_000, { assistantMessageID: "msg_b" });
+    send("ses_root", "session.step.ended", 12_010, { assistantMessageID: "msg_b", finish: "stop", cost: 0.01, tokens });
+    let usage = await internal.finalUsage("/w", "ses_root", 0, new Set(), watch);
+    assert.equal(usage.lastRequestMs, 2_000, "the newest anchored root step wins");
+    assert.equal(usage.firstTokenMs, undefined, "a first-token lag never crosses onto another step");
+
+    // A subagent child's newer anchored step belongs to the child's own line,
+    // never to the root turn's last request.
+    watch.children.add("ses_child");
+    send("ses_child", "session.step.started", 30_000, { assistantMessageID: "msg_c", model, started: 30_000 });
+    send("ses_child", "session.step.streamed", 35_000, { assistantMessageID: "msg_c" });
+    send("ses_child", "session.step.ended", 35_010, { assistantMessageID: "msg_c", finish: "stop", cost: 0.01, tokens });
+    usage = await internal.finalUsage("/w", "ses_root", 0, new Set(), watch);
+    assert.equal(usage.lastRequestMs, 2_000, "child steps never become the root's last request");
+
+    // A still-newer persisted root window — what a reattached bot reads back —
+    // takes over without inventing a first-token lag for a step it never saw.
+    f.history.push({ type: "assistant", id: "msg_persisted", agent: "sitebuilder", model, content: [], finish: "stop",
+      time: { created: 50_000, streamed: 53_000, completed: 53_010 },
+      tokens: { input: 100, output: 90, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0.01 } as SessionMessageInfo);
+    usage = await internal.finalUsage("/w", "ses_root", 0, new Set(), watch);
+    assert.equal(usage.lastRequestMs, 3_000, "the newest persisted root window takes over");
+    assert.equal(usage.firstTokenMs, undefined, "no first token was observed for the persisted step");
+  } finally { await stop(); }
+});
+
 test("persisted streamed windows rate the turn even when live events were never seen", async () => {
   const f = fixture();
   const now = Date.now();

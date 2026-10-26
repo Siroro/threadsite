@@ -43,6 +43,10 @@ export interface ProgressMetrics {
   compactions?: number;
   liveTokensPerSecond?: number;
   outputTokensPerSecond?: number;
+  /** Generation window of the newest anchored root step. */
+  lastRequestMs?: number;
+  /** That step's start-to-first-token lag; undefined unless observed live. */
+  firstTokenMs?: number;
   /** Per-model attribution, when steps carried their model; live turns may lack it. */
   models?: ModelUsage[];
 }
@@ -350,7 +354,22 @@ export function usageDetailText(metrics: ProgressMetrics): string {
     metrics.liveTokensPerSecond ? `live ~${formatTokensPerSecond(metrics.liveTokensPerSecond)} tok/s` : "",
     metrics.outputTokensPerSecond ? `average ~${formatTokensPerSecond(metrics.outputTokensPerSecond)} tok/s` : "",
   ].filter(Boolean).join(" · ");
-  return [tokens || "Token counts unavailable", context, counts, rates].filter(Boolean).join("\n");
+  // Request-scale timing: the newest root step's window and its first-token
+  // lag. A restored turn times the request but never invents a first token —
+  // the server persists none — so that half stays absent rather than zero.
+  const timing = [
+    metrics.lastRequestMs ? `last request ${requestDuration(metrics.lastRequestMs)}` : "",
+    metrics.firstTokenMs ? `first token ${requestDuration(metrics.firstTokenMs)}` : "",
+  ].filter(Boolean).join(" · ");
+  return [tokens || "Token counts unavailable", context, counts, rates, timing ? `Timing **${timing}**` : ""]
+    .filter(Boolean).join("\n");
+}
+
+/** Request-scale durations keep a decimal where tenths matter, then hand off to elapsed(). */
+function requestDuration(ms: number): string {
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  return elapsed(ms);
 }
 
 const PLAN_MARKS: Record<ProgressPlanItem["status"], string> = { completed: "✓", in_progress: "●", cancelled: "↷", pending: "○" };

@@ -1,5 +1,5 @@
 import {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, ContainerBuilder, FileUploadBuilder, LabelBuilder,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, CheckboxBuilder, ContainerBuilder, FileUploadBuilder, LabelBuilder,
   ModalBuilder, StringSelectMenuBuilder, TextDisplayBuilder, TextInputBuilder, TextInputStyle,
 } from "discord.js";
 import { cardId } from "./card-actions.js";
@@ -59,7 +59,7 @@ export function renderDetailPanel(title: string, resource: string, scope: PanelS
 }
 
 export function requestModal(resource: string, nonce: string, steer = false): ModalBuilder {
-  return new ModalBuilder().setCustomId(cardId("request", resource, nonce)).setTitle(steer ? "Add an instruction to this turn" : "Request a project change")
+  const modal = new ModalBuilder().setCustomId(cardId("request", resource, nonce)).setTitle(steer ? "Add an instruction to this turn" : "Request a project change")
     .addLabelComponents(
       new LabelBuilder().setLabel(steer ? "What should the agent change?" : "What would you like to change?")
         .setDescription(steer ? "If this turn has finished, your request will be queued." : "Your request uses this project's normal update queue.")
@@ -67,6 +67,14 @@ export function requestModal(resource: string, nonce: string, steer = false): Mo
       new LabelBuilder().setLabel("Attachments (optional)").setDescription("Images reach the model when it supports them; other files are saved into the project workspace.")
         .setFileUploadComponent(new FileUploadBuilder().setCustomId("images").setMinValues(0).setMaxValues(4).setRequired(false)),
     );
+  if (steer) {
+    modal.addLabelComponents(
+      new LabelBuilder().setLabel("Stop and restart this turn")
+        .setDescription("Stop the turn instead (partial edits kept) and continue it in this card with your instruction.")
+        .setCheckboxComponent(new CheckboxBuilder().setCustomId("restart").setDefault(false)),
+    );
+  }
+  return modal;
 }
 
 export function renderQueuePanel(resource: string, queue: QueuedRequest[], preparing: number, page = 0): CardMessage {

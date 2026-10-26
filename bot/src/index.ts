@@ -42,7 +42,7 @@ import { DiscordProgress, type ProgressCallback } from "./progress.js";
 import { ProjectService, TurnStoppedError, type MutationResult, type StopTurnOutcome } from "./project.js";
 import { recoverPublishRoot } from "./publish.js";
 import { Store, pendingTurnMatches } from "./store.js";
-import { multiplayerModeLabel, projectKindLabel } from "./templates.js";
+import { multiplayerModeLabel, projectKindLabel, restartInstruction } from "./templates.js";
 import type { CommitAuthor, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
 import { saveUploadAttachments, uploadPromptNote, type UploadedFile } from "./uploads.js";
 import { UsageLog, type UsageTotal } from "./usage.js";
@@ -513,6 +513,12 @@ async function recoverInterruptedTurns(): Promise<void> {
         } catch (error) {
           await progress?.close();
           if (error instanceof TurnStoppedError) {
+            // Same handoff as a stopped live turn: a stop-and-restart steer
+            // continues on this card, so the recovered pass reports nothing.
+            if (status && pendingRestarts.delete(status.id)) {
+              await deliver("🔁 Stopped at your request — continuing this turn with the added instruction…").catch(() => undefined);
+              return;
+            }
             await deliver("🛑 **Stopped at your request**: the recovered turn's partial edits are preserved in the workspace.");
             return;
           }
@@ -680,6 +686,8 @@ interface QueuedUpdate {
   requestStatusId?: string;
   /** Progress instance already live on this status (the burst-initial message). */
   progress?: DiscordProgress;
+  /** Turn-clock anchor for a continuation that presents as one turn (stop-and-restart). */
+  startedAt?: number;
 }
 
 interface PendingUpdate {
@@ -689,6 +697,13 @@ interface PendingUpdate {
 }
 
 const pendingUpdates = new Map<string, PendingUpdate>();
+/**
+ * Status-message ids of turns interrupted by the stop-and-restart steer. The
+ * settling turn consults this set to swallow its stopped-turn card: the restart
+ * closure, queued directly behind it, continues the work on that same message
+ * as if the turn had never stopped.
+ */
+const pendingRestarts = new Set<string>();
 /**
  * Persisted request ids that a drain has taken but has not started prompting
  * yet. `/site queue` must not remove these from the store: the in-memory batch
@@ -898,11 +913,15 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
   }
   const fullPrompt = [prompt, uploadPromptNote(uploads)].filter(Boolean).join("\n\n");
   requireCurrentContributor(project.threadId, actor);
+  const author = commitAuthorIdentity({ globalName: interaction.user.globalName, username: interaction.user.username, id: interaction.user.id });
   // A steer is confirmed by the private interaction reply alone: no public
   // card is posted unless the request falls through to the durable queue (the
   // turn ended first, or attachments forced the queue path). A steer that
   // throws also never reaches the queue, so the interaction handler resets
   // the form.
+  if (form.steer && form.restart && await restartTurnWithInstruction(current, form, fullPrompt, images, author, interaction.user.id)) {
+    return "🔁 Stopped that turn — it is restarting in the same card with your instruction. Partial edits are kept.";
+  }
   if (form.steer && !images.length && !uploads.length && await projects.steerActiveTurn(project.threadId, fullPrompt, form.resource, interaction.user.id)) {
     return "🧭 Your instruction was sent to the running turn.";
   }
@@ -910,7 +929,6 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
   if (!channel || !("send" in channel)) throw new CardUserError("This project thread is unavailable.");
   const status = await channel.send(renderStatusCard("⏳ Saving your request…"));
   store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: status.id });
-  const author = commitAuthorIdentity({ globalName: interaction.user.globalName, username: interaction.user.username, id: interaction.user.id });
   try { await enqueueUserRequest(project.threadId, status, fullPrompt, images, author, interaction.user.id, prompt, uploads, actor); }
   catch (error) {
     // appendQueuedRequest failed before accepting anything. A new submission
@@ -919,6 +937,79 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
     throw error;
   }
   return form.steer ? "✅ That turn had finished accepting instructions, so your request was queued for the next pass." : "✅ Your request was saved in the project's update queue.";
+}
+
+/**
+ * The stop-and-restart steer: instead of a mid-flight message, interrupt the
+ * running turn and continue it as a fresh turn on the SAME status card — like
+ * pressing Stop and typing "continue", but without the stopped-turn outcome in
+ * between. The interrupted pass keeps its partial edits (a stop never commits
+ * or publishes them), the session history is intact, and the continuation
+ * picks up model/effort changes made while the old pass ran, because mutate()
+ * reads them when the continuation prompts.
+ *
+ * Returns false when this card no longer hosts a live turn, so the caller can
+ * fall back to the ordinary steer/queue paths.
+ */
+async function restartTurnWithInstruction(project: ProjectRecord, form: RequestFormState, instruction: string, images: PromptImage[], fallbackAuthor: CommitAuthor, requesterId: string): Promise<boolean> {
+  const threadId = project.threadId;
+  const pending = store.getProject(threadId)?.pendingTurn;
+  if (!pending || pending.statusMessageId !== form.resource) return false;
+
+  const originalPrompt = pending.prompt;
+  // The commit stays attributed to whoever's change this continues; only a
+  // turn without an author (initial builds) falls back to the steerer.
+  const author = pending.author ?? fallbackAuthor;
+  const notes = await projects.projectNotes(threadId);
+  const instructionOverride = restartInstruction(originalPrompt, instruction, notes);
+  const isGame = (store.getProject(threadId)?.projectKind ?? "site") !== "site";
+  // The continuation presents as the same turn: its card keeps counting from
+  // the interrupted pass's start.
+  const startedAt = Date.parse(pending.startedAt);
+
+  // Marked before the stop so the interrupted pass sees it when its abort
+  // lands moments later and swallows its stopped-turn card.
+  pendingRestarts.add(form.resource);
+  let outcome: StopTurnOutcome;
+  try {
+    outcome = await projects.stopTurn(threadId, form.resource);
+  } catch (error) {
+    pendingRestarts.delete(form.resource);
+    throw error;
+  }
+  log("info", "discord.turn_restart_requested", { threadId, statusMessageId: form.resource, userId: requesterId, stopped: outcome.stopped, delivering: outcome.delivering, queueFreed: outcome.queueFreed });
+  await store.addContribution(threadId, requesterId, "steers")
+    .catch((error) => log("warn", "project.contribution_count_failed", { threadId, userId: requesterId, kind: "steers", error: errorText(error) }));
+
+  // Queued directly behind the interrupted pass: this closure runs the moment
+  // that turn settles, so the card passes from one pass to its continuation
+  // without another turn claiming the thread in between.
+  projects.enqueue(threadId, async () => {
+    pendingRestarts.delete(form.resource);
+    const live = store.getProject(threadId);
+    if (!live || live.pendingDeletion) return;
+    const thread = await client.channels.fetch(threadId).catch(() => undefined);
+    if (!thread?.isThread()) return;
+    // The card message normally survives its own stop; a deleted one gets a
+    // fresh status message, exactly like restart recovery.
+    let status = await thread.messages.fetch(form.resource).catch(() => undefined);
+    if (status && status.author.id !== client.user?.id) status = undefined;
+    if (!status) status = await thread.send(renderStatusCard("🔁 Continuing the stopped turn with your instruction…")).catch(() => undefined);
+    if (!status) return;
+    await runUpdateTurn(threadId, isGame, [{ prompt: instruction, displayPrompt: instruction, images, author, requesterId, status, startedAt }], instructionOverride);
+  }).catch((error) => {
+    // The instruction never became a turn: say so on the card rather than
+    // leaving the "continuing…" handoff line as the last word.
+    pendingRestarts.delete(form.resource);
+    logError("discord.turn_restart_failed", error, { threadId, statusMessageId: form.resource });
+    void (async () => {
+      const thread = await client.channels.fetch(threadId).catch(() => undefined);
+      if (!thread?.isThread()) return;
+      const status = await thread.messages.fetch(form.resource).catch(() => undefined);
+      if (status) await setStatusMessage(status, "❌ The stopped turn could not be restarted. Its partial edits are preserved; send your instruction as a new message to continue.").catch(() => undefined);
+    })();
+  });
+  return true;
 }
 
 function scheduleUpdateDrain(threadId: string, isGame: boolean): void {
@@ -1001,14 +1092,14 @@ function composeMergedPrompt(head: string, rest: string[]): string {
   return `${head}\n\nWhile updates were queued, the user sent ${rest.length} more message${rest.length === 1 ? "" : "s"}: apply all of them in this same pass:\n${rest.join("\n")}`;
 }
 
-async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpdate[]): Promise<void> {
+async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpdate[], instructionOverride?: string): Promise<void> {
   const first = batch[0];
   const project = store.getProject(threadId);
   if (!project) {
     for (const entry of batch) await setStatusMessage(entry.status, "❌ This thread's project no longer exists.").catch(() => undefined);
     return;
   }
-  const progress = first.progress ?? new DiscordProgress(first.status, `${isGame ? "🎮 Updating" : "🛠️ Updating"} ${project.displayName}`);
+  const progress = first.progress ?? new DiscordProgress(first.status, `${isGame ? "🎮 Updating" : "🛠️ Updating"} ${project.displayName}`, first.startedAt);
   if (!first.progress) registerQuestionButtons(first.status, progress);
   const callback = withQuestionPings(progress.callback, threadId, first.requesterId);
   const merged = mergeUpdateBatch(batch);
@@ -1024,7 +1115,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
   }
   progress.enableStopButton();
   try {
-    const result = await projects.mutate(threadId, merged.prompt, false, callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id), merged.display ?? first.displayPrompt, first.requesterId);
+    const result = await projects.mutate(threadId, merged.prompt, false, callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id), merged.display ?? first.displayPrompt, first.requesterId, instructionOverride);
     await progress.close();
     if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
       await setStatusMessage(first.status, finishedWithErrorsMessageText(result));
@@ -1039,6 +1130,13 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
   } catch (error) {
     await progress.close();
     if (error instanceof TurnStoppedError) {
+      // A stop-and-restart steer already owns this card's next render: the
+      // interrupted pass must not post a stopped-turn outcome — the restart
+      // closure behind it continues the work here, edits preserved.
+      if (pendingRestarts.delete(first.status.id)) {
+        await setStatusMessage(first.status, "🔁 Stopped at your request — continuing this turn with the added instruction…").catch(() => undefined);
+        return;
+      }
       await setStatusMessage(
         first.status,
         "🛑 **Stopped at your request**: the agent's partial edits are preserved in the workspace. Reply here to build on them, or roll them back below.",

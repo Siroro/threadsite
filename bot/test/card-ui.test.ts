@@ -7,7 +7,7 @@ import {
 import { cardEdit, disableMessageControls, renderStatusCard, safeCardUrl } from "../src/card-ui.js";
 import { cardId, parseCardId } from "../src/card-actions.js";
 import { renderDetailPanel, renderQueuePanel, requestModal, textPages } from "../src/card-panels.js";
-import { renderProgressCard, progressDetailSections } from "../src/progress-view.js";
+import { renderProgressCard, progressDetailSections, usageDetailText } from "../src/progress-view.js";
 import { answerModal, questionControls, readAnswerForm, renderQuestionReview } from "../src/question-ui.js";
 import type { QuestionDraft } from "../src/card-state.js";
 import { buildingSnapshot } from "./fixtures/progress.js";
@@ -302,6 +302,19 @@ test("while both rates exist the live footer swaps the streaming rate with the t
     "outside a stream the average keeps its avg prefix");
 });
 
+test("usage details time the last root request and its first token", () => {
+  const timed = usageDetailText({ inputTokens: 82_300, outputTokens: 6_200, cacheTokens: 65_840, steps: 12,
+    lastRequestMs: 34_500, firstTokenMs: 17_300 });
+  assert.match(timed, /Timing \*\*last request 34\.5s · first token 17\.3s\*\*/);
+
+  const restored = usageDetailText({ inputTokens: 82_300, outputTokens: 6_200, steps: 12, lastRequestMs: 34_500 });
+  assert.match(restored, /Timing \*\*last request 34\.5s\*\*/, "a window still times the request");
+  assert.doesNotMatch(restored, /first token/, "a first token never seen streaming stays absent, never zero");
+
+  const bare = usageDetailText({ inputTokens: 82_300, outputTokens: 6_200, steps: 12 });
+  assert.doesNotMatch(bare, /Timing/, "no anchored step adds no timing row");
+});
+
 
 test("detail panels paginate every character and keep section choice stable", () => {
   const sections = [
@@ -360,6 +373,15 @@ test("the request modal carries the nonce route, prompt field, and bounded image
   assert.equal(upload.type, ComponentType.FileUpload);
   assert.equal(upload.max_values, 4);
   assert.equal(upload.required, false);
+  assert.equal(modal.toJSON().components.length, 2, "the queue form offers no restart checkbox");
+});
+
+test("the steer form adds an unchecked stop-and-restart checkbox", () => {
+  const modal = requestModal("turn", "nonce123", true);
+  const checkbox = modal.toJSON().components[2].component;
+  assert.equal(checkbox.type, ComponentType.Checkbox);
+  assert.equal(checkbox.custom_id, "restart");
+  assert.equal(checkbox.default, false, "a plain steer stays the default");
 });
 
 test("answer modals mix radio, checkbox, select and text controls per question", () => {

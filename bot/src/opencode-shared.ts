@@ -82,6 +82,10 @@ export interface TurnUsage {
   timedOutputTokens?: number;
   /** Output-token throughput across timed steps (tokens/second); undefined when no step was timed. */
   outputTokensPerSecond?: number;
+  /** Generation window of the turn's newest anchored root step; undefined when none was timed. */
+  lastRequestMs?: number;
+  /** That same step's start-to-first-token lag; live observation only — absent when never seen streaming. */
+  firstTokenMs?: number;
   /** Per-model token/cost breakdown across every step of the turn. */
   models: ModelUsage[];
   /** Root-versus-subagent split, when the turn's sessions were attributed. */
@@ -244,6 +248,11 @@ export function addUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): Tu
     ...(generationMs > 0 && timedOutputTokens > 0
       ? { generationMs, timedOutputTokens, outputTokensPerSecond: (timedOutputTokens * 1000) / generationMs }
       : {}),
+    // Last-request figures describe one specific step, so they travel as the
+    // newer turn's pair or the older's — a first-token lag never crosses onto
+    // another step's duration.
+    ...(b.lastRequestMs !== undefined ? { lastRequestMs: b.lastRequestMs, firstTokenMs: b.firstTokenMs }
+      : a.lastRequestMs !== undefined ? { lastRequestMs: a.lastRequestMs, firstTokenMs: a.firstTokenMs } : {}),
     models: mergeModelUsage([...(a.models ?? []), ...(b.models ?? [])]),
     ...(a.sessions || b.sessions ? { sessions: mergeSessionUsage([...(a.sessions ?? []), ...(b.sessions ?? [])]) } : {}),
   };
