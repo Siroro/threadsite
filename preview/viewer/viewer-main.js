@@ -227,6 +227,8 @@ async function openStage(url, title) {
 
   const state = { renderer, scene, camera, pivot, grid, radius: 3, theta: 0.9, phi: 1.1,
     target: new THREE.Vector3(), dragging: false, lastX: 0, lastY: 0, running: true, error: "" };
+  const stopDrag = () => { state.dragging = false; };
+  state.stopDrag = stopDrag;
   stageState = state;
   try {
     const gltf = await loader.loadAsync(url);
@@ -243,7 +245,7 @@ async function openStage(url, title) {
   }
   const canvas = renderer.domElement;
   canvas.addEventListener("pointerdown", (event) => { state.dragging = true; state.lastX = event.clientX; state.lastY = event.clientY; });
-  addEventListener("pointerup", () => { state.dragging = false; });
+  addEventListener("pointerup", stopDrag);
   canvas.addEventListener("pointermove", (event) => {
     if (!state.dragging) return;
     state.theta -= (event.clientX - state.lastX) * 0.008;
@@ -257,7 +259,7 @@ async function openStage(url, title) {
   }, { passive: false });
 
   const tick = () => {
-    if (stageState !== state) { disposeStage(state, grid); return; }
+    if (stageState !== state) { disposeStage(state); return; }
     if (!state.dragging) state.theta += 0.003;
     camera.position.set(
       state.target.x + state.radius * Math.sin(state.phi) * Math.sin(state.theta),
@@ -278,8 +280,12 @@ async function openStage(url, title) {
   requestAnimationFrame(tick);
 }
 
-function disposeStage(state, grid) {
-  state.scene.remove(grid);
+function disposeStage(state) {
+  // The pivot and grid ride the shared thumbnail scene; both must come off it,
+  // or every later stage and thumbnail render stacks the closed model on top.
+  state.scene.remove(state.pivot);
+  state.scene.remove(state.grid);
+  removeEventListener("pointerup", state.stopDrag);
   disposeTree(state.pivot);
   state.renderer.dispose();
 }
@@ -287,11 +293,13 @@ function disposeStage(state, grid) {
 for (const button of document.querySelectorAll("[data-close]")) {
   button.addEventListener("click", () => {
     document.getElementById(button.dataset.close).classList.remove("open");
-    stageState = undefined;
+    // Closing the lightbox must not tear down an open 3D stage.
+    if (button.dataset.close === "stage") stageState = undefined;
   });
 }
 addEventListener("keydown", (event) => {
-  if (event.key === "Escape") for (const id of ["lightbox", "stage"]) document.getElementById(id).classList.remove("open");
+  if (event.key !== "Escape") return;
+  for (const id of ["lightbox", "stage"]) document.getElementById(id).classList.remove("open");
   stageState = undefined;
 });
 

@@ -58,9 +58,32 @@ function pipeWithKeepalive(upstream, response, heartbeatMs) {
     trackEventBoundary(chunk, state);
   });
   upstream.on("end", stop);
-  upstream.on("error", stop);
+  cutClientOnUpstreamDeath(upstream, response, stop);
   response.on("close", stop);
   upstream.pipe(response);
+}
+
+/**
+ * A mid-stream upstream death (a socket reset, or a close that arrives before
+ * the response's 'end') is signalled on the response object, never on the
+ * ClientRequest — so the request-level error handler cannot see it. Without
+ * this, the client side stays half-open: an SSE listener idles on a dead
+ * stream until its own HTTP timeout instead of reconnecting promptly. A plain
+ * destroy() closes the socket without emitting an 'error' on our response.
+ */
+function cutClientOnUpstreamDeath(upstreamResponse, response, onDeath = () => {}) {
+  const die = () => {
+    onDeath();
+    if (!response.writableEnded && !response.destroyed) response.destroy();
+  };
+  upstreamResponse.on("error", die);
+  upstreamResponse.on("aborted", die);
+  // The safety net: 'close' always fires, and 'complete' is false exactly when
+  // the response ended before its body was through, whatever event sequence
+  // the socket failure produced.
+  upstreamResponse.on("close", () => {
+    if (!upstreamResponse.complete) die();
+  });
 }
 
 export function createMcpProxy({ upstreamHost = "127.0.0.1", upstreamPort, heartbeatMs = 45_000 }) {
@@ -99,6 +122,7 @@ export function createMcpProxy({ upstreamHost = "127.0.0.1", upstreamPort, heart
           pipeWithKeepalive(upstreamResponse, response, heartbeatMs);
           return;
         }
+        cutClientOnUpstreamDeath(upstreamResponse, response);
         upstreamResponse.pipe(response);
       });
       response.on("close", () => {

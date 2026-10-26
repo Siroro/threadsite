@@ -61,8 +61,10 @@ function openStream(port) {
     const request = http.get({ host: "127.0.0.1", port, path: "/mcp" }, (response) => {
       let text = "";
       let ended = false;
+      let closed = false;
       response.on("data", (chunk) => (text += chunk.toString("utf8")));
       response.on("end", () => (ended = true));
+      response.on("close", () => (closed = true));
       resolve({
         response,
         getText: () => text,
@@ -71,6 +73,11 @@ function openStream(port) {
           new Promise((done) => {
             if (ended) return done();
             response.once("end", () => done());
+          }),
+        whenClosed: () =>
+          new Promise((done) => {
+            if (closed) return done();
+            response.once("close", () => done());
           }),
       });
     });
@@ -182,6 +189,49 @@ test("aborting an SSE client releases the upstream stream", async () => {
     await waitFor(() => upstreamClosed, 2000).catch(() =>
       assert.fail("upstream stream was not released after client abort"),
     );
+  } finally {
+    await dispose();
+  }
+});
+
+test("an upstream that dies mid-stream cuts the SSE client instead of hanging it", async () => {
+  const { proxyPort, dispose } = await withProxy((request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write("event: ready\ndata: {}\n\n");
+    // Kill the connection without 'end': the proxy must tear the client side
+    // down so its listener reconnects rather than idling on a dead stream.
+    setTimeout(() => response.destroy(), 50);
+  }, 40);
+  try {
+    const stream = await openStream(proxyPort);
+    await waitFor(() => stream.getText().includes("event: ready"));
+    await Promise.race([
+      stream.whenClosed(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("client stream hung after upstream death")), 3000)),
+    ]);
+  } finally {
+    await dispose();
+  }
+});
+
+test("an upstream that dies mid-body cuts the plain client response", async () => {
+  const { proxyPort, dispose } = await withProxy((request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.write('{"partial":');
+    setTimeout(() => response.destroy(), 50);
+  });
+  try {
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        const request = http.get({ host: "127.0.0.1", port: proxyPort, path: "/mcp" }, (res) => {
+          res.on("end", resolve);
+          res.on("close", resolve);
+          res.on("error", resolve);
+        });
+        request.on("error", reject);
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("client response hung after upstream death")), 3000)),
+    ]);
   } finally {
     await dispose();
   }

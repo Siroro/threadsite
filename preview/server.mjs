@@ -199,8 +199,12 @@ export function createPreviewServer({ workspaceRoot, viewerDist } = {}) {
     res.setHeader("X-Content-Type-Options", "nosniff");
     if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405); res.end(); return; }
     if (req.url === "/health") { res.writeHead(200); res.end(req.method === "HEAD" ? undefined : "ok"); return; }
+    let pathname;
+    // A bad escape is the client's fault; answer 400 instead of letting the
+    // generic catch below classify the URIError as a 500.
+    try { pathname = decodeURIComponent((req.url || "/").split("?")[0]); }
+    catch { res.writeHead(400); res.end("Malformed percent-encoding in the request path."); return; }
     try {
-      const pathname = decodeURIComponent((req.url || "/").split("?")[0]);
       // The harness viewer bundle is project-independent and shared by every
       // __assets page; serve it from the built dist, never from a workspace.
       if (pathname === "/__viewer" || pathname.startsWith("/__viewer/")) {

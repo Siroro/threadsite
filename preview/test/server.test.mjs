@@ -357,3 +357,11 @@ test("preview emits imported glb models as hashed assets, matching production", 
   assert.equal(asset.headers.get("content-type"), "model/gltf-binary");
   assert.ok(Buffer.from(await asset.arrayBuffer()).equals(glb), "the emitted asset carries the original bytes");
 });
+
+test("malformed percent-encoding in the path is a client error, not a server failure", async (t) => {
+  const { origin } = await fixture(t);
+  for (const bad of ["/%", "/%zz", "/%E0%A4%A"]) {
+    const response = await fetch(`${origin}${bad}`);
+    assert.equal(response.status, 400, bad);
+  }
+});
