@@ -87,42 +87,42 @@ function contributorSection(project: ProjectRecord): string | undefined {
   ].filter(Boolean).join("\n");
 }
 
-// The cost roster stops here; a long-lived thread summarizes the rest in one line.
-const COST_MODEL_ROWS = 4;
+/** Model usage lines shared by the pinned card and the paginated project details. */
+export function lifetimeModelLines(usage: UsageTotal, includeCost = true): string[] {
+  return [...usage.models.values()]
+    .filter((entry) => entry.inputTokens || entry.outputTokens || entry.cost > 0 || (entry.catalogCost ?? 0) > 0)
+    .sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens))
+    .map((entry) => {
+      const cached = entry.cacheTokens > 0 && entry.inputTokens > 0
+        ? ` (${Math.round(Math.min(1, entry.cacheTokens / entry.inputTokens) * 100)}%)` : "";
+      const tokens = `in ${formatTokens(entry.inputTokens)}${cached} · out ${formatTokens(entry.outputTokens)}`;
+      if (!includeCost) return `\`${modelDisplayName(entry.model)}\`: ${tokens}`;
+      // A missing provider charge is not proof that a model was free.
+      const label = entry.cost > 0 ? estimateLabel(entry) : entry.unreported ? " (pricing unavailable)" : "";
+      const catalog = entry.reported && entry.catalogCost && entry.catalogCost > 0
+        ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : "";
+      return `\`${modelDisplayName(entry.model)}\`: ${tokens} · ${formatCost(entry.cost)}${label}${catalog}`;
+    });
+}
 
-/**
- * The project's lifetime spend: the ledgered total, then one line per model
- * that billed anything — its tokens, then its cost — provider-stripped like
- * every public model name. A surplus-served model also quotes what those
- * tokens would have cost at another provider's list rates. A project with
- * nothing priced returns nothing rather than a $0 field.
- */
+/** Pinned card summary; the project details page carries the complete roster. */
 function lifetimeCostLines(usage: UsageTotal): string | undefined {
-  if (!(usage.cost > 0 || usage.catalogCost > 0)) return undefined;
-  const rows = [...usage.models.values()]
-    .filter((entry) => entry.cost > 0 || (entry.catalogCost ?? 0) > 0)
-    .sort((a, b) => b.cost - a.cost || (b.catalogCost ?? 0) - (a.catalogCost ?? 0));
-  const lines = rows.slice(0, COST_MODEL_ROWS).map((entry) => {
-    // The bracket is the share of input served from cache — for an agent turn
-    // it dominates the token count, and it is what makes the spend so low.
-    const cached = entry.cacheTokens > 0 && entry.inputTokens > 0
-      ? ` (${Math.round(Math.min(1, entry.cacheTokens / entry.inputTokens) * 100)}%)` : "";
-    const tokens = entry.inputTokens || entry.outputTokens
-      ? `in ${formatTokens(entry.inputTokens)}${cached} · out ${formatTokens(entry.outputTokens)} · ` : "";
-    const spend = `${formatCost(entry.cost)}${estimateLabel(entry)}`;
-    const catalog = entry.reported && entry.catalogCost && entry.catalogCost > 0
-      ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : "";
-    return `\`${modelDisplayName(entry.model)}\`: ${tokens}${spend}${catalog}`;
-  });
-  // A total is real spend only when every line under it is a provider charge.
-  const allEstimated = rows.length > 0 && rows.every((entry) => estimateLabel(entry));
-  const anyCatalog = rows.some((entry) => entry.catalogEstimated === true || estimateLabel(entry) === " (catalog)");
-  const more = rows.length - lines.length;
-  return [
-    `**Total ${formatCost(usage.cost)}**${allEstimated ? anyCatalog ? " (catalog)" : " (est)" : ""}${usage.catalogCost > 0 && !allEstimated ? ` · ${formatCost(usage.catalogCost)} at catalog rates` : ""}`,
-    ...lines,
-    more > 0 ? `+${more} more model${more === 1 ? "" : "s"}` : undefined,
-  ].filter(Boolean).join("\n");
+  const lines = lifetimeModelLines(usage);
+  if (!lines.length) return undefined;
+  const priced = [...usage.models.values()].filter((entry) => entry.cost > 0 || (entry.catalogCost ?? 0) > 0);
+  const allEstimated = priced.length > 0 && priced.every((entry) => estimateLabel(entry));
+  const anyCatalog = priced.some((entry) => entry.catalogEstimated === true || estimateLabel(entry) === " (catalog)");
+  const unavailable = usage.cost === 0 && [...usage.models.values()].some((entry) => entry.unreported);
+  const total = `**Total ${formatCost(usage.cost)}**${unavailable ? " (pricing unavailable)" : allEstimated ? anyCatalog ? " (catalog)" : " (est)" : ""}${usage.catalogCost > 0 && !allEstimated ? ` · ${formatCost(usage.catalogCost)} at catalog rates` : ""}`;
+  const shown: string[] = [];
+  let length = total.length;
+  for (const line of lines) {
+    if (length + line.length + 1 > 850) break;
+    shown.push(line);
+    length += line.length + 1;
+  }
+  const more = lines.length - shown.length;
+  return [total, ...shown, more ? `+${more} more in project details` : ""].filter(Boolean).join("\n");
 }
 
 /**

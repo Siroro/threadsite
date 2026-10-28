@@ -744,9 +744,41 @@ test("the subagent lines name each child, its steps and its current tool", async
   } finally { await stop(); await progress.close(); }
 });
 
+test("reattachment keeps the subagent roster and step counts within the current turn", async () => {
+  const f = fixture();
+  const since = Date.now() - 5000;
+  const child = (id: string, parentID: string, created: number) => ({ ...f.session, id, parentID,
+    agent: "explore", time: { created, updated: created } });
+  const old = child("old", "ses_root", since - 20000);
+  const current = child("current", "ses_root", since + 1000);
+  const nested = child("nested", "current", since + 2000);
+  const reused = child("reused", "ses_root", since - 30000);
+  f.client.session.list = async () => ({ data: [f.session, old, current, nested, reused], cursor: {} });
+  const message = (id: string, created: number) => ({ ...assistant(id, 10, "Done"), time: { created, completed: created + 1 } });
+  const histories: Record<string, SessionMessageInfo[]> = {
+    old: [message("old-step", since - 10000)],
+    current: [message("old-replay", since - 10000), message("new-step", since + 1500)],
+    nested: [message("nested-step", since + 2500)],
+    reused: [message("old-reused", since - 10000), message("new-reused", since + 3000)],
+  };
+  f.client.message.list = async ({ sessionID }: { sessionID: string }) => ({ data: [...(histories[sessionID] ?? [])].reverse(), cursor: {} });
+  f.client.session.active = async () => ({ old: {}, current: {}, reused: {} });
+  const updates: any[] = [];
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => updates.push(update), since);
+  try {
+    for (let i = 0; i < 100 && !updates.some((update) => update.subagentHistory?.length === 3); i++) await new Promise((resolve) => setImmediate(resolve));
+    const update = updates.filter((item) => item.subagentHistory?.length === 3).at(-1);
+    assert.ok(update);
+    assert.deepEqual(update.subagentHistory.map((sub: any) => sub.id).sort(), ["current", "nested", "reused"]);
+    assert.equal(update.subagentHistory.find((sub: any) => sub.id === "current").steps, 1);
+    assert.equal(update.subagentHistory.find((sub: any) => sub.id === "reused").steps, 1);
+    assert.equal(update.activeSubagents, 2);
+  } finally { await stop(); }
+});
+
 test("reattachment reconciles active descendants and clears stale counts on status polls and detach", async () => {
   const f = fixture();
-  const child = { ...f.session, id: "ses_child", parentID: "ses_root" };
+  const child = { ...f.session, id: "ses_child", parentID: "ses_root", time: { created: Date.now(), updated: Date.now() } };
   f.client.session.list = async () => ({ data: [f.session, child,
     { ...child, id: "ses_foreign", location: { directory: "/other" } }], cursor: {} });
   let active: Record<string, unknown> = { ses_child: {}, ses_foreign: {} };

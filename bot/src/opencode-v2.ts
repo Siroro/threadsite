@@ -798,17 +798,25 @@ export class OpenCodeV2Harness {
               && !watch.children.has(child.id) && sameDirectory(child.location.directory, directory)) {
               watch.children.add(child.id); changed = true;
               if (isBackgroundAgent(child.agent)) watch.backgroundChildren.add(child.id);
-              const info = watch.subagents.get(child.id);
-              if (!info) watch.subagents.set(child.id, { agent: child.agent || "subagent", steps: new Set() });
-              else if (child.agent) info.agent = child.agent;
-              const childInfo = watch.subagents.get(child.id);
-              if (childInfo && child.model) childInfo.model = `${child.model.providerID}/${child.model.id}`;
+              // Track the full descendant graph for recovery, but build the
+              // visible roster only from sessions belonging to this turn.
+              const created = child.time?.created;
+              if (created !== undefined && created >= watch.since) {
+                watch.subagents.set(child.id, { agent: child.agent || "subagent", steps: new Set(), startedAt: created,
+                  ...(child.model ? { model: `${child.model.providerID}/${child.model.id}` } : {}) });
+              }
             }
           } while (changed);
           for (const child of watch.children) {
             const childHistory = await this.rawMessages(child);
             this.restoreUsage(watch, child, childHistory);
-            this.rehydrateSubagent(watch, child, directory, childHistory);
+            const currentHistory = childHistory.filter((message) => !watch.baseline.has(message.id) && message.time.created >= watch.since);
+            if (watch.subagents.has(child) || currentHistory.length) {
+              const session = sessions.find((entry) => entry.id === child);
+              if (!watch.subagents.has(child)) watch.subagents.set(child, { agent: session?.agent || "subagent", steps: new Set(),
+                ...(session?.model ? { model: `${session.model.providerID}/${session.model.id}` } : {}) });
+              this.rehydrateSubagent(watch, child, directory, currentHistory);
+            }
           }
           await this.restore(directory, sessionID, watch, callback, await this.rawMessages(sessionID));
           this.restoreSubagents(watch, await this.client.session.active(requestOptions()));
@@ -856,7 +864,7 @@ export class OpenCodeV2Harness {
   }
 
   private restoreSubagents(watch: Watch, active: Record<string, unknown>): void {
-    const next = new Set([...watch.children].filter((id) => active[id]));
+    const next = new Set([...watch.children].filter((id) => active[id] && watch.subagents.has(id)));
     for (const id of watch.children) {
       const info = watch.subagents.get(id);
       if (!info) continue;
@@ -1003,8 +1011,8 @@ export class OpenCodeV2Harness {
     if (event.type === "session.created" && (event.data.parentID === sessionID || watch.children.has(event.data.parentID ?? ""))) {
       watch.children.add(event.data.sessionID);
       const info = watch.subagents.get(event.data.sessionID);
-      if (!info) watch.subagents.set(event.data.sessionID, { agent: event.data.agent || "subagent", steps: new Set(), startedAt: event.created });
-      else if (event.data.agent) info.agent = event.data.agent;
+      if (!info && event.created >= watch.since) watch.subagents.set(event.data.sessionID, { agent: event.data.agent || "subagent", steps: new Set(), startedAt: event.created });
+      else if (info && event.data.agent) info.agent = event.data.agent;
       if (isBackgroundAgent(event.data.agent)) watch.backgroundChildren.add(event.data.sessionID);
       return;
     }
@@ -1012,17 +1020,23 @@ export class OpenCodeV2Harness {
     if (!("sessionID" in data) || (data.sessionID !== sessionID && !watch.children.has(data.sessionID))) return;
     const child = data.sessionID !== sessionID;
     if (child) {
-      if (event.type === "session.execution.started" || event.type === "session.step.started" || event.type === "session.tool.called"
-        || (event.type === "session.status" && event.data.status.type !== "idle")) watch.activeChildren.add(data.sessionID);
-      if (["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)
-        || (event.type === "session.status" && event.data.status.type === "idle")) watch.activeChildren.delete(data.sessionID);
-      const info = watch.subagents.get(data.sessionID);
-      if (info) {
-        if (watch.activeChildren.has(data.sessionID)) info.endedAt = undefined;
-        else if (["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)
-          || (event.type === "session.status" && event.data.status.type === "idle")) info.endedAt ??= "created" in event ? event.created : Date.now();
+      if (!watch.subagents.has(data.sessionID) && "created" in event && event.created >= watch.since
+        && (event.type === "session.execution.started" || event.type === "session.step.started" || event.type === "session.tool.called")) {
+        watch.subagents.set(data.sessionID, { agent: "subagent", steps: new Set(), startedAt: event.created });
       }
-      this.publishSubagents(watch);
+      if (watch.subagents.has(data.sessionID)) {
+        if (event.type === "session.execution.started" || event.type === "session.step.started" || event.type === "session.tool.called"
+          || (event.type === "session.status" && event.data.status.type !== "idle")) watch.activeChildren.add(data.sessionID);
+        if (["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)
+          || (event.type === "session.status" && event.data.status.type === "idle")) watch.activeChildren.delete(data.sessionID);
+        const info = watch.subagents.get(data.sessionID);
+        if (info) {
+          if (watch.activeChildren.has(data.sessionID)) info.endedAt = undefined;
+          else if (["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)
+            || (event.type === "session.status" && event.data.status.type === "idle")) info.endedAt ??= "created" in event ? event.created : Date.now();
+        }
+        this.publishSubagents(watch);
+      }
     }
     switch (event.type) {
       case "session.step.started":

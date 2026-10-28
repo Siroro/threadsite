@@ -37,7 +37,7 @@ import { ForgejoClient } from "./forgejo.js";
 import { getLogFile, log, logError, recentIncidents, recordIncident, serializeError } from "./logger.js";
 import { multiplayerRelayStatus } from "./multiplayer.js";
 import { OpenCodeHarness, formatTurnUsage, type PromptImage, type QuotaBlock } from "./opencode.js";
-import { renderProjectCard, type ProjectCardMessage, type ProjectCardState } from "./project-card.js";
+import { lifetimeModelLines, renderProjectCard, type ProjectCardMessage, type ProjectCardState } from "./project-card.js";
 import { DiscordProgress, type ProgressCallback } from "./progress.js";
 import { ProjectService, TurnStoppedError, type MutationResult, type StopTurnOutcome } from "./project.js";
 import { recoverPublishRoot } from "./publish.js";
@@ -2069,6 +2069,7 @@ async function projectDetailSections(project: ProjectRecord): Promise<PanelSecti
       !costsHidden() && (usage.cost > 0 || usage.catalogCost > 0)
         ? `Spend **${formatCost(usage.cost)}**${usage.catalogCost > 0 ? ` · **${formatCost(usage.catalogCost)}** at catalog rates` : ""}`
         : "",
+      ...lifetimeModelLines(usage, !costsHidden()),
       usage.lastTs ? `Last recorded ${usage.lastTs}` : "",
     ].filter(Boolean).join("\n") : "Provider usage counts unavailable." },
     { key: "qa", label: "Browser findings", text: project.browserQaFindings ? `Advisory · checked ${stamp(project.browserQaFindings.checkedAt) ?? project.browserQaFindings.checkedAt}\n\n${project.browserQaFindings.findings.map((finding) => `- ${finding}`).join("\n") || "No findings"}` : "No browser findings have been recorded." },

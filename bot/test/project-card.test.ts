@@ -7,7 +7,7 @@ import type { UsageTotal } from "../src/usage.js";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
-const { renderProjectCard } = await import("../src/project-card.js");
+const { lifetimeModelLines, renderProjectCard } = await import("../src/project-card.js");
 
 function record(overrides: Partial<ProjectRecord> = {}): ProjectRecord {
   return {
@@ -63,13 +63,12 @@ test("a live project links its site and repo and carries lifetime spend with mod
   assert.equal(card.buttons[0].url, "https://sites.example.invalid/koi-pond-arcade/");
   assert.equal(card.buttons[1].url, "https://git.example.invalid/site-koi-pond-arcade");
   // Spend is public on the pinned card: the ledgered total, then each model
-  // that billed anything with its tokens — a surplus model with its
-  // catalog-rate equivalent, an unpriced free-tier model not at all.
+  // that used tokens, including a free-tier model.
   const cost = card.fields!.find((field) => field.name === "Lifetime cost")!.value;
   assert.match(cost, /\*\*Total \$1\.25\*\* · \$9\.80 at catalog rates/);
   assert.match(cost, /`glm`: in 80k \(81%\) · out 6k · \$1\.20 · \$9\.80 at catalog rates/,
     "the bracket is the cached share of input; the billed figure stands alone");
-  assert.doesNotMatch(cost, /qwen/, "a model that billed nothing earns no line");
+  assert.match(cost, /`qwen-free`: in 2\.3k \(37%\) · out 200 · \$0/);
   // Provider routing still stays off the public card.
   assert.doesNotMatch(JSON.stringify(card), /opencode\/|surplus\//);
 });
@@ -105,13 +104,29 @@ test("a live market-rate estimate is marked (est), not (catalog)", () => {
   assert.doesNotMatch(cost, /catalog/);
 });
 
-test("a project where nothing was priced carries no cost field at all", () => {
+test("a project with only zero-cost usage still lists its model", () => {
   const card = cardView(renderProjectCard({ project: record(), usage: usage({
     cost: 0, catalogCost: 0,
     models: new Map([["opencode/qwen-free", { model: "opencode/qwen-free", turns: 1, inputTokens: 100, outputTokens: 10, cacheTokens: 0, cost: 0 }]]),
   }) }));
   assert.match(card.fields!.find((field) => field.name === "Lifetime usage")!.value, /4 turns/);
-  assert.equal(card.fields!.some((field) => field.name === "Lifetime cost"), false, "a $0 project shows no cost field");
+  const cost = card.fields!.find((field) => field.name === "Lifetime cost")!.value;
+  assert.match(cost, /`qwen-free`: in 100 · out 10 · \$0/);
+});
+
+test("model breakdown keeps zero-cost and unpriced models and handles long rosters", () => {
+  const models = new Map(Array.from({ length: 40 }, (_, i) => [`provider/model-${i}`, {
+    model: `provider/model-${i}`, turns: 1, inputTokens: 2000 - i, outputTokens: 100, cacheTokens: 0,
+    cost: i === 0 ? 1 : 0, ...(i === 1 ? { unreported: true as const } : {}),
+  }]));
+  const total = usage({ models, cost: 1, catalogCost: 0 });
+  const lines = lifetimeModelLines(total);
+  assert.equal(lines.length, 40);
+  assert.match(lines[1], /\$0 \(pricing unavailable\)/);
+  assert.doesNotMatch(lifetimeModelLines(total, false).join("\n"), /\$/);
+  const field = cardView(renderProjectCard({ project: record(), usage: total })).fields.find((item) => item.name === "Lifetime cost")!;
+  assert.match(field.value, /more in project details/);
+  assert.ok(field.value.length < 1024);
 });
 
 test("missing provider counts are shown as unavailable instead of claiming zero usage", () => {
