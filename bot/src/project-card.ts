@@ -92,11 +92,11 @@ const COST_MODEL_ROWS = 4;
 
 /**
  * The project's lifetime spend: the ledgered total, then one line per model
- * that billed anything, provider-stripped like every public model name. A
- * model served through the surplus provider quotes its billed figure plus,
- * when another provider's catalog lists the same model, what those tokens
- * would have cost at its list rates. A project with nothing priced returns
- * nothing rather than a $0 field.
+ * that billed anything — its tokens, then its cost — provider-stripped like
+ * every public model name. A model served through the surplus provider quotes
+ * its billed figure plus, when another provider's catalog lists the same
+ * model, what those tokens would have cost at its list rates. A project with
+ * nothing priced returns nothing rather than a $0 field.
  */
 function lifetimeCostLines(usage: UsageTotal): string | undefined {
   if (!(usage.cost > 0 || usage.catalogCost > 0)) return undefined;
@@ -104,10 +104,12 @@ function lifetimeCostLines(usage: UsageTotal): string | undefined {
     .filter((entry) => entry.cost > 0 || (entry.catalogCost ?? 0) > 0)
     .sort((a, b) => b.cost - a.cost || (b.catalogCost ?? 0) - (a.catalogCost ?? 0));
   const lines = rows.slice(0, COST_MODEL_ROWS).map((entry) => {
+    const tokens = entry.inputTokens || entry.outputTokens
+      ? `in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)} · ` : "";
     const spend = formatCost(entry.cost);
-    if (!entry.model.startsWith(`${SURPLUS_PROVIDER_ID}/`)) return `\`${modelDisplayName(entry.model)}\`: ${spend}`;
+    if (!entry.model.startsWith(`${SURPLUS_PROVIDER_ID}/`)) return `\`${modelDisplayName(entry.model)}\`: ${tokens}${spend}`;
     const catalog = entry.catalogCost && entry.catalogCost > 0 ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : "";
-    return `\`${modelDisplayName(entry.model)}\`: ${spend} on surplus${catalog}`;
+    return `\`${modelDisplayName(entry.model)}\`: ${tokens}${spend} on surplus${catalog}`;
   });
   const more = rows.length - lines.length;
   return [

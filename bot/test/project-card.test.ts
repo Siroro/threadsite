@@ -49,11 +49,11 @@ test("a live project links its site and repo and carries lifetime spend with mod
   assert.equal(card.buttons[0].url, "https://sites.example.invalid/koi-pond-arcade/");
   assert.equal(card.buttons[1].url, "https://git.example.invalid/site-koi-pond-arcade");
   // Spend is public on the pinned card: the ledgered total, then each model
-  // that billed anything — a surplus model with its catalog-rate equivalent,
-  // an unpriced free-tier model not at all.
+  // that billed anything with its tokens — a surplus model with its
+  // catalog-rate equivalent, an unpriced free-tier model not at all.
   const cost = card.fields!.find((field) => field.name === "Lifetime cost")!.value;
   assert.match(cost, /\*\*Total \$1\.25\*\* · \$9\.80 at catalog rates/);
-  assert.match(cost, /`glm`: \$1\.20 on surplus · \$9\.80 at catalog rates/);
+  assert.match(cost, /`glm`: in 80k · out 6k · \$1\.20 on surplus · \$9\.80 at catalog rates/);
   assert.doesNotMatch(cost, /qwen/, "a model that billed nothing earns no line");
   // Provider routing still stays off the public card.
   assert.doesNotMatch(JSON.stringify(card), /opencode\/|surplus\//);
