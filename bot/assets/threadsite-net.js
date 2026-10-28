@@ -156,7 +156,6 @@ export class ThreadSiteNet {
     entities;
     run;
     saves;
-    leaderboards;
     playerIdentity;
     storagePlayerId = null;
     storageRequests = new Map();
@@ -285,7 +284,6 @@ export class ThreadSiteNet {
         this.entities = new NetEntities();
         this.run = new NetRun(this);
         this.saves = new NetSaves(this);
-        this.leaderboards = new NetLeaderboards(this);
         this.worldSync = null;
         if (options.world)
             this.syncWorld(options.world);
@@ -301,7 +299,7 @@ export class ThreadSiteNet {
             return Promise.reject(new ThreadSiteNetError("Player storage requires an online relay. Keep solo play available.", "storage_offline"));
         }
         if (!this.storagePlayerId)
-            return Promise.reject(new ThreadSiteNetError("This relay or browser does not support player persistence.", "storage_unsupported"));
+            return Promise.reject(new ThreadSiteNetError("A private browser identity is required for player persistence.", "identity_unavailable"));
         if (this.storageRequests.size >= 16 || this.socket.bufferedAmount > MAX_BUFFERED_BYTES) {
             return Promise.reject(new ThreadSiteNetError("Too many outstanding requests or a busy connection.", "storage_busy"));
         }
@@ -748,7 +746,12 @@ export class ThreadSiteNet {
     handleFrame(frame, failTimer) {
         switch (frame.t) {
             case "welcome": {
-                this.storagePlayerId = frame.persistence?.version === 1 && typeof frame.persistence.playerId === "string" ? frame.persistence.playerId : null;
+                if (frame.v !== PROTOCOL_VERSION || frame.persistence?.version !== 1) {
+                    clearTimeout(failTimer);
+                    this.handleError({ t: "error", code: "bad_version", message: "The relay returned an unsupported protocol version." });
+                    return;
+                }
+                this.storagePlayerId = typeof frame.persistence.playerId === "string" ? frame.persistence.playerId : null;
                 this.id = String(frame.you);
                 this.cid = typeof frame.cid === "string" ? frame.cid : this.cid;
                 this.mode = frame.mode === "single" ? "single" : "rooms";
@@ -1142,19 +1145,6 @@ export class NetSaves {
     }
     delete(slot, revision) {
         return this.net.storageRequest({ op: "save.delete", slot, revision });
-    }
-}
-/** Public per-game personal bests. Scores are client-reported, not cheat-proof. */
-export class NetLeaderboards {
-    net;
-    constructor(net) {
-        this.net = net;
-    }
-    submit(board, score, options = {}) {
-        return this.net.storageRequest({ op: "board.submit", board, score, order: options.order ?? "desc" });
-    }
-    list(board, options = {}) {
-        return this.net.storageRequest({ op: "board.list", board, limit: options.limit ?? 10 });
     }
 }
 /**

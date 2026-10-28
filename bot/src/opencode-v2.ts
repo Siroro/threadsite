@@ -577,9 +577,8 @@ export class OpenCodeV2Harness {
     if (watch) this.restoreSubagents(watch, active);
     if (!active[sessionID]) await this.resumeBackgroundResult(sessionID, inbox);
     if (active[sessionID] || inbox.length || forms.length) return true;
-    // The persisted marker predates asset-forge; its call-ID list covers every
-    // background agent so a cancelled child stays settled across restarts.
-    return pendingBackgroundAgents(await this.rawMessages(sessionID), session.metadata?.threadsiteCancelledBrowserQa).size > 0;
+    // Cancelled background calls stay settled across restarts.
+    return pendingBackgroundAgents(await this.rawMessages(sessionID), session.metadata?.threadsiteCancelledBackgroundAgents).size > 0;
   }
 
   private async resumeBackgroundResult(sessionID: string, inbox: SessionInboxInfo[]): Promise<void> {
@@ -604,8 +603,7 @@ export class OpenCodeV2Harness {
     this.stopped.add(sessionID); // Mark before I/O so no concurrent watcher can resurrect it.
     let session = await this.session(directory, sessionID);
     const initialHistory = await this.rawMessages(sessionID);
-    // Same legacy marker key as isBusy: cancelled background-subagent call IDs.
-    const pending = pendingBackgroundAgents(initialHistory, session.metadata?.threadsiteCancelledBrowserQa);
+    const pending = pendingBackgroundAgents(initialHistory, session.metadata?.threadsiteCancelledBackgroundAgents);
     if (pending.size) {
       for (const childID of pending) {
         const child = await this.session(directory, childID);
@@ -628,13 +626,13 @@ export class OpenCodeV2Harness {
         await sleep(100);
       }
       session = await this.session(directory, sessionID);
-      const previous = session.metadata?.threadsiteCancelledBrowserQa;
+      const previous = session.metadata?.threadsiteCancelledBackgroundAgents;
       const cancelledCalls = initialHistory.flatMap((message) => message.type === "assistant" ? message.content.flatMap((part) =>
         part.type === "tool" && part.name === "subagent" && part.state.status === "completed"
           && typeof part.state.metadata?.sessionID === "string" && pending.has(part.state.metadata.sessionID)
           ? [`${message.id}:${part.id}`] : []) : []);
       await this.client.session.update({ sessionID, metadata: { ...session.metadata,
-        threadsiteCancelledBrowserQa: [...new Set([...(Array.isArray(previous) ? previous : []), ...cancelledCalls])] } }, requestOptions());
+        threadsiteCancelledBackgroundAgents: [...new Set([...(Array.isArray(previous) ? previous : []), ...cancelledCalls])] } }, requestOptions());
     }
     // Interrupt alone leaves inbox entries capable of starting another execution.
     for (const input of await this.client.session.inbox.list({ sessionID }, requestOptions())) {

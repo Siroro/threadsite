@@ -104,7 +104,7 @@ export class CollaborationService {
       || (wipePolicy !== undefined && !WIPE_POLICY_LABELS[wipePolicy])) {
       throw new CollaborationError("Select up to 25 Discord contributors and a supported editing mode.");
     }
-    try { this.services.store.setCollaboration(threadId, { mode, userIds, revision: current.revision + 1, ...(wipePolicy ? { wipePolicy } : {}) }, revision, ownerId(project, actor)); }
+    try { this.services.store.setCollaboration(threadId, { mode, userIds, revision: current.revision + 1, ...(wipePolicy ? { wipePolicy } : {}) }, revision); }
     catch (error) { throw new CollaborationError((error as Error).message); }
     this.services.changed(threadId);
   }
@@ -139,7 +139,7 @@ export class CollaborationService {
     const card = new ContainerBuilder().setAccentColor(0x5865f2);
     addCardHeader(card, "COLLABORATION", project.displayName, COLLABORATION_LABELS[settings.mode]);
     addCardField(card, "Who can contribute", [
-      ownerId(project, actor) ? `Owner: <@${ownerId(project, actor)}>` : "Owner not recorded; a server administrator can manage this project.",
+      ownerId(project) ? `Owner: <@${ownerId(project)}>` : "Owner not recorded; a server administrator can manage this project.",
       settings.userIds.length ? `Selected contributors: ${settings.userIds.map((id) => `<@${id}>`).join(", ")}` : "No selected contributors.",
       "The owner and server administrators can always manage the project. In approval mode, selected contributors edit directly and other requests wait for review.",
       ...(isGame ? [`Relay state reset (arena world & scores): ${WIPE_POLICY_LABELS[settings.wipePolicy ?? "owner"]} — the owner and server administrators always.`] : []),

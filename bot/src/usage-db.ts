@@ -41,41 +41,20 @@ export class UsageDatabase {
     await fs.mkdir(path.dirname(this.file), { recursive: true });
     const db = this.open();
     try {
-      const version = Number(db.prepare("PRAGMA user_version").get()?.user_version ?? 0);
-      if (version > 3) throw new Error(`Usage database schema version ${version} is newer than this bot supports`);
       db.exec(`PRAGMA journal_mode = WAL;
-        CREATE TABLE IF NOT EXISTS usage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS usage_deleted (thread_id TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS usage_entries (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, ts TEXT NOT NULL, started_at TEXT, record TEXT NOT NULL,
           generation_ms REAL, timed_output_tokens INTEGER,
           output_tokens_per_second REAL GENERATED ALWAYS AS (timed_output_tokens * 1000.0 / NULLIF(generation_ms, 0)) STORED);
         CREATE INDEX IF NOT EXISTS usage_by_thread_order ON usage_entries(thread_id, ts, id);
         CREATE INDEX IF NOT EXISTS usage_by_time_order ON usage_entries(ts, id);
-        DROP INDEX IF EXISTS usage_by_thread;
-        DROP INDEX IF EXISTS usage_by_time;
         CREATE INDEX IF NOT EXISTS usage_by_started_at ON usage_entries(started_at);
         CREATE TABLE IF NOT EXISTS usage_models (entry_id TEXT NOT NULL REFERENCES usage_entries(id) ON DELETE CASCADE,
           model TEXT NOT NULL, input_tokens INTEGER NOT NULL, cache_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
           cost REAL NOT NULL, generation_ms REAL, timed_output_tokens INTEGER,
           output_tokens_per_second REAL GENERATED ALWAYS AS (timed_output_tokens * 1000.0 / NULLIF(generation_ms, 0)) STORED, PRIMARY KEY(entry_id, model));
-        CREATE INDEX IF NOT EXISTS usage_models_by_model ON usage_models(model, entry_id);
-        PRAGMA user_version = 3;`);
+        CREATE INDEX IF NOT EXISTS usage_models_by_model ON usage_models(model, entry_id);`);
       UsageSummaries.create(db);
-      if (db.prepare("SELECT value FROM usage_meta WHERE key = 'thread_summary_v2'").get()) return;
-      db.exec("BEGIN IMMEDIATE");
-      try {
-        if (!db.prepare("SELECT value FROM usage_meta WHERE key = 'thread_summary_v2'").get()) {
-          // Summary tables are derived data: rebuild them atomically when the
-          // schema changes or an earlier setup was interrupted.
-          db.exec("DROP TABLE IF EXISTS usage_thread_totals; DROP TABLE IF EXISTS usage_thread_models");
-          UsageSummaries.create(db);
-          for (const row of db.prepare("SELECT record FROM usage_entries").iterate()) {
-            this.summaries.adjust(db, JSON.parse(String(row.record)) as UsageEntry, 1);
-          }
-          db.prepare("INSERT INTO usage_meta(key,value) VALUES ('thread_summary_v2','done')").run();
-        }
-        db.exec("COMMIT");
-      } catch (error) { db.exec("ROLLBACK"); throw error; }
     } finally { db.close(); }
   }
 

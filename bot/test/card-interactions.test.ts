@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import { test } from "node:test";
-import { PermissionFlagsBits, PermissionsBitField, type ModalBuilder } from "discord.js";
+import { PermissionFlagsBits, PermissionsBitField, type Message, type MessageEditOptions, type ModalBuilder } from "discord.js";
 import { testRecord, testRootSetup, trackStore } from "./fixtures/root.js";
+import { cardView } from "./fixtures/cards.js";
 import type { RequestFormState } from "../src/card-state.js";
 
 const root = testRootSetup("card-interactions");
 const { Store } = await import("../src/store.js");
 const { CardInteractions } = await import("../src/card-interactions.js");
 const { cardId } = await import("../src/card-actions.js");
+const { DiscordProgress } = await import("../src/progress.js");
 
 let serial = 0;
 
@@ -23,11 +25,12 @@ async function fixture() {
   store.patchCardState(threadId, turn, {});
   const submitted: RequestFormState[] = [];
   const wiped: string[] = [];
+  const stopped: string[] = [];
   const replies: unknown[] = [];
   const router = new CardInteractions({ store, questions: {} as never,
     projectSections: () => [], queue: () => ({ requests: [], preparing: 0 }), cancel: async () => "",
     submit: async (_interaction, _project, form) => { submitted.push(form); return "saved"; },
-    stop: async () => "", rollback: async () => {}, busy: async () => false, error: () => {},
+    stop: async (_threadId, statusId) => { stopped.push(statusId); return "stopped"; }, rollback: async () => {}, busy: async () => false, error: () => {},
     wipe: async (threadId, userId, scope) => {
       wiped.push(`${threadId}/${userId}:${[scope.world ? "world" : "", scope.scores ? "scores" : ""].filter(Boolean).join("+")}`);
       return "wipe done";
@@ -41,16 +44,29 @@ async function fixture() {
     showModal: async () => {}, reply: async (value: unknown) => { replies.push(value); }, editReply: async (value: unknown) => { replies.push(value); }, deferReply: async () => {}, deferUpdate: async () => {},
     ...overrides,
   });
-  return { store, threadId, turn, router, submitted, wiped, replies, interaction };
+  return { store, threadId, turn, router, submitted, wiped, stopped, replies, interaction };
 }
 
-/** Modal fields as discord.js reports them; "absent" simulates a pre-checkbox modal. */
-function modalFields(options: { prompt?: string; restart?: boolean | "absent" } = {}) {
+test("the live progress stop control routes to its turn and cannot stop a successor", async () => {
+  const f = await fixture();
+  const edits: MessageEditOptions[] = [];
+  const progress = new DiscordProgress({ id: f.turn, edit: async (payload: MessageEditOptions) => { edits.push(payload); } } as unknown as Message, "Updating");
+  progress.enableStopButton();
+  await progress.close();
+  const control = cardView(edits[0]).buttons.find((button) => button.custom_id?.startsWith("ts2:stop:"))!;
+  await f.router.handle(f.interaction(control.custom_id!, { isButton: () => true }));
+  assert.deepEqual(f.stopped, [f.turn]);
+  await f.store.patchProject(f.threadId, { pendingTurn: { id: "successor", prompt: "next", initial: false, startedAt: new Date().toISOString(), statusMessageId: "999999" } });
+  await f.router.handle(f.interaction(control.custom_id!, { isButton: () => true }));
+  assert.deepEqual(f.stopped, [f.turn]);
+});
+
+/** Modal fields as discord.js reports them. */
+function modalFields(options: { prompt?: string; restart?: boolean } = {}) {
   return {
     getTextInputValue: (id: string) => (id === "prompt" ? options.prompt ?? "" : ""),
     getUploadedFiles: () => null,
     getCheckbox: (id: string) => {
-      if (options.restart === "absent") throw new Error(`No modal component with id: ${id}`);
       return options.restart ?? false;
     },
   };
@@ -72,11 +88,10 @@ test("a checked restart checkbox reaches the submit service flagged on the steer
   assert.equal(f.submitted[0].restart, true, "the restart choice rides the claimed form, not just the store");
 });
 
-test("unchecked and pre-checkbox steer forms stay ordinary steers", async () => {
+test("unchecked steer forms stay ordinary steers", async () => {
   const f = await fixture();
   await steerSubmission(f, modalFields({ prompt: "also add penguins", restart: false }));
-  await steerSubmission(f, modalFields({ prompt: "and a seal", restart: "absent" }));
-  assert.deepEqual(f.submitted.map((form) => form.restart), [false, false], "legacy modals submit as unchecked rather than failing");
+  assert.equal(f.submitted[0].restart, false);
 });
 
 test("queue-form submissions never carry the restart flag", async () => {

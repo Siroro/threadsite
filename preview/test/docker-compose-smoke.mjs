@@ -22,7 +22,7 @@ for (const dir of [workspace, sites, state, hostConfig]) await fs.mkdir(dir);
 await fs.writeFile(path.join(hostConfig, "providers.json"), JSON.stringify({ providers: { surplus: {
   settings: { baseURL: "http://fixture:7070/v1", apiKey: "fixture-only" },
   models: { "compose-vision": {}, "compose-text": {} },
-} }, catalogs: { surplus: { contextCap: 100000 } } }));
+} }, catalogs: { surplus: {} }, contextCaps: { surplus: 100000 } }));
 const opencodeEnv = {
   XDG_DATA_HOME: "/opencode-data", OPENCODE_SERVER_PASSWORD: "fixture-only",
   OPENCODE_MAX_STEPS: "50",

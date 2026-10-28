@@ -45,8 +45,8 @@ export function cardView(message: Pick<MessageEditOptions, "components">) {
 
 export function assertV2(message: MessageEditOptions): void {
   assert.ok(Number(message.flags) & MessageFlags.IsComponentsV2);
-  assert.ok(!message.content, "V2 has no legacy message content");
-  assert.ok(!message.embeds?.length, "V2 has no legacy embeds");
+  assert.ok(!message.content, "V2 has no message content");
+  assert.ok(!message.embeds?.length, "V2 has no embeds");
   assert.deepEqual(message.allowedMentions, { parse: [] });
   const components = cardComponents(message);
   assert.equal(components[0].type, ComponentType.Container);

@@ -1,5 +1,6 @@
 import type { Message } from "discord.js";
 import { cardEdit } from "./card-ui.js";
+import { cardId } from "./card-actions.js";
 import { questionControls } from "./question-ui.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
@@ -252,16 +253,14 @@ export class DiscordProgress {
     if (persistence.load) {
       this.narration = persistence.load.narration ?? [];
       this.reasoning = persistence.load.reasoning ?? [];
-      // Restored history keeps its commands; the pick-list also drops fields
-      // older saved cards may still carry.
-      this.history.push(...persistence.load.history.map(({ text, detail, at, key, command }) => ({ text, detail, at, key, command })));
+      this.history.push(...persistence.load.history);
       this.thought = persistence.load.thought;
       this.plan = persistence.load.plan;
       this.files = persistence.load.files;
       this.context = persistence.load.context;
       this.metrics = persistence.load.metrics;
       this.subagentHistory = persistence.load.subagentHistory ?? [];
-      this.questionPin = persistence.load.questionPin ? { ...persistence.load.questionPin, requestID: persistence.load.questionPin.requestID ?? "restored" } : undefined;
+      this.questionPin = persistence.load.questionPin ? { ...persistence.load.questionPin } : undefined;
       this.questionStatus = persistence.load.questionStatus;
     }
   }
@@ -305,7 +304,7 @@ export class DiscordProgress {
   }
 
   /** Show a Stop button under the live status while the turn runs; the final outcome edit clears it. */
-  enableStopButton(customId = "threadsite:stop"): void {
+  enableStopButton(customId = cardId("stop", this.message.id)): void {
     this.stopCustomId = customId;
     this.schedule();
   }

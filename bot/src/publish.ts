@@ -1125,7 +1125,7 @@ export async function publishIndex(projects: ProjectRecord[], repoUrl: (repo: st
       try {
         const version = JSON.parse(rawVersion ?? "null") as { publishedAt?: string } | null;
         if (version?.publishedAt && Number.isFinite(Date.parse(version.publishedAt))) updatedAt = date(version.publishedAt);
-      } catch { /* Legacy publications can lack deployment metadata. */ }
+      } catch { /* Keep the gallery available if deployment metadata is unreadable. */ }
       return {
         id: crypto.createHash("sha256").update(`gallery:${project.threadId}`).digest("hex").slice(0, 20),
         name: project.displayName.slice(0, 180), kind,

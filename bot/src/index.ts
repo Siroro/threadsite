@@ -35,7 +35,6 @@ import { approvalCard, CollaborationService, installApprovedUploads } from "./co
 import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
 import { getLogFile, log, logError, recentIncidents, recordIncident, serializeError } from "./logger.js";
-import { discardLegacyUsageLedger } from "./maintenance.js";
 import { multiplayerRelayStatus } from "./multiplayer.js";
 import { OpenCodeHarness, formatTurnUsage, type PromptImage, type QuotaBlock } from "./opencode.js";
 import { lifetimeModelLines, renderProjectCard, type ProjectCardMessage, type ProjectCardState } from "./project-card.js";
@@ -72,9 +71,6 @@ const botVersion = await fs
   .catch(() => undefined);
 
 const store = await Store.open(config.stateDbFile, config.defaultModel);
-// The usage ledger lives in that same database; a standalone ledger file from
-// an older bot is superseded and gets discarded, not migrated.
-await discardLegacyUsageLedger();
 // A publish that died between its two renames leaves the live site missing
 // with its content in a .backup-* directory; restore it before any turn can
 // republish over the gap.
@@ -230,18 +226,6 @@ const cardInteractions = new CardInteractions({
 
 function unregisterQuestionButtons(statusMessageId: string | undefined): void {
   if (statusMessageId) liveProgress.delete(statusMessageId);
-}
-
-// customId "q:<requestID>:<questionIndex>:<optionIndex>" answers the agent's
-// question; "qskip:<requestID>" rejects it so the agent proceeds on its own
-// judgment. Option indices resolve against the DiscordProgress copy of the
-// question, which also carries each option's real label.
-async function handleQuestionButton(interaction: ButtonInteraction): Promise<void> {
-  const [kind, revision, questionIndex, optionIndex] = interaction.customId.split(":");
-  const pending = revision ? liveProgress.get(interaction.message.id)?.pendingQuestion(revision) : undefined;
-  const action = kind === "qskip" ? "skip" : pending?.questions.length === 1 && !pending.questions[0].multiple && questionIndex === "0" && /^\d+$/.test(optionIndex ?? "") ? "answer" : "review";
-  if (!revision) throw new Error("That question is no longer pending.");
-  await cardInteractions.handle(interaction, cardId(action, interaction.message.id, revision, action === "answer" ? optionIndex! : "0"));
 }
 
 client.once(Events.ClientReady, (ready) => {
@@ -404,7 +388,7 @@ async function recheckExternalPush(threadId: string): Promise<void> {
   }
 }
 
-/** Backfill: make sure every existing project's repo has the push webhook. */
+/** Retry webhook registration after service outages or configuration changes. */
 async function ensureExistingProjectWebhooks(): Promise<void> {
   const secret = store.getWebhookSecret();
   if (!secret) return;
@@ -623,18 +607,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.channel?.isThread()) {
         const project = store.getProject(interaction.channel.id);
         if (project) authorizeCard(project, interactionActor(interaction, config.adminUserIds.has(interaction.user.id)),
-          interaction.customId.startsWith("q:") || interaction.customId.startsWith("qskip:") ? "answer" : "stop");
+          "stop");
       }
-      if (interaction.customId.startsWith("q:") || interaction.customId.startsWith("qskip:")) {
-        await handleQuestionButton(interaction);
-      } else if (interaction.customId === "threadsite:stop") {
-        await handleStopButton(interaction);
-      } else if (interaction.customId.startsWith("threadsite:qcancel:")) {
-        await handleQueueCancelButton(interaction);
-      } else if (interaction.customId.startsWith("threadsite:ext")) {
+      if (interaction.customId.startsWith("threadsite:ext")) {
         await handleExternalPushButton(interaction);
-      } else if (interaction.customId === "threadsite:rollback" || interaction.customId === "threadsite:keep") {
-        await handleFailureButton(interaction);
       } else {
         await interaction.reply({ ...renderStatusCard("That control is no longer supported. Use the current project card."), flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
       }
@@ -766,7 +742,6 @@ client.on(Events.MessageCreate, async (message) => {
     userId: message.author.id,
     admin: config.adminUserIds.has(message.author.id) || (message.member?.permissions.has(PermissionFlagsBits.ManageGuild) ?? false),
     canSend: message.channel.permissionsFor(message.author)?.has(PermissionFlagsBits.SendMessagesInThreads) ?? true,
-    ...(message.channel.ownerId && message.channel.ownerId !== client.user?.id ? { threadOwnerId: message.channel.ownerId } : {}),
   };
   const access = contributionAccess(project, actor);
   if (access === "denied") {
@@ -777,7 +752,7 @@ client.on(Events.MessageCreate, async (message) => {
   // Acknowledge first: the capability check below calls the agent service,
   // whose HTTP timeouts are disabled by design, so a wedged service would
   // otherwise leave the message with no reply at all.
-  const reviewerId = ownerId(project, actor);
+  const reviewerId = ownerId(project);
   const status = await message.reply(access === "approval" ? {
     content: `⏳ ${reviewerId ? `<@${reviewerId}> · ` : ""}Saving a request for owner review…`,
     allowedMentions: { parse: [], users: reviewerId ? [reviewerId] : [], repliedUser: false },
@@ -794,7 +769,7 @@ client.on(Events.MessageCreate, async (message) => {
       await setStatusMessage(status, `🚫 ${error instanceof CollaborationError ? error.message : "Could not save this request for approval. Please try again."}`).catch(() => undefined);
       return;
     }
-    await status.edit({ ...cardEdit(approvalCard(project, status.id, ownerId(project, actor))), allowedMentions: { parse: [], users: ownerId(project, actor) ? [ownerId(project, actor)!] : [] } }).catch(() => undefined);
+    await status.edit({ ...cardEdit(approvalCard(project, status.id, ownerId(project))), allowedMentions: { parse: [], users: ownerId(project) ? [ownerId(project)!] : [] } }).catch(() => undefined);
     return;
   }
 
@@ -899,14 +874,14 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
   if (contributionAccess(current, actor) === "approval") {
     const channel = interaction.channel;
     if (!channel || !("send" in channel)) throw new CollaborationError("The project thread is unavailable.");
-    const reviewerId = ownerId(current, actor);
+    const reviewerId = ownerId(current);
     const status = await channel.send({ ...renderStatusCard(`⏳ ${reviewerId ? `<@${reviewerId}> · ` : ""}Saving a request for owner review…`),
       allowedMentions: { parse: [], users: reviewerId ? [reviewerId] : [] },
     });
     try {
       await collaboration.request(project.threadId, actor, status.id, prompt, commitAuthorIdentity({ globalName: interaction.user.globalName, username: interaction.user.username, id: interaction.user.id }), attachments);
       store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: status.id });
-      await status.edit({ ...cardEdit(approvalCard(current, status.id, ownerId(current, actor))), allowedMentions: { parse: [], users: ownerId(current, actor) ? [ownerId(current, actor)!] : [] } }).catch(() => undefined);
+      await status.edit({ ...cardEdit(approvalCard(current, status.id, ownerId(current))), allowedMentions: { parse: [], users: ownerId(current) ? [ownerId(current)!] : [] } }).catch(() => undefined);
     } catch (error) { await setStatusMessage(status, "🚫 Could not save this request for approval. Please try again.").catch(() => undefined); throw error; }
     return "Your request is saved and waiting for the thread owner's approval. It has not been sent to the agent.";
   }
@@ -1154,7 +1129,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
       await setStatusMessage(
         first.status,
         "🛑 **Stopped at your request**: the agent's partial edits are preserved in the workspace. Reply here to build on them, or roll them back below.",
-        (await offerEditsChoice(store.getProject(threadId), error)) ? [failureEditsRow()] : undefined,
+        (await offerEditsChoice(store.getProject(threadId), error)) ? [failureEditsRow(first.status.id)] : undefined,
       );
       return;
     }
@@ -1168,7 +1143,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
     await setStatusMessage(
       first.status,
       `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Update failed · reference \`${incident.id}\`. The previous published version is unchanged.`,
-      (await offerEditsChoice(project, error)) ? [failureEditsRow()] : undefined,
+      (await offerEditsChoice(project, error)) ? [failureEditsRow(first.status.id)] : undefined,
     );
   } finally {
     void recheckExternalPush(threadId);
@@ -1345,7 +1320,7 @@ async function startProjectThread(
       await setStatusMessage(
         status,
         `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ ${options.outcome === "site" ? "Initial generation" : "Initial game generation"} failed · reference \`${incident.id}\`. ${retry}`,
-        (await offerEditsChoice(project, error)) ? [failureEditsRow()] : undefined,
+        (await offerEditsChoice(project, error)) ? [failureEditsRow(status.id)] : undefined,
       );
     } finally {
       // A thread deleted mid-setup must not leave a repository and a live
@@ -2369,10 +2344,10 @@ async function publishTurnResult(status: Message, result: MutationResult, isGame
   }
 }
 
-function failureEditsRow(): ActionRowBuilder<ButtonBuilder> {
+function failureEditsRow(resource: string): ActionRowBuilder<ButtonBuilder> {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId("threadsite:rollback").setLabel("Rollback edits").setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId("threadsite:keep").setLabel("Keep edits").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(cardId("rollback", resource)).setLabel("Rollback edits").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(cardId("keep", resource)).setLabel("Keep edits").setStyle(ButtonStyle.Secondary),
   );
 }
 
@@ -2398,12 +2373,6 @@ async function setStatusMessage(
     store.patchCardState<StoredTurnCard & { failureVersion?: string }>(project.threadId, status.id, {
       closed: true, failureVersion: components?.length ? `${project.lastCommit ?? ""}/${project.lastTurnAt ?? ""}` : undefined,
     });
-    // Old failure rows are upgraded in place to versioned controls scoped to
-    // this outcome, including an explicit confirmation before discarding edits.
-    for (const row of components ?? []) for (const control of row.components) {
-      if ("custom_id" in control.data && control.data.custom_id === "threadsite:rollback") control.setCustomId(cardId("rollback", status.id));
-      if ("custom_id" in control.data && control.data.custom_id === "threadsite:keep") control.setCustomId(cardId("keep", status.id)).setStyle(ButtonStyle.Secondary);
-    }
   }
   try {
     await status.edit(cardEdit(payload));
@@ -2498,24 +2467,6 @@ function stopOutcomeText(outcome: StopTurnOutcome): string {
   return "No model turn is currently running in this thread. Waiting messages, if any, can be cancelled with `/site queue`.";
 }
 
-// Stop on a live status message: abort the running agent turn but keep the
-// session, workspace, and history — the gentle alternative to /site reset.
-// Works from the moment the button renders (queued turns report "nothing to
-// stop" until the model actually starts).
-async function handleStopButton(interaction: ButtonInteraction): Promise<void> {
-  if (!interaction.inGuild() || !interaction.channel?.isThread()) {
-    throw new Error("This button only works inside a project thread.");
-  }
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  if (store.getProject(interaction.channel.id)?.pendingTurn?.statusMessageId !== interaction.message.id) {
-    await interaction.editReply(cardEdit(renderStatusCard("That turn is no longer running. Use the current turn's controls.")));
-    return;
-  }
-  const outcome = await projects.stopTurn(interaction.channel.id, interaction.message.id);
-  await interaction.editReply(cardEdit(renderStatusCard(stopOutcomeText(outcome))));
-  if (outcome.stopped) log("info", "discord.stop_button_used", { threadId: interaction.channel.id, userId: interaction.user.id });
-}
-
 /**
  * `/site queue`: make the backlog visible and withdraw individual waiting
  * messages. Entries a drain has already taken are reported separately — they
@@ -2526,18 +2477,6 @@ async function showQueue(interaction: ChatInputCommandInteraction, threadId: str
   const requests = all.filter((entry) => !inFlightQueuedRequests.has(entry.statusMessageId));
   const preparing = all.length - requests.length;
   await interaction.editReply(cardEdit(renderQueuePanel(threadId, requests, preparing)));
-}
-
-/** Remove one waiting request from the in-memory batch and the durable queue. */
-async function handleQueueCancelButton(interaction: ButtonInteraction): Promise<void> {
-  if (!interaction.inGuild() || !interaction.channel?.isThread()) {
-    throw new Error("This button only works inside a project thread.");
-  }
-  const statusId = interaction.customId.slice("threadsite:qcancel:".length);
-  if (!/^\d{5,25}$/.test(statusId)) throw new Error("That queue entry id is invalid.");
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-  await interaction.editReply(cardEdit(renderStatusCard(await cancelQueueRequest(interaction.channel.id, statusId))));
 }
 
 async function cancelQueueRequest(threadId: string, statusId: string): Promise<string> {
@@ -2572,10 +2511,6 @@ async function cancelQueueRequest(threadId: string, statusId: string): Promise<s
   }
   const preview = truncate((stored.prompt ?? memory?.prompt ?? "").replace(/\s+/g, " ").trim(), 120);
   return `🚫 Cancelled${preview ? `: **${preview}**` : " that request"} · **${remaining}** still queued.`;
-}
-
-async function handleFailureButton(interaction: ButtonInteraction): Promise<void> {
-  await cardInteractions.handle(interaction, cardId(interaction.customId === "threadsite:rollback" ? "rollback" : "keep", interaction.message.id));
 }
 
 /**

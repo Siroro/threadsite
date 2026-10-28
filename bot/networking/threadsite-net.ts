@@ -29,9 +29,6 @@ export interface NetWorldSnapshot<T = any> {
 export interface NetPlayerStateEntry<T = any> { id: string; cid: string | null; state: T }
 export interface NetPresenceEntry<T = any> { id: string; cid: string | null; state: T }
 export interface NetSave<T = unknown> { value: T | null; revision: number; updatedAt: number | null }
-export interface NetScore { playerId: string; name: string; score: number; updatedAt: number }
-export type NetScoreOrder = "asc" | "desc";
-export interface NetLeaderboard { order: NetScoreOrder | null; entries: NetScore[] }
 
 /** Engine-neutral 2D/3D transform. Extra game fields pass through unchanged. */
 export interface NetTransform {
@@ -312,7 +309,6 @@ export class ThreadSiteNet {
   readonly entities: NetEntities;
   readonly run: NetRun;
   readonly saves: NetSaves;
-  readonly leaderboards: NetLeaderboards;
   private readonly playerIdentity: { token: string | null; persistent: boolean };
   private storagePlayerId: string | null = null;
   private readonly storageRequests = new Map<string, { resolve: (value: any) => void; reject: (error: ThreadSiteNetError) => void; timer: Timer }>();
@@ -437,7 +433,6 @@ export class ThreadSiteNet {
     this.entities = new NetEntities();
     this.run = new NetRun(this);
     this.saves = new NetSaves(this);
-    this.leaderboards = new NetLeaderboards(this);
     this.worldSync = null;
     if (options.world) this.syncWorld(options.world);
     this.connectSocket();
@@ -453,7 +448,7 @@ export class ThreadSiteNet {
     if (this.manuallyClosed || this.status !== NET_STATUS.ONLINE || this.socket?.readyState !== WebSocket.OPEN) {
       return Promise.reject(new ThreadSiteNetError("Player storage requires an online relay. Keep solo play available.", "storage_offline"));
     }
-    if (!this.storagePlayerId) return Promise.reject(new ThreadSiteNetError("This relay or browser does not support player persistence.", "storage_unsupported"));
+    if (!this.storagePlayerId) return Promise.reject(new ThreadSiteNetError("A private browser identity is required for player persistence.", "identity_unavailable"));
     if (this.storageRequests.size >= 16 || this.socket.bufferedAmount > MAX_BUFFERED_BYTES) {
       return Promise.reject(new ThreadSiteNetError("Too many outstanding requests or a busy connection.", "storage_busy"));
     }
@@ -826,7 +821,12 @@ export class ThreadSiteNet {
   private handleFrame(frame: WireFrame, failTimer: Timer): void {
     switch (frame.t) {
       case "welcome": {
-        this.storagePlayerId = frame.persistence?.version === 1 && typeof frame.persistence.playerId === "string" ? frame.persistence.playerId : null;
+        if (frame.v !== PROTOCOL_VERSION || frame.persistence?.version !== 1) {
+          clearTimeout(failTimer);
+          this.handleError({ t: "error", code: "bad_version", message: "The relay returned an unsupported protocol version." });
+          return;
+        }
+        this.storagePlayerId = typeof frame.persistence.playerId === "string" ? frame.persistence.playerId : null;
         this.id = String(frame.you); this.cid = typeof frame.cid === "string" ? frame.cid : this.cid;
         this.mode = frame.mode === "single" ? "single" : "rooms";
         this.room = this.mode === "rooms" && typeof frame.room === "string" ? frame.room : null;
@@ -1079,17 +1079,6 @@ export class NetSaves {
   }
   delete(slot: string, revision: number): Promise<NetSave<null>> {
     return this.net.storageRequest({ op: "save.delete", slot, revision });
-  }
-}
-
-/** Public per-game personal bests. Scores are client-reported, not cheat-proof. */
-export class NetLeaderboards {
-  constructor(private readonly net: ThreadSiteNet) {}
-  submit(board: string, score: number, options: { order?: NetScoreOrder } = {}): Promise<NetScore> {
-    return this.net.storageRequest({ op: "board.submit", board, score, order: options.order ?? "desc" });
-  }
-  list(board: string, options: { limit?: number } = {}): Promise<NetLeaderboard> {
-    return this.net.storageRequest({ op: "board.list", board, limit: options.limit ?? 10 });
   }
 }
 

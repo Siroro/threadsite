@@ -7,7 +7,7 @@ export function buildingSnapshot(): ProgressSnapshot {
     // A single request is not echoed on the card; see mergedSnapshot().
     context: { siteUrl: "https://sites.example.invalid/sumo-shove/", repoUrl: "https://git.example.invalid/site-sumo-shove" },
     thought: "The arena now has crowd reactions. I’m connecting the leaderboard to the shared match state.",
-    files: { files: 6, added: 2, modified: 4, deleted: 0, additions: 184, deletions: 37, paths: ["site/src/player.ts", "site/src/leaderboard.ts", "site/css/main.css", "site/src/arena.ts", "site/index.html", "site/assets/crowd.svg"] },
+    files: { files: 6, added: 2, modified: 4, deleted: 0, additions: 184, deletions: 37, entries: ["site/src/player.ts", "site/src/leaderboard.ts", "site/css/main.css", "site/src/arena.ts", "site/index.html", "site/assets/crowd.svg"].map((path) => ({ path })) },
     metrics: { contextTokens: 28400, contextLimit: 100000, inputTokens: 82300, outputTokens: 6200, cacheTokens: 65840, steps: 12, outputTokensPerSecond: 54 },
     plan: [
       { content: "Inspect the arena and multiplayer state", status: "completed" },

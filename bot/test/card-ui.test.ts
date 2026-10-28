@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, ComponentType,
-  MessageFlags, MessagePayload, type Message, type ModalSubmitInteraction, type TextBasedChannel,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType,
+  type Message, type ModalSubmitInteraction,
 } from "discord.js";
 import { cardEdit, disableMessageControls, renderStatusCard, safeCardUrl } from "../src/card-ui.js";
 import { cardId, parseCardId } from "../src/card-actions.js";
@@ -17,22 +17,6 @@ process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { DiscordProgress } = await import("../src/progress.js");
 const { turnPanelSections } = await import("../src/card-interactions.js");
-
-test("the Discord wire payload clears legacy content and embeds when a status becomes V2", () => {
-  const client = new Client({ intents: [] });
-  const target = { client } as TextBasedChannel;
-  const card = renderProgressCard(buildingSnapshot(), { stopCustomId: "threadsite:stop" });
-  const create = MessagePayload.create(target, card).resolveBody().body!;
-  assert.equal(create.flags, MessageFlags.IsComponentsV2);
-  assert.equal(create.content, undefined);
-  assert.equal(create.embeds, undefined);
-  const edit = MessagePayload.create(target, cardEdit(card)).resolveBody().body!;
-  assert.equal(edit.flags, MessageFlags.IsComponentsV2);
-  assert.equal(edit.content, "");
-  assert.deepEqual(edit.embeds, []);
-  assert.equal(edit.components![0].type, ComponentType.Container);
-  assert.deepEqual(edit.allowed_mentions, { parse: [] });
-});
 
 test("simple questions answer with quick secondary buttons; long lists use a select", () => {
   const request = (options: number, multiple = false): import("../src/progress.js").AgentQuestion => ({
@@ -61,14 +45,14 @@ test("simple questions answer with quick secondary buttons; long lists use a sel
 
 test("failure, reset, merge and cancellation outcomes replace live controls without leaving V2", () => {
   const choices = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId("threadsite:rollback").setLabel("Rollback edits").setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId("threadsite:keep").setLabel("Keep edits").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(cardId("rollback", "turn")).setLabel("Rollback edits").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(cardId("keep", "turn")).setLabel("Keep edits").setStyle(ButtonStyle.Success),
   );
   for (const text of ["❌ Turn failed", "🛑 Stopped by reset", "🔗 Merged into the update above", "🚫 Cancelled"]) {
     const message = cardEdit(renderStatusCard(text, text.includes("failed") ? [choices] : []));
     assertV2(message);
     assert.equal(message.content, null);
-    assert.equal(cardView(message).buttons.some((button) => button.custom_id === "threadsite:stop"), false);
+    assert.equal(cardView(message).buttons.some((button) => button.custom_id === cardId("stop", "turn")), false);
     const disabled = disableMessageControls(message as unknown as Pick<Message, "components">);
     assert.equal(cardView(disabled).text, cardView(message).text);
     assert.ok(cardView(disabled).buttons.every((button) => button.disabled));
@@ -107,15 +91,15 @@ test("every phase keeps a valid V2 payload with long plans, paths, history and p
     state.latest = { ...state.latest, text: long, detail: long };
     state.plan = Array.from({ length: 100 }, () => ({ content: long, status: "pending" }));
     state.history = Array.from({ length: 10 }, () => ({ text: long, detail: long, at: state.startedAt }));
-    state.files!.paths = Array.from({ length: 10 }, () => long);
-    const message = renderProgressCard(state, { stopCustomId: "threadsite:stop" });
+    state.files!.entries = Array.from({ length: 10 }, () => ({ path: long }));
+    const message = renderProgressCard(state, { stopCustomId: cardId("stop", "turn") });
     assertV2(message);
-    assert.ok(cardView(message).buttons.some((button) => button.custom_id === "threadsite:stop"));
+    assert.ok(cardView(message).buttons.some((button) => button.custom_id === cardId("stop", "turn")));
     assert.doesNotMatch(cardView(message).text, /^## /m, "the title leads in the small line; no big heading");
   }
 });
 
-test("changed files carry per-file line counts, and older snapshots fall back to bare paths", () => {
+test("changed files carry per-file line counts", () => {
   const state = buildingSnapshot();
   state.files = { files: 4, added: 3, modified: 1, deleted: 0, additions: 120, deletions: 8,
     entries: [
@@ -134,10 +118,6 @@ test("changed files carry per-file line counts, and older snapshots fall back to
   assert.match(overview.text, /`site\/src\/main\.ts` · \+64/);
   assert.match(overview.text, /`site\/assets\/fonts\/space-grotesk-500\.woff2` · binary/);
   assert.match(overview.text, /\+1 more/);
-  // A snapshot saved before per-file entries existed still lists paths without counts.
-  const legacy = progressDetailSections(buildingSnapshot()).find((section) => section.key === "files")!;
-  assert.match(legacy.text, /- `site\/src\/player\.ts`$/m);
-  assert.doesNotMatch(legacy.text, / · \+\d/);
 });
 
 test("the compact live card shows recent public narration; the private panel keeps all of it", () => {

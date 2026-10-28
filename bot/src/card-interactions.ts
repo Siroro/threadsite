@@ -40,7 +40,8 @@ export interface CardInteractionServices {
 export class CardInteractions {
   constructor(private readonly services: CardInteractionServices) {}
 
-  async handle(interaction: CardInteraction, customId = interaction.customId): Promise<boolean> {
+  async handle(interaction: CardInteraction): Promise<boolean> {
+    const customId = interaction.customId;
     if (!customId.startsWith("ts2:")) return false;
     try {
       const route = parseCardId(customId);
@@ -123,9 +124,7 @@ export class CardInteractions {
       const prompt = interaction.fields.getTextInputValue("prompt").trim();
       const attachments = [...(interaction.fields.getUploadedFiles("images")?.values() ?? [])];
       if (!prompt) throw new CardUserError("Describe the change you want before submitting.");
-      // Modals opened before this checkbox existed still submit without it;
-      // a missing component is simply an unchecked box.
-      const claimed: RequestFormState = { ...form, prompt, restart: form.steer && (modalCheckbox(interaction, "restart") ?? false), status: "submitting" };
+      const claimed: RequestFormState = { ...form, prompt, restart: form.steer && interaction.fields.getCheckbox("restart"), status: "submitting" };
       if (!this.services.store.claimCardAction(threadId, `request:${nonce}`, claimed)) {
         await this.respond(interaction, renderStatusCard("⏳ This request is already being submitted."));
         return;
@@ -190,9 +189,8 @@ export class CardInteractions {
         if (!fresh.projectKind || fresh.projectKind === "site") throw new CardUserError("Only games keep state on the multiplayer relay.");
         requireWipeAccess(fresh, interactionActor(interaction, this.services.adminUser?.(interaction.user.id)));
         const singleplayer = (fresh.multiplayerMode ?? "arena") === "singleplayer";
-        // Modals ship with both boxes; a missing component reads as checked.
-        const world = singleplayer ? false : (modalCheckbox(interaction, "world") ?? true);
-        const scores = modalCheckbox(interaction, "scores") ?? true;
+        const world = singleplayer ? false : interaction.fields.getCheckbox("world");
+        const scores = interaction.fields.getCheckbox("scores");
         if (!world && !scores) throw new CardUserError("Choose at least one thing to clear.");
         await this.respond(interaction, renderStatusCard(await this.services.wipe(threadId, interaction.user.id, { world, scores })));
         return;
@@ -377,10 +375,6 @@ export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: Pr
 }
 
 export class CardUserError extends Error {}
-/** A modal checkbox's value, or undefined when the submitted form predates that component. */
-function modalCheckbox(interaction: ModalSubmitInteraction, customId: string): boolean | undefined {
-  try { return interaction.fields.getCheckbox(customId); } catch { return undefined; }
-}
 function indexArg(value?: string): number {
   if (value === undefined) return 0;
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new CardUserError("That page is invalid.");

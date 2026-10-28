@@ -623,12 +623,6 @@ export class ProjectService {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site. Use /site start first.");
     if (project.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
-    // Older records only stored the founder id. Reading the name from the
-    // founder's own next turn lets legacy READMEs gain attribution without a
-    // Discord lookup or exposing the numeric id.
-    if (!project.starterName && project.starterId && requesterId === project.starterId && author?.name) {
-      project = await this.store.patchProject(threadId, { starterName: author.name });
-    }
     if (!initial && !deferNaming) project = await this.ensureProjectName(threadId, onProgress);
     if (!prompt.trim() && !images?.length) throw new Error("Prompt is empty.");
     if (prompt.length > config.maxPromptChars) throw new Error(`Prompt exceeds MAX_PROMPT_CHARS (${config.maxPromptChars}).`);
@@ -2036,8 +2030,7 @@ export class ProjectService {
 
   /**
    * A stop mark applies to a turn when it was set for that turn's pending
-   * marker id. Unscoped marks (null) apply to any next turn, preserving the
-   * legacy behavior for marks set when no pendingTurn identity was known.
+   * marker id. Unscoped marks (null) also stop work still preparing its marker.
    */
   private stopMarkApplies(mark: string | null | undefined, turnId: string | undefined): boolean {
     return mark !== undefined && (mark === null || mark === turnId);

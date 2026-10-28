@@ -79,8 +79,7 @@ export async function applyProviderConfig(base, host = {}, {
   for (const [id, provider] of Object.entries(config.providers)) {
     if (!object(provider) || (provider.models !== undefined && !object(provider.models))) throw new Error(`Invalid provider config: ${id}`);
     const catalog = catalogs[id];
-    if (catalog !== undefined && catalog !== false && (!object(catalog) || Object.keys(catalog).some((key) => key !== "contextCap")
-      || (catalog.contextCap !== undefined && (!Number.isSafeInteger(catalog.contextCap) || catalog.contextCap < 0)))) {
+    if (catalog !== undefined && catalog !== false && (!object(catalog) || Object.keys(catalog).length > 0)) {
       throw new Error(`Invalid catalog config: ${id}`);
     }
     let discovered = {};
@@ -115,7 +114,6 @@ export async function applyProviderConfig(base, host = {}, {
       // Unknown configured models must not gain browser access through
       // OpenCode's optimistic default image capabilities.
       model.capabilities = { input: ["text"], ...model.capabilities };
-      if (catalog?.contextCap) model.limit = { ...model.limit, context: Math.min(model.limit?.context ?? catalog.contextCap, catalog.contextCap) };
       const cap = config.contextCaps[`${id}/${modelID}`] ?? config.contextCaps[id];
       // Native config overrides run after plugin transforms. Clamp explicit
       // limits here too, so they cannot restore a larger window afterwards.

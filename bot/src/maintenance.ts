@@ -53,30 +53,6 @@ export async function backupDatabase(file: string): Promise<string> {
   return destination;
 }
 
-/**
- * A standalone usage ledger from older bots is superseded by the usage tables
- * inside `STATE_DB_FILE`; the leftover file (and its WAL sidecars) is dead
- * weight next to the live database, so discard it rather than migrate it.
- * Historical usage does not carry over — the ledger restarts from the bot's
- * own records in the shared database.
- */
-export async function discardLegacyUsageLedger(): Promise<void> {
-  for (const name of ["usage-log.jsonl.sqlite", "usage-log.jsonl.sqlite-wal", "usage-log.jsonl.sqlite-shm"]) {
-    const file = path.join(path.dirname(config.stateDbFile), name);
-    try {
-      await fs.stat(file);
-    } catch {
-      continue;
-    }
-    try {
-      await fs.rm(file, { force: true });
-      log("warn", "maintenance.discarded_legacy_usage_ledger", { file });
-    } catch (error) {
-      log("warn", "maintenance.legacy_usage_ledger_kept", { file, error: errorText(error) });
-    }
-  }
-}
-
 export async function removeDiscordThread(project: ProjectRecord, rest = new REST({ version: "10" }).setToken(config.discordToken)): Promise<void> {
   let channel: { type: number; guild_id?: string };
   try { channel = await rest.get(Routes.channel(project.threadId)) as typeof channel; }

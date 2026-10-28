@@ -1,5 +1,4 @@
 import type { DatabaseSync, StatementSync } from "node:sqlite";
-import type { ModelUsage } from "./opencode-shared.js";
 import type { UsageEntry, UsageTotal } from "./usage.js";
 
 /** Incremental project rollups; every change runs in the ledger transaction. */
@@ -45,16 +44,13 @@ export class UsageSummaries {
       this.cache.set(db, queries);
     }
     const models = entry.models ?? [];
-    const turn = entry.label !== "title";
-    const legacy = entry as UsageEntry & { turns?: number; failedTurns?: number };
     const catalogCost = models.reduce((sum, model) => sum + (model.catalogCost ?? 0), 0);
-    queries.total.run(entry.threadId, direction, direction * (legacy.turns ?? (turn ? 1 : 0)),
-      direction * (legacy.failedTurns ?? (entry.failed && turn ? 1 : 0)), direction * entry.inputTokens,
+    queries.total.run(entry.threadId, direction, direction,
+      direction * (entry.failed ? 1 : 0), direction * entry.inputTokens,
       direction * entry.outputTokens, direction * entry.cacheTokens, direction * entry.cost,
       direction * catalogCost, direction * (entry.cost > 0 ? 1 : 0), direction * (catalogCost > 0 ? 1 : 0));
     for (const model of models) {
-      const item = model as ModelUsage & { turns?: number };
-      queries.model.run(entry.threadId, model.model, direction, direction * (item.turns ?? (turn ? 1 : 0)),
+      queries.model.run(entry.threadId, model.model, direction, direction,
         direction * model.inputTokens, direction * model.outputTokens, direction * model.cacheTokens,
         direction * model.cost, direction * (model.catalogCost ?? 0), direction * (model.catalogCost !== undefined ? 1 : 0),
         direction * (!model.reported ? 1 : 0), direction * (!model.reported && !model.marketEstimated ? 1 : 0),

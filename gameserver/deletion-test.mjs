@@ -13,8 +13,6 @@ const state = path.join(root, "state");
 const token = "a".repeat(64);
 await fs.writeFile(tokenFile, token);
 await fs.mkdir(state);
-await fs.writeFile(path.join(state, "keep-game.json"), JSON.stringify({ version: 1, gameId: "keep-game", savedAt: Date.now(), state: { keep: true } }));
-await fs.writeFile(path.join(state, "players.sqlite"), "superseded player records");
 const probe = net.createServer();
 await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
 const port = probe.address().port;
@@ -52,9 +50,9 @@ async function connect(game) {
 }
 try {
   await start();
-  await assert.rejects(fs.access(path.join(state, "players.sqlite")), { code: "ENOENT" }, "legacy player records are discarded, not migrated");
-  // Durable world count from /health: the legacy keep-game.json is imported at
-  // boot, so a published delete-game world brings it to 2.
+  const keeper = await connect("keep-game");
+  keeper.ws.send(JSON.stringify({ t: "world", generation: keeper.frame.generation, epoch: keeper.frame.epoch, s: { keep: true } }));
+  await waitFor(async () => (await (await fetch(`${origin}/health`)).json()).durableWorlds === 1);
   const durableCount = async () => (await (await fetch(`${origin}/health`)).json()).durableWorlds;
   const host = await connect("delete-game");
   host.ws.send(JSON.stringify({ t: "world", generation: host.frame.generation, epoch: host.frame.epoch, s: { secret: "deleted project state" } }));
@@ -79,8 +77,6 @@ try {
   assert.equal((await connect("delete-game")).frame.code, "project_deleted", "stale clients stay blocked after restart");
   assert.deepEqual((await connect("keep-game")).frame.world.s, { keep: true });
   assert.deepEqual(await inventory(), ["keep-game"], "purge inventory ignores deleted markers after restart");
-  const leftovers = (await fs.readdir(state)).filter((name) => /\.(json|deleted)$/.test(name) || name.endsWith(".tmp"));
-  assert.deepEqual(leftovers, [], "legacy snapshots are imported and leave no stray files");
   console.log("PASS: authenticated game deletion, disconnected players, no state resurrection, restart durability and unrelated-game preservation.");
 } finally {
   for (const ws of sockets) ws.terminate();

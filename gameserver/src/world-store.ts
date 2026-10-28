@@ -9,10 +9,6 @@ import { DatabaseSync } from "node:sqlite";
  */
 export type StoredWorld = { version: 1; gameId: string; state: unknown; savedAt: number };
 
-const LEGACY_WORLD = /^([a-z0-9][a-z0-9-]{2,63})\.json$/;
-const LEGACY_DELETED = /^([a-z0-9][a-z0-9-]{2,63})\.deleted$/;
-const LEGACY_TMP = /^[a-z0-9][a-z0-9-]{2,63}\.json\.\d+\.[a-f0-9]{8}\.tmp$/;
-
 /** The relay's single database: worlds, tombstones, redirects, saves and scores. */
 export function relayDatabaseFile(stateDir: string): string { return path.join(stateDir, "relay.sqlite"); }
 
@@ -22,9 +18,6 @@ export function relayDatabaseFile(stateDir: string): string { return path.join(s
  * old-name redirects recorded by project renames. The tables share
  * `relay.sqlite` (see {@link relayDatabaseFile}) with the player store; this
  * store opens its own connection at startup, before the server listens.
- * Legacy per-game `<id>.json` snapshots and `<id>.deleted` tombstones are
- * imported once at open; each file is removed only after its row landed, and
- * re-importing is a no-op, so a crash mid-migration heals on the next start.
  */
 export class WorldStore {
   private database: DatabaseSync | undefined;
@@ -43,67 +36,9 @@ export class WorldStore {
           game TEXT PRIMARY KEY, state TEXT, saved_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS deleted_games (game TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS game_aliases (from_game TEXT PRIMARY KEY, to_game TEXT NOT NULL);`);
-      this.importLegacyFiles(db);
       this.database = db;
       return db;
     } catch (error) { db.close(); throw error; }
-  }
-
-  private importLegacyFiles(db: DatabaseSync): void {
-    let names: string[];
-    try { names = fs.readdirSync(this.stateDir); } catch { return; } // no directory yet: nothing to import
-    const imported: string[] = [];
-    for (const name of names) {
-      const tombstone = LEGACY_DELETED.exec(name)?.[1];
-      if (tombstone) {
-        db.prepare("INSERT OR IGNORE INTO deleted_games VALUES (?)").run(tombstone);
-        imported.push(name);
-        continue;
-      }
-      const gameId = LEGACY_WORLD.exec(name)?.[1];
-      if (!gameId) {
-        // Crash leftovers of the old temp-file + rename writes.
-        if (LEGACY_TMP.test(name)) fs.rmSync(path.join(this.stateDir, name), { force: true });
-        continue;
-      }
-      try {
-        const parsed = JSON.parse(fs.readFileSync(path.join(this.stateDir, name), "utf8")) as Partial<StoredWorld>;
-        if (parsed?.version !== 1 || parsed.gameId !== gameId
-          || typeof parsed.savedAt !== "number" || parsed.state === undefined) {
-          console.warn(`[threadsite-gameserver] worlds skipped legacy ${name}: unexpected shape`);
-          continue;
-        }
-        // A row can only be absent (first import) or newer (a live write after
-        // a partial migration); either way the file never overwrites the row.
-        db.prepare("INSERT OR IGNORE INTO worlds VALUES (?, ?, ?)").run(gameId, JSON.stringify(parsed.state), parsed.savedAt);
-        imported.push(name);
-      } catch (error) {
-        console.warn(`[threadsite-gameserver] worlds skipped legacy ${name}: ${String((error as Error).message ?? error)}`);
-      }
-    }
-    for (const name of imported) {
-      try { fs.rmSync(path.join(this.stateDir, name), { force: true, maxRetries: 3 }); }
-      catch (error) { console.warn(`[threadsite-gameserver] worlds kept legacy ${name}: ${String((error as Error).message ?? error)}`); }
-    }
-    this.discardLegacyPlayerDatabase();
-  }
-
-  /**
-   * Historical `players.sqlite` (and its WAL sidecars) are not migrated into
-   * `relay.sqlite`: a deployment upgrade starts player records fresh by
-   * design, and the superseded file would otherwise linger forever. Removed
-   * only after `relay.sqlite` opened, so an unreadable new database never
-   * costs the old one.
-   */
-  private discardLegacyPlayerDatabase(): void {
-    let removed = false;
-    for (const name of ["players.sqlite", "players.sqlite-wal", "players.sqlite-shm"]) {
-      const file = path.join(this.stateDir, name);
-      if (!fs.existsSync(file)) continue;
-      try { fs.rmSync(file, { force: true, maxRetries: 3 }); removed = true; }
-      catch (error) { console.warn(`[threadsite-gameserver] worlds kept legacy ${name}: ${String((error as Error).message ?? error)}`); }
-    }
-    if (removed) console.warn("[threadsite-gameserver] discarded legacy players.sqlite; player records start fresh in relay.sqlite");
   }
 
   /** Every persisted world; tombstoned games are excluded by the caller. */

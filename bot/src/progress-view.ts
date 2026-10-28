@@ -67,8 +67,7 @@ export interface ProgressFileEntry {
 }
 export interface ProgressFiles {
   files: number; added: number; modified: number; deleted: number; additions: number; deletions: number;
-  paths?: string[];
-  /** Per-file line counts; older saved snapshots carry only paths. */
+  /** Changed files with their line counts when available. */
   entries?: ProgressFileEntry[];
 }
 export interface ProgressActivity { text: string; detail?: string; at: number; key?: string; command?: boolean }
@@ -96,9 +95,9 @@ export interface ProgressSnapshot {
   queuedRequests: number;
   actions: number;
   activeTools: number;
-  /** Live child sessions only; omitted by older saved cards. */
+  /** Count of live child sessions. */
   activeSubagents?: number;
-  /** Per-child detail for the active sessions; omitted by older saved cards. */
+  /** Per-child detail for the active sessions. */
   subagents?: ProgressSubagent[];
   /** Every child seen during the turn, including finished ones; kept for turn details. */
   subagentHistory?: ProgressSubagent[];
@@ -108,7 +107,7 @@ export interface ProgressSnapshot {
   agentReportedActive?: boolean;
   /** Why the card is amber while not waiting for an answer; shown with the warning. */
   waitingReason?: string;
-  questionPin?: { requestID?: string; question: string; resolution?: string };
+  questionPin?: { requestID: string; question: string; resolution?: string };
   questions?: Array<{ header?: string; question: string; multiple?: boolean; options: Array<{ label: string; description?: string }> }>;
   questionStatus?: { status: QuestionStatus; error?: string };
   /** Time since the agent last emitted any event, once past the configured stall threshold. */
@@ -192,8 +191,8 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   if (state.files && !state.questions?.length) {
     const files = state.files;
     const counts = [files.added ? `${files.added} new` : "", files.modified ? `${files.modified} modified` : "", files.deleted ? `${files.deleted} removed` : ""].filter(Boolean);
-    const paths = fileEntries(files).slice(0, 3).map((entry) => `\`${clean(entry.path, 90).replaceAll("`", "")}\`${fileEntrySuffix(entry)}`);
-    const rest = fileEntries(files).length - paths.length;
+    const paths = (files.entries ?? []).slice(0, 3).map((entry) => `\`${clean(entry.path, 90).replaceAll("`", "")}\`${fileEntrySuffix(entry)}`);
+    const rest = (files.entries ?? []).length - paths.length;
     fields.push({ name: "Changes this turn", value: [`**${files.files} file${files.files === 1 ? "" : "s"}** · **+${files.additions} / −${files.deletions}** lines`, counts.join(" · "), ...paths, rest > 0 ? `+${rest} more` : ""].filter(Boolean).join("\n") });
   } else if (state.changes && !state.questions?.length) {
     fields.push({ name: "Changes this turn", value: plain(state.changes, 500) });
@@ -478,15 +477,6 @@ export function hasUsageData(metrics: ProgressMetrics | undefined): boolean {
     || metrics.steps || metrics.compactions || metrics.liveTokensPerSecond || metrics.outputTokensPerSecond);
 }
 
-/**
- * The changed-file list, preferring per-file entries. Snapshots saved before
- * they existed carry only paths, so those still render without counts.
- */
-function fileEntries(files: ProgressFiles): ProgressFileEntry[] {
-  if (files.entries?.length) return files.entries;
-  return (files.paths ?? []).map((path) => ({ path }));
-}
-
 /** `+A/−D` beside a file; binary files say why there is nothing to count. */
 function fileEntrySuffix(entry: ProgressFileEntry): string {
   const counts = [entry.additions === undefined ? "" : `+${entry.additions}`, entry.deletions === undefined ? "" : `−${entry.deletions}`].filter(Boolean).join("/");
@@ -503,7 +493,7 @@ const detailSections = {
     const files = state.files;
     const text = [
       files ? `**${files.files} file${files.files === 1 ? "" : "s"}** · ${files.added} added · ${files.modified} modified · ${files.deleted} removed · **+${files.additions} / −${files.deletions}** lines` : "",
-      ...(files ? fileEntries(files) : []).map((entry) => `- \`${entry.path.replaceAll("`", "")}\`${fileEntrySuffix(entry)}`),
+      ...(files ? (files.entries ?? []) : []).map((entry) => `- \`${entry.path.replaceAll("`", "")}\`${fileEntrySuffix(entry)}`),
       state.changes ?? "",
     ].filter(Boolean).join("\n");
     return text.trim() ? { key: "files", label: "Changed files", text } : undefined;
@@ -540,12 +530,10 @@ function activity(item: ProgressActivity, max: number): string {
 }
 /**
  * One line per live child session: who it is, how much it has done and what
- * it is on right now. A count alone stays for older saved cards that predate
- * the per-child detail.
+ * it is on right now.
  */
 function subagentLines(state: ProgressSnapshot): string {
   const subs = state.subagents ?? [];
-  if (!subs.length) return `🤖 ${state.activeSubagents} active`;
   return [...subs.slice(0, 4).map((sub) => [
     `🤖 **${plain(sub.agent, 24)}**`,
     `${sub.steps} step${sub.steps === 1 ? "" : "s"}`,

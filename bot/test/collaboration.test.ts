@@ -92,15 +92,6 @@ test("owner-selected contributors and editing modes persist; stale panels and no
   assert.equal(contributionAccess(reopened.getProject(project.threadId)!, editor), "direct");
 });
 
-test("human thread ownership overrides the project starter on legacy records and is retained when settings are saved", async () => {
-  const { service, store, project } = await fixture();
-  await store.patchProject(project.threadId, { ownerId: undefined });
-  const threadOwner = { ...owner, threadOwnerId: owner.userId };
-  service.update(project.threadId, threadOwner, 0, { mode: "contributors" });
-  assert.equal(store.getProject(project.threadId)!.ownerId, owner.userId);
-  assert.equal(contributionAccess(store.getProject(project.threadId)!, { ...guest, userId: project.starterId! }), "denied");
-});
-
 test("restricted controls reject steers, answers, queue cancellation and rollback; approved requesters can answer only their active turn", async () => {
   const { project } = await fixture();
   const restricted: ProjectRecord = { ...project, collaboration: { mode: "contributors", userIds: [editor.userId], revision: 1 } };

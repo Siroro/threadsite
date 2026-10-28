@@ -41,7 +41,7 @@ const top = await boards.list("points-v1", { limit: 10 });
 // Render names via textContent; top.entries = [{ playerId, name, score, updatedAt }].
 ```
 
-- Read once after connecting, then save at checkpoints/end of run; never save per frame. Catch every persistence rejection and keep the game playable. `net.saves.available` reports current support/connectivity. Persistence is an additive v4 capability; older relays return `storage_unsupported` locally.
+- Read once after connecting, then save at checkpoints/end of run; never save per frame. Catch every persistence rejection and keep the game playable. `net.saves.available` reports current support/connectivity.
 - Save slots hold up to 64 KiB JSON, with 16 distinct slot names per player (deleted names still count so their revisions stay safe). Missing saves return `{ value: null, revision: 0, updatedAt: null }`. Delete keeps a tombstone and increments revision. Put a schema version in your data and validate it before use; use stable versioned slot keys for incompatible migrations.
 - Every set/delete needs the last returned revision. `save_conflict` means another tab/session won: re-read and deliberately merge or ask which progress to keep. Do not blindly overwrite. Serialize a client's own checkpoint writes, and retain the newly returned revision.
 - Requests require an online connection, time out after 10 s, and are never queued/replayed automatically. `storage_uncertain` means a write may have committed: read again after reconnect before deciding whether to retry. Keep any offline progress locally and merge it deliberately; do not erase it when a cloud read fails. Show whether a checkpoint was actually saved.

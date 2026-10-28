@@ -403,18 +403,18 @@ test("turn revisions survive reopening the ledger and concurrent writes", async 
 });
 
 test("indexed timing survives sparse recovery and deletion", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-migrate-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-timing-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const file = path.join(root, "usage.sqlite");
   const log = new UsageLog(file);
   const first: TurnUsage = { inputTokens: 20, outputTokens: 5, cacheTokens: 0, cost: 0.1, contextTokens: 0, compactions: 0, steps: 1,
     models: [{ model: "provider/a", inputTokens: 20, outputTokens: 5, cacheTokens: 0, cost: 0.1 }] };
   await log.record({ id: "turn", threadId: "t", project: "Game", kind: "site", usage: first });
-  const migrated = new DatabaseSync(file, { readOnly: true });
+  const untimed = new DatabaseSync(file, { readOnly: true });
   try {
-    assert.equal((migrated.prepare("SELECT output_tokens_per_second FROM usage_entries WHERE id = ?").get("turn") as any).output_tokens_per_second, null);
-    assert.equal((migrated.prepare("SELECT output_tokens_per_second FROM usage_models WHERE entry_id = ?").get("turn") as any).output_tokens_per_second, null);
-  } finally { migrated.close(); }
+    assert.equal((untimed.prepare("SELECT output_tokens_per_second FROM usage_entries WHERE id = ?").get("turn") as any).output_tokens_per_second, null);
+    assert.equal((untimed.prepare("SELECT output_tokens_per_second FROM usage_models WHERE entry_id = ?").get("turn") as any).output_tokens_per_second, null);
+  } finally { untimed.close(); }
   const usage: TurnUsage = { inputTokens: 30, outputTokens: 10, cacheTokens: 0, cost: 0.2, contextTokens: 0, compactions: 0, steps: 2,
     generationMs: 4000, timedOutputTokens: 8, models: [{ model: "provider/a", inputTokens: 30, outputTokens: 10, cacheTokens: 0,
       cost: 0.2, generationMs: 4000, timedOutputTokens: 8 }] };
@@ -447,7 +447,7 @@ test("indexed timing survives sparse recovery and deletion", async (t) => {
   assert.equal((await new UsageLog(file).threadTotal("t")).turns, 0, "a late writer cannot restore a deleted project");
 });
 
-test("materialized project totals follow revisions, rollback and existing-database upgrades", async (t) => {
+test("materialized project totals follow revisions, rollback and reopening", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-summary-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const file = path.join(root, "usage.sqlite");
@@ -476,15 +476,6 @@ test("materialized project totals follow revisions, rollback and existing-databa
     total = await log.threadTotal("one");
     assert.deepEqual([total.turns, total.inputTokens, total.cost, total.models.size], [2, 350, 3.5, 1]);
     db.exec("DROP TRIGGER reject_sample");
-    // Simulate the earlier summary schema: opening it must rebuild both
-    // summaries from the authoritative turn rows exactly once.
-    db.exec(`ALTER TABLE usage_thread_totals DROP COLUMN priced_entries;
-      ALTER TABLE usage_thread_totals DROP COLUMN catalog_priced_entries;
-      ALTER TABLE usage_thread_models DROP COLUMN priced_entries;
-      ALTER TABLE usage_thread_models DROP COLUMN catalog_priced_entries;
-      DELETE FROM usage_meta WHERE key = 'thread_summary_v2';
-      INSERT OR IGNORE INTO usage_meta(key,value) VALUES ('thread_summary_v1','done');
-      PRAGMA user_version = 2`);
   } finally { db.close(); }
   total = await new UsageLog(file).threadTotal("one");
   assert.deepEqual([total.turns, total.inputTokens, total.cost, total.models.size], [2, 350, 3.5, 1]);
@@ -576,24 +567,11 @@ test("database write failures surface and the same ledger can retry", async (t) 
   assert.equal((await log.threadTotal("thread")).turns, 1);
 });
 
-test("side prompts spend tokens without counting as turns", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-side-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const file = path.join(root, "usage.sqlite");
-  const log = new UsageLog(file);
-  const usage = usageFromMessages([message("done", Date.now())])!;
-  await log.record({ label: "turn", threadId: "thread", project: "Game", kind: "game-2d", usage });
-  await log.record({ label: "title", threadId: "thread", project: "Game", kind: "game-2d", usage });
-  const total = await new UsageLog(file).threadTotal("thread");
-  assert.equal(total.turns, 1, "only real agent turns count as turns");
-  assert.equal(total.inputTokens, 270, "side prompts still spent their tokens");
-});
-
 test("missing turn usage reconciles within saved boundaries, retaining failures and turn counts", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-backfill-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const file = path.join(root, "usage.sqlite");
-  const entry = { v: 1 as const, label: "turn" as const, threadId: "thread", project: "Game", kind: "game-3d",
+  const entry = { v: 1 as const, threadId: "thread", project: "Game", kind: "game-3d",
     inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, models: [] };
   const database = new UsageDatabase(file);
   await database.putEntry({ ...entry, id: "first-turn", sessionId: "session", startedAt: new Date(1000).toISOString(), ts: new Date(2000).toISOString(), failed: true });

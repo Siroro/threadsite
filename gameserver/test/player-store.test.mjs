@@ -10,38 +10,27 @@ import { PlayerStore } from "../dist/player-store.js";
 async function fixture(t, limits = { players: 4, gameBytes: 100_000 }) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-player-store-"));
   assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(root).startsWith("threadsite-player-store-"));
-  const store = new PlayerStore(path.join(root, "players.sqlite"), limits);
+  const store = new PlayerStore(path.join(root, "relay.sqlite"), limits);
   t.after(async () => { store.close(); await fs.rm(root, { recursive: true, force: true }); });
   const request = (op, fields = {}, player = "alice", game = "game-one") => store.execute(game, player, player, { op, ...fields });
   return { store, request, root };
 }
 
-test("existing saves are counted after upgrade, and counter changes survive rollback, restart and deletion", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-player-upgrade-"));
-  const file = path.join(root, "players.sqlite");
-  const db = new DatabaseSync(file);
-  db.exec(`CREATE TABLE players (game TEXT NOT NULL, player TEXT NOT NULL, PRIMARY KEY(game,player));
-    CREATE TABLE saves (game TEXT NOT NULL, player TEXT NOT NULL, slot TEXT NOT NULL, value TEXT, bytes INTEGER NOT NULL,
-      revision INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(game,player,slot),
-      FOREIGN KEY(game,player) REFERENCES players(game,player) ON DELETE CASCADE);
-    INSERT INTO players VALUES ('game-one','alice');
-    INSERT INTO saves VALUES ('game-one','alice','a','"123456"',8,1,1);`);
-  db.close();
-  const store = new PlayerStore(file, { players: 4, gameBytes: 12 });
-  t.after(async () => { store.close(); await fs.rm(root, { recursive: true, force: true }); });
-  const send = (op, fields) => store.execute("game-one", "alice", "Alice", { op, ...fields });
-  assert.throws(() => send("save.set", { slot: "b", value: "123", revision: 0 }), { code: "storage_full" });
-  const resized = send("save.set", { slot: "a", value: "1", revision: 1 });
-  send("save.set", { slot: "b", value: "123", revision: 0 });
-  assert.throws(() => send("save.set", { slot: "a", value: "123456", revision: resized.revision }), { code: "storage_full" });
+test("save quotas stay accurate across resizing, rejected writes, restart and game deletion", async (t) => {
+  const { store, request, root } = await fixture(t, { players: 4, gameBytes: 12 });
+  request("save.set", { slot: "a", value: "123456", revision: 0 });
+  assert.throws(() => request("save.set", { slot: "b", value: "123", revision: 0 }), { code: "storage_full" });
+  const resized = request("save.set", { slot: "a", value: "1", revision: 1 });
+  request("save.set", { slot: "b", value: "123", revision: 0 });
+  assert.throws(() => request("save.set", { slot: "a", value: "123456", revision: resized.revision }), { code: "storage_full" });
   store.close();
-  assert.equal(send("save.get", { slot: "a" }).value, "1");
-  send("save.delete", { slot: "b", revision: 1 });
-  send("save.set", { slot: "a", value: "123456", revision: resized.revision });
-  const inspect = new DatabaseSync(file, { readOnly: true });
+  assert.equal(request("save.get", { slot: "a" }).value, "1");
+  assert.throws(() => request("save.set", { slot: "c", value: "123", revision: 0 }), { code: "storage_full" });
+  request("save.delete", { slot: "b", revision: 1 });
+  request("save.set", { slot: "a", value: "123456", revision: resized.revision });
+  const inspect = new DatabaseSync(path.join(root, "relay.sqlite"), { readOnly: true });
   try {
-    const total = inspect.prepare("SELECT bytes FROM game_save_bytes WHERE game = ?").get("game-one");
-    assert.equal(total.bytes, 8);
+    assert.equal(inspect.prepare("SELECT bytes FROM game_save_bytes WHERE game = ?").get("game-one").bytes, 8);
     for (const direction of ["ASC", "DESC"]) {
       const plan = inspect.prepare(`EXPLAIN QUERY PLAN SELECT player FROM scores WHERE game = ? AND board = ?
         ORDER BY score ${direction}, updated_at ASC, player ASC LIMIT 10`).all("game-one", "board");
@@ -51,8 +40,8 @@ test("existing saves are counted after upgrade, and counter changes survive roll
       .some((row) => String(row.detail).includes("INDEX")));
   } finally { inspect.close(); }
   store.deleteGame("game-one");
-  send("save.set", { slot: "new", value: "123456", revision: 0 });
-  assert.equal(send("save.get", { slot: "new" }).value, "123456");
+  request("save.set", { slot: "new", value: "123456", revision: 0 });
+  assert.equal(request("save.get", { slot: "new" }).value, "123456");
 });
 
 test("save revisions reject stale writes and stay monotonic across deletion; player and game isolation", async (t) => {

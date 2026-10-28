@@ -409,6 +409,7 @@ function handleFrame(peer: Peer, msg: Frame): void {
       const game = canonicalGame(peer.game);
       if (deletedGames.has(game)) { fail("not_joined", "Join before using persistence."); return; }
       if (!peer.playerId) { fail("identity_unavailable", "A private player token is required for persistence."); return; }
+      if (msg.op !== "save.get" && msg.op !== "save.set" && msg.op !== "save.delete") { fail("bad_operation", "Storage requests support save.get, save.set and save.delete."); return; }
       if (!peer.storageLimiter.allow()) { fail("storage_rate_limited", "Persistence allows 5 requests/s with a burst of 10; save at checkpoints."); return; }
       try {
         const result = playerStore.execute(game, peer.playerId, peer.name, msg);

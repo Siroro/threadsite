@@ -175,21 +175,6 @@ test("running/completed duplicates count as one tool action and stay out of the 
   } finally { await progress.close(); }
 });
 
-test("progress needs no embed permission and upgrades the acknowledgement into a V2 card", async () => {
-  const edits: MessageEditOptions[] = [];
-  const message = { id: "v2", edit: async (options: MessageEditOptions) => {
-    assert.ok(!options.embeds?.length);
-    edits.push(options);
-  } } as unknown as Message;
-  const progress = new DiscordProgress(message, "Updating without embeds");
-  progress.enableStopButton();
-  await nextTick();
-  await progress.close();
-  assert.equal(edits.length, 1);
-  assertV2(edits[0]);
-  assert.equal(edits[0].content, null, "clear the original acknowledgement when upgrading it");
-});
-
 test("a resumed turn's stall clock starts at supervision attach, not the original start", async () => {
   const { config } = await import("../src/config.js");
   const original = config.turnStallWarnMs;

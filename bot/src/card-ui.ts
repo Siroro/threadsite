@@ -95,16 +95,15 @@ export function cardMessage(card: ContainerBuilder): CardMessage {
   return { components: [card], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
 }
 
-/** Clear legacy content/embeds when upgrading an existing message; replace all old controls. */
+/** Replace a card or text acknowledgement, clearing its previous attachments. */
 export function cardEdit(message: CardMessage): MessageEditOptions {
-  return { ...message, content: null, embeds: [], attachments: [] };
+  return { ...message, content: null, attachments: [] };
 }
 
 /** Acknowledging a click must preserve V2 text/media, which live inside components too. */
 export function disableMessageControls(message: Pick<Message, "components">): MessageEditOptions {
-  // Both stop generations stay usable: a stopped turn is the one ack that
-  // must never be locked out by a disabled control.
-  const keepEnabled = (customId?: string) => customId === "threadsite:stop" || customId?.startsWith("ts2:stop:");
+  // Keep stop usable while acknowledging other controls on a live turn.
+  const keepEnabled = (customId?: string) => customId?.startsWith("ts2:stop:");
   const disable = (component: APIComponentInContainer): APIComponentInContainer => {
     if (component.type === ComponentType.ActionRow) return {
       ...component, components: component.components.map((control) => "custom_id" in control && !keepEnabled(control.custom_id) ? { ...control, disabled: true } : control),

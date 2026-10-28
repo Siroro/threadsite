@@ -2,14 +2,14 @@ import { PermissionFlagsBits, type BaseInteraction } from "discord.js";
 import type { CardAction } from "./card-actions.js";
 import type { ProjectRecord } from "./types.js";
 
-export interface ProjectActor { userId: string; admin: boolean; canSend: boolean; threadOwnerId?: string }
+export interface ProjectActor { userId: string; admin: boolean; canSend: boolean }
 export class CollaborationError extends Error {}
 
-export function ownerId(project: ProjectRecord, actor?: ProjectActor): string | undefined {
-  return project.ownerId ?? actor?.threadOwnerId ?? project.starterId;
+export function ownerId(project: ProjectRecord): string | undefined {
+  return project.ownerId;
 }
 export function managesProject(project: ProjectRecord, actor: ProjectActor): boolean {
-  return actor.admin || actor.userId === ownerId(project, actor);
+  return actor.admin || actor.userId === ownerId(project);
 }
 export function contributionAccess(project: ProjectRecord, actor: ProjectActor): "direct" | "approval" | "denied" {
   if (project.pendingDeletion || !actor.canSend) return "denied";
@@ -40,12 +40,9 @@ export function requireWipeAccess(project: ProjectRecord, actor: ProjectActor): 
 }
 
 export function interactionActor(interaction: BaseInteraction, extraAdmin = false): ProjectActor {
-  const channel = interaction.channel;
-  const threadOwner = channel?.isThread() && channel.ownerId !== interaction.client?.user?.id ? channel.ownerId : undefined;
   return { userId: interaction.user.id,
     admin: extraAdmin || (interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false),
     canSend: interaction.memberPermissions?.has(PermissionFlagsBits.SendMessagesInThreads) ?? false,
-    ...(threadOwner ? { threadOwnerId: threadOwner } : {}),
   };
 }
 

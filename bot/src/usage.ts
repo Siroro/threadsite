@@ -6,9 +6,8 @@ import { costsHidden, formatCost, formatTokens, truncate } from "./util.js";
 
 /**
  * Indexed token/cost ledger behind `/site-admin usage`: one current row per
- * agent turn — completed or failed, initial, mutation, repair, restart-recovery
- * — plus, in older deployments, per AI thread-title prompt. Turn IDs allow
- * durable revisions without counting recovery twice.
+ * agent turn (completed or failed, initial, mutation, repair, restart-recovery).
+ * Turn IDs allow durable revisions without counting recovery twice.
  */
 export interface UsageEntry {
   v: 1;
@@ -19,8 +18,6 @@ export interface UsageEntry {
   pending?: boolean;
   /** ISO completion timestamp. */
   ts: string;
-  /** "turn" is a real agent turn; "title" is a retired side prompt kept for historical ledger lines. */
-  label: "turn" | "title";
   threadId: string;
   project: string;
   kind: string;
@@ -76,15 +73,11 @@ function addToTotal(
     failedTurns?: number;
     /** Single-entry failure marker (a raw ledger line). */
     failed?: boolean;
-    /** Ledger label of a raw entry; side prompts are not turns. */
-    label?: UsageEntry["label"];
     models?: Array<ModelUsage & { turns?: number }>;
   },
 ): void {
-  // Title prompts spend tokens without counting as agent turns.
-  const isTurn = !entry.label || entry.label === "turn";
-  total.turns += entry.turns ?? (isTurn ? 1 : 0);
-  total.failedTurns += entry.failedTurns ?? (entry.failed && isTurn ? 1 : 0);
+  total.turns += entry.turns ?? 1;
+  total.failedTurns += entry.failedTurns ?? (entry.failed ? 1 : 0);
   total.inputTokens += entry.inputTokens;
   total.outputTokens += entry.outputTokens;
   total.cacheTokens += entry.cacheTokens;
@@ -111,7 +104,7 @@ function addToTotal(
     if (!model.reported && !model.marketEstimated) bucket.catalogEstimated = true;
     // Pre-aggregated contributions (a whole day folded into one blob) carry
     // their own turn count; raw entries count as one.
-    bucket.turns += model.turns ?? (isTurn ? 1 : 0);
+    bucket.turns += model.turns ?? 1;
     total.models.set(model.model, bucket);
   }
 }
@@ -141,7 +134,6 @@ export class UsageLog {
     sessionId?: string;
     startedAt?: string;
     pending?: boolean;
-    label?: "turn" | "title";
     threadId: string;
     project: string;
     kind: string;
@@ -178,7 +170,6 @@ export class UsageLog {
       ...(input.startedAt ? { startedAt: input.startedAt } : {}),
       ...(input.pending ? { pending: true } : {}),
       ts: new Date().toISOString(),
-      label: input.label ?? "turn",
       threadId: input.threadId,
       project: input.project,
       kind: input.kind,
@@ -214,7 +205,7 @@ export class UsageLog {
     let changed = false;
     for (const entry of await this.readEntries(threadId)) {
       if (entry.pending) continue;
-      const canRecoverHistory = entry.label === "turn" && entry.sessionId === sessionId && Boolean(entry.startedAt);
+      const canRecoverHistory = entry.sessionId === sessionId && Boolean(entry.startedAt);
       const saved = canRecoverHistory
         ? usageFromMessages(messages, Date.parse(entry.startedAt!), Date.parse(entry.ts)) : undefined;
       const fuller = saved && saved.inputTokens + saved.outputTokens > entry.inputTokens + entry.outputTokens;
@@ -246,7 +237,7 @@ export class UsageLog {
     await write;
   }
 
-  /** Lifetime ledgered usage for one thread (completed + failed turns and title prompts). */
+  /** Lifetime ledgered usage for one thread (completed and failed turns). */
   async threadTotal(threadId: string): Promise<UsageTotal & { lastTs?: string }> {
     await this.writes;
     return this.database.threadTotal(threadId);

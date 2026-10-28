@@ -73,17 +73,6 @@ export interface NetSave<T = unknown> {
     revision: number;
     updatedAt: number | null;
 }
-export interface NetScore {
-    playerId: string;
-    name: string;
-    score: number;
-    updatedAt: number;
-}
-export type NetScoreOrder = "asc" | "desc";
-export interface NetLeaderboard {
-    order: NetScoreOrder | null;
-    entries: NetScore[];
-}
 /** Engine-neutral 2D/3D transform. Extra game fields pass through unchanged. */
 export interface NetTransform {
     x: number;
@@ -274,7 +263,6 @@ export declare class ThreadSiteNet {
     readonly entities: NetEntities;
     readonly run: NetRun;
     readonly saves: NetSaves;
-    readonly leaderboards: NetLeaderboards;
     private readonly playerIdentity;
     private storagePlayerId;
     private readonly storageRequests;
@@ -394,17 +382,6 @@ export declare class NetSaves {
     get<T = unknown>(slot: string): Promise<NetSave<T>>;
     set<T>(slot: string, value: T, revision: number): Promise<NetSave<T>>;
     delete(slot: string, revision: number): Promise<NetSave<null>>;
-}
-/** Public per-game personal bests. Scores are client-reported, not cheat-proof. */
-export declare class NetLeaderboards {
-    private readonly net;
-    constructor(net: ThreadSiteNet);
-    submit(board: string, score: number, options?: {
-        order?: NetScoreOrder;
-    }): Promise<NetScore>;
-    list(board: string, options?: {
-        limit?: number;
-    }): Promise<NetLeaderboard>;
 }
 /**
  * Local transform publication plus remote transform reads.

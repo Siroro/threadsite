@@ -50,29 +50,18 @@ export class PlayerStore {
           FOREIGN KEY (game, board) REFERENCES boards(game, board) ON DELETE CASCADE);
         CREATE INDEX IF NOT EXISTS score_ranking ON scores(game, board, score, updated_at, player);
         CREATE INDEX IF NOT EXISTS score_ranking_desc ON scores(game, board, score DESC, updated_at ASC, player ASC);
-        CREATE INDEX IF NOT EXISTS score_player ON scores(game, player);`);
-      // Build the per-game byte counter once for existing databases. Triggers
-      // and the initial snapshot are committed together, including after a crash.
-      db.exec("BEGIN IMMEDIATE");
-      try {
-        db.exec(`CREATE TABLE IF NOT EXISTS storage_meta (key TEXT PRIMARY KEY);
-          CREATE TABLE IF NOT EXISTS game_save_bytes (game TEXT PRIMARY KEY, bytes INTEGER NOT NULL CHECK(bytes >= 0));`);
-        if (!db.prepare("SELECT 1 FROM storage_meta WHERE key = 'save_bytes_v1'").get()) {
-          db.exec(`INSERT INTO game_save_bytes(game, bytes) SELECT game, SUM(bytes) FROM saves GROUP BY game;
-            CREATE TRIGGER save_bytes_insert AFTER INSERT ON saves BEGIN
-              INSERT INTO game_save_bytes(game, bytes) VALUES (NEW.game, NEW.bytes)
-                ON CONFLICT(game) DO UPDATE SET bytes = bytes + NEW.bytes;
-            END;
-            CREATE TRIGGER save_bytes_update AFTER UPDATE OF bytes ON saves BEGIN
-              UPDATE game_save_bytes SET bytes = bytes + NEW.bytes - OLD.bytes WHERE game = NEW.game;
-            END;
-            CREATE TRIGGER save_bytes_delete AFTER DELETE ON saves BEGIN
-              UPDATE game_save_bytes SET bytes = bytes - OLD.bytes WHERE game = OLD.game;
-            END;
-            INSERT INTO storage_meta(key) VALUES ('save_bytes_v1');`);
-        }
-        db.exec("COMMIT");
-      } catch (error) { db.exec("ROLLBACK"); throw error; }
+        CREATE INDEX IF NOT EXISTS score_player ON scores(game, player);
+        CREATE TABLE IF NOT EXISTS game_save_bytes (game TEXT PRIMARY KEY, bytes INTEGER NOT NULL CHECK(bytes >= 0));
+        CREATE TRIGGER IF NOT EXISTS save_bytes_insert AFTER INSERT ON saves BEGIN
+          INSERT INTO game_save_bytes(game, bytes) VALUES (NEW.game, NEW.bytes)
+            ON CONFLICT(game) DO UPDATE SET bytes = bytes + NEW.bytes;
+        END;
+        CREATE TRIGGER IF NOT EXISTS save_bytes_update AFTER UPDATE OF bytes ON saves BEGIN
+          UPDATE game_save_bytes SET bytes = bytes + NEW.bytes - OLD.bytes WHERE game = NEW.game;
+        END;
+        CREATE TRIGGER IF NOT EXISTS save_bytes_delete AFTER DELETE ON saves BEGIN
+          UPDATE game_save_bytes SET bytes = bytes - OLD.bytes WHERE game = OLD.game;
+        END;`);
       this.database = db;
       return db;
     } catch (error) { db.close(); throw error; }

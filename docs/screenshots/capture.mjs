@@ -103,7 +103,7 @@ const shell = (content) => `<!doctype html><html lang="en"><meta charset="utf-8"
   <main class="thread"><div class="topbar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3 4 21M14 3l-2 18M2 9h18M1 16h13"/><path d="M16 14h6v5h-2l-2 2v-2h-2z"/></svg>Sumo Shove<span class="parent">make-a-game</span><span class="more">⋯</span></div>
   <div class="messages">${content}</div><div class="composer"><span class="add">⊕</span>Message Sumo Shove<span class="face">☺</span></div></main></html>`;
 
-const progress = renderProgressCard(buildingSnapshot(), { resource: "123", stopCustomId: "threadsite:stop" });
+const progress = renderProgressCard(buildingSnapshot(), { resource: "123", stopCustomId: "ts2:stop:123" });
 const finished = {
   resource: "123", name: "Sumo Shove", kind: "game-2d", published: true,
   commit: "e9b74c2a0f", commitFiles: 6, additions: 184, deletions: 37, durationMs: 178000,

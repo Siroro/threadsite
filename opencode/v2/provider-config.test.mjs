@@ -54,7 +54,7 @@ test("compatible catalog fetch uses auth, translates pricing, caps context and p
     package: "@ai-sdk/openai-compatible", env: ["MISSING_KEY", "CUSTOM_KEY"],
     settings: { baseURL: `http://127.0.0.1:${server.address().port}/v1` }, headers: { "X-Tenant": "{env:TENANT}" },
     models: { vision: { cost: { input: 1 }, variants: [{ id: "high", body: { reasoning_effort: "max" } }] }, offline: {} },
-  } }, catalogs: { custom: { contextCap: 100000 } } }, { env: { CUSTOM_KEY: "secret", TENANT: "private-tenant" } });
+  } }, catalogs: { custom: {} }, contextCaps: { custom: 100000 } }, { env: { CUSTOM_KEY: "secret", TENANT: "private-tenant" } });
   const models = config.providers.custom.models;
   assert.deepEqual(models.vision.cost, { input: 1, output: 6, cache: { read: 0.5, write: 3 } });
   assert.deepEqual(models.vision.limit, { context: 100000, output: 8000 });
@@ -66,11 +66,11 @@ test("compatible catalog fetch uses auth, translates pricing, caps context and p
   assert.deepEqual(models["feature-tools"].capabilities.input, ["text"]);
   assert.equal(models["no-tools"], undefined);
   assert.deepEqual(models.offline.capabilities.input, ["text"]);
-  assert.equal(models.offline.limit.context, 100000);
+  assert.equal(models.offline.limit, undefined);
 });
 
 test("Surplus remains publicly discoverable with saved auth and offline fallback is conservative", async () => {
-  const host = { providers: { surplus: { models: { "glm-5.3": {}, "effort-plain": {}, "offline-vision": {} } } }, catalogs: { surplus: { contextCap: 0 } } };
+  const host = { providers: { surplus: { models: { "glm-5.3": {}, "effort-plain": {}, "offline-vision": {} } } }, catalogs: { surplus: {} } };
   let calls = 0;
   const config = await applyProviderConfig({ providers: bundled.providers }, host, {
     defaultCatalogs: bundled.catalogs, env: {}, fetchImpl: async (_url, options) => {
@@ -109,7 +109,7 @@ test("Surplus remains publicly discoverable with saved auth and offline fallback
 test("host config rejects policy overrides and malformed configuration without leaking JSON secrets", async (t) => {
   for (const host of [null, [], { permissions: [] }, { provider: {} }, { providers: [] }, { providers: { broken: null } },
     { providers: { broken: { models: { model: null } } } }, { catalogs: { missing: {} } },
-    { providers: { custom: {} }, catalogs: { custom: { contextCap: -1 } } },
+    { providers: { custom: {} }, catalogs: { custom: { unexpected: true } } },
     JSON.parse('{"providers":{"__proto__":{"apiKey":"secret"}}}')]) {
     await assert.rejects(applyProviderConfig({}, host));
   }

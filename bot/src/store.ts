@@ -176,11 +176,11 @@ export class Store {
     this.db.close();
   }
 
-  setCollaboration(threadId: string, settings: CollaborationSettings, expectedRevision: number, ownerId?: string): void {
+  setCollaboration(threadId: string, settings: CollaborationSettings, expectedRevision: number): void {
     const current = this.getProject(threadId);
     if (!current || current.pendingDeletion) throw new Error("This project is no longer available.");
     if ((current.collaboration?.revision ?? 0) !== expectedRevision) throw new Error("Collaboration settings changed. Refresh the panel before editing them.");
-    const record = { ...current, collaboration: settings, ...(ownerId ? { ownerId } : {}) };
+    const record = { ...current, collaboration: settings };
     const result = this.db.prepare("UPDATE projects SET record = ? WHERE thread_id = ? AND COALESCE(json_extract(record, '$.collaboration.revision'), 0) = ?")
       .run(JSON.stringify(record), threadId, expectedRevision);
     if (!Number(result.changes)) throw new Error("Collaboration settings changed. Refresh the panel before editing them.");

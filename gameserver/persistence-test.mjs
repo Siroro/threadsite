@@ -6,7 +6,7 @@ import net from "node:net";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket } from "ws";
 import { ThreadSiteNet } from "../bot/assets/threadsite-net.js";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-player-persistence-"));
@@ -85,7 +85,6 @@ try {
   lock.close();
   const empty = await first.saves.get("progress");
   const saved = await first.saves.set("progress", { level: 4, inventory: ["key"] }, empty.revision);
-  const best = await first.leaderboards.submit("points", 125);
   const identity = first.playerId;
   assert.equal(first.saves.identityPersistent, true);
 
@@ -103,15 +102,15 @@ try {
   // Same public continuity metadata is no credential, nor is a visible player ID.
   const bob = await raw("save-test-game", "b".repeat(64));
   assert.equal((await bob.request("save.get", { slot: "progress" })).result.value, null);
-  assert.equal((await bob.request("board.submit", { board: "points", score: 200 })).result.score, 200);
   const impersonator = await raw("save-test-game", "c".repeat(64));
   assert.notEqual(impersonator.welcome.persistence.playerId, bob.welcome.persistence.playerId);
   const invalid = await raw("save-test-game", identity);
   // Even if the public hash has credential syntax, hashing it again identifies
   // a different player; it cannot recover the original secret.
   assert.equal((await invalid.request("save.get", { slot: "progress", playerId: identity, player: identity })).result.value, null);
-  const legacy = await raw("save-test-game");
-  assert.equal((await legacy.request("save.get", { slot: "progress" })).code, "identity_unavailable");
+  assert.equal((await bob.request("board.submit", { board: "points", score: 200 })).code, "bad_operation");
+  const anonymous = await raw("save-test-game");
+  assert.equal((await anonymous.request("save.get", { slot: "progress" })).code, "identity_unavailable");
   assert.equal(bob.frames.some((frame) => JSON.stringify(frame).includes("inventory")), false, "personal save data is never broadcast");
   assert.equal(bob.frames.some((frame) => JSON.stringify(frame).includes("playerToken")), false, "credentials are never echoed");
   const elsewhere = await connect({ game: "other-save-game" });
@@ -134,12 +133,6 @@ try {
   const afterCrash = await connect({ name: "Alice" });
   assert.equal(afterCrash.playerId, identity);
   assert.deepEqual((await afterCrash.saves.get("progress")).value, { level: 5 });
-  assert.deepEqual((await afterCrash.leaderboards.list("points")).entries.map((entry) => entry.score), [200, best.score]);
-  const lower = await afterCrash.leaderboards.submit("points", 100);
-  assert.equal(lower.score, best.score);
-  const improved = await afterCrash.leaderboards.submit("points", 300);
-  assert.equal(improved.playerId, identity);
-
   // Closing with an outstanding write is explicit uncertainty; it never queues a replay.
   const current = await afterCrash.saves.get("progress");
   const uncertain = afterCrash.saves.set("progress", { level: 6 }, current.revision);
@@ -170,24 +163,6 @@ try {
   const kept = await connect({ game: "other-save-game" });
   assert.equal((await kept.saves.get("progress")).value, "keep me");
 
-  // A pre-extension v4 relay still accepts the new client for normal play.
-  const oldRelay = new WebSocketServer({ port: 0, host: "127.0.0.1" });
-  await once(oldRelay, "listening");
-  oldRelay.on("connection", (ws) => {
-    ws.on("message", (bytes) => {
-      const frame = JSON.parse(String(bytes));
-      if (frame.t === "join") ws.send(JSON.stringify({ t: "welcome", v: 4, you: "old-peer", mode: "single",
-        host: "old-peer", generation: "old-generation", epoch: 1, peers: [], world: null }));
-    });
-  });
-  try {
-    const compatible = await connect({ url: `ws://127.0.0.1:${oldRelay.address().port}/ws`, mode: "single" });
-    assert.equal(compatible.status, "online");
-    assert.equal(compatible.saves.available, false);
-    await assert.rejects(compatible.saves.get("progress"), { code: "storage_unsupported" });
-    compatible.close();
-  } finally { for (const ws of oldRelay.clients) ws.terminate(); await new Promise((resolve) => oldRelay.close(resolve)); }
-
   // localStorage denial degrades to page-lifetime identity and never prevents play.
   Object.defineProperty(globalThis, "localStorage", { configurable: true, get() { throw new Error("blocked"); } });
   const temporary = await connect({ game: "temporary-game" });
@@ -203,12 +178,12 @@ try {
     const noIdentity = await connect({ game: "no-secure-identity" });
     assert.equal(noIdentity.status, "online");
     assert.equal(noIdentity.saves.available, false);
-    await assert.rejects(noIdentity.saves.get("progress"), { code: "storage_unsupported" });
+    await assert.rejects(noIdentity.saves.get("progress"), { code: "identity_unavailable" });
   } finally {
     if (savedCrypto) Object.defineProperty(globalThis, "crypto", savedCrypto);
     else delete globalThis.crypto;
   }
-  console.log("PASS: private browser identity, CAS conflicts, disk failure recovery, request limits, crash durability, leaderboards, cleanup and solo-safe failures.");
+  console.log("PASS: private browser identity, CAS conflicts, disk failure recovery, request limits, crash durability, cleanup and solo-safe failures.");
 } finally {
   for (const client of clients) client.close();
   for (const ws of sockets) ws.terminate();

@@ -226,7 +226,7 @@ Add a `contextCaps` map to `opencode/host/providers.json`. It applies to built-i
 
 Provider keys cap all of that provider's models. Full `provider/model-id` keys override the provider cap for that model, including model IDs containing slashes. Values are non-negative integer token counts: `0` removes that host cap, while omission retains a bundled default if one exists. Surplus defaults to 100000; other providers have no bundled cap. This selection is explicit and applies equally to paid and free models; prices and usage accounting are unchanged.
 
-The native plugin applies caps across OpenCode's resolved model catalog, including models never listed in the host file. It lowers context and any larger input ceiling while retaining smaller native windows and the output limit. Native auto-compaction and the bot's context meter use the capped window. Compaction reserves headroom (the bundled buffer is 20000 tokens), so its trigger is below the cap; very small caps leave little room for work. Existing `providers.<id>.models.<model>.limit` overrides remain supported, with host caps taking precedence over larger explicit limits. Legacy `catalogs.<id>.contextCap` also remains supported as an additional discovery-time ceiling; set it to `0` when moving entirely to `contextCaps`.
+The native plugin applies caps across OpenCode's resolved model catalog, including models never listed in the host file. It lowers context and any larger input ceiling while retaining smaller native windows and the output limit. Native auto-compaction and the bot's context meter use the capped window. Compaction reserves headroom (the bundled buffer is 20000 tokens), so its trigger is below the cap; very small caps leave little room for work. Existing `providers.<id>.models.<model>.limit` overrides remain supported, with host caps taking precedence over larger explicit limits.
 
 ### Model discovery and accounting
 
@@ -269,7 +269,7 @@ When the agent container starts, its startup script calls the public Surplus `GE
 /site-admin model model:surplus/gpt-5.5
 ```
 
-Surplus environment settings are no longer read. Move existing credentials into `providers.surplus.settings.apiKey` (or use a `{file:...}` reference), endpoint overrides into `settings.baseURL`, extra model IDs into `models`, and the context ceiling into `contextCaps.surplus`. The ceiling defaults to 100000 tokens; `0` disables it. Host JSON overrides take precedence over bundled JSON defaults. Catalog pricing is imported when advertised, and host model costs can supply missing prices.
+Configure credentials through `providers.surplus.settings.apiKey` (or a `{file:...}` reference), the endpoint through `settings.baseURL`, extra model IDs through `models`, and the context ceiling through `contextCaps.surplus`. The ceiling defaults to 100000 tokens; `0` disables it. Host JSON overrides take precedence over bundled JSON defaults. Catalog pricing is imported when advertised, and host model costs can supply missing prices.
 
 ## Serving generated sites from your own Apache
 

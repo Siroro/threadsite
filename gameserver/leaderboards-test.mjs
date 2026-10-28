@@ -78,7 +78,7 @@ try {
   const multiplayer = await ThreadSiteNet.connect({ game: "scores-game", url, mode: "rooms", createRoom: true, name: "Alice" });
   clients.push(multiplayer);
   assert.equal(multiplayer.playerId, first.playerId, "both clients share the existing anonymous identity");
-  await multiplayer.leaderboards.submit("points-v1", 150);
+  await alice.submit("points-v1", 150);
   assert.deepEqual((await alice.list("points-v1")).entries.map((entry) => entry.score), [150]);
   storage.set("threadsite-player-v1:scores-game", crypto.randomBytes(32).toString("hex"));
   const bob = new ThreadSiteLeaderboards({ game: "scores-game", url, name: "Bob" });

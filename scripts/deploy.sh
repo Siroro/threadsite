@@ -127,5 +127,4 @@ if (( images_were_current )); then
 fi
 
 echo "Done. Deployed $new_head ($BRANCH)."
-echo "On boot the bot backfills pinned project cards into existing threads;"
-echo "new slash-command options register immediately (guild) or within ~1h (global)."
+echo "Slash-command options register immediately (guild) or within ~1h (global)."
