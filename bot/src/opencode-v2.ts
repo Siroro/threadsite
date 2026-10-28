@@ -982,9 +982,13 @@ export class OpenCodeV2Harness {
       case "session.step.failed": {
         const step = event.data;
         const model = watch.models.get(step.assistantMessageID);
+        // The provider's raw usage object — the only place a gateway's own
+        // charged amount survives. Servers expose it as `native`; a payload
+        // that kept the internal field name arrives as `providerState`.
+        const native = step.native ?? (step as { providerState?: Record<string, unknown> }).providerState;
         watch.steps.set(step.assistantMessageID, { info: { id: step.assistantMessageID, sessionID: step.sessionID,
           role: "assistant", time: { created: watch.started.get(step.assistantMessageID) ?? event.created }, providerID: model?.providerID, modelID: model?.id,
-          tokens: step.tokens, cost: step.cost, native: step.native } });
+          tokens: step.tokens, cost: step.cost, native } });
         const timed = stepTiming(watch.started.get(step.assistantMessageID), watch.streamed.get(step.assistantMessageID), step.tokens);
         if (timed) watch.timings.set(step.assistantMessageID, timed);
         else watch.timings.delete(step.assistantMessageID);
