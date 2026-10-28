@@ -290,11 +290,20 @@ test("thread totals keep whether a model's figure was a provider charge", async 
     usage: usageFromMessages([charged("c", "mixed", 0.001, true)]) });
   await log.record({ threadId: "t", project: "P", kind: "site",
     usage: usageFromMessages([charged("d", "mixed", 9.9, false)]) });
+  // A market-priced estimate: still an estimate, but a different provenance.
+  const market = usageFromMessages([charged("e", "market", 9.9, false)]);
+  annotateMarketCosts(market, new Map([["market", { input: 0.001, output: 0.002 }]]));
+  await log.record({ threadId: "t", project: "P", kind: "site", usage: market });
+
   const total = await log.threadTotal("t");
   assert.equal(total.models.get("surplus/real")!.reported, true, "a reported charge stays reported through the rollup");
   assert.equal(total.models.get("surplus/real")!.unreported, undefined);
   assert.equal(total.models.get("surplus/estimate")!.unreported, true, "an estimate is marked");
+  assert.equal(total.models.get("surplus/estimate")!.catalogEstimated, true, "and a list-rate guess says why");
   assert.equal(total.models.get("surplus/mixed")!.unreported, true, "one estimate makes the whole line an estimate");
+  assert.equal(total.models.get("surplus/market")!.unreported, true);
+  assert.equal(total.models.get("surplus/market")!.catalogEstimated, undefined,
+    "a market-priced estimate carries no catalog marker");
 });
 
 test("a step the provider never charged for is estimated at live market prices, not list rates", () => {

@@ -67,13 +67,28 @@ test("figures a provider never charged are marked as catalog estimates", () => {
   const card = cardView(renderProjectCard({ project: record(), usage: usage({
     cost: 0.2, catalogCost: 0,
     models: new Map([
-      ["surplus/muse-spark", { model: "surplus/muse-spark", turns: 2, inputTokens: 2_000_000, outputTokens: 10_000, cacheTokens: 1_800_000, cost: 0.2 }],
+      ["surplus/muse-spark", { model: "surplus/muse-spark", turns: 2, inputTokens: 2_000_000, outputTokens: 10_000, cacheTokens: 1_800_000, cost: 0.2, unreported: true, catalogEstimated: true }],
     ]),
   }) }));
   const cost = card.fields!.find((field) => field.name === "Lifetime cost")!.value;
   assert.match(cost, /\*\*Total \$0\.20\*\* \(catalog\)/, "an all-estimate total says so");
   assert.match(cost, /`muse-spark`: in 2M \(90%\) · out 10k · \$0\.20 \(catalog\)/);
   assert.doesNotMatch(cost, /at catalog rates/, "an estimate needs no separate comparison");
+});
+
+test("a live market-rate estimate is marked (est), not (catalog)", () => {
+  // The marketplace's own seller price is real money, so it is a better
+  // estimate than list rates and is labelled differently.
+  const card = cardView(renderProjectCard({ project: record(), usage: usage({
+    cost: 0.002112, catalogCost: 0,
+    models: new Map([
+      ["surplus/muse-spark", { model: "surplus/muse-spark", turns: 2, inputTokens: 12_500_000, outputTokens: 73_500, cacheTokens: 10_750_000, cost: 0.002112, unreported: true }],
+    ]),
+  }) }));
+  const cost = card.fields!.find((field) => field.name === "Lifetime cost")!.value;
+  assert.match(cost, /\*\*Total \$0\.0021\*\* \(est\)/);
+  assert.match(cost, /`muse-spark`: in 12\.5M \(86%\) · out 73\.5k · \$0\.0021 \(est\)/);
+  assert.doesNotMatch(cost, /catalog/);
 });
 
 test("a project where nothing was priced carries no cost field at all", () => {

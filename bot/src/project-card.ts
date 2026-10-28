@@ -109,28 +109,37 @@ function lifetimeCostLines(usage: UsageTotal): string | undefined {
       ? ` (${Math.round(Math.min(1, entry.cacheTokens / entry.inputTokens) * 100)}%)` : "";
     const tokens = entry.inputTokens || entry.outputTokens
       ? `in ${formatTokens(entry.inputTokens)}${cached} · out ${formatTokens(entry.outputTokens)} · ` : "";
-    const spend = `${formatCost(entry.cost)}${isEstimated(entry) ? " (catalog)" : ""}`;
-    const catalog = !isEstimated(entry) && entry.catalogCost && entry.catalogCost > 0
+    const spend = `${formatCost(entry.cost)}${estimateLabel(entry)}`;
+    const catalog = entry.reported && entry.catalogCost && entry.catalogCost > 0
       ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : "";
     return `\`${modelDisplayName(entry.model)}\`: ${tokens}${spend}${catalog}`;
   });
   // A total is real spend only when every line under it is a provider charge.
-  const allEstimated = rows.length > 0 && rows.every(isEstimated);
+  const allEstimated = rows.length > 0 && rows.every((entry) => estimateLabel(entry));
+  const anyCatalog = rows.some((entry) => entry.catalogEstimated === true || estimateLabel(entry) === " (catalog)");
   const more = rows.length - lines.length;
   return [
-    `**Total ${formatCost(usage.cost)}**${allEstimated ? " (catalog)" : ""}${usage.catalogCost > 0 && !allEstimated ? ` · ${formatCost(usage.catalogCost)} at catalog rates` : ""}`,
+    `**Total ${formatCost(usage.cost)}**${allEstimated ? anyCatalog ? " (catalog)" : " (est)" : ""}${usage.catalogCost > 0 && !allEstimated ? ` · ${formatCost(usage.catalogCost)} at catalog rates` : ""}`,
     ...lines,
     more > 0 ? `+${more} more model${more === 1 ? "" : "s"}` : undefined,
   ].filter(Boolean).join("\n");
 }
 
 /**
- * Whether a model's figure is a rate estimate rather than a provider charge.
- * Only a charge is real spend; a route that reports none leaves the catalog
- * fallback, and the card must not present that as the bill.
+ * The suffix a cost figure earns. A provider charge is real spend and needs
+ * none; a live market-rate estimate is "(est)", since the seller price is real
+ * but the final amount is not invoiced; a bare catalog-rate guess is
+ * "(catalog)" — list rates overstate a discounted route by orders of magnitude,
+ * so the distinction matters to a reader.
  */
-function isEstimated(entry: { reported?: true; unreported?: true }): boolean {
-  return entry.unreported === true || entry.reported !== true;
+function estimateLabel(entry: { reported?: true; unreported?: true; catalogEstimated?: true; marketEstimated?: true }): "" | " (est)" | " (catalog)" {
+  // Ledger buckets say so directly: a catalog guess anywhere demotes the line.
+  if (entry.catalogEstimated) return " (catalog)";
+  if (entry.unreported) return " (est)";
+  if (entry.reported) return "";
+  // A single turn's entry: market-priced estimates are grounded in a real
+  // seller price; anything else is the catalog fallback.
+  return entry.marketEstimated ? " (est)" : " (catalog)";
 }
 
 /** The pinned, self-updating front page of a project thread. */

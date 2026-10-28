@@ -39,6 +39,10 @@ export interface ModelUsage {
   /** Set when `cost` is the provider's reported charge rather than a rate
    * estimate, so reconciliation never lets a larger estimate win. */
   reported?: true;
+  /** Set when `cost` is an estimate at live marketplace seller rates because
+   * the endpoint reported no charge of its own. Absent on catalog-rate
+   * estimates, which is how a reader tells the two apart. */
+  marketEstimated?: true;
   /** What these tokens would cost at another provider's catalog list rates;
    * carried only by surplus-served models, and undefined when no other
    * provider lists the same model id. */
@@ -182,14 +186,19 @@ export function reconcileUsage(observed: TurnUsage | undefined, saved: TurnUsage
   const peer = billing === saved ? observed : saved;
   result.models = billing.models.map((entry) => {
     const priced = peer.models.find((candidate) => candidate.model === entry.model);
+    // A provider charge and a market-rate estimate are both grounded in real
+    // prices; only two bare catalog guesses compete on magnitude.
+    const authoritative = (value: ModelUsage | undefined) => value?.reported || value?.marketEstimated;
     const cost = !priced ? entry.cost
-      : entry.reported ? entry.cost
-      : priced.reported ? priced.cost
+      : authoritative(entry) ? entry.cost
+      : authoritative(priced) ? priced.cost
       : Math.max(entry.cost, priced.cost);
+    const winner = cost === entry.cost ? entry : priced;
     return {
       ...entry,
       cost,
-      ...(entry.reported || priced?.reported ? { reported: true as const } : {}),
+      ...(winner?.reported ? { reported: true as const } : {}),
+      ...(winner?.marketEstimated ? { marketEstimated: true as const } : {}),
       ...(entry.catalogCost === undefined && priced?.catalogCost !== undefined ? { catalogCost: priced.catalogCost } : {}),
     };
   });
@@ -320,9 +329,10 @@ export function annotateCatalogCosts(usage: TurnUsage, catalog: ReadonlyArray<Ca
  * all, so OpenCode fell back to catalog list rates — at the marketplace's own
  * live seller prices instead. List rates overstate a discounted route by
  * orders of magnitude, so this is the honest estimate for such a turn; the
- * figure stays marked as an estimate (`reported` absent), and the list-rate
- * comparison computed earlier is left in `catalogCost`. Rates are USD per
- * million tokens; models without a market price keep their existing figure.
+ * figure stays an estimate (`reported` absent) but is marked as market-priced
+ * so the card can label it differently from a list-rate guess, and the
+ * list-rate comparison computed earlier is left in `catalogCost`. Rates are
+ * USD per million tokens; models without a market price keep their figure.
  */
 export function annotateMarketCosts(usage: TurnUsage, rates: ReadonlyMap<string, ModelRates>): void {
   if (!rates.size) return;
@@ -334,6 +344,7 @@ export function annotateMarketCosts(usage: TurnUsage, rates: ReadonlyMap<string,
     const modelRates = rates.get(modelID);
     if (!modelRates) continue;
     entry.cost = costAtRates(entry, modelRates);
+    entry.marketEstimated = true;
     changed = true;
   }
   if (!changed) return;
@@ -416,6 +427,9 @@ export function mergeModelUsage(entries: ModelUsage[]): ModelUsage[] {
     // in the mix keeps the figure a blend, not a charge.
     if (existing) { if (!entry.reported) current.reported = undefined; }
     else if (entry.reported) current.reported = true;
+    // Likewise a bucket is market-priced only when every estimate in it was.
+    if (existing) { if (!entry.marketEstimated) current.marketEstimated = undefined; }
+    else if (entry.marketEstimated) current.marketEstimated = true;
     if (entry.catalogCost !== undefined) current.catalogCost = (current.catalogCost ?? 0) + entry.catalogCost;
     merged.set(entry.model, current);
   }
