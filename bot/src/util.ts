@@ -134,10 +134,16 @@ export function formatTokensPerSecond(rate: number): string {
   return rate >= 10 ? String(Math.round(rate)) : rate.toFixed(1).replace(/\.0$/, "");
 }
 
-/** USD cost with enough precision for both sub-cent per-turn amounts and large totals. */
+/** USD cost with enough precision for sub-cent per-turn amounts, micro-dollar
+ * marketplace charges and large totals alike. */
 export function formatCost(cost: number): string {
   if (!Number.isFinite(cost) || cost <= 0) return "$0";
-  if (cost < 0.01) return `$${cost.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+  if (cost < 0.01) {
+    // Discount marketplace calls bill fractions of a cent; four decimals would
+    // round a real charge to "$0" and read as free.
+    const trimmed = cost.toFixed(cost >= 0.001 ? 4 : 6).replace(/0+$/, "").replace(/\.$/, "");
+    return trimmed === "0" ? "<$0.000001" : `$${trimmed}`;
+  }
   if (cost < 1000) return `$${cost.toFixed(2)}`;
   return `$${Math.round(cost).toLocaleString("en-US")}`;
 }

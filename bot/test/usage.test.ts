@@ -9,6 +9,7 @@ process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { UsageLog } = await import("../src/usage.js");
 const { annotateCatalogCosts, usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage, reportedCost } = await import("../src/opencode.js");
+const { formatCost } = await import("../src/util.js");
 
 function message(id: string, created: number, input = 100, output = 20): SessionMessage {
   return { info: { id, role: "assistant", providerID: "test", modelID: "model", time: { created },
@@ -99,6 +100,18 @@ test("the session split attributes root and subagent figures that sum to the tur
   assert.deepEqual(split[1].models?.map((entry) => entry.model), ["surplus/glm-5.3"]);
   // An unobserved child still gets a bucket, labeled as a generic subagent.
   assert.equal(sessionUsageFromMessages([step("x", "ses_ghost", 1500, 10, 1)], "ses_root", () => undefined)[0].agent, "subagent");
+});
+
+test("discounted marketplace charges stay visible instead of rounding to $0", () => {
+  // A surplus marketplace call bills fractions of a cent (179 micro-dollars
+  // per million input tokens), so a project's real spend sits far below one
+  // cent. Rendering that as "$0" would read as free.
+  assert.equal(formatCost(0.0005), "$0.0005");
+  assert.equal(formatCost(0.0000123), "$0.000012");
+  assert.equal(formatCost(0.0000001), "<$0.000001", "below micro precision, say so rather than claim zero");
+  assert.equal(formatCost(0.009999), "$0.01", "ordinary sub-cent amounts keep two-decimal readability");
+  assert.equal(formatCost(3.42), "$3.42");
+  assert.equal(formatCost(0), "$0", "a genuine zero is still zero");
 });
 
 test("a gateway's own charge replaces the catalog estimate for the same tokens", () => {
