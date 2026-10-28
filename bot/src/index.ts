@@ -35,6 +35,7 @@ import { approvalCard, CollaborationService, installApprovedUploads } from "./co
 import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
 import { getLogFile, log, logError, recentIncidents, recordIncident, serializeError } from "./logger.js";
+import { discardLegacyUsageLedger } from "./maintenance.js";
 import { multiplayerRelayStatus } from "./multiplayer.js";
 import { OpenCodeHarness, formatTurnUsage, type PromptImage, type QuotaBlock } from "./opencode.js";
 import { lifetimeModelLines, renderProjectCard, type ProjectCardMessage, type ProjectCardState } from "./project-card.js";
@@ -71,6 +72,9 @@ const botVersion = await fs
   .catch(() => undefined);
 
 const store = await Store.open(config.stateDbFile, config.defaultModel);
+// The usage ledger lives in that same database; a standalone ledger file from
+// an older bot is superseded and gets discarded, not migrated.
+await discardLegacyUsageLedger();
 // A publish that died between its two renames leaves the live site missing
 // with its content in a .backup-* directory; restore it before any turn can
 // republish over the gap.
@@ -79,7 +83,7 @@ const opencode = new OpenCodeHarness();
 // The admin-set backup list wins; without one the configured env list applies.
 opencode.failoverModelSource = () => store.getFailoverModels() ?? null;
 const forgejo = new ForgejoClient();
-const usageLog = new UsageLog(config.usageDbFile);
+const usageLog = new UsageLog(config.stateDbFile);
 const projects = new ProjectService(store, opencode, forgejo, usageLog, async (project, title) => {
   const channel = await client.channels.fetch(project.threadId, { force: true });
   if (!channel?.isThread()) throw new Error("The project Discord thread is unavailable.");

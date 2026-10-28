@@ -115,10 +115,8 @@ export const config = {
 
   workspaceRoot: path.resolve(env("WORKSPACE_ROOT", "/workspace")),
   publishRoot: path.resolve(env("PUBLISH_ROOT", "/srv/sites")),
-  // SQLite store (projects + settings).
+  // Single SQLite database: projects, settings and the token/cost ledger.
   stateDbFile: path.resolve(env("STATE_DB_FILE", "/data/state.db")),
-  // Indexed SQLite token/cost ledger backing /site-admin usage.
-  usageDbFile: path.resolve(env("USAGE_DB_FILE", "/data/usage-log.jsonl.sqlite")),
   publicSitesBaseUrl: env("PUBLIC_SITES_BASE_URL", "http://localhost:8080").replace(/\/$/, ""),
   publicIndexEnabled: boolEnv("PUBLIC_INDEX_ENABLED", true),
 
