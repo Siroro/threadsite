@@ -28,8 +28,6 @@ See the [install guide](docs/deployment.md#caddy-quickstart) for custom domains,
 
 ## Usage
 
-Set `HIDE_COSTS=true` in `.env` to hide monetary figures in Discord cards and reports. It defaults to `false`; usage and cost accounting remain recorded. Usage is stored in indexed SQLite tables inside the bot's single state database (`STATE_DB_FILE`, default `/data/state.db`).
-
 Create a website:
 
 ```text
