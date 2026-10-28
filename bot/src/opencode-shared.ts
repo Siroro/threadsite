@@ -186,19 +186,17 @@ export function reconcileUsage(observed: TurnUsage | undefined, saved: TurnUsage
   const peer = billing === saved ? observed : saved;
   result.models = billing.models.map((entry) => {
     const priced = peer.models.find((candidate) => candidate.model === entry.model);
-    // A provider charge and a market-rate estimate are both grounded in real
-    // prices; only two bare catalog guesses compete on magnitude.
-    const authoritative = (value: ModelUsage | undefined) => value?.reported || value?.marketEstimated;
-    const cost = !priced ? entry.cost
-      : authoritative(entry) ? entry.cost
-      : authoritative(priced) ? priced.cost
-      : Math.max(entry.cost, priced.cost);
-    const winner = cost === entry.cost ? entry : priced;
+    // A reported charge outranks an estimate, and a market estimate outranks
+    // a catalog guess. Keep the winning provenance with its amount.
+    const rank = (value: ModelUsage | undefined) => value?.reported ? 2 : value?.marketEstimated ? 1 : 0;
+    const winner = !priced || rank(entry) > rank(priced) ? entry
+      : rank(priced) > rank(entry) ? priced
+      : rank(entry) > 0 || entry.cost >= priced.cost ? entry : priced;
+    const { reported: _reported, marketEstimated: _marketEstimated, ...base } = entry;
     return {
-      ...entry,
-      cost,
-      ...(winner?.reported ? { reported: true as const } : {}),
-      ...(winner?.marketEstimated ? { marketEstimated: true as const } : {}),
+      ...base, cost: winner.cost,
+      ...(winner.reported ? { reported: true as const } : {}),
+      ...(winner.marketEstimated ? { marketEstimated: true as const } : {}),
       ...(entry.catalogCost === undefined && priced?.catalogCost !== undefined ? { catalogCost: priced.catalogCost } : {}),
     };
   });
@@ -338,9 +336,8 @@ export function annotateMarketCosts(usage: TurnUsage, rates: ReadonlyMap<string,
   if (!rates.size) return;
   let changed = false;
   for (const entry of usage.models) {
-    if (entry.reported) continue;
-    const modelID = entry.model.startsWith(`${SURPLUS_PROVIDER_ID}/`)
-      ? entry.model.slice(SURPLUS_PROVIDER_ID.length + 1) : entry.model;
+    if (entry.reported || entry.marketEstimated || !entry.model.startsWith(`${SURPLUS_PROVIDER_ID}/`)) continue;
+    const modelID = entry.model.slice(SURPLUS_PROVIDER_ID.length + 1);
     const modelRates = rates.get(modelID);
     if (!modelRates) continue;
     entry.cost = costAtRates(entry, modelRates);

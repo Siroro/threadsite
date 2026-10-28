@@ -207,20 +207,25 @@ export class UsageLog {
     await this.writes;
   }
 
-  /** Reconcile saved turn usage from its session and time boundaries. */
-  async reconcileThread(threadId: string, sessionId: string, messages: SessionMessage[]): Promise<boolean> {
+  /** Reconcile saved turn usage and repair catalog estimates when market prices are available. */
+  async reconcileThread(threadId: string, sessionId: string, messages: SessionMessage[],
+    priceUsage?: (usage: TurnUsage) => Promise<void>): Promise<boolean> {
     if (this.forgottenThreads.has(threadId)) return false;
     let changed = false;
     for (const entry of await this.readEntries()) {
-      if (entry.threadId !== threadId || entry.label !== "turn") continue;
-      const until = Date.parse(entry.ts);
-      if (entry.pending || entry.sessionId !== sessionId || !entry.startedAt) continue;
-      const since = Date.parse(entry.startedAt);
-      const saved = usageFromMessages(messages, since, until);
-      if (!saved || saved.inputTokens + saved.outputTokens <= entry.inputTokens + entry.outputTokens) continue;
-      await this.append({ ...entry, sessionId, startedAt: new Date(since).toISOString(),
-        inputTokens: saved.inputTokens, outputTokens: saved.outputTokens, cacheTokens: saved.cacheTokens,
-        cost: saved.cost, models: saved.models });
+      if (entry.threadId !== threadId || entry.pending) continue;
+      const canRecoverHistory = entry.label === "turn" && entry.sessionId === sessionId && Boolean(entry.startedAt);
+      const saved = canRecoverHistory
+        ? usageFromMessages(messages, Date.parse(entry.startedAt!), Date.parse(entry.ts)) : undefined;
+      const fuller = saved && saved.inputTokens + saved.outputTokens > entry.inputTokens + entry.outputTokens;
+      const usage: TurnUsage = fuller ? saved : {
+        inputTokens: entry.inputTokens, outputTokens: entry.outputTokens, cacheTokens: entry.cacheTokens,
+        cost: entry.cost, models: structuredClone(entry.models), contextTokens: 0, compactions: 0, steps: 0,
+      };
+      if (priceUsage) await priceUsage(usage);
+      if (!fuller && JSON.stringify(usage.models) === JSON.stringify(entry.models)) continue;
+      await this.append({ ...entry, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+        cacheTokens: usage.cacheTokens, cost: usage.cost, models: usage.models });
       changed = true;
     }
     return changed;

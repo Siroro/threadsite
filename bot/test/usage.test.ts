@@ -360,6 +360,14 @@ test("market re-pricing never overwrites a provider-reported charge", () => {
   assert.equal(usage.models[0].reported, true);
 });
 
+test("Surplus market rates do not reprice another provider using the same model name", () => {
+  const usage = usageFromMessages([{ info: { id: "a", role: "assistant", providerID: "other", modelID: "m",
+    time: { created: 1 }, tokens: { input: 1000, output: 100 }, cost: 0.05 } }])!;
+  annotateMarketCosts(usage, new Map([["m", { input: 0.001, output: 0.002 }]]));
+  assert.equal(usage.cost, 0.05);
+  assert.equal(usage.models[0].marketEstimated, undefined);
+});
+
 test("a model with no market price keeps its existing figure", () => {
   const usage = usageFromMessages([{
     info: { id: "a", role: "assistant", providerID: "opencode", modelID: "free-model", time: { created: 1000 },
@@ -426,6 +434,61 @@ test("missing turn usage reconciles within saved boundaries, retaining failures 
   assert.equal(total.inputTokens, 370);
   assert.equal(total.outputTokens, 64);
   assert.equal((await log.modelBreakdown()).models[0].inputTokens, 370);
+});
+
+test("recovery prices fuller history and repairs existing catalog estimates without duplicating usage", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-reprice-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const log = new UsageLog(path.join(root, "usage.jsonl"));
+  const step = (id: string, time: number, input: number): SessionMessage => ({
+    info: { id, role: "assistant", providerID: "surplus", modelID: "deepseek-v4.1-flash",
+      time: { created: time }, tokens: { input, output: 100, cache: { read: 500, write: 0 } }, cost: 0.04 },
+  });
+  const first = step("a", 1500, 1000);
+  const second = step("b", 1600, 1000);
+  const initial = usageFromMessages([first])!;
+  await log.record({ id: "turn", sessionId: "session", startedAt: new Date(1000).toISOString(),
+    threadId: "thread", project: "Game", kind: "site", usage: initial });
+  const price = async (usage: TurnUsage) => annotateMarketCosts(usage,
+    new Map([["deepseek-v4.1-flash", { input: 0.001, output: 0.002, cacheRead: 0.0001 }]]));
+  assert.equal(await log.reconcileThread("thread", "session", [first], price), true);
+  let total = await log.threadTotal("thread");
+  assert.equal(total.turns, 1);
+  assert.equal(total.models.get("surplus/deepseek-v4.1-flash")?.catalogEstimated, undefined);
+  assert.ok(Math.abs(total.cost - 0.00000125) < 1e-12);
+  assert.equal(await log.reconcileThread("thread", "session", [first, second], price), true);
+  total = await log.threadTotal("thread");
+  assert.equal(total.turns, 1);
+  assert.equal(total.inputTokens, 3000);
+  assert.ok(Math.abs(total.cost - 0.0000025) < 1e-12);
+  assert.equal(await log.reconcileThread("thread", "session", [first, second], price), false);
+});
+
+test("reconciliation keeps the market estimate for the fuller token snapshot", () => {
+  const rates = new Map([["m", { input: 1, output: 1, cacheRead: 0.01 }]]);
+  const make = (input: number, cached: number) => usageFromMessages([{ info: { id: "a", role: "assistant",
+    providerID: "surplus", modelID: "m", time: { created: 1 },
+    tokens: { input, output: 1, cache: { read: cached, write: 0 } }, cost: 1 } }])!;
+  const smaller = make(1000, 0);
+  const fuller = make(1, 2000);
+  annotateMarketCosts(smaller, rates);
+  annotateMarketCosts(fuller, rates);
+  assert.ok(smaller.cost > fuller.cost);
+  const result = reconcileUsage(smaller, fuller)!;
+  assert.equal(result.cost, fuller.cost);
+  assert.equal(result.inputTokens, fuller.inputTokens);
+});
+
+test("reported charges outrank market estimates even when history is fuller", () => {
+  const reported = usageFromMessages([{ info: { id: "a", role: "assistant", providerID: "surplus", modelID: "m",
+    time: { created: 1 }, tokens: { input: 1, output: 1 }, native: { buyer_cost_micro: 2000 } } }])!;
+  const estimated = usageFromMessages([{ info: { id: "a", role: "assistant", providerID: "surplus", modelID: "m",
+    time: { created: 1 }, tokens: { input: 2, output: 2 }, cost: 1 } }])!;
+  annotateMarketCosts(estimated, new Map([["m", { input: 1, output: 1 }]]));
+  const reconciled = reconcileUsage(reported, estimated)!;
+  assert.equal(reconciled.cost, 0.002);
+  assert.equal(reconciled.models[0].reported, true);
+  assert.equal(reconciled.models[0].marketEstimated, undefined);
 });
 
 test("project deletion erases every usage revision while preserving other projects and ignoring late events", async (t) => {

@@ -64,6 +64,33 @@ function assistant(id: string, input: number, text: string): SessionMessageInfo 
     tokens: { input, output: 10, reasoning: 2, cache: { read: 20, write: 0 } }, cost: 0.01 };
 }
 
+test("market lookup failures fall back and retry promptly for later turns", async () => {
+  const f = fixture();
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    if (calls === 1) throw new Error("market unavailable");
+    return new Response(JSON.stringify({ markets: [{ model: "deepseek-v4.1-flash",
+      best_input_per_1m: 1000, best_output_per_1m: 2000, best_cache_read_per_1m: 100 }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const make = () => usageFromMessages([{ info: { id: "a", role: "assistant", providerID: "surplus",
+      modelID: "deepseek-v4.1-flash", time: { created: 1 }, tokens: { input: 1000, output: 100 }, cost: 0.05 } }])!;
+    const first = make();
+    await f.harness.priceUsage(first);
+    assert.equal(first.cost, 0.05);
+    const cache = (f.harness as any).marketCache;
+    assert.ok(cache.expires - Date.now() <= 60_000);
+    cache.expires = Date.now() - 1;
+    const next = make();
+    await f.harness.priceUsage(next);
+    assert.equal(calls, 2);
+    assert.equal(next.models[0].marketEstimated, true);
+    assert.ok(next.cost < first.cost);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("native v2 prompt sends files, model variant and permissions separately and returns saved billing", async () => {
   const f = fixture();
   const result = await f.harness.prompt("/w", "ses_root", "Build", "test/vision", undefined, "sitebuilder", "high",

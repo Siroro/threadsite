@@ -203,10 +203,17 @@ export class OpenCodeV2Harness {
       return rates;
     })().catch((error) => {
       log("warn", "opencode.v2_market_prices_failed", { error: serializeError(error) });
+      // Retry a failed lookup promptly rather than caching an empty market for the full TTL.
+      if (this.marketCache?.promise === promise) this.marketCache.expires = Date.now() + 60_000;
       return new Map<string, ModelRates>();
     });
     this.marketCache = { expires: Date.now() + Math.max(60_000, config.marketPricesTtlMs), promise };
     return promise;
+  }
+
+  /** Price unreported Surplus usage at current marketplace rates when available. */
+  async priceUsage(usage: TurnUsage): Promise<void> {
+    annotateMarketCosts(usage, await this.marketRates());
   }
 
   async modelAcceptsAttachments(providerID: string, modelID: string, directory?: string): Promise<boolean | undefined> {

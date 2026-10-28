@@ -235,7 +235,8 @@ export class ProjectService {
     if (!project?.sessionId || !project.workspacePath) return false;
     try {
       return await this.usageLog.reconcileThread(threadId, project.sessionId,
-        await this.opencode.usageMessages(project.workspacePath, project.sessionId));
+        await this.opencode.usageMessages(project.workspacePath, project.sessionId),
+        typeof this.opencode.priceUsage === "function" ? (usage) => this.opencode.priceUsage(usage) : undefined);
     } catch (error) {
       log("warn", "usage.reconcile_failed", { threadId, error: errorText(error) });
       return false;
@@ -246,8 +247,10 @@ export class ProjectService {
     usage: TurnUsage | undefined, failed: boolean, durationMs: number): Promise<TurnUsage | undefined> {
     if (pending && typeof this.opencode.usageMessages === "function") {
       try {
-        usage = reconcileUsage(usage, usageFromMessages(
-          await this.opencode.usageMessages(project.workspacePath, project.sessionId), Date.parse(pending.startedAt)));
+        const saved = usageFromMessages(
+          await this.opencode.usageMessages(project.workspacePath, project.sessionId), Date.parse(pending.startedAt));
+        if (saved && typeof this.opencode.priceUsage === "function") await this.opencode.priceUsage(saved);
+        usage = reconcileUsage(usage, saved);
       } catch (error) {
         log("warn", "usage.turn_history_failed", { threadId: project.threadId, error: errorText(error) });
       }
