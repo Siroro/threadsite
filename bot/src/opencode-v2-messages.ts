@@ -30,7 +30,14 @@ export function applicationMessage(message: SessionMessageInfo, sessionID: strin
       time: { ...message.time, completed: message.time.created } });
   }
   if (message.type === "compaction" && message.status !== "running") {
-    Object.assign(info, { role: "assistant", tokens: message.tokens, cost: message.cost });
+    // A compaction is a billed step the summary model wrote; only a completed
+    // record names that model and the gateway's own charge, and dropping them
+    // files its spend under "unknown" instead.
+    const model = message.status === "completed" ? message.model : undefined;
+    Object.assign(info, { role: "assistant", tokens: message.tokens, cost: message.cost,
+      ...(model ? { providerID: model.providerID, modelID: model.id, variant: model.variant,
+        model: { providerID: model.providerID, modelID: model.id, variant: model.variant } } : {}),
+      ...(message.status === "completed" ? { native: message.native } : {}) });
   }
   return { info, parts: message.type === "compaction" ? [{ type: "compaction", status: message.status }] : [] };
 }

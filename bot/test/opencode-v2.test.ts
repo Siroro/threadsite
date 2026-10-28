@@ -402,6 +402,21 @@ test("every persisted v2 model step is billed once, including child usage", asyn
     "the split sums to the billed totals");
 });
 
+test("a compaction bills the model that wrote its summary, at the gateway's reported charge", async () => {
+  const f = fixture();
+  // OpenCode's catalog estimate for these tokens is 48c; the gateway charged 10c.
+  f.history.push({ type: "compaction", id: "msg_summary", status: "completed", reason: "auto",
+    model: { id: "deepseek-4.1", providerID: "surplus" }, time: { created: Date.now() }, summary: "…",
+    tokens: { input: 120_000, output: 3_000, reasoning: 0, cache: { read: 0, write: 0 } },
+    cost: 0.48, native: { buyer_cost_micro: 100_000 } } as SessionMessageInfo);
+  const usage = usageFromMessages(await f.harness.usageMessages("/w", "ses_root"))!;
+  assert.deepEqual(usage.models.map((entry) => [entry.model, entry.cost, entry.reported]),
+    [["surplus/deepseek-4.1", 0.1, true]], "compaction spend belongs to its model, not an unknown bucket");
+  assert.equal(usage.cost, 0.1);
+  assert.equal(usage.inputTokens, 120_000);
+  assert.equal(usage.outputTokens, 3_000);
+});
+
 test("root finish-up budget counts persisted steps and sends a single non-resuming receipt", async () => {
   const f = fixture();
   const oldLimit = config.opencodeMaxSteps;
