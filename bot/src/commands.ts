@@ -57,7 +57,16 @@ export const siteCommand = new SlashCommandBuilder()
       .setMaxLength(2000)))
   .addSubcommand((sub) => sub
     .setName("wipe")
-    .setDescription("Clear this game's relay state: the shared arena world and leaderboard scores"))
+    .setDescription("Clear this game's relay state: the shared arena world and/or leaderboard scores")
+    .addStringOption((option) => option
+      .setName("scope")
+      .setDescription("What to clear")
+      .setRequired(true)
+      .addChoices(
+        { name: "Everything (arena world and scores)", value: "all" },
+        { name: "Arena state only", value: "world" },
+        { name: "Leaderboard scores only", value: "scores" },
+      )))
   .addSubcommand((sub) => sub
     .setName("compact")
     .setDescription("Compact this thread's agent session context now"))
@@ -199,7 +208,8 @@ export const adminCommand = new SlashCommandBuilder()
       .setDescription("What to clear across every game")
       .setRequired(true)
       .addChoices(
-        { name: "Everything (worlds, rooms and scores)", value: "all" },
+        { name: "Everything (arena worlds, rooms and scores)", value: "all" },
+        { name: "Arena state only", value: "world" },
         { name: "Leaderboard scores only", value: "scores" },
       )))
   .addSubcommand((sub) => sub

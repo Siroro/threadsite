@@ -28,7 +28,10 @@ async function fixture() {
     projectSections: () => [], queue: () => ({ requests: [], preparing: 0 }), cancel: async () => "",
     submit: async (_interaction, _project, form) => { submitted.push(form); return "saved"; },
     stop: async () => "", rollback: async () => {}, busy: async () => false, error: () => {},
-    wipe: async (threadId, userId) => { wiped.push(`${threadId}/${userId}`); return "wipe done"; },
+    wipe: async (threadId, userId, scope) => {
+      wiped.push(`${threadId}/${userId}:${[scope.world ? "world" : "", scope.scores ? "scores" : ""].filter(Boolean).join("+")}`);
+      return "wipe done";
+    },
   });
   const interaction = (customId: string, overrides: Record<string, unknown> = {}): any => ({
     customId, channelId: threadId, guildId: project.guildId, user: { id: "12345" },
@@ -95,41 +98,67 @@ async function gameFixture(extra: Record<string, unknown> = {}) {
   return f;
 }
 
-test("the card wipe button confirms first and only resets after the second click", async () => {
+test("the card wipe button opens a scope form instead of editing the distant card", async () => {
   const f = await gameFixture({ collaboration: { mode: "open", userIds: [], revision: 1, wipePolicy: "anyone" } });
-  await f.router.handle(f.interaction(cardId("wipe", f.threadId), { isButton: () => true }));
-  assert.deepEqual(f.wiped, [], "the first click only asks for confirmation");
-  assert.ok(JSON.stringify(f.replies).includes(cardId("wipe", f.threadId, "go")), "the confirmation offers the execute button");
-  await f.router.handle(f.interaction(cardId("wipe", f.threadId, "go"), { isButton: () => true }));
-  assert.deepEqual(f.wiped, [`${f.threadId}/12345`]);
+  let modal: ModalBuilder | undefined;
+  await f.router.handle(f.interaction(cardId("wipe", f.threadId), { isButton: () => true, showModal: async (value: ModalBuilder) => { modal = value; } }));
+  assert.ok(modal, "the button opens a modal centred on the user's view");
+  assert.deepEqual(f.wiped, [], "opening the form clears nothing");
+  const json = JSON.stringify(modal!.toJSON());
+  assert.match(json, /"custom_id":"world"/);
+  assert.match(json, /"custom_id":"scores"/);
+  assert.match(json, /"default":true/, "both scopes start checked, so submitting is the deliberate act");
 });
 
-test("cancel dismisses the wipe confirmation without resetting", async () => {
+test("submitting the wipe form clears exactly the checked scopes", async () => {
   const f = await gameFixture({ collaboration: { mode: "open", userIds: [], revision: 1, wipePolicy: "anyone" } });
-  await f.router.handle(f.interaction(cardId("dismiss", f.threadId), { isButton: () => true }));
+  const submit = (boxes: Record<string, boolean>) => f.router.handle(f.interaction(cardId("wipe", f.threadId), {
+    isButton: () => false, isModalSubmit: () => true,
+    fields: { getCheckbox: (id: string) => boxes[id] ?? (() => { throw new Error(`No modal component with id: ${id}`); })() },
+  }));
+  await submit({ world: true, scores: false });
+  await submit({ world: false, scores: true });
+  await submit({ world: true, scores: true });
+  assert.deepEqual(f.wiped, [
+    `${f.threadId}/12345:world`,
+    `${f.threadId}/12345:scores`,
+    `${f.threadId}/12345:world+scores`,
+  ]);
+});
+
+test("an empty wipe form is refused rather than clearing nothing silently", async () => {
+  const f = await gameFixture({ collaboration: { mode: "open", userIds: [], revision: 1, wipePolicy: "anyone" } });
+  await f.router.handle(f.interaction(cardId("wipe", f.threadId), {
+    isButton: () => false, isModalSubmit: () => true, fields: { getCheckbox: () => false },
+  }));
   assert.deepEqual(f.wiped, []);
+  assert.ok(JSON.stringify(f.replies).includes("Choose at least one thing to clear"));
 });
 
-test("a confirmed wipe still rechecks the current policy before resetting", async () => {
+test("a submitted wipe form still rechecks the current policy before resetting", async () => {
   const f = await gameFixture({ collaboration: { mode: "open", userIds: [], revision: 1, wipePolicy: "anyone" } });
-  await f.router.handle(f.interaction(cardId("wipe", f.threadId), { isButton: () => true }));
-  // The owner tightens the policy while the confirmation is still open.
+  // The owner tightens the policy while the form is still open.
   await f.store.patchProject(f.threadId, { collaboration: { mode: "open", userIds: [], revision: 2, wipePolicy: "owner" } });
-  await f.router.handle(f.interaction(cardId("wipe", f.threadId, "go"), { isButton: () => true }));
-  assert.deepEqual(f.wiped, [], "a stale confirmation cannot outlive the policy that allowed it");
+  await f.router.handle(f.interaction(cardId("wipe", f.threadId), {
+    isButton: () => false, isModalSubmit: () => true, fields: { getCheckbox: () => true },
+  }));
+  assert.deepEqual(f.wiped, [], "a stale form cannot outlive the policy that allowed it");
 });
 
-test("only the owner's policy and managers open the wipe confirmation; sites have none", async () => {
-  const f = await gameFixture();
-  await f.router.handle(f.interaction(cardId("wipe", f.threadId), { isButton: () => true }));
-  assert.deepEqual(f.wiped, []);
-  assert.ok(JSON.stringify(f.replies).includes("Only the thread owner"), "the denial explains the Collaboration toggle");
-  const admin = await gameFixture();
-  await admin.router.handle(admin.interaction(cardId("wipe", admin.threadId), {
+test("singleplayer games get a scores-only form, and only the owner's policy or managers reach it", async () => {
+  const f = await gameFixture({ multiplayerMode: "singleplayer" });
+  let modal: ModalBuilder | undefined;
+  await f.router.handle(f.interaction(cardId("wipe", f.threadId), {
     isButton: () => true,
     memberPermissions: new PermissionsBitField([PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.ManageGuild]),
+    showModal: async (value: ModalBuilder) => { modal = value; },
   }));
-  assert.ok(JSON.stringify(admin.replies).includes(cardId("wipe", admin.threadId, "go")), "server administrators always reach the confirmation");
+  assert.ok(modal, "server administrators always reach the form");
+  assert.doesNotMatch(JSON.stringify(modal!.toJSON()), /"custom_id":"world"/, "singleplayer has no shared arena world to clear");
+  assert.match(JSON.stringify(modal!.toJSON()), /"custom_id":"scores"/);
+  const denied = await gameFixture();
+  await denied.router.handle(denied.interaction(cardId("wipe", denied.threadId), { isButton: () => true }));
+  assert.ok(JSON.stringify(denied.replies).includes("Only the thread owner"), "the denial explains the Collaboration toggle");
   const site = await fixture();
   await site.router.handle(site.interaction(cardId("wipe", site.threadId), {
     isButton: () => true,

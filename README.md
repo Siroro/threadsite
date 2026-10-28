@@ -70,7 +70,7 @@ Games can use a shared arena, invite-code rooms or singleplayer mode. For exampl
 /makegam dimension:2d multiplayer:rooms prompt: make a co-op dungeon crawler
 ```
 
-ThreadSite includes the multiplayer server. Games can also use saved progress and global leaderboards, and fall back to solo play if multiplayer is unavailable. Change an existing game's mode with `/site multiplayer`, and clear a game's shared arena world and leaderboard scores with `/site wipe` or the pinned card's **Wipe state** button (the owner chooses who may reset in Collaboration).
+ThreadSite includes the multiplayer server. Games can also use saved progress and global leaderboards, and fall back to solo play if multiplayer is unavailable. Change an existing game's mode with `/site multiplayer`, and clear a game's shared arena world and/or leaderboard scores with `/site wipe` or the pinned card's **Wipe state** form (the owner chooses who may reset in Collaboration).
 
 See [multiplayer](docs/multiplayer.md) for modes, saves and hosting.
 

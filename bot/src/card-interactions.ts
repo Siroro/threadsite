@@ -5,7 +5,7 @@ import {
 } from "discord.js";
 import { cardId, parseCardId, type CardAction, type CardRoute } from "./card-actions.js";
 import { addCardHeader, cardEdit, cardMessage, renderStatusCard, type CardMessage } from "./card-ui.js";
-import { renderDetailPanel, renderQueuePanel, requestModal, type PanelSection, type PanelScope } from "./card-panels.js";
+import { renderDetailPanel, renderQueuePanel, requestModal, wipeModal, type PanelSection, type PanelScope } from "./card-panels.js";
 import type { RequestFormState, StoredTurnCard } from "./card-state.js";
 import { elapsed, hasUsageData, modelUsageLines, sessionUsageLines, progressDetailSections, subagentDetailText, subagentHistory, usageDetailText, type ProgressSnapshot } from "./progress-view.js";
 import { formatCost } from "./util.js";
@@ -28,7 +28,7 @@ export interface CardInteractionServices {
   submit(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, attachments: Attachment[]): Promise<string>;
   stop(threadId: string, statusMessageId: string): Promise<string>;
   /** Clear the game's shared relay state; resolves to the reply text. */
-  wipe(threadId: string, userId: string): Promise<string>;
+  wipe(threadId: string, userId: string, scope: { world: boolean; scores: boolean }): Promise<string>;
   rollback(threadId: string, expectedVersion: string, actor: ProjectActor): Promise<void>;
   busy(threadId: string): Promise<boolean>;
   error(error: unknown, interaction: CardInteraction): void;
@@ -181,30 +181,25 @@ export class CardInteractions {
     }
     if (action === "wipe") {
       if (!project.projectKind || project.projectKind === "site") throw new CardUserError("Only games keep state on the multiplayer relay.");
-      if (args[0] === "go") {
+      if (interaction.isModalSubmit()) {
         await this.begin(interaction, route.action);
-        // The confirm panel may sit open for a while: recheck the project,
-        // its kind and the wipe policy against current settings.
+        // The form may sit open for a while: recheck the project, its kind and
+        // the wipe policy against current settings before anything is deleted.
         const fresh = this.services.store.getProject(threadId);
         if (!fresh) throw new CardUserError("This project is no longer available.");
         if (!fresh.projectKind || fresh.projectKind === "site") throw new CardUserError("Only games keep state on the multiplayer relay.");
         requireWipeAccess(fresh, interactionActor(interaction, this.services.adminUser?.(interaction.user.id)));
-        await this.respond(interaction, renderStatusCard(await this.services.wipe(threadId, interaction.user.id)));
+        const singleplayer = (fresh.multiplayerMode ?? "arena") === "singleplayer";
+        // Modals ship with both boxes; a missing component reads as checked.
+        const world = singleplayer ? false : (modalCheckbox(interaction, "world") ?? true);
+        const scores = modalCheckbox(interaction, "scores") ?? true;
+        if (!world && !scores) throw new CardUserError("Choose at least one thing to clear.");
+        await this.respond(interaction, renderStatusCard(await this.services.wipe(threadId, interaction.user.id, { world, scores })));
         return;
       }
-      await this.begin(interaction, route.action);
-      const card = new ContainerBuilder().setAccentColor(0xef4444);
-      addCardHeader(card, "CONFIRM", `Clear ${project.displayName}'s relay state?`, "The shared arena world, any open rooms and every leaderboard score will be cleared. Connected players reconnect into a fresh, empty world. Private save slots, the site and the repository are kept.");
-      card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId(cardId("wipe", resource, "go")).setLabel("Wipe state now").setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId(cardId("dismiss", resource)).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
-      ));
-      await this.respond(interaction, cardMessage(card));
-      return;
-    }
-    if (action === "dismiss") {
-      await this.begin(interaction, route.action);
-      await this.respond(interaction, renderStatusCard("Cancelled. Nothing was changed."));
+      if (!interaction.isButton()) throw new CardUserError("Open the wipe form from the project card.");
+      // The modal doubles as the confirmation: submitting is the deliberate act.
+      await interaction.showModal(wipeModal(resource, (project.multiplayerMode ?? "arena") === "singleplayer"));
       return;
     }
     await this.question(interaction, project, route);

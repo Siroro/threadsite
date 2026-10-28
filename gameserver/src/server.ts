@@ -559,17 +559,36 @@ async function deleteGame(gameId: string): Promise<void> {
   durableTails.delete(gameId);
 }
 
+/** What a reset removes. Scores and worlds are asked for independently. */
+type ResetScope = { world: boolean; scores: boolean };
+
 /**
- * Clear a game's shared state without deleting the project: live rooms are
- * closed with a recoverable code (clients reconnect into fresh, empty ones),
- * the durable ARENA world is forgotten, and leaderboard scores are dropped.
- * Private save slots are player data, not game state, and survive.
+ * Parse `?scope=` for the admin reset endpoints. `all` (the default) clears
+ * both, `world` and `scores` clear one, and anything unrecognized is a bad
+ * request rather than a silent full wipe.
  */
-async function resetGame(gameId: string): Promise<void> {
-  for (const key of leaderboardLimits.keys()) if (key.startsWith(`${gameId}:`)) leaderboardLimits.delete(key);
+function parseResetScope(params: URLSearchParams): ResetScope | undefined {
+  const scope = (params.get("scope") ?? "all").trim().toLowerCase();
+  if (scope === "all") return { world: true, scores: true };
+  if (scope === "world" || scope === "scores") return { world: scope === "world", scores: scope === "scores" };
+  return undefined;
+}
+
+/**
+ * Clear a game's shared state without deleting the project. Leaderboard scores
+ * and the arena world are independent: scores drop their boards, while a world
+ * reset closes live rooms with a recoverable code (clients reconnect into
+ * fresh, empty ones) and forgets the durable snapshot. Private save slots are
+ * player data, not game state, and always survive.
+ */
+async function resetGame(gameId: string, scope: ResetScope = { world: true, scores: true }): Promise<void> {
+  if (scope.scores) {
+    for (const key of leaderboardLimits.keys()) if (key.startsWith(`${gameId}:`)) leaderboardLimits.delete(key);
+    playerStore.resetScores(gameId);
+  }
+  if (!scope.world) return;
   closeGamePeers(gameId, 4005, "state reset");
   games.delete(gameId);
-  playerStore.resetScores(gameId);
   // No tombstone is written: the game keeps accepting joins. The tail is
   // awaited before the file removal so an in-flight snapshot write cannot
   // resurrect the old world on disk (or in durableWorlds) after the reset.
@@ -592,13 +611,9 @@ async function knownGames(): Promise<Set<string>> {
 }
 
 /** Reset every known game at once; returns how many games were affected. */
-async function resetAllGames(scoresOnly: boolean): Promise<number> {
+async function resetAllGames(scope: ResetScope): Promise<number> {
   const ids = await knownGames();
-  for (const id of ids) {
-    if (!scoresOnly) { await resetGame(id); continue; }
-    for (const key of leaderboardLimits.keys()) if (key.startsWith(`${id}:`)) leaderboardLimits.delete(key);
-    playerStore.resetScores(id);
-  }
+  for (const id of ids) await resetGame(id, scope);
   return ids.size;
 }
 
@@ -609,12 +624,7 @@ const server = http.createServer((req, res) => {
   const reset = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})\/reset$/.exec(pathname);
   const adminDelete = Boolean(deletion && req.method === "DELETE");
   const adminReset = Boolean(reset && req.method === "POST");
-  let wipeAll = false;
-  let wipeScoresOnly = false;
-  if (req.method === "POST" && pathname === "/admin/reset") {
-    wipeAll = true;
-    try { wipeScoresOnly = new URL(req.url ?? "/", "http://internal").searchParams.get("scope") === "scores"; } catch { /* invalid query: reset everything */ }
-  }
+  const wipeAll = req.method === "POST" && pathname === "/admin/reset";
   if (adminDelete || adminReset || wipeAll || (req.method === "GET" && pathname === "/admin/games")) {
     void (async () => {
       const token = (await fs.readFile(ADMIN_TOKEN_FILE, "utf8")).trim();
@@ -628,14 +638,21 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify([...await knownGames()].sort()));
         return;
       }
+      let scope: ResetScope | undefined;
+      if (adminReset || wipeAll) {
+        let searchParams: URLSearchParams | undefined;
+        try { searchParams = new URL(req.url ?? "/", "http://internal").searchParams; } catch { /* invalid query: 400 below */ }
+        scope = searchParams ? parseResetScope(searchParams) : undefined;
+        if (!scope) { res.writeHead(400); res.end(); return; }
+      }
       if (wipeAll) {
-        const games = await resetAllGames(wipeScoresOnly);
+        const games = await resetAllGames(scope!);
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ ok: true, games }));
         return;
       }
       if (adminDelete) await deleteGame(deletion![1]!);
-      else await resetGame(reset![1]!);
+      else await resetGame(reset![1]!, scope);
       res.writeHead(204); res.end();
     })().catch((error) => {
       console.warn(`[threadsite-gameserver] admin_api failed: ${String((error as Error).message)}`);

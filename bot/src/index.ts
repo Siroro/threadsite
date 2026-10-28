@@ -41,7 +41,7 @@ import { renderProjectCard, type ProjectCardMessage, type ProjectCardState } fro
 import { DiscordProgress, type ProgressCallback } from "./progress.js";
 import { ProjectService, TurnStoppedError, type MutationResult, type StopTurnOutcome } from "./project.js";
 import { recoverPublishRoot } from "./publish.js";
-import { resetAllRelayGames, resetRelayGame } from "./relay-cleanup.js";
+import { resetAllRelayGames, resetRelayGame, type RelayResetScope } from "./relay-cleanup.js";
 import { Store, pendingTurnMatches } from "./store.js";
 import { multiplayerModeLabel, projectKindLabel, restartInstruction } from "./templates.js";
 import type { CommitAuthor, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
@@ -200,11 +200,11 @@ const cardInteractions = new CardInteractions({
   cancel: cancelQueueRequest,
   submit: submitCardRequest,
   stop: async (threadId, statusMessageId) => stopOutcomeText(await projects.stopTurn(threadId, statusMessageId)),
-  wipe: async (threadId, userId) => {
+  wipe: async (threadId, userId, scope) => {
     const project = store.getProject(threadId);
     if (!project || project.pendingDeletion) throw new CardUserError("This project is no longer available.");
     if (!project.projectKind || project.projectKind === "site") throw new CardUserError("Only games keep state on the multiplayer relay.");
-    return wipeRelayState(project, userId);
+    return wipeRelayState(project, userId, scope);
   },
   busy: (threadId) => projects.agentBusy(threadId),
   rollback: (threadId, expectedVersion, actor) => projects.enqueue(threadId, async () => {
@@ -1389,7 +1389,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         "**/site republish**: rebuild and republish without the model\n" +
         "**/site compact**: summarize the session context now\n" +
         "**/site multiplayer**: switch a game between arena, rooms, and singleplayer (the agent asks how, then rewrites the netcode; you get pinged when it asks)\n" +
-        "**/site wipe**: clear a game's relay state: shared arena world, open rooms and leaderboard scores (private saves are kept)\n" +
+        "**/site wipe**: clear a game's arena state and/or leaderboard scores (private saves are kept; the pinned card's Wipe state form does the same)\n" +
         "**/site stop**: interrupt the running turn without dropping its session\n" +
         "**/site queue**: show queued messages and cancel individual entries\n" +
         "**/site revert**: undo the last accepted turn\n" +
@@ -1564,9 +1564,12 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     // between owner/admins-only (the default) and anyone in the thread, so the
     // generic contributor gate must not pre-empt it.
     requireWipeAccess(project, actor);
+    const raw = interaction.options.getString("scope", true);
+    const singleplayer = (project.multiplayerMode ?? "arena") === "singleplayer";
+    const scope: RelayResetScope = { world: raw !== "scores" && !singleplayer, scores: raw !== "world" };
     // Deliberately not queued: it never touches the workspace, and clearing bad
     // relay state should not wait behind the very turn it exists to fix.
-    await interaction.editReply(await wipeRelayState(project, interaction.user.id));
+    await interaction.editReply(await wipeRelayState(project, interaction.user.id, scope));
     return;
   }
 
@@ -1808,14 +1811,15 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
   }
 
   if (sub === "wipe") {
-    const scoresOnly = interaction.options.getString("scope", true) === "scores";
-    const games = await resetAllRelayGames(scoresOnly);
-    log("info", "admin.relay_wiped", { userId: interaction.user.id, games, scoresOnly });
+    const raw = interaction.options.getString("scope", true);
+    const scope: RelayResetScope = { world: raw !== "scores", scores: raw !== "world" };
+    const games = await resetAllRelayGames(scope);
+    log("info", "admin.relay_wiped", { userId: interaction.user.id, games, ...scope });
+    const cleared = [scope.world ? "every shared arena world, open room and leaderboard score" : "", scope.scores && !scope.world ? "every leaderboard score" : ""].filter(Boolean);
     await interaction.editReply(
-      `🧹 Relay-wide reset complete for ${games} game${games === 1 ? "" : "s"}: ` +
-      (scoresOnly
-        ? "every leaderboard score was cleared. Shared arena worlds and private save slots are untouched."
-        : "every shared arena world, open room and leaderboard score was cleared. Connected players reconnect into fresh, empty worlds; private save slots are untouched."),
+      `🧹 Relay-wide reset complete for ${games} game${games === 1 ? "" : "s"}: cleared ${cleared.join(" and ")}. ` +
+      (scope.world ? "Connected players reconnect into fresh, empty worlds. " : "") +
+      "Private save slots are untouched.",
     );
     return;
   }
@@ -2455,15 +2459,16 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
   log("info", "discord.external_push_button_used", { action: publish ? "publish" : "dismiss", threadId: interaction.channel.id, userId: interaction.user.id });
 }
 
-/** Clear one game's shared relay state; shared by `/site wipe` and the pinned
+/** Clear a game's shared relay state; shared by `/site wipe` and the pinned
  * card's Wipe state button so both report the same outcome. */
-async function wipeRelayState(project: ProjectRecord, userId: string): Promise<string> {
+async function wipeRelayState(project: ProjectRecord, userId: string, scope: RelayResetScope): Promise<string> {
   const gameId = project.multiplayerGameId ?? project.siteSlug;
-  await resetRelayGame(gameId);
-  log("info", "discord.relay_wiped", { threadId: project.threadId, gameId, userId });
-  return (project.multiplayerMode ?? "arena") === "singleplayer"
-    ? "🧹 Cleared this game's leaderboard scores. It runs singleplayer, so there is no shared arena world. Private save slots are kept."
-    : "🧹 Cleared this game's relay state: the shared arena world, any open rooms, and every leaderboard score. Connected players reconnect into a fresh, empty world; private save slots are kept.";
+  await resetRelayGame(gameId, scope);
+  log("info", "discord.relay_wiped", { threadId: project.threadId, gameId, userId, ...scope });
+  const cleared = [scope.world ? "the shared arena world and open rooms" : "", scope.scores ? "every leaderboard score" : ""].filter(Boolean);
+  return `🧹 Cleared ${cleared.join(" and ")}. ` +
+    (scope.world ? "Connected players reconnect into a fresh, empty world. " : "") +
+    "Private save slots are kept.";
 }
 
 /** One wording for the Stop button and `/site stop`; the slash command exists

@@ -49,7 +49,7 @@ export function interactionActor(interaction: BaseInteraction, extraAdmin = fals
   };
 }
 
-const READ_ACTIONS: readonly CardAction[] = ["details", "tab", "page", "project", "queue", "doc", "review", "retry", "collaboration", "dismiss"];
+const READ_ACTIONS: readonly CardAction[] = ["details", "tab", "page", "project", "queue", "doc", "review", "retry", "collaboration"];
 const REQUEST_ACTIONS: readonly CardAction[] = ["change", "steer", "request"];
 const QUESTION_ACTIONS: readonly CardAction[] = ["answer", "select", "questions", "form", "other", "custom", "skip", "send"];
 export function authorizeCard(project: ProjectRecord, actor: ProjectActor, action: CardAction): void {

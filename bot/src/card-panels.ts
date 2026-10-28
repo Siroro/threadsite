@@ -77,6 +77,24 @@ export function requestModal(resource: string, nonce: string, steer = false): Mo
   return modal;
 }
 
+/**
+ * The Wipe state form. Submitting runs the reset immediately, so the form is
+ * the confirmation: every checked box names something that will be deleted.
+ * Singleplayer games have no shared arena world, so they only see the scores.
+ */
+export function wipeModal(resource: string, singleplayer = false): ModalBuilder {
+  const modal = new ModalBuilder().setCustomId(cardId("wipe", resource)).setTitle("Wipe relay state");
+  if (!singleplayer) {
+    modal.addLabelComponents(new LabelBuilder().setLabel("Shared arena world and open rooms")
+      .setDescription("Connected players reconnect into a fresh, empty world.")
+      .setCheckboxComponent(new CheckboxBuilder().setCustomId("world").setDefault(true)));
+  }
+  modal.addLabelComponents(new LabelBuilder().setLabel("Leaderboard scores")
+    .setDescription("Every board and its entries are deleted; players can set new scores.")
+    .setCheckboxComponent(new CheckboxBuilder().setCustomId("scores").setDefault(true)));
+  return modal;
+}
+
 export function renderQueuePanel(resource: string, queue: QueuedRequest[], preparing: number, page = 0): CardMessage {
   const pageCount = Math.max(1, Math.ceil(queue.length / 5));
   page = Math.max(0, Math.min(pageCount - 1, Number.isSafeInteger(page) ? page : 0));
