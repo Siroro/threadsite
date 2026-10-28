@@ -109,15 +109,28 @@ function lifetimeCostLines(usage: UsageTotal): string | undefined {
       ? ` (${Math.round(Math.min(1, entry.cacheTokens / entry.inputTokens) * 100)}%)` : "";
     const tokens = entry.inputTokens || entry.outputTokens
       ? `in ${formatTokens(entry.inputTokens)}${cached} · out ${formatTokens(entry.outputTokens)} · ` : "";
-    const catalog = entry.catalogCost && entry.catalogCost > 0 ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : "";
-    return `\`${modelDisplayName(entry.model)}\`: ${tokens}${formatCost(entry.cost)}${catalog}`;
+    const spend = `${formatCost(entry.cost)}${isEstimated(entry) ? " (catalog)" : ""}`;
+    const catalog = !isEstimated(entry) && entry.catalogCost && entry.catalogCost > 0
+      ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : "";
+    return `\`${modelDisplayName(entry.model)}\`: ${tokens}${spend}${catalog}`;
   });
+  // A total is real spend only when every line under it is a provider charge.
+  const allEstimated = rows.length > 0 && rows.every(isEstimated);
   const more = rows.length - lines.length;
   return [
-    `**Total ${formatCost(usage.cost)}**${usage.catalogCost > 0 ? ` · ${formatCost(usage.catalogCost)} at catalog rates` : ""}`,
+    `**Total ${formatCost(usage.cost)}**${allEstimated ? " (catalog)" : ""}${usage.catalogCost > 0 && !allEstimated ? ` · ${formatCost(usage.catalogCost)} at catalog rates` : ""}`,
     ...lines,
     more > 0 ? `+${more} more model${more === 1 ? "" : "s"}` : undefined,
   ].filter(Boolean).join("\n");
+}
+
+/**
+ * Whether a model's figure is a rate estimate rather than a provider charge.
+ * Only a charge is real spend; a route that reports none leaves the catalog
+ * fallback, and the card must not present that as the bill.
+ */
+function isEstimated(entry: { reported?: true; unreported?: true }): boolean {
+  return entry.unreported === true || entry.reported !== true;
 }
 
 /** The pinned, self-updating front page of a project thread. */

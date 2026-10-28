@@ -47,7 +47,7 @@ interface UsageTotal {
   /** Catalog-rate equivalent across surplus-served models; 0 when no recorded
    * turn carries a comparison. */
   catalogCost: number;
-  models: Map<string, ModelUsage & { turns: number }>;
+  models: Map<string, ModelUsage & { turns: number; /** At least one contributing turn priced by rate, not by a provider charge. */ unreported?: true }>;
 }
 
 export type { UsageTotal };
@@ -101,6 +101,9 @@ function addToTotal(
     bucket.cacheTokens += model.cacheTokens;
     bucket.cost += model.cost;
     if (model.catalogCost !== undefined) bucket.catalogCost = (bucket.catalogCost ?? 0) + model.catalogCost;
+    // A model's figure is a provider charge only when every contribution in the
+    // bucket was; one estimate makes the whole line an estimate.
+    if (!model.reported) bucket.unreported = true;
     // Pre-aggregated contributions (a whole day folded into one blob) carry
     // their own turn count; raw entries count as one.
     bucket.turns += model.turns ?? (isTurn ? 1 : 0);

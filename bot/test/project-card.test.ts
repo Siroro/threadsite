@@ -25,7 +25,7 @@ function usage(overrides: Partial<UsageTotal> = {}): UsageTotal {
   return {
     turns: 4, failedTurns: 1, inputTokens: 82_300, outputTokens: 6_200, cacheTokens: 65_840, cost: 1.25, catalogCost: 9.8,
     models: new Map([
-      ["surplus/glm", { model: "surplus/glm", turns: 3, inputTokens: 80_000, outputTokens: 6_000, cacheTokens: 65_000, cost: 1.2, catalogCost: 9.8 }],
+      ["surplus/glm", { model: "surplus/glm", turns: 3, inputTokens: 80_000, outputTokens: 6_000, cacheTokens: 65_000, cost: 1.2, catalogCost: 9.8, reported: true as const }],
       ["opencode/qwen-free", { model: "opencode/qwen-free", turns: 1, inputTokens: 2_300, outputTokens: 200, cacheTokens: 840, cost: 0 }],
     ]),
     ...overrides,
@@ -58,6 +58,22 @@ test("a live project links its site and repo and carries lifetime spend with mod
   assert.doesNotMatch(cost, /qwen/, "a model that billed nothing earns no line");
   // Provider routing still stays off the public card.
   assert.doesNotMatch(JSON.stringify(card), /opencode\/|surplus\//);
+});
+
+test("figures a provider never charged are marked as catalog estimates", () => {
+  // A route that reports no usage leaves OpenCode's list-rate fallback. The
+  // card must not present that as the bill — this is what old turns and
+  // no-usage routes look like.
+  const card = cardView(renderProjectCard({ project: record(), usage: usage({
+    cost: 0.2, catalogCost: 0,
+    models: new Map([
+      ["surplus/muse-spark", { model: "surplus/muse-spark", turns: 2, inputTokens: 2_000_000, outputTokens: 10_000, cacheTokens: 1_800_000, cost: 0.2 }],
+    ]),
+  }) }));
+  const cost = card.fields!.find((field) => field.name === "Lifetime cost")!.value;
+  assert.match(cost, /\*\*Total \$0\.20\*\* \(catalog\)/, "an all-estimate total says so");
+  assert.match(cost, /`muse-spark`: in 2M \(90%\) · out 10k · \$0\.20 \(catalog\)/);
+  assert.doesNotMatch(cost, /at catalog rates/, "an estimate needs no separate comparison");
 });
 
 test("a project where nothing was priced carries no cost field at all", () => {
