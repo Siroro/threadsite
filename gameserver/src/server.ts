@@ -9,6 +9,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { PlayerStore, StorageError } from "./player-store.js";
+import { WorldStore, relayDatabaseFile } from "./world-store.js";
 
 const PROTOCOL_VERSION = 4;
 const SINGLE_ROOM_KEY = "@single";
@@ -49,11 +50,16 @@ const HOST_STALL_MS = intEnv("GAMESERVER_HOST_STALL_MS", 15_000);
 // ARENA (mode "single") worlds survive empty rooms and relay restarts; the
 // latest authoritative world.s is snapshotted here. Roomed games stay ephemeral.
 const STATE_DIR = env("GAMESERVER_STATE_DIR", path.join(process.cwd(), "data", "relay-state"));
+// One database for the whole relay: durable worlds, tombstones, rename
+// redirects (world store) alongside saves, boards and scores (player store).
+// Each store opens its own connection; the world store's opens at startup.
+const RELAY_DATABASE = relayDatabaseFile(STATE_DIR);
+const worldStore = new WorldStore(STATE_DIR);
 const PERSIST_INTERVAL_MS = intEnv("GAMESERVER_PERSIST_INTERVAL_MS", 1000);
 const SHUTDOWN_FLUSH_TIMEOUT_MS = intEnv("GAMESERVER_SHUTDOWN_FLUSH_TIMEOUT_MS", 1000);
 const ALLOWED_ORIGINS = env("GAMESERVER_ALLOWED_ORIGINS").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
 const ADMIN_TOKEN_FILE = env("GAMESERVER_ADMIN_TOKEN_FILE", "/run/threadsite-control/cleanup-token");
-const playerStore = new PlayerStore(path.join(STATE_DIR, "players.sqlite"), {
+const playerStore = new PlayerStore(RELAY_DATABASE, {
   players: intEnv("GAMESERVER_MAX_SAVED_PLAYERS_PER_GAME", 10_000),
   gameBytes: intEnv("GAMESERVER_MAX_SAVE_BYTES_PER_GAME", 16 * 1024 * 1024),
 });
@@ -106,8 +112,9 @@ function handleLeaderboard(peer: Peer, msg: Frame): void {
   const id = typeof msg.id === "string" && EVENT_ID_PATTERN.test(msg.id) ? msg.id : null;
   const fail = (code: string, message: string) => send(peer, { t: "leaderboard-result", id, ok: false, code, message });
   if (!id || msg.v !== 1 || peer.room) { fail("bad_request", "Use a version 1 score-only request with a bounded id."); return; }
-  const game = typeof msg.game === "string" ? msg.game : "";
-  if (!GAME_ID_PATTERN.test(game)) { fail("bad_game", "Invalid game ID."); return; }
+  const requestedGame = typeof msg.game === "string" ? msg.game : "";
+  if (!GAME_ID_PATTERN.test(requestedGame)) { fail("bad_game", "Invalid game ID."); return; }
+  const game = canonicalGame(requestedGame);
   if (deletedGames.has(game)) { fail("project_deleted", "This project was deleted."); return; }
   if (msg.op !== "board.list" && msg.op !== "board.submit") { fail("bad_operation", "Score-only requests support board.list and board.submit."); return; }
   if (typeof msg.playerToken !== "string" || !/^[a-f0-9]{64}$/.test(msg.playerToken)) { fail("identity_unavailable", "A private player token is required."); return; }
@@ -156,73 +163,60 @@ class Room {
  */
 type DurableWorld = { version: 1; gameId: string; state: unknown; savedAt: number };
 
-/** Latest persisted ARENA world per game; seeded from STATE_DIR at startup. */
+/** Latest persisted ARENA world per game, keyed by canonical game id. */
 const durableWorlds = new Map<string, DurableWorld>();
 // Empty tombstones prevent stale browser tabs from recreating deleted worlds.
 const deletedGames = new Set<string>();
+// Old names of renamed projects redirect to the current game id, exactly like
+// the published sites keep old-URL redirects. Already-open tabs (and the
+// briefly stale net-config of a published site) keep using the old id; every
+// game-id boundary resolves through this map before acting.
+const gameAliases = new Map<string, string>();
 
-function stateFile(gameId: string): string { return path.join(STATE_DIR, `${gameId}.json`); }
+function canonicalGame(gameId: string): string {
+  const target = gameAliases.get(gameId);
+  return target === undefined ? gameId : target;
+}
 
-/** Scan STATE_DIR once at startup; corrupt/foreign files are skipped, not fatal. */
-async function loadDurableWorlds(): Promise<void> {
-  let names: string[];
-  try { names = await fs.readdir(STATE_DIR); }
-  catch { return; } // no directory yet: nothing was ever persisted
-  for (const name of names) {
-    const match = /^([a-z0-9][a-z0-9-]{2,63})\.deleted$/.exec(name);
-    if (match) deletedGames.add(match[1]!);
-  }
-  for (const name of names) {
-    const match = /^([a-z0-9][a-z0-9-]{2,63})\.json$/.exec(name);
-    const gameId = match?.[1];
-    if (!gameId || deletedGames.has(gameId)) continue;
-    try {
-      const raw = await fs.readFile(path.join(STATE_DIR, name), "utf8");
-      const parsed = JSON.parse(raw) as Partial<DurableWorld>;
-      if (parsed?.version === 1 && parsed.gameId === gameId
-        && typeof parsed.savedAt === "number" && parsed.state !== undefined) {
-        durableWorlds.set(parsed.gameId, { version: 1, gameId: parsed.gameId, state: parsed.state, savedAt: parsed.savedAt });
-      } else {
-        console.warn(`[threadsite-gameserver] durable_state skipped ${name}: unexpected shape`);
-      }
-    } catch (error) {
-      console.warn(`[threadsite-gameserver] durable_state skipped ${name}: ${String((error as Error).message ?? error)}`);
+/** Load worlds, tombstones and rename redirects from SQLite at startup. */
+function loadDurableState(): void {
+  const state = worldStore.load();
+  for (const id of state.deleted) deletedGames.add(id);
+  for (const { from, to } of state.aliases) gameAliases.set(from, to);
+  for (const world of state.worlds) {
+    if (!deletedGames.has(world.gameId)) {
+      durableWorlds.set(world.gameId, { version: 1, gameId: world.gameId, state: world.state, savedAt: world.savedAt });
     }
   }
-  if (durableWorlds.size) console.log(`[threadsite-gameserver] restored ${durableWorlds.size} durable arena world(s) from ${STATE_DIR}`);
+  if (durableWorlds.size) console.log(`[threadsite-gameserver] restored ${durableWorlds.size} durable arena world(s) from ${worldStore.stateDir}`);
 }
 
 /**
- * Serialized per-game write chain: rename-atomic full-file writes, newest
- * last. A state handed here is queued behind any write still in flight and
- * always reaches disk — which is why callers may clear their dirty flag at
- * call time — so a slow write can never silently swallow the newest
- * snapshot. The last-leave and shutdown flushes depend on exactly that.
+ * Serialized per-game write chain: newest last, each write committed (FULL
+ * sync) before the chain advances. A state handed here is queued behind any
+ * write still in flight and always reaches the database — which is why callers
+ * may clear their dirty flag at call time — so a slow write can never silently
+ * swallow the newest snapshot. The last-leave and shutdown flushes depend on
+ * exactly that. The game id is re-resolved at write time so a rename part-way
+ * through a chain lands queued snapshots under the new name.
  */
 const durableTails = new Map<string, Promise<void>>();
 
-function persistWorld(gameId: string, state: unknown): Promise<void> {
-  if (deletedGames.has(gameId)) return Promise.resolve();
-  const write = (durableTails.get(gameId) ?? Promise.resolve()).then(async () => {
+function persistWorld(rawGameId: string, state: unknown): Promise<void> {
+  const tailKey = canonicalGame(rawGameId);
+  if (deletedGames.has(tailKey)) return Promise.resolve();
+  const write = (durableTails.get(tailKey) ?? Promise.resolve()).then(() => {
+    const gameId = canonicalGame(rawGameId);
     if (deletedGames.has(gameId)) return;
     const durable: DurableWorld = { version: 1, gameId, state, savedAt: Date.now() };
     try {
-      await fs.mkdir(STATE_DIR, { recursive: true });
-      const final = stateFile(gameId);
-      const tmp = `${final}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
-      try {
-        await fs.writeFile(tmp, JSON.stringify(durable));
-        await fs.rename(tmp, final);
-      } catch (error) {
-        await fs.rm(tmp, { force: true }).catch(() => undefined);
-        throw error;
-      }
+      worldStore.persist(gameId, durable.state, durable.savedAt);
       durableWorlds.set(gameId, durable);
     } catch (error) {
       console.warn(`[threadsite-gameserver] durable_state write failed for ${gameId}: ${String((error as Error).message ?? error)}`);
     }
   });
-  durableTails.set(gameId, write);
+  durableTails.set(tailKey, write);
   return write;
 }
 
@@ -329,14 +323,16 @@ function handleJoin(peer: Peer, msg: Frame): void {
     send(peer, errorFrame("bad_version", `Protocol v${String(msg.v ?? "?")} is unsupported; relay requires v${PROTOCOL_VERSION}.`));
     return;
   }
-  const gameId = String(msg.game ?? "");
+  const requestedGame = String(msg.game ?? "");
+  if (!GAME_ID_PATTERN.test(requestedGame)) {
+    send(peer, errorFrame("bad_game", "join.game must be a lowercase harness game id (3-64 chars)."));
+    return;
+  }
+  // Old names of renamed projects redirect to the current game id.
+  const gameId = canonicalGame(requestedGame);
   if (deletedGames.has(gameId)) {
     send(peer, errorFrame("project_deleted", "This project was deleted."));
     peer.ws.close(4004, "project deleted");
-    return;
-  }
-  if (!GAME_ID_PATTERN.test(gameId)) {
-    send(peer, errorFrame("bad_game", "join.game must be a lowercase harness game id (3-64 chars)."));
     return;
   }
   const mode = msg.mode === "single" ? "single" : "rooms";
@@ -409,16 +405,18 @@ function handleFrame(peer: Peer, msg: Frame): void {
       const id = typeof msg.id === "string" && EVENT_ID_PATTERN.test(msg.id) ? msg.id : null;
       const fail = (code: string, message: string) => send(peer, { t: "storage-result", id, ok: false, code, message });
       if (!id) { fail("bad_request", "Persistence requests require a bounded request id."); return; }
-      if (!peer.game || !room || deletedGames.has(peer.game)) { fail("not_joined", "Join before using persistence."); return; }
+      if (!peer.game || !room) { fail("not_joined", "Join before using persistence."); return; }
+      const game = canonicalGame(peer.game);
+      if (deletedGames.has(game)) { fail("not_joined", "Join before using persistence."); return; }
       if (!peer.playerId) { fail("identity_unavailable", "A private player token is required for persistence."); return; }
       if (!peer.storageLimiter.allow()) { fail("storage_rate_limited", "Persistence allows 5 requests/s with a burst of 10; save at checkpoints."); return; }
       try {
-        const result = playerStore.execute(peer.game, peer.playerId, peer.name, msg);
+        const result = playerStore.execute(game, peer.playerId, peer.name, msg);
         send(peer, { t: "storage-result", id, ok: true, result });
       } catch (error) {
         if (error instanceof StorageError) fail(error.code, error.message);
         else {
-          console.warn(`[threadsite-gameserver] player_storage failed game=${peer.game}: ${String((error as Error).message)}`);
+          console.warn(`[threadsite-gameserver] player_storage failed game=${game}: ${String((error as Error).message)}`);
           fail("storage_unavailable", "Player storage is temporarily unavailable. Read the save again before retrying a write.");
         }
       }
@@ -549,27 +547,80 @@ function closeGamePeers(gameId: string, code: number, reason: string): void {
   }
 }
 
-/** Remove a game's durable world file and any in-flight tmp writes for it. */
-async function removeWorldFiles(gameId: string): Promise<void> {
-  await fs.rm(stateFile(gameId), { force: true });
-  const files = await fs.readdir(STATE_DIR).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
-  for (const name of files) {
-    if (new RegExp(`^${gameId}\\.json\\.\\d+\\.[a-f0-9]{8}\\.tmp$`).test(name)) await fs.rm(path.join(STATE_DIR, name), { force: true });
-  }
-}
-
-async function deleteGame(gameId: string): Promise<void> {
+/** Delete a project's relay presence: world, saves, scores and live rooms. */
+async function deleteGame(rawGameId: string): Promise<void> {
+  const gameId = canonicalGame(rawGameId);
   deletedGames.add(gameId);
   for (const key of leaderboardLimits.keys()) if (key.startsWith(`${gameId}:`)) leaderboardLimits.delete(key);
-  await fs.mkdir(STATE_DIR, { recursive: true });
-  await fs.writeFile(path.join(STATE_DIR, `${gameId}.deleted`), "");
   closeGamePeers(gameId, 4004, "project deleted");
   games.delete(gameId);
   playerStore.deleteGame(gameId);
   await durableTails.get(gameId);
-  await removeWorldFiles(gameId);
+  worldStore.delete(gameId);
   durableWorlds.delete(gameId);
   durableTails.delete(gameId);
+}
+
+/**
+ * Move a renamed game's live rooms under its new id so old-name and new-name
+ * clients share one room per game. On the (bot-prevented) key collision the
+ * room holding the world — else the one with more peers — wins and the other
+ * room's peers are closed recoverably.
+ */
+function moveLiveRooms(from: string, to: string): void {
+  const source = games.get(from);
+  if (!source) return;
+  const target = games.get(to) ?? new Map();
+  for (const [key, room] of source) {
+    const existing = target.get(key);
+    if (existing) {
+      const keep = room.world && !existing.world ? room
+        : existing.world && !room.world ? existing
+        : room.peers.size >= existing.peers.size ? room : existing;
+      const drop = keep === existing ? room : existing;
+      for (const peer of drop.peers.values()) {
+        peer.room = null;
+        peer.game = null;
+        peer.ws.close(4005, "state reset");
+      }
+      drop.peers.clear();
+      target.set(key, keep);
+    } else target.set(key, room);
+  }
+  for (const room of target.values()) for (const peer of room.peers.values()) peer.game = to;
+  games.set(to, target);
+  games.delete(from);
+}
+
+/**
+ * Re-key a game to its renamed project: the durable world moves, an old-name
+ * redirect is recorded (open tabs and briefly stale published configs keep
+ * working), and the old name's private saves and scores are dropped — a
+ * rename is a fresh start for them. The target name, if a deleted project
+ * still occupies it, is taken over completely.
+ */
+async function renameGame(rawFrom: string, to: string): Promise<void> {
+  const from = canonicalGame(rawFrom);
+  worldStore.rename(from, to);
+  playerStore.deleteGame(from);
+  playerStore.deleteGame(to);
+  for (const key of leaderboardLimits.keys()) if (key.startsWith(`${from}:`) || key.startsWith(`${to}:`)) leaderboardLimits.delete(key);
+  // Alias bookkeeping mirrors the store's transactional update, including
+  // re-chaining redirects that pointed at the old name.
+  for (const [source, target] of gameAliases) if (target === from) gameAliases.set(source, to);
+  gameAliases.delete(to);
+  gameAliases.set(from, to);
+  deletedGames.delete(to);
+  const world = durableWorlds.get(from);
+  durableWorlds.delete(from);
+  durableWorlds.delete(to);
+  if (world) durableWorlds.set(to, { ...world, gameId: to });
+  // The write chains merge so a queued old-name snapshot can never overwrite a
+  // newer new-name one; queued writes re-resolve their id at write time.
+  const tails = Promise.all([durableTails.get(from) ?? Promise.resolve(), durableTails.get(to) ?? Promise.resolve()]).then(() => undefined);
+  durableTails.set(to, tails);
+  durableTails.delete(from);
+  moveLiveRooms(from, to);
 }
 
 /** What a reset removes. Scores and worlds are asked for independently. */
@@ -594,7 +645,8 @@ function parseResetScope(params: URLSearchParams): ResetScope | undefined {
  * fresh, empty ones) and forgets the durable snapshot. Private save slots are
  * player data, not game state, and always survive.
  */
-async function resetGame(gameId: string, scope: ResetScope = { world: true, scores: true }): Promise<void> {
+async function resetGame(rawGameId: string, scope: ResetScope = { world: true, scores: true }): Promise<void> {
+  const gameId = canonicalGame(rawGameId);
   if (scope.scores) {
     for (const key of leaderboardLimits.keys()) if (key.startsWith(`${gameId}:`)) leaderboardLimits.delete(key);
     playerStore.resetScores(gameId);
@@ -603,29 +655,24 @@ async function resetGame(gameId: string, scope: ResetScope = { world: true, scor
   closeGamePeers(gameId, 4005, "state reset");
   games.delete(gameId);
   // No tombstone is written: the game keeps accepting joins. The tail is
-  // awaited before the file removal so an in-flight snapshot write cannot
-  // resurrect the old world on disk (or in durableWorlds) after the reset.
+  // awaited before the row removal so an in-flight snapshot write cannot
+  // resurrect the old world in the database (or in durableWorlds) after the reset.
   await durableTails.get(gameId);
   durableWorlds.delete(gameId);
-  await removeWorldFiles(gameId);
+  worldStore.reset(gameId);
   durableTails.delete(gameId);
 }
 
-/** Every game the relay still knows about, deleted projects excluded. */
-async function knownGames(): Promise<Set<string>> {
-  const ids = new Set([...durableWorlds.keys(), ...games.keys(), ...playerStore.games()]);
-  const files = await fs.readdir(STATE_DIR).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
-  for (const file of files) {
-    const game = /^([a-z0-9][a-z0-9-]{2,63})\.json(?:\.\d+\.[a-f0-9]{8}\.tmp)?$/.exec(file)?.[1];
-    if (game) ids.add(game);
-  }
-  for (const id of ids) if (deletedGames.has(id)) ids.delete(id);
+/** Every game the relay still knows about, deleted projects and old names excluded. */
+function knownGames(): Set<string> {
+  const ids = new Set([...durableWorlds.keys(), ...games.keys(), ...playerStore.games(), ...worldStore.games()]);
+  for (const id of ids) if (deletedGames.has(id) || gameAliases.has(id)) ids.delete(id);
   return ids;
 }
 
 /** Reset every known game at once; returns how many games were affected. */
 async function resetAllGames(scope: ResetScope): Promise<number> {
-  const ids = await knownGames();
+  const ids = knownGames();
   for (const id of ids) await resetGame(id, scope);
   return ids.size;
 }
@@ -635,10 +682,12 @@ const server = http.createServer((req, res) => {
   try { pathname = new URL(req.url ?? "/", "http://internal").pathname; } catch { /* invalid -> 404 */ }
   const deletion = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})$/.exec(pathname);
   const reset = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})\/reset$/.exec(pathname);
+  const rename = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})\/rename$/.exec(pathname);
   const adminDelete = Boolean(deletion && req.method === "DELETE");
   const adminReset = Boolean(reset && req.method === "POST");
+  const adminRename = Boolean(rename && req.method === "POST");
   const wipeAll = req.method === "POST" && pathname === "/admin/reset";
-  if (adminDelete || adminReset || wipeAll || (req.method === "GET" && pathname === "/admin/games")) {
+  if (adminDelete || adminReset || adminRename || wipeAll || (req.method === "GET" && pathname === "/admin/games")) {
     void (async () => {
       const token = (await fs.readFile(ADMIN_TOKEN_FILE, "utf8")).trim();
       const actual = Buffer.from(String(req.headers.authorization ?? ""));
@@ -648,15 +697,38 @@ const server = http.createServer((req, res) => {
       }
       if (req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-        res.end(JSON.stringify([...await knownGames()].sort()));
+        res.end(JSON.stringify([...knownGames()].sort()));
         return;
+      }
+      // Old names of renamed projects redirect for players, but never for
+      // admins: wiping through a stale name must not touch the live game.
+      if ((adminDelete || adminReset) && canonicalGame((adminDelete ? deletion : reset)![1]!) !== (adminDelete ? deletion : reset)![1]!) {
+        res.writeHead(409); res.end(); return;
+      }
+      let searchParams: URLSearchParams | undefined;
+      if (adminReset || adminRename || wipeAll) {
+        try { searchParams = new URL(req.url ?? "/", "http://internal").searchParams; } catch { /* invalid query: 400 below */ }
       }
       let scope: ResetScope | undefined;
       if (adminReset || wipeAll) {
-        let searchParams: URLSearchParams | undefined;
-        try { searchParams = new URL(req.url ?? "/", "http://internal").searchParams; } catch { /* invalid query: 400 below */ }
         scope = searchParams ? parseResetScope(searchParams) : undefined;
         if (!scope) { res.writeHead(400); res.end(); return; }
+      }
+      if (adminRename) {
+        const from = rename![1]!;
+        const to = (searchParams?.get("to") ?? "").trim();
+        const canonical = canonicalGame(from);
+        // Idempotent: renaming to the current name (or re-delivering a rename
+        // that already landed) succeeds without touching anything.
+        if (!GAME_ID_PATTERN.test(to)) { res.writeHead(400); res.end(); return; }
+        if (deletedGames.has(canonical)) { res.writeHead(409); res.end(); return; }
+        if (canonical === to) { res.writeHead(204); res.end(); return; }
+        const redirect = gameAliases.get(to);
+        if (redirect !== undefined && redirect !== canonical) { res.writeHead(409); res.end(); return; } // live name of another game
+        if (worldStore.has(to) && !deletedGames.has(to)) { res.writeHead(409); res.end(); return; } // live world owns the name
+        await renameGame(from, to);
+        res.writeHead(204); res.end();
+        return;
       }
       if (wipeAll) {
         const games = await resetAllGames(scope!);
@@ -825,7 +897,7 @@ hostWatchdog.unref();
 const durableFlush = setInterval(() => { void Promise.all(flushDurableRooms()); }, PERSIST_INTERVAL_MS);
 durableFlush.unref();
 
-await loadDurableWorlds();
+loadDurableState();
 server.listen(PORT, HOST, () => {
   console.log(`[threadsite-gameserver] listening on ${HOST}:${PORT} (protocol v${PROTOCOL_VERSION}, /ws)`);
   console.log(`[threadsite-gameserver] durable arena worlds -> ${STATE_DIR} every ${PERSIST_INTERVAL_MS}ms`);

@@ -64,9 +64,12 @@ async function board(op, game, extra = {}, tokenForPlayer = playerToken) {
 const reset = (headers) => fetch(`${origin}/admin/games/reset-game/reset`, { method: "POST", headers });
 try {
   await start();
+  // Durable world count from /health: the legacy keep-game.json is imported at
+  // boot, so a published reset-game world brings the count to 2.
+  const durableCount = async () => (await (await fetch(`${origin}/health`)).json()).durableWorlds;
   const host = await connect("reset-game");
   host.ws.send(JSON.stringify({ t: "world", generation: host.frame.generation, epoch: host.frame.epoch, s: { secret: "old shared world" } }));
-  await waitFor(() => fs.access(path.join(state, "reset-game.json")).then(() => true, () => false));
+  await waitFor(async () => (await durableCount()) === 2);
   host.ws.send(JSON.stringify({ t: "storage", id: "s1", op: "save.set", slot: "progress", revision: 0, value: { gold: 5 } }));
   await waitFor(() => host.frames.some((frame) => frame.t === "storage-result" && frame.ok));
   assert.deepEqual((await board("board.submit", "reset-game", { board: "main", score: 100, name: "Alice", order: "desc" })).score, 100);
@@ -77,7 +80,7 @@ try {
   const closed = once(host.ws, "close");
   assert.equal((await reset({ Authorization: `Bearer ${token}` })).status, 204);
   assert.equal((await closed)[0], 4005, "connected players are closed with a recoverable code, not project-deleted");
-  await assert.rejects(fs.access(path.join(state, "reset-game.json")), { code: "ENOENT" });
+  await waitFor(async () => (await durableCount()) === 1);
   const fresh = await connect("reset-game");
   assert.equal(fresh.frame.t, "welcome");
   assert.equal(fresh.frame.world, null, "a fresh join restores no durable world");
@@ -93,31 +96,31 @@ try {
   await stop();
   await start();
   const afterRestart = await connect("reset-game");
+  assert.equal(afterRestart.frame.t, "welcome", "a reset never tombstones the project");
   assert.equal(afterRestart.frame.world, null, "the old world does not resurrect from disk after a restart");
-  await assert.rejects(fs.access(path.join(state, "reset-game.deleted")), { code: "ENOENT" }, "a reset never tombstones the project");
   assert.deepEqual((await connect("keep-game")).frame.world.s, { keep: true });
   // Per-game scopes are independent: a world-only reset keeps scores, and a
   // scores-only reset keeps the world and leaves connected players alone.
   const resetOne = (query = "", headers) => fetch(`${origin}/admin/games/reset-game/reset${query}`, { method: "POST", headers });
   afterRestart.ws.send(JSON.stringify({ t: "world", generation: afterRestart.frame.generation, epoch: afterRestart.frame.epoch, s: { secret: "scoped world" } }));
-  await waitFor(() => fs.access(path.join(state, "reset-game.json")).then(() => true, () => false));
+  await waitFor(async () => (await durableCount()) === 2);
   await board("board.submit", "reset-game", { board: "main", score: 30, name: "Alice", order: "desc" });
   assert.equal((await resetOne("?scope=nonsense", { Authorization: `Bearer ${token}` })).status, 400, "an unknown scope is rejected instead of clearing everything");
-  await fs.access(path.join(state, "reset-game.json"));
+  assert.equal(await durableCount(), 2);
   assert.equal((await board("board.list", "reset-game", { board: "main" })).entries.length, 1);
   const closedWorld = once(afterRestart.ws, "close");
   assert.equal((await resetOne("?scope=world", { Authorization: `Bearer ${token}` })).status, 204);
   assert.equal((await closedWorld)[0], 4005);
-  await assert.rejects(fs.access(path.join(state, "reset-game.json")), { code: "ENOENT" });
+  await waitFor(async () => (await durableCount()) === 1);
   assert.deepEqual((await board("board.list", "reset-game", { board: "main" })).entries.map((entry) => entry.score), [30], "a world reset keeps scores");
   const host2 = await connect("reset-game");
   assert.equal(host2.frame.world, null);
   host2.ws.send(JSON.stringify({ t: "world", generation: host2.frame.generation, epoch: host2.frame.epoch, s: { secret: "kept world" } }));
-  await waitFor(() => fs.access(path.join(state, "reset-game.json")).then(() => true, () => false));
+  await waitFor(async () => (await durableCount()) === 2);
   assert.equal((await resetOne("?scope=scores", { Authorization: `Bearer ${token}` })).status, 204);
   assert.deepEqual(await board("board.list", "reset-game", { board: "main" }), { order: null, entries: [] });
   assert.equal(host2.ws.readyState, 1, "a scores-only reset leaves connected players alone");
-  await fs.access(path.join(state, "reset-game.json"));
+  assert.equal(await durableCount(), 2);
   // Relay-wide reset: the scores-only sweep spares worlds, the full sweep clears both.
   await board("board.submit", "keep-game", { board: "main", score: 9, name: "Kay", order: "desc" });
   await board("board.submit", "reset-game", { board: "main", score: 11, name: "Alice", order: "desc" });
@@ -126,21 +129,19 @@ try {
   assert.equal((await wipeAll("", { Authorization: `Bearer ${"0".repeat(64)}` })).status, 403);
   const scoresOnly = await wipeAll("?scope=scores", { Authorization: `Bearer ${token}` });
   assert.equal(scoresOnly.status, 200);
-  assert.equal((await scoresOnly.json()).games, 2, "the sweep counts every known game, file-only tenants included");
+  assert.equal((await scoresOnly.json()).games, 2, "the sweep counts every known game, legacy-imported tenants included");
   assert.deepEqual(await board("board.list", "reset-game", { board: "main" }), { order: null, entries: [] });
   assert.deepEqual(await board("board.list", "keep-game", { board: "main" }), { order: null, entries: [] });
   assert.equal(host2.ws.readyState, 1, "a scores-only sweep leaves connected players alone");
-  await fs.access(path.join(state, "reset-game.json"));
-  await fs.access(path.join(state, "keep-game.json"));
+  assert.equal(await durableCount(), 2);
   const closed2 = once(host2.ws, "close");
   const full = await wipeAll("", { Authorization: `Bearer ${token}` });
   assert.equal(full.status, 200);
   assert.equal((await full.json()).games, 2);
   assert.equal((await closed2)[0], 4005);
-  await assert.rejects(fs.access(path.join(state, "reset-game.json")), { code: "ENOENT" });
-  await assert.rejects(fs.access(path.join(state, "keep-game.json")), { code: "ENOENT" });
+  await waitFor(async () => (await durableCount()) === 0);
   assert.equal((await connect("reset-game")).frame.world, null);
-  assert.equal((await connect("keep-game")).frame.world, null, "file-only tenants are swept too");
+  assert.equal((await connect("keep-game")).frame.world, null, "legacy-imported tenants are swept too");
   console.log("PASS: authenticated game reset, scoped world/scores resets, recoverable disconnects, wiped scores with surviving saves, no state resurrection, relay-wide sweeps and unrelated-game preservation.");
 } finally {
   for (const ws of sockets) ws.terminate();

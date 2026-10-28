@@ -72,13 +72,17 @@ const remove = (game) => fetch(`${origin}/admin/games/${game}`, { method: "DELET
 
 try {
   await start();
-  // A disk failure is recoverable and must not disable normal relay traffic.
-  await fs.mkdir(path.join(state, "players.sqlite"), { recursive: true });
+  // A storage outage is recoverable and must not disable normal relay traffic:
+  // a second connection holding the database's only write slot makes every
+  // write request fail cleanly while ordinary routing continues.
+  const lock = new DatabaseSync(path.join(state, "relay.sqlite"));
+  lock.exec("BEGIN EXCLUSIVE");
   const first = await connect({ name: "Alice" });
-  await assert.rejects(first.saves.get("progress"), { code: "storage_unavailable" });
+  await assert.rejects(first.saves.set("progress", { level: 0 }, 0), { code: "storage_unavailable" });
   first.ping();
   await waitFor(() => first.rtt !== null);
-  await fs.rmdir(path.join(state, "players.sqlite"));
+  lock.exec("COMMIT");
+  lock.close();
   const empty = await first.saves.get("progress");
   const saved = await first.saves.set("progress", { level: 4, inventory: ["key"] }, empty.revision);
   const best = await first.leaderboards.submit("points", 125);
@@ -150,7 +154,7 @@ try {
   // Storage-only tenants remain discoverable after all room memory is lost.
   assert.deepEqual(await inventory(), ["other-save-game", "save-test-game"]);
   assert.equal((await remove("save-test-game")).status, 204);
-  const database = new DatabaseSync(path.join(state, "players.sqlite"));
+  const database = new DatabaseSync(path.join(state, "relay.sqlite"));
   try {
     for (const table of ["players", "saves", "boards", "scores"]) {
       assert.equal(database.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE game = ?`).get("save-test-game").n, 0);

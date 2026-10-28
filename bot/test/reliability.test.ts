@@ -400,7 +400,7 @@ test("renames refresh both URLs, preserve old subpage links, and revert the whol
   assert.equal(renamed.repoName, "sumo-shove");
   assert.equal(renamed.lastTurnBaseCommit, f.base);
   assert.equal(renamed.lastCommit, (await currentHead(f.dir)).slice(0, 10));
-  assert.equal(renamed.multiplayerGameId, old);
+  assert.equal(renamed.multiplayerGameId, undefined, "sites never gain a relay identity from a rename");
   assert.match(await fs.readFile(path.join(config.publishRoot, old, "index.html"), "utf8"), /sumo-shove\/.*location.search\+location.hash/);
   assert.match(await fs.readFile(path.join(config.publishRoot, old, "about/index.html"), "utf8"), /sumo-shove\/about\//);
   assert.match(await fs.readFile(path.join(config.publishRoot, "index.html"), "utf8"), /sumo-shove/);
@@ -410,6 +410,35 @@ test("renames refresh both URLs, preserve old subpage links, and revert the whol
   assert.equal(f.store.getProject(f.project.threadId)!.siteSlug, "sumo-shove");
   assert.match(await fs.readFile(path.join(f.dir, "README.md"), "utf8"), /sumo-shove/);
   assert.match(await fs.readFile(path.join(config.publishRoot, "sumo-shove/js/main.js"), "utf8"), /baseline/);
+});
+
+test("game renames re-key the relay identity before republishing", async () => {
+  const f = await projectFixture("rename-relay");
+  await f.store.patchProject(f.project.threadId, { projectKind: "game-arcade", multiplayerGameId: f.project.siteSlug });
+  const calls: Array<[string, string]> = [];
+  Object.assign(f.service, { renameRelayGame: async (from: string, to: string) => { calls.push([from, to]); } });
+  const renamed = await f.service.renameProject(f.project.threadId, "Sumo Relay");
+  assert.deepEqual(calls, [[f.project.siteSlug, renamed.siteSlug]], "the relay rename lands once with the old and new ids");
+  assert.equal(renamed.multiplayerGameId, renamed.siteSlug, "the relay identity follows the new name");
+  assert.match(await fs.readFile(path.join(f.dir, "site/net/net-config.js"), "utf8"), new RegExp(`game: "${renamed.siteSlug}"`),
+    "the republished net-config carries the new game id");
+});
+
+test("a game rename whose relay step fails keeps its intent and resumes with the old id", async () => {
+  const f = await projectFixture("rename-relay-retry");
+  await f.store.patchProject(f.project.threadId, { projectKind: "game-arcade", multiplayerGameId: f.project.siteSlug });
+  const calls: Array<[string, string]> = [];
+  Object.assign(f.service, { renameRelayGame: async (from: string, to: string) => {
+    calls.push([from, to]);
+    if (calls.length === 1) throw new Error("Relay unreachable");
+  } });
+  await assert.rejects(f.service.renameProject(f.project.threadId, "Fresh Game"), /Relay unreachable/);
+  const retained = f.store.getProject(f.project.threadId)!;
+  assert.equal(retained.pendingRename?.siteSlug, "fresh-game");
+  assert.equal(retained.multiplayerGameId, f.project.siteSlug, "the identity flips only after the relay rename lands");
+  const renamed = await f.service.resumeRename(f.project.threadId);
+  assert.deepEqual(calls, [[f.project.siteSlug, "fresh-game"], [f.project.siteSlug, "fresh-game"]], "delivery retries with the old id until it lands");
+  assert.equal(renamed.multiplayerGameId, "fresh-game");
 });
 
 test("README.md carries the original request, submitter and agent README through turns, rename and revert", async () => {
@@ -799,13 +828,16 @@ test("webhook outages do not block project creation or leave renames pending", a
   await fs.access(path.join(config.publishRoot, renamed.siteSlug, "index.html"));
 });
 
-test("renaming a game keeps its multiplayer tenant through future builds", async () => {
+test("renaming a game moves its multiplayer tenant to the new name through future builds", async () => {
   const f = await projectFixture("game");
   await f.store.patchProject(f.project.threadId, { projectKind: "game-2d" });
+  const relayRenames: Array<[string, string]> = [];
+  Object.assign(f.service, { renameRelayGame: async (from: string, to: string) => { relayRenames.push([from, to]); } });
   const renamed = await f.service.renameProject(f.project.threadId, "Neon Arena");
+  assert.deepEqual(relayRenames, [[f.project.siteSlug, renamed.siteSlug]]);
+  assert.equal(renamed.multiplayerGameId, renamed.siteSlug, "the relay tenant follows the project name");
   const netConfig = await fs.readFile(path.join(f.dir, "site/net/net-config.js"), "utf8");
-  assert.equal(renamed.multiplayerGameId, f.project.siteSlug);
-  assert.ok(netConfig.includes(JSON.stringify(f.project.siteSlug)));
+  assert.ok(netConfig.includes(JSON.stringify(renamed.siteSlug)));
   await f.service.republish(f.project.threadId);
   assert.equal(await fs.readFile(path.join(f.dir, "site/net/net-config.js"), "utf8"), netConfig);
 });
@@ -1015,15 +1047,20 @@ test("switching multiplayer rewrites the wiring and runs a question-first agent 
   assert.match(await fs.readFile(path.join(f.dir, "AGENTS.md"), "utf8"), /Session mode \(rooms\)/);
   assert.ok(await fs.access(path.join(f.dir, "site/net/net-config.js")).then(() => true, () => false), "net config is in place for rooms");
   const boardsConfig = await fs.readFile(path.join(f.dir, "site/leaderboards/leaderboards-config.js"), "utf8");
-  const stableGameId = f.store.getProject(f.project.threadId)!.multiplayerGameId;
+  assert.match(boardsConfig, /old-mp-switch/, "the rankings config starts on the game's first identity");
+  const previousGameId = f.store.getProject(f.project.threadId)!.multiplayerGameId;
+  const relayRenames: Array<[string, string]> = [];
+  Object.assign(f.service, { renameRelayGame: async (from: string, to: string) => { relayRenames.push([from, to]); } });
   await f.service.renameProject(f.project.threadId, "Ranking Game");
-  assert.equal(f.store.getProject(f.project.threadId)!.multiplayerGameId, stableGameId);
+  assert.equal(f.store.getProject(f.project.threadId)!.multiplayerGameId, "ranking-game", "the relay identity follows the rename");
+  assert.deepEqual(relayRenames, [[previousGameId, "ranking-game"]]);
 
   // Going singleplayer removes the wiring outright — net dir and guide gone.
   instruction = "";
   await f.service.switchMultiplayer(f.project.threadId, "singleplayer", "status-2");
   assert.equal(f.store.getProject(f.project.threadId)!.multiplayerMode, "singleplayer");
-  assert.equal(await fs.readFile(path.join(f.dir, "site/leaderboards/leaderboards-config.js"), "utf8"), boardsConfig, "rankings retain their identity after renaming and switching gameplay modes");
+  assert.match(await fs.readFile(path.join(f.dir, "site/leaderboards/leaderboards-config.js"), "utf8"), /ranking-game/,
+    "rankings follow the renamed identity through gameplay-mode switches");
   await fs.access(path.join(f.dir, "site/leaderboards/threadsite-leaderboards.js"));
   await assert.rejects(fs.access(path.join(f.dir, "site/net")));
   await assert.rejects(fs.access(path.join(f.dir, "NETWORKING.md")));

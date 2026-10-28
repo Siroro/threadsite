@@ -14,8 +14,9 @@ const MAX_SAVE_BYTES = 64 * 1024;
 const MAX_SLOTS = 16;
 const MAX_BOARDS = 16;
 
-/** Separate from world snapshots: private saves and public, client-reported best scores.
- * Open lazily so existing arena-only installations keep their file layout.
+/** Private saves and public, client-reported best scores. The tables share
+ * `relay.sqlite` with the durable world store; this store opens its own
+ * connection lazily, on the first persistence request.
  * Every successful mutation is committed before the relay acknowledges it.
  */
 export class PlayerStore {

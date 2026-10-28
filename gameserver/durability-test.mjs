@@ -1,7 +1,7 @@
 // ARENA (mode "single") world durability across relay restarts, using the
-// generated browser client: interval flush to disk, first-joiner restore
-// through the welcome snapshot, and the publish gate that protects a restored
-// world from an eager fresh host. Roomed games stay ephemeral.
+// generated browser client: interval flush to the worlds database, first-joiner
+// restore through the welcome snapshot, and the publish gate that protects a
+// restored world from an eager fresh host. Roomed games stay ephemeral.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -14,7 +14,7 @@ const URL = `ws://127.0.0.1:${PORT}/ws`;
 const HEALTH = `http://127.0.0.1:${PORT}/health`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const STATE_DIR = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-durable-"));
-const arenaFile = path.join(STATE_DIR, "durable-arena-test.json");
+const durableCount = async () => (await (await fetch(HEALTH)).json()).durableWorlds;
 
 async function waitFor(predicate, label, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
@@ -60,10 +60,6 @@ async function stopRelay(relay) {
   await relay.exited;
 }
 
-async function readArenaFile() {
-  return JSON.parse(await fs.readFile(arenaFile, "utf8"));
-}
-
 function arenaLifecycle(state) {
   return {
     schemaVersion: 1,
@@ -97,26 +93,17 @@ try {
   assert.equal(first.authority.ready, true, "publishing is unblocked once the welcome world is processed");
   assert.equal(first.world.restored, false, "a brand-new arena starts fresh");
   await waitFor(() => hostState.tick > 1, "arena world publication");
-  await waitFor(async () => {
-    try { return (await readArenaFile()).state.state.bossHp === 9; } catch { return false; }
-  }, "interval flush of the arena world to disk");
-  const saved = await readArenaFile();
-  assert.equal(saved.version, 1);
-  assert.equal(saved.gameId, "durable-arena-test");
-  assert.equal(saved.state.schemaVersion, 1, "the persisted state is the complete game envelope, opaque to the relay");
+  await waitFor(async () => (await durableCount()) === 1, "interval flush of the arena world to the database");
 
-  // Roomed worlds must never touch disk.
+  // Roomed worlds must never touch the database.
   const roomState = { tick: 0, bossHp: 4, restores: 0, authoritative: false, recovered: false };
   const roomed = track(await ThreadSiteNet.createAuthoritativeSession({
-    game: "durable-arena-test", url: URL, mode: "rooms", createRoom: true, name: "RoomHost",
+    game: "durable-rooms-test", url: URL, mode: "rooms", createRoom: true, name: "RoomHost",
     world: arenaLifecycle(roomState),
   }));
   await waitFor(() => roomState.tick > 1, "roomed world publication");
   first.close(); roomed.close();
-  await waitFor(async () => {
-    const names = await fs.readdir(STATE_DIR);
-    return names.length === 1 && names[0] === "durable-arena-test.json";
-  }, "rooms stay ephemeral (only the arena file exists)");
+  assert.equal(await durableCount(), 1, "rooms stay ephemeral (only the arena world is durable)");
 
   // Phase 2: full relay restart wipes RAM rooms; disk must survive.
   await stopRelay(relay);
@@ -140,11 +127,8 @@ try {
 
   // Phase 4: updated state is flushed again and survives another restart.
   returnState.bossHp = 2;
-  await waitFor(async () => {
-    try { return (await readArenaFile()).state.state.bossHp === 2; } catch { return false; }
-  }, "updated arena world flushed again");
+  await waitFor(() => returned.world.snapshot?.state?.state?.bossHp === 2, "updated arena world acknowledged");
   await stopRelay(relay);
-  assert.equal((await readArenaFile()).state.state.bossHp, 2, "latest dirty world persisted at exit");
 
   relay = await startRelay();
   const lateState = { tick: 0, bossHp: 0, elapsed: 0, restores: 0, authoritative: false, recovered: false };
@@ -180,9 +164,15 @@ try {
     net.close(); // last-leave flush races whatever is still in flight
   }
   await stopRelay(relay); // shutdown awaits every queued write
+  relay = await startRelay();
   for (const [i, gameId] of burstIds.entries()) {
-    const saved = JSON.parse(await fs.readFile(path.join(STATE_DIR, `${gameId}.json`), "utf8"));
-    assert.equal(saved.state.state.bossHp, 777, `burst game ${i} kept its final world`);
+    const finalState = { tick: 0, bossHp: 0, restores: 0, authoritative: false, recovered: false };
+    const net = track(await ThreadSiteNet.createAuthoritativeSession({
+      game: gameId, url: URL, mode: "single", name: `Verify${i}`,
+      world: arenaLifecycle(finalState),
+    }));
+    await waitFor(() => finalState.bossHp === 777, `burst game ${i} kept its final world across the restart`);
+    net.close();
   }
   console.log("ALL ARENA DURABILITY TESTS PASSED");
 } finally {

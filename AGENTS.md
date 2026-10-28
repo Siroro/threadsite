@@ -25,7 +25,7 @@ Discord threads become static sites and browser games. This repo runs the bot, O
 - One thread owns one workspace, session and repository. Keep queue claims and turn IDs durable. After ambiguous transport failures, reconcile status/history before retrying or touching a possibly running workspace.
 - Reconcile live and saved usage without double-counting; flush it before clearing recovery markers. Missing provider counts are unavailable, not zero.
 - Build/type/static validation blocks publication; browser QA is advisory and fail-open. Retain actionable findings, filter preview/environment noise, and push accepted source before atomically replacing the live site.
-- Renames retain repository/tenant identity and old URL redirects. Naming and deletion intent survive failures/restarts; automatic naming preserves dirty failed-turn edits. See [architecture](docs/architecture.md) and [thread deletion](docs/thread-deletion.md).
+- Renames retain repository identity and old URL redirects; the relay tenant follows the new name (durable world re-keyed, old game ids redirect for connected players, old-name saves/scores dropped, admin wipes refuse old names). Naming and deletion intent survive failures/restarts; automatic naming preserves dirty failed-turn edits. See [architecture](docs/architecture.md), [multiplayer](docs/multiplayer.md) and [thread deletion](docs/thread-deletion.md).
 - Route generated-workspace Git through `bot/src/git.ts` with explicit canonical paths. No `safe.directory=*`, inherited Git routing or fallback to the server checkout.
 - Preserve inactivity-based recovery, pending-question pauses, and one finish-up steer at 90% of root steps. Never restart an idle/stopped turn to steer it. See [turn safeguards](docs/agent-turns.md).
 - Browser MCP requires advertised image input; unknown capabilities and general/explore subagents get no browser tools. Optional `browser-qa` uses its configured vision model and browser tools only. It may run in the background; retain turn ownership/billing until its report is handled, and drain notifications on stop. Findings stay advisory.
@@ -44,7 +44,7 @@ Use Node 24 and run commands in the component directory; there is no root npm pa
 | Bot | `npm test` |
 | Discord commands | Also `node --import tsx --test test/commands.test.ts` |
 | Networking client | Relevant relay/client checks |
-| Relay | Applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, `test:stall`, `test:storage`, `test:persistence`, `test:leaderboards`, `test:delete`, `test:reset` |
+| Relay | Applicable `test:relay`, `test:client`, `test:restart`, `test:durable`, `test:stall`, `test:storage`, `test:persistence`, `test:leaderboards`, `test:delete`, `test:rename`, `test:reset` |
 | OpenCode v2 | `npm test` in `opencode/` |
 | Preview / provider adapter | `npm test` in `preview/`; relevant browser/Docker checks for integration changes |
 | Docs/instructions | Check referenced paths/commands and generated variants; `git diff --check` |

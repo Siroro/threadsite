@@ -23,7 +23,7 @@ import { log, logError, serializeError } from "./logger.js";
 import { errorText, formatShortDuration, parseModel, safeChild, slugify, truncate, withTimeout, sleep } from "./util.js";
 import { browserQaFeedback, runBrowserQa as driveBrowserQa, type BrowserQaResult } from "./browser-qa.js";
 import { assertExclusiveResources, projectAccounts, projectRepos, removalPaths } from "./project-removal.js";
-import { deleteRelayGame } from "./relay-cleanup.js";
+import { deleteRelayGame, renameRelayGame } from "./relay-cleanup.js";
 import { pushRenameMetadata } from "./git.js";
 import { fallbackProjectName, projectName } from "./naming.js";
 
@@ -517,7 +517,6 @@ export class ProjectService {
         const target = await this.forgejo.repositoryInfo(repoName);
         if (target && target.id !== source.id) continue;
         await this.store.patchProject(threadId, {
-          multiplayerGameId: project.multiplayerGameId ?? project.siteSlug,
           ...(project.pendingNaming ? { pendingNaming: { ...project.pendingNaming, name: displayName } } : {}),
           pendingRename: { displayName, siteSlug, repoName, fromSiteSlug: project.siteSlug, fromRepoName: project.repoName,
             fromDisplayName: project.displayName, repoId: source.id,
@@ -549,6 +548,19 @@ export class ProjectService {
     project = await this.store.patchProject(threadId, { repoName: intent.repoName });
     await ensureGitRepository(project.workspacePath, intent.repoName, this.forgejo);
     await this.ensureProjectWebhook(intent.repoName);
+    // The relay tenant follows the project name: the durable arena world is
+    // re-keyed, the old name keeps redirecting for connected players and the
+    // briefly stale published net-config, and the old name's saves/scores are
+    // dropped. Landed before the rebuild so the republished net-config (and
+    // the project record everything else reads) carries the new game id.
+    // Only games have a relay presence; siteSlug still holds the old name here.
+    if (project.projectKind?.startsWith("game-")) {
+      const fromGameId = project.multiplayerGameId ?? project.siteSlug;
+      if (fromGameId !== intent.siteSlug) {
+        await this.renameRelayGame(fromGameId, intent.siteSlug);
+        project = await this.store.patchProject(threadId, { multiplayerGameId: intent.siteSlug });
+      }
+    }
     const renamed = { ...project, displayName: intent.displayName, siteSlug: intent.siteSlug };
     await this.writeReadme(renamed);
     // The description's title heading is the project's name; keep it pointed
@@ -1799,6 +1811,7 @@ export class ProjectService {
   }
 
   private deleteRelayGame = deleteRelayGame;
+  private renameRelayGame = renameRelayGame;
 
   /** Whether an agent turn is currently running for the project's session. */
   async agentBusy(threadId: string): Promise<boolean> {

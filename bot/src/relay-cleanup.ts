@@ -22,6 +22,21 @@ export async function deleteRelayGame(gameId: string): Promise<void> {
   if (!response.ok) throw new Error(`Relay game cleanup failed (${response.status}).`);
 }
 
+/**
+ * Re-key a game's relay presence to its renamed project: the durable arena
+ * world follows the new name, the old name keeps redirecting for connected
+ * players and briefly stale published configs, and the old name's private
+ * saves and scores are dropped. Redelivering a landed rename is idempotent,
+ * so retrying an ambiguous failure is safe.
+ */
+export async function renameRelayGame(from: string, to: string): Promise<void> {
+  if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(from) || !/^[a-z0-9][a-z0-9-]{2,63}$/.test(to)) throw new Error("Invalid relay game identity.");
+  const response = await fetch(`${config.gameserverInternalUrl}/admin/games/${encodeURIComponent(from)}/rename?to=${encodeURIComponent(to)}`, {
+    method: "POST", headers: { Authorization: `Bearer ${await relayCleanupToken()}` }, signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`Relay game rename failed (${response.status}).`);
+}
+
 /** What a reset removes. Scores and worlds are chosen independently. */
 export interface RelayResetScope { world: boolean; scores: boolean }
 
