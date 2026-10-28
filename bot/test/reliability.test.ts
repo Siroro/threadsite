@@ -329,7 +329,7 @@ async function projectFixture(id: string, forgejo = new LocalForgejo()) {
   const store = await openStore(path.join(root, `state-${id}.db`));
   await store.putProject(project);
   const opencode = { isBusy: async () => false, lastUserMessageId: async () => "message", revertSession: async () => {} } as unknown as OpenCodeHarness;
-  const usage = new UsageLog(path.join(root, `usage-${id}.sqlite`));
+  const usage = new UsageLog(store.file);
   const service = new ProjectService(store, opencode, forgejo, usage);
   await buildSite(dir);
   await validateSite(path.join(dir, "site"));
@@ -589,7 +589,7 @@ test("the first successful build adopts the agent-chosen DESCRIPTION.md title as
       return { text: "A fresh garden", usage: {} };
     },
   } as unknown as OpenCodeHarness;
-  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-title-usage.sqlite")));
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(store.file));
   const titles: string[] = [];
   const result = await service.createProject({
     threadId: "123456789012345678", guildId: "100", parentChannelId: "200", displayName: "site-a-long-original-prompt",
@@ -726,7 +726,7 @@ test("an unnamed first build gets one repair turn whose reply becomes the card s
       return { text: "Neon Loom: weave light through the rift in short solo rounds.", usage: {} };
     },
   } as unknown as OpenCodeHarness;
-  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-naming-fix-usage.sqlite")));
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(store.file));
   const result = await service.createProject({
     threadId: "123456789012345681", guildId: "100", parentChannelId: "200", displayName: "game-unnamed-request",
     initialPrompt: "Make a cool game", renameable: true,
@@ -758,7 +758,7 @@ test("a repair turn that still does not name the project falls back once without
       return { text: `Attempt ${prompts} done`, usage: {} };
     },
   } as unknown as OpenCodeHarness;
-  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-naming-fix-stubborn-usage.sqlite")));
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(store.file));
   const result = await service.createProject({
     threadId: "123456789012345682", guildId: "100", parentChannelId: "200", displayName: "game-make-me-a-game",
     initialPrompt: "Make a cool game", renameable: true,
@@ -814,7 +814,7 @@ test("webhook outages do not block project creation or leave renames pending", a
       return { text: "Finished", usage: {} };
     },
   } as unknown as OpenCodeHarness;
-  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "webhook-outage-usage.sqlite")));
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(store.file));
   const result = await service.createProject({
     threadId: "123456789012345679", guildId: "100", parentChannelId: "200", displayName: "Hook Outage Project",
     initialPrompt: "Make a small site",

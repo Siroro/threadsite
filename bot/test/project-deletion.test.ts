@@ -23,7 +23,7 @@ async function fixture(id: string) {
   await fs.mkdir(path.join(root, "published", `.backup-${project.siteSlug}-0123456789`));
   const store = trackStore(await Store.open(path.join(root, `${id}.db`)));
   await store.putProject(project);
-  const usage = new UsageLog(path.join(root, `${id}-usage.sqlite`));
+  const usage = new UsageLog(store.file);
   await usage.record({ threadId: id, project: project.displayName, kind: "game-3d" });
   const calls: string[] = [];
   const agent = { deleteSessionsInDirectory: async () => { calls.push("sessions"); }, isBusy: async () => false };
