@@ -306,7 +306,7 @@ export class CardInteractions {
  * per-session splits — appear only when the viewer is a site admin.
  */
 export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: ProgressSnapshot | undefined, scope: PanelScope, admin = false): PanelSection[] {
-  const sections = snapshot ? progressDetailSections(snapshot) : [];
+  const sections = snapshot ? progressDetailSections(snapshot, admin) : [];
   const result = card?.result;
   if (result) {
     const links = [

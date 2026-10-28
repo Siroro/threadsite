@@ -653,6 +653,10 @@ test("the live card counts executing children and removes the section after all 
       assert.equal(lines.length, 2, "the added section shows one line per live child");
       assert.match(lines[0], /browser-qa/, "the browser-QA child is named on its line");
     }
+    send("ses_child", "session.step.started", { assistantMessageID: "msg_qa", model: { providerID: "test", id: "vision" }, started: Date.now() });
+    assert.equal(progress.readSnapshot().subagents?.find((sub) => sub.id === "ses_child")?.model, "test/vision");
+    send("ses_root", "session.step.started", { assistantMessageID: "msg_root", model: { providerID: "test", id: "builder" }, started: Date.now() });
+    assert.equal(progress.readSnapshot().metrics?.currentModel, "test/builder");
     send("ses_child", "session.step.ended", { assistantMessageID: "msg_qa", tokens: { input: 1, output: 1, reasoning: 0 }, finish: "tool-calls" });
     assert.equal(progress.readSnapshot().activeSubagents, 2, "a model step ending is not session completion");
     send("ses_child", "session.execution.succeeded");

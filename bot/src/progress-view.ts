@@ -22,6 +22,7 @@ export interface ProgressSubagent {
   id: string;
   /** Agent name the child runs as (general, explore, browser-qa…). */
   agent: string;
+  model?: string;
   /** Completed model steps, deduped across retries. */
   steps: number;
   /** Running children drive the live card; finished ones stay in turn details. */
@@ -34,6 +35,9 @@ export interface ProgressSubagent {
   startedAt?: number;
 }
 export interface ProgressMetrics {
+  currentModel?: string;
+  cost?: number;
+  catalogCost?: number;
   contextTokens?: number;
   contextLimit?: number;
   inputTokens?: number;
@@ -407,7 +411,7 @@ export function sessionUsageLines(sessions: SessionUsage[], admin = false): stri
     .join("\n");
 }
 
-export function progressDetailSections(state: ProgressSnapshot): PanelSection[] {
+export function progressDetailSections(state: ProgressSnapshot, admin = false): PanelSection[] {
   const overview = renderProgressOverview(state).components[0].components
     .filter((component): component is TextDisplayBuilder => component instanceof TextDisplayBuilder).map((component) => component.data.content).join("\n\n");
   const metrics = state.metrics;
@@ -417,7 +421,7 @@ export function progressDetailSections(state: ProgressSnapshot): PanelSection[] 
     { key: "overview", label: "Overview", text: overview },
     detailSections.plan(state),
     detailSections.files(state),
-    detailSections.usage(metrics, state.stats, state.toolErrors),
+    detailSections.usage(metrics, state.stats, state.toolErrors, admin),
     detailSections.updates(updates, state.startedAt),
     state.reasoning?.length ? { key: "thinking", label: "Thinking trace", text: state.reasoning.map((item) => `**${elapsed(item.at - state.startedAt)}**\n${item.text}`).join("\n\n") } : undefined,
     { key: "activity", label: "Activity history", text: [...state.history, state.latest].filter((item) => item.text.trim()).map((item) => `${elapsed(item.at - state.startedAt)} · ${item.text}${item.detail ? `\n${item.detail}` : ""}`).join("\n\n") },
@@ -442,6 +446,7 @@ export function subagentDetailText(subagents: ProgressSubagent[], now?: number):
     const facts = [`${sub.steps} step${sub.steps === 1 ? "" : "s"}`, status, subagentSpan(sub, now)].filter(Boolean).join(" · ");
     return [
       `🤖 **${plain(sub.agent, 40)}** · ${facts}`,
+      sub.model ? `Model: ${plain(modelDisplayName(sub.model), 100)}` : "",
       sub.activity ? `Last action: ${plain(sub.activity, 180)}` : "",
     ].filter(Boolean).join("\n");
   }).join("\n\n");
@@ -498,11 +503,15 @@ const detailSections = {
     ].filter(Boolean).join("\n");
     return text.trim() ? { key: "files", label: "Changed files", text } : undefined;
   },
-  usage(metrics: ProgressMetrics | undefined, stats: string | undefined, toolErrors = 0): PanelSection | undefined {
+  usage(metrics: ProgressMetrics | undefined, stats: string | undefined, toolErrors = 0, admin = false): PanelSection | undefined {
     // The tool-error count left the public footer for concision; this private
     // page is its home, beside the turn's other figures. The finished turn's
     // panel reuses this text as its "last live reading" block.
     const text = [
+      metrics?.currentModel ? `**Current model**
+${plain(admin ? metrics.currentModel : modelDisplayName(metrics.currentModel), 120)}` : "",
+      admin && metrics && (metrics.cost || metrics.catalogCost) ? `**Current cost**
+${formatCost(metrics.cost || metrics.catalogCost!)}${metrics.cost ? "" : " at catalog rates"}` : "",
       hasUsageData(metrics) && metrics ? usageDetailText(metrics) : "",
       stats ?? "",
       toolErrors ? `⚠️ ${toolErrors} tool error${toolErrors === 1 ? "" : "s"}` : "",

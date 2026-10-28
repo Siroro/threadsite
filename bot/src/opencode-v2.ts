@@ -99,7 +99,7 @@ interface Watch {
   children: Set<string>;
   activeChildren: Set<string>;
   /** Per-child detail for the card's subagent lines; keyed by child session id. */
-  subagents: Map<string, { agent: string; steps: Set<string>; startedAt?: number; activity?: { text: string; at: number } }>;
+  subagents: Map<string, { agent: string; steps: Set<string>; model?: string; startedAt?: number; activity?: { text: string; at: number } }>;
   callback?: ProgressCallback;
   backgroundChildren: Set<string>;
   lastProgress: number;
@@ -107,6 +107,7 @@ interface Watch {
   progressKeys: Map<string, string>;
   steps: Map<string, SessionMessage>;
   models: Map<string, ModelRef>;
+  currentModel?: string;
   tools: Map<string, { name: string; input?: Record<string, unknown> }>;
   text: Map<string, string>;
   started: Map<string, number>;
@@ -793,6 +794,8 @@ export class OpenCodeV2Harness {
               const info = watch.subagents.get(child.id);
               if (!info) watch.subagents.set(child.id, { agent: child.agent || "subagent", steps: new Set(), startedAt: Date.now() });
               else if (child.agent) info.agent = child.agent;
+              const childInfo = watch.subagents.get(child.id);
+              if (childInfo && child.model) childInfo.model = `${child.model.providerID}/${child.model.id}`;
             }
           } while (changed);
           for (const child of watch.children) {
@@ -836,7 +839,7 @@ export class OpenCodeV2Harness {
     // The live card only needs running children; the durable roster keeps every
     // child so turn details can still name a finished subagent and what it did.
     const history = [...watch.subagents].map(([id, info]): ProgressSubagent => ({
-      id, agent: info.agent, steps: info.steps.size, startedAt: info.startedAt,
+      id, agent: info.agent, model: info.model, steps: info.steps.size, startedAt: info.startedAt,
       status: watch.activeChildren.has(id) ? "running" : "finished",
       activity: info.activity?.text, activityAt: info.activity?.at,
     }));
@@ -888,6 +891,8 @@ export class OpenCodeV2Harness {
       // A history fetch begun before a live retry must not restore its old window.
       if (message.time.created < (watch.started.get(message.id) ?? -Infinity)) continue;
       watch.models.set(message.id, message.model);
+      if (root) watch.currentModel = `${message.model.providerID}/${message.model.id}`;
+      else { const info = watch.subagents.get(sessionID); if (info) info.model = `${message.model.providerID}/${message.model.id}`; }
       watch.steps.set(message.id, applicationMessage(message, sessionID));
       watch.started.set(message.id, message.time.created);
       if (message.time.streamed !== undefined) watch.streamed.set(message.id, message.time.streamed);
@@ -908,7 +913,7 @@ export class OpenCodeV2Harness {
     const usage = usageFromMessages([...watch.steps.values()]) ?? emptyUsage();
     const timing = timingTotals(watch.timings.values());
     this.publish(watch, "metrics", { kind: "metrics", text: "Usage updated", metrics: {
-      ...usage, ...timing, outputTokensPerSecond: timing.outputTokensPerSecond, liveTokensPerSecond: undefined,
+      ...usage, currentModel: watch.currentModel ?? (watch.models.get("__session") ? `${watch.models.get("__session")!.providerID}/${watch.models.get("__session")!.id}` : undefined), ...timing, outputTokensPerSecond: timing.outputTokensPerSecond, liveTokensPerSecond: undefined,
       ...(watch.lastRequest ? { lastRequestMs: watch.lastRequest.generationMs,
         ...(watch.lastRequest.firstTokenMs !== undefined ? { firstTokenMs: watch.lastRequest.firstTokenMs } : {}) } : {}),
       contextLimit: watch.contextLimit, compactions: watch.compactions,
@@ -1001,6 +1006,14 @@ export class OpenCodeV2Harness {
     switch (event.type) {
       case "session.step.started":
         watch.models.set(event.data.assistantMessageID, event.data.model);
+        if (child) {
+          const info = watch.subagents.get(data.sessionID);
+          if (info) info.model = `${event.data.model.providerID}/${event.data.model.id}`;
+          this.publishSubagents(watch);
+        } else {
+          watch.currentModel = `${event.data.model.providerID}/${event.data.model.id}`;
+          this.metrics(watch, callback);
+        }
         watch.started.set(event.data.assistantMessageID, event.data.started);
         // A retried step re-anchors and discards its earlier streamed window,
         // mirroring opencode's message updater.
