@@ -95,7 +95,8 @@ function addToTotal(
   total.catalogCost += (entry.models ?? []).reduce((sum, model) => sum + (model.catalogCost ?? 0), 0);
   for (const model of entry.models ?? []) {
     const bucket = total.models.get(model.model)
-      ?? { model: model.model, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, turns: 0 };
+      ?? { model: model.model, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, turns: 0,
+        ...(model.reported ? { reported: true as const } : {}) };
     bucket.inputTokens += model.inputTokens;
     bucket.outputTokens += model.outputTokens;
     bucket.cacheTokens += model.cacheTokens;

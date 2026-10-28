@@ -272,6 +272,31 @@ test("addUsage merges repair passes without double-counting a session", () => {
   assert.equal(addUsage(first, undefined)!.sessions?.length, 1, "a pass without a split keeps the other's");
 });
 
+test("thread totals keep whether a model's figure was a provider charge", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-reported-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const log = new UsageLog(path.join(root, "usage.jsonl"));
+  const charged = (id: string, model: string, cost: number, reported: boolean) => ({
+    info: { id, role: "assistant", providerID: "surplus", modelID: model, time: { created: 1000 },
+      tokens: { input: 1_000, output: 100, cache: { read: 0, write: 0 } }, cost: reported ? undefined : 9.9,
+      ...(reported ? { native: { buyer_cost_micro: Math.round(cost * 1_000_000) } } : {}) }, parts: [],
+  });
+  await log.record({ threadId: "t", project: "P", kind: "site",
+    usage: usageFromMessages([charged("a", "real", 0.001, true)]) });
+  await log.record({ threadId: "t", project: "P", kind: "site",
+    usage: usageFromMessages([charged("b", "estimate", 9.9, false)]) });
+  // One real charge plus one estimate on the same model is a mixed line.
+  await log.record({ threadId: "t", project: "P", kind: "site",
+    usage: usageFromMessages([charged("c", "mixed", 0.001, true)]) });
+  await log.record({ threadId: "t", project: "P", kind: "site",
+    usage: usageFromMessages([charged("d", "mixed", 9.9, false)]) });
+  const total = await log.threadTotal("t");
+  assert.equal(total.models.get("surplus/real")!.reported, true, "a reported charge stays reported through the rollup");
+  assert.equal(total.models.get("surplus/real")!.unreported, undefined);
+  assert.equal(total.models.get("surplus/estimate")!.unreported, true, "an estimate is marked");
+  assert.equal(total.models.get("surplus/mixed")!.unreported, true, "one estimate makes the whole line an estimate");
+});
+
 test("turn revisions survive reopening the ledger, concurrent appends and a torn final line", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
