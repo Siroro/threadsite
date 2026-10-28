@@ -87,6 +87,11 @@ function contributorSection(project: ProjectRecord): string | undefined {
   ].filter(Boolean).join("\n");
 }
 
+/** OpenCode's explicitly named free-tier models do not need pricing metadata. */
+function isFreeTierModel(model: string): boolean {
+  return model.startsWith("opencode/") && model.endsWith("-free");
+}
+
 /** Model usage lines shared by the pinned card and the paginated project details. */
 export function lifetimeModelLines(usage: UsageTotal, includeCost = true): string[] {
   return [...usage.models.values()]
@@ -98,7 +103,7 @@ export function lifetimeModelLines(usage: UsageTotal, includeCost = true): strin
       const tokens = `in ${formatTokens(entry.inputTokens)}${cached} · out ${formatTokens(entry.outputTokens)}`;
       if (!includeCost) return `\`${modelDisplayName(entry.model)}\`: ${tokens}`;
       // A missing provider charge is not proof that a model was free.
-      const label = entry.cost > 0 ? estimateLabel(entry) : entry.unreported ? " (pricing unavailable)" : "";
+      const label = entry.cost > 0 ? estimateLabel(entry) : entry.unreported && !isFreeTierModel(entry.model) ? " (pricing unavailable)" : "";
       const catalog = entry.reported && entry.catalogCost && entry.catalogCost > 0
         ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : "";
       return `\`${modelDisplayName(entry.model)}\`: ${tokens} · ${formatCost(entry.cost)}${label}${catalog}`;
@@ -112,7 +117,7 @@ function lifetimeCostLines(usage: UsageTotal): string | undefined {
   const priced = [...usage.models.values()].filter((entry) => entry.cost > 0 || (entry.catalogCost ?? 0) > 0);
   const allEstimated = priced.length > 0 && priced.every((entry) => estimateLabel(entry));
   const anyCatalog = priced.some((entry) => entry.catalogEstimated === true || estimateLabel(entry) === " (catalog)");
-  const unavailable = usage.cost === 0 && [...usage.models.values()].some((entry) => entry.unreported);
+  const unavailable = usage.cost === 0 && [...usage.models.values()].some((entry) => entry.unreported && !isFreeTierModel(entry.model));
   const total = `**Total ${formatCost(usage.cost)}**${unavailable ? " (pricing unavailable)" : allEstimated ? anyCatalog ? " (catalog)" : " (est)" : ""}${usage.catalogCost > 0 && !allEstimated ? ` · ${formatCost(usage.catalogCost)} at catalog rates` : ""}`;
   const shown: string[] = [];
   let length = total.length;

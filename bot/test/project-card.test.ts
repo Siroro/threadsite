@@ -114,6 +114,20 @@ test("a project with only zero-cost usage still lists its model", () => {
   assert.match(cost, /`qwen-free`: in 100 · out 10 · \$0/);
 });
 
+test("OpenCode free-tier usage is shown as free while other unpriced models remain uncertain", () => {
+  const total = usage({ cost: 0, catalogCost: 0, models: new Map([
+    ["opencode/mimo-v2.6-flash-free", { model: "opencode/mimo-v2.6-flash-free", turns: 1,
+      inputTokens: 3_800_000, outputTokens: 48_800, cacheTokens: 3_610_000, cost: 0, unreported: true }],
+  ]) });
+  const free = cardView(renderProjectCard({ project: record(), usage: total })).fields.find((field) => field.name === "Lifetime cost")!.value;
+  assert.match(free, /`mimo-v2\.6-flash-free`: in 3\.8M \(95%\) · out 48\.8k · \$0/);
+  assert.doesNotMatch(free, /pricing unavailable/);
+  total.models.set("other/mimo-v2.6-flash-free", { model: "other/mimo-v2.6-flash-free", turns: 1,
+    inputTokens: 100, outputTokens: 20, cacheTokens: 0, cost: 0, unreported: true });
+  const mixed = cardView(renderProjectCard({ project: record(), usage: total })).fields.find((field) => field.name === "Lifetime cost")!.value;
+  assert.match(mixed, /pricing unavailable/);
+});
+
 test("model breakdown keeps zero-cost and unpriced models and handles long rosters", () => {
   const models = new Map(Array.from({ length: 40 }, (_, i) => [`provider/model-${i}`, {
     model: `provider/model-${i}`, turns: 1, inputTokens: 2000 - i, outputTokens: 100, cacheTokens: 0,
