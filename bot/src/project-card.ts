@@ -2,7 +2,7 @@ import { ButtonBuilder, ButtonStyle, ContainerBuilder, TextDisplayBuilder, Thumb
 import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, KIND_COLORS, safeCardUrl, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
 import { COLLABORATION_LABELS, WIPE_POLICY_LABELS } from "./collaboration-service.js";
-import { modelDisplayName, SURPLUS_PROVIDER_ID } from "./opencode.js";
+import { modelDisplayName } from "./opencode.js";
 import type { ProjectDescription } from "./project-docs.js";
 import { projectKindLabel } from "./templates.js";
 import type { ContributionTally, ProjectRecord } from "./types.js";
@@ -93,9 +93,8 @@ const COST_MODEL_ROWS = 4;
 /**
  * The project's lifetime spend: the ledgered total, then one line per model
  * that billed anything — its tokens, then its cost — provider-stripped like
- * every public model name. A model served through the surplus provider quotes
- * its billed figure plus, when another provider's catalog lists the same
- * model, what those tokens would have cost at its list rates. A project with
+ * every public model name. A surplus-served model also quotes what those
+ * tokens would have cost at another provider's list rates. A project with
  * nothing priced returns nothing rather than a $0 field.
  */
 function lifetimeCostLines(usage: UsageTotal): string | undefined {
@@ -104,12 +103,14 @@ function lifetimeCostLines(usage: UsageTotal): string | undefined {
     .filter((entry) => entry.cost > 0 || (entry.catalogCost ?? 0) > 0)
     .sort((a, b) => b.cost - a.cost || (b.catalogCost ?? 0) - (a.catalogCost ?? 0));
   const lines = rows.slice(0, COST_MODEL_ROWS).map((entry) => {
+    // The bracket is the share of input served from cache — for an agent turn
+    // it dominates the token count, and it is what makes the spend so low.
+    const cached = entry.cacheTokens > 0 && entry.inputTokens > 0
+      ? ` (${Math.round(Math.min(1, entry.cacheTokens / entry.inputTokens) * 100)}%)` : "";
     const tokens = entry.inputTokens || entry.outputTokens
-      ? `in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)} · ` : "";
-    const spend = formatCost(entry.cost);
-    if (!entry.model.startsWith(`${SURPLUS_PROVIDER_ID}/`)) return `\`${modelDisplayName(entry.model)}\`: ${tokens}${spend}`;
+      ? `in ${formatTokens(entry.inputTokens)}${cached} · out ${formatTokens(entry.outputTokens)} · ` : "";
     const catalog = entry.catalogCost && entry.catalogCost > 0 ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : "";
-    return `\`${modelDisplayName(entry.model)}\`: ${tokens}${spend} on surplus${catalog}`;
+    return `\`${modelDisplayName(entry.model)}\`: ${tokens}${formatCost(entry.cost)}${catalog}`;
   });
   const more = rows.length - lines.length;
   return [

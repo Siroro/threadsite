@@ -53,7 +53,8 @@ test("a live project links its site and repo and carries lifetime spend with mod
   // catalog-rate equivalent, an unpriced free-tier model not at all.
   const cost = card.fields!.find((field) => field.name === "Lifetime cost")!.value;
   assert.match(cost, /\*\*Total \$1\.25\*\* · \$9\.80 at catalog rates/);
-  assert.match(cost, /`glm`: in 80k · out 6k · \$1\.20 on surplus · \$9\.80 at catalog rates/);
+  assert.match(cost, /`glm`: in 80k \(81%\) · out 6k · \$1\.20 · \$9\.80 at catalog rates/,
+    "the bracket is the cached share of input; the billed figure stands alone");
   assert.doesNotMatch(cost, /qwen/, "a model that billed nothing earns no line");
   // Provider routing still stays off the public card.
   assert.doesNotMatch(JSON.stringify(card), /opencode\/|surplus\//);
