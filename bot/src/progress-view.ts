@@ -378,14 +378,15 @@ const PLAN_MARKS: Record<ProgressPlanItem["status"], string> = { completed: "✓
  * Per-model figures for the final usage tab with each model's tokens. Names
  * are provider-stripped for members; admins see the full provider/model id,
  * since routing is the part they can act on. Spend joins a line only for
- * admins — model identities are fine to show any viewer, but spend data
- * stays admin-only.
+ * admins — model identities are fine to show any viewer — and a surplus
+ * model's catalog-rate equivalent rides its billed figure.
  */
 export function modelUsageLines(models: ModelUsage[], admin = false): string {
   return models
     .filter((entry) => entry.model && entry.model !== "unknown")
     .map((entry) => `\`${admin ? entry.model : modelDisplayName(entry.model)}\`: in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)}`
-      + (admin && entry.cost > 0 ? ` · ${formatCost(entry.cost)}` : ""))
+      + (admin && entry.cost > 0 ? ` · ${formatCost(entry.cost)}` : "")
+      + (admin && entry.catalogCost ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : ""))
     .join("\n");
 }
 

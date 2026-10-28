@@ -6,7 +6,7 @@ import { OpenCode, type OpenCodeClient, type ModelInfo, type ModelRef, type Sess
 import { config } from "./config.js";
 import { log, serializeError } from "./logger.js";
 import { applicationMessage, formQuestion } from "./opencode-v2-messages.js";
-import { usageFromMessages, reconcileUsage, sessionUsageFromMessages, describeTool, toolLabel, type SessionMessage, type PromptImage,
+import { annotateCatalogCosts, usageFromMessages, reconcileUsage, sessionUsageFromMessages, describeTool, toolLabel, type SessionMessage, type PromptImage,
   type PromptResult, type TurnUsage, type QuotaBlock } from "./opencode-shared.js";
 import type { ProgressCallback, ProgressUpdate, ProgressPlanItem, ProgressSubagent } from "./progress.js";
 import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
@@ -477,12 +477,14 @@ export class OpenCodeV2Harness {
       result.sessions = sessionUsageFromMessages(savedIsFuller ? messages : streamSteps, sessionID,
         (id) => watch.subagents?.get(id)?.agent ?? entries.find((entry) => entry.sessionID === id)?.agent,
         since, Infinity, baseline);
+      annotateCatalogCosts(result, await this.models(directory));
       return result;
     }
     catch (error) {
       log("warn", "opencode.v2_usage_recovery_failed", { sessionID, error: serializeError(error) });
       observed.sessions = sessionUsageFromMessages(streamSteps, sessionID,
         (id) => watch.subagents?.get(id)?.agent, since);
+      annotateCatalogCosts(observed, await this.models(directory));
       return observed;
     }
   }

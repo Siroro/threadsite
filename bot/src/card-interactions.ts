@@ -13,7 +13,7 @@ import { answerModal, customAnswerModal, readAnswerForm, renderQuestionReview } 
 import type { QuestionService } from "./question-service.js";
 import type { Store } from "./store.js";
 import type { ProjectRecord, QueuedRequest } from "./types.js";
-import { authorizeCard, CollaborationError, interactionActor, type ProjectActor } from "./collaboration.js";
+import { authorizeCard, CollaborationError, interactionActor, requireWipeAccess, type ProjectActor } from "./collaboration.js";
 import type { CollaborationService } from "./collaboration-service.js";
 
 export type CardInteraction = ButtonInteraction | AnySelectMenuInteraction | ModalSubmitInteraction;
@@ -27,6 +27,8 @@ export interface CardInteractionServices {
   cancel(threadId: string, statusId: string): Promise<string>;
   submit(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, attachments: Attachment[]): Promise<string>;
   stop(threadId: string, statusMessageId: string): Promise<string>;
+  /** Clear the game's shared relay state; resolves to the reply text. */
+  wipe(threadId: string, userId: string): Promise<string>;
   rollback(threadId: string, expectedVersion: string, actor: ProjectActor): Promise<void>;
   busy(threadId: string): Promise<boolean>;
   error(error: unknown, interaction: CardInteraction): void;
@@ -47,7 +49,7 @@ export class CardInteractions {
       this.checkResource(project, route);
       const actor = interactionActor(interaction, this.services.adminUser?.(interaction.user.id));
       authorizeCard(project, actor, route.action);
-      if (["collaboration", "collabmode", "collabusers", "approve", "reject", "reviewrequest"].includes(route.action)) {
+      if (["collaboration", "collabmode", "collabusers", "collabwipe", "approve", "reject", "reviewrequest"].includes(route.action)) {
         if (!this.services.collaboration) throw new CardUserError("Collaboration settings are unavailable.");
         await this.services.collaboration.handle(interaction, project, actor, route);
         return true;
@@ -177,6 +179,34 @@ export class CardInteractions {
       await this.respond(interaction, renderStatusCard("↩️ Restored the last published commit. The partial edits were discarded."));
       return;
     }
+    if (action === "wipe") {
+      if (!project.projectKind || project.projectKind === "site") throw new CardUserError("Only games keep state on the multiplayer relay.");
+      if (args[0] === "go") {
+        await this.begin(interaction, route.action);
+        // The confirm panel may sit open for a while: recheck the project,
+        // its kind and the wipe policy against current settings.
+        const fresh = this.services.store.getProject(threadId);
+        if (!fresh) throw new CardUserError("This project is no longer available.");
+        if (!fresh.projectKind || fresh.projectKind === "site") throw new CardUserError("Only games keep state on the multiplayer relay.");
+        requireWipeAccess(fresh, interactionActor(interaction, this.services.adminUser?.(interaction.user.id)));
+        await this.respond(interaction, renderStatusCard(await this.services.wipe(threadId, interaction.user.id)));
+        return;
+      }
+      await this.begin(interaction, route.action);
+      const card = new ContainerBuilder().setAccentColor(0xef4444);
+      addCardHeader(card, "CONFIRM", `Clear ${project.displayName}'s relay state?`, "The shared arena world, any open rooms and every leaderboard score will be cleared. Connected players reconnect into a fresh, empty world. Private save slots, the site and the repository are kept.");
+      card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId(cardId("wipe", resource, "go")).setLabel("Wipe state now").setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(cardId("dismiss", resource)).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
+      ));
+      await this.respond(interaction, cardMessage(card));
+      return;
+    }
+    if (action === "dismiss") {
+      await this.begin(interaction, route.action);
+      await this.respond(interaction, renderStatusCard("Cancelled. Nothing was changed."));
+      return;
+    }
     await this.question(interaction, project, route);
   }
 
@@ -276,8 +306,9 @@ export class CardInteractions {
 /**
  * The pages behind a turn's details dropdown. Only sections with real content
  * are offered: an empty plan, absent findings or an unwritten changelog must
- * not become a dead entry in the select menu. Spend figures appear only when
- * the viewer is a site admin — this panel is that viewer's private reply.
+ * not become a dead entry in the select menu. Lifetime spend rides the pinned
+ * project card; this panel's figures — per-turn spend, provider routing,
+ * per-session splits — appear only when the viewer is a site admin.
  */
 export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: ProgressSnapshot | undefined, scope: PanelScope, admin = false): PanelSection[] {
   const sections = snapshot ? progressDetailSections(snapshot) : [];
@@ -318,7 +349,7 @@ export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: Pr
       : "";
     const spend = admin
       ? result.usage.cost > 0
-        ? `**Cost**\nTurn spend **${formatCost(result.usage.cost)}**`
+        ? `**Cost**\nTurn spend **${formatCost(result.usage.cost)}**${result.usage.catalogCost ? ` · **${formatCost(result.usage.catalogCost)}** at catalog rates` : ""}`
         : `**Cost**\n$0; the provider's pricing is not reported for these models`
       : "";
     const finalUsage: PanelSection = { key: "usage", label: "Usage & context", text: [

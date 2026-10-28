@@ -33,6 +33,10 @@ export interface ModelUsage {
   cacheTokens: number;
   /** Provider-reported USD cost, when pricing is known. */
   cost: number;
+  /** What these tokens would cost at another provider's catalog list rates;
+   * carried only by surplus-served models, and undefined when no other
+   * provider lists the same model id. */
+  catalogCost?: number;
 }
 
 /**
@@ -76,6 +80,9 @@ export interface TurnUsage {
   steps: number;
   /** Provider-reported USD cost across the turn; 0 when pricing is unknown. */
   cost: number;
+  /** Catalog-rate equivalent across the turn's surplus-served models; undefined
+   * when none of them has another provider listing the same model id. */
+  catalogCost?: number;
   /** Wall-clock generation time across timed model steps; tok/s denominator. */
   generationMs?: number;
   /** Output tokens produced within those timed windows; tok/s numerator. */
@@ -164,17 +171,32 @@ export function reconcileUsage(observed: TurnUsage | undefined, saved: TurnUsage
   // The two sides price the same steps independently: the stream can report a
   // provider-quoted cost the saved messages lack (or vice versa), so a $0
   // snapshot must not erase the other side's spend. Take the fuller figure
-  // per model and in total; tokens stay with the billing snapshot.
+  // per model and in total; tokens stay with the billing snapshot. The
+  // catalog-rate comparison follows the same rule: it is derived from the
+  // billing snapshot's tokens when that side has it, and adopted from the
+  // peer otherwise.
   const peer = billing === saved ? observed : saved;
-  if ((peer.cost ?? 0) > (billing.cost ?? 0)) {
-    result.cost = peer.cost;
-    result.models = billing.models.map((entry) => {
-      const priced = peer.models.find((candidate) => candidate.model === entry.model);
-      return priced && priced.cost > entry.cost ? { ...entry, cost: priced.cost } : entry;
-    });
-  }
+  if ((peer.cost ?? 0) > (billing.cost ?? 0)) result.cost = peer.cost;
+  result.models = billing.models.map((entry) => {
+    const priced = peer.models.find((candidate) => candidate.model === entry.model);
+    return {
+      ...entry,
+      cost: priced && priced.cost > entry.cost ? priced.cost : entry.cost,
+      ...(entry.catalogCost === undefined && priced?.catalogCost !== undefined ? { catalogCost: priced.catalogCost } : {}),
+    };
+  });
+  const catalogCost = result.models.reduce((sum, entry) => sum + (entry.catalogCost ?? 0), 0);
+  if (catalogCost > 0) result.catalogCost = catalogCost;
+  else delete result.catalogCost;
   return result;
 }
+
+/**
+ * The deployment's discount provider (see `opencode/providers.json`): its
+ * billed rates run below the vendors' list prices, so models it serves also
+ * carry a catalog-rate comparison — what the same tokens would cost elsewhere.
+ */
+export const SURPLUS_PROVIDER_ID = "surplus";
 
 /** "surplus/deepseek-4.1" -> "deepseek-4.1": the model identity without its provider. */
 export function modelDisplayName(model: string): string {
@@ -200,6 +222,72 @@ export function turnModelSummary(usage: TurnUsage, limit = 2): string {
   return modelNameSummary(usage.models, limit);
 }
 
+/** A catalog entry's advertised price: USD per million tokens. */
+export interface ModelRates {
+  input: number;
+  output: number;
+  cacheRead?: number;
+}
+
+/** The OpenCode model list's entry shape, as far as pricing cares. */
+export interface CatalogModel {
+  id: string;
+  providerID: string;
+  cost?: Array<{ tier?: unknown; input?: number; output?: number; cache?: { read?: number; write?: number } }> | null;
+}
+
+/**
+ * Base-tier rates from a catalog model entry that advertises pricing. Entries
+ * can tier prices by context size; the untiered entry is the baseline a
+ * discount provider is compared against, and a fully tiered catalog falls back
+ * to its first tier.
+ */
+export function modelEntryRates(entry: CatalogModel): ModelRates | undefined {
+  const usable = entry.cost?.filter((cost): cost is { tier?: unknown; input: number; output: number; cache?: { read?: number; write?: number } } =>
+    cost.input !== undefined && Number.isFinite(cost.input) && cost.input >= 0
+    && cost.output !== undefined && Number.isFinite(cost.output) && cost.output >= 0) ?? [];
+  const base = usable.find((cost) => cost.tier === undefined) ?? usable[0];
+  if (!base) return undefined;
+  return { input: base.input, output: base.output,
+    ...(base.cache?.read !== undefined && Number.isFinite(base.cache.read) && base.cache.read >= 0 ? { cacheRead: base.cache.read } : {}) };
+}
+
+/**
+ * Price a usage record's tokens at per-million rates. Cached tokens bill at
+ * the cache-read rate when the catalog carries one — a turn's cache is
+ * overwhelmingly reads after the first write — and at the input rate otherwise.
+ */
+export function costAtRates(usage: Pick<ModelUsage, "inputTokens" | "outputTokens" | "cacheTokens">, rates: ModelRates): number {
+  const fresh = Math.max(0, usage.inputTokens - usage.cacheTokens);
+  const cached = Math.max(0, usage.cacheTokens);
+  return (fresh * rates.input + cached * (rates.cacheRead ?? rates.input) + usage.outputTokens * rates.output) / 1_000_000;
+}
+
+/**
+ * Catalog-rate comparison for a finished turn: every model the surplus
+ * provider served is re-priced at another provider's list rates for the same
+ * model id — what the turn would have cost off surplus. A model only surplus
+ * carries keeps no comparison rather than guessing a vendor, and when several
+ * providers list the same id the alphabetically first priced one is used,
+ * deterministically. Catalog entries are the OpenCode model list's shape.
+ */
+export function annotateCatalogCosts(usage: TurnUsage, catalog: ReadonlyArray<CatalogModel>): void {
+  let catalogCost = 0;
+  for (const entry of usage.models) {
+    if (!entry.model.startsWith(`${SURPLUS_PROVIDER_ID}/`)) continue;
+    const modelID = entry.model.slice(SURPLUS_PROVIDER_ID.length + 1);
+    const rates = catalog
+      .filter((candidate) => candidate.id === modelID && candidate.providerID !== SURPLUS_PROVIDER_ID)
+      .sort((a, b) => a.providerID.localeCompare(b.providerID))
+      .map(modelEntryRates)
+      .find((rates): rates is ModelRates => rates !== undefined);
+    if (!rates) continue;
+    entry.catalogCost = costAtRates(entry, rates);
+    catalogCost += entry.catalogCost;
+  }
+  if (catalogCost > 0) usage.catalogCost = catalogCost;
+}
+
 /** Public turn-usage line: context size, cumulative billed tokens, cache share, model steps. */
 export function formatTurnUsage(usage: TurnUsage): string {
   const parts: string[] = [];
@@ -221,8 +309,9 @@ export function formatTurnUsage(usage: TurnUsage): string {
     parts.push(`~${formatTokensPerSecond(usage.outputTokensPerSecond)} tok/s`);
   }
   if (usage.steps > 0) parts.push(`${usage.steps} step${usage.steps === 1 ? "" : "s"}`);
-  // Cost is deliberately absent: token counts are fine to show publicly, but
-  // spend data is admin-only (/site-admin usage).
+  // Cost is absent from the live line: mid-turn spend churns. The settled
+  // figures — billed and catalog-rate — ride the pinned project card and the
+  // details panels once the turn finishes.
   if (usage.compactions > 0) parts.push(`compacted ${usage.compactions}×`);
   return parts.join(" · ");
 }
@@ -243,6 +332,8 @@ export function addUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): Tu
     compactions: a.compactions + b.compactions,
     steps: a.steps + b.steps,
     cost: a.cost + b.cost,
+    ...(a.catalogCost !== undefined || b.catalogCost !== undefined
+      ? { catalogCost: (a.catalogCost ?? 0) + (b.catalogCost ?? 0) } : {}),
     // Throughput combines as summed numerator over summed denominator, not an
     // average of rates, so a fast title pass cannot skew a slow build turn.
     ...(generationMs > 0 && timedOutputTokens > 0
@@ -268,6 +359,7 @@ export function mergeModelUsage(entries: ModelUsage[]): ModelUsage[] {
     current.outputTokens += entry.outputTokens;
     current.cacheTokens += entry.cacheTokens;
     current.cost += entry.cost;
+    if (entry.catalogCost !== undefined) current.catalogCost = (current.catalogCost ?? 0) + entry.catalogCost;
     merged.set(entry.model, current);
   }
   return [...merged.values()].sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens));

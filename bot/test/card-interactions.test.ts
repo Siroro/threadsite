@@ -22,20 +22,23 @@ async function fixture() {
   await store.patchProject(threadId, { pendingTurn: { id: "turn-1", prompt: "make it pop", initial: false, startedAt: new Date().toISOString(), statusMessageId: turn } });
   store.patchCardState(threadId, turn, {});
   const submitted: RequestFormState[] = [];
+  const wiped: string[] = [];
+  const replies: unknown[] = [];
   const router = new CardInteractions({ store, questions: {} as never,
     projectSections: () => [], queue: () => ({ requests: [], preparing: 0 }), cancel: async () => "",
     submit: async (_interaction, _project, form) => { submitted.push(form); return "saved"; },
     stop: async () => "", rollback: async () => {}, busy: async () => false, error: () => {},
+    wipe: async (threadId, userId) => { wiped.push(`${threadId}/${userId}`); return "wipe done"; },
   });
   const interaction = (customId: string, overrides: Record<string, unknown> = {}): any => ({
     customId, channelId: threadId, guildId: project.guildId, user: { id: "12345" },
     memberPermissions: new PermissionsBitField(PermissionFlagsBits.SendMessagesInThreads),
     channel: { isThread: () => true }, client: { user: { id: "bot" } },
     inGuild: () => true, isButton: () => false, isModalSubmit: () => false, deferred: false, replied: false,
-    showModal: async () => {}, reply: async () => {}, editReply: async () => {}, deferReply: async () => {}, deferUpdate: async () => {},
+    showModal: async () => {}, reply: async (value: unknown) => { replies.push(value); }, editReply: async (value: unknown) => { replies.push(value); }, deferReply: async () => {}, deferUpdate: async () => {},
     ...overrides,
   });
-  return { store, threadId, turn, router, submitted, interaction };
+  return { store, threadId, turn, router, submitted, wiped, replies, interaction };
 }
 
 /** Modal fields as discord.js reports them; "absent" simulates a pre-checkbox modal. */
@@ -82,4 +85,55 @@ test("queue-form submissions never carry the restart flag", async () => {
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0].steer, false);
   assert.notEqual(f.submitted[0].restart, true, "the restart option exists only on the steer form");
+});
+
+/** A game thread whose owner is someone else; the fixture user is a plain member. */
+async function gameFixture(extra: Record<string, unknown> = {}) {
+  const f = await fixture();
+  const record = f.store.getProject(f.threadId)!;
+  await f.store.patchProject(f.threadId, { projectKind: "game-2d", multiplayerGameId: record.siteSlug, ownerId: "999", ...extra });
+  return f;
+}
+
+test("the card wipe button confirms first and only resets after the second click", async () => {
+  const f = await gameFixture({ collaboration: { mode: "open", userIds: [], revision: 1, wipePolicy: "anyone" } });
+  await f.router.handle(f.interaction(cardId("wipe", f.threadId), { isButton: () => true }));
+  assert.deepEqual(f.wiped, [], "the first click only asks for confirmation");
+  assert.ok(JSON.stringify(f.replies).includes(cardId("wipe", f.threadId, "go")), "the confirmation offers the execute button");
+  await f.router.handle(f.interaction(cardId("wipe", f.threadId, "go"), { isButton: () => true }));
+  assert.deepEqual(f.wiped, [`${f.threadId}/12345`]);
+});
+
+test("cancel dismisses the wipe confirmation without resetting", async () => {
+  const f = await gameFixture({ collaboration: { mode: "open", userIds: [], revision: 1, wipePolicy: "anyone" } });
+  await f.router.handle(f.interaction(cardId("dismiss", f.threadId), { isButton: () => true }));
+  assert.deepEqual(f.wiped, []);
+});
+
+test("a confirmed wipe still rechecks the current policy before resetting", async () => {
+  const f = await gameFixture({ collaboration: { mode: "open", userIds: [], revision: 1, wipePolicy: "anyone" } });
+  await f.router.handle(f.interaction(cardId("wipe", f.threadId), { isButton: () => true }));
+  // The owner tightens the policy while the confirmation is still open.
+  await f.store.patchProject(f.threadId, { collaboration: { mode: "open", userIds: [], revision: 2, wipePolicy: "owner" } });
+  await f.router.handle(f.interaction(cardId("wipe", f.threadId, "go"), { isButton: () => true }));
+  assert.deepEqual(f.wiped, [], "a stale confirmation cannot outlive the policy that allowed it");
+});
+
+test("only the owner's policy and managers open the wipe confirmation; sites have none", async () => {
+  const f = await gameFixture();
+  await f.router.handle(f.interaction(cardId("wipe", f.threadId), { isButton: () => true }));
+  assert.deepEqual(f.wiped, []);
+  assert.ok(JSON.stringify(f.replies).includes("Only the thread owner"), "the denial explains the Collaboration toggle");
+  const admin = await gameFixture();
+  await admin.router.handle(admin.interaction(cardId("wipe", admin.threadId), {
+    isButton: () => true,
+    memberPermissions: new PermissionsBitField([PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.ManageGuild]),
+  }));
+  assert.ok(JSON.stringify(admin.replies).includes(cardId("wipe", admin.threadId, "go")), "server administrators always reach the confirmation");
+  const site = await fixture();
+  await site.router.handle(site.interaction(cardId("wipe", site.threadId), {
+    isButton: () => true,
+    memberPermissions: new PermissionsBitField([PermissionFlagsBits.SendMessagesInThreads, PermissionFlagsBits.ManageGuild]),
+  }));
+  assert.deepEqual(site.wiped, [], "site projects hold no relay state");
 });

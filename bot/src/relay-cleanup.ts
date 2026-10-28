@@ -22,6 +22,30 @@ export async function deleteRelayGame(gameId: string): Promise<void> {
   if (!response.ok) throw new Error(`Relay game cleanup failed (${response.status}).`);
 }
 
+/**
+ * Clear a live game's shared relay state: the durable arena world, its open
+ * rooms (connected players reconnect into fresh, empty ones) and leaderboard
+ * scores. Private save slots survive; no deletion tombstone is written.
+ */
+export async function resetRelayGame(gameId: string): Promise<void> {
+  if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(gameId)) throw new Error("Invalid relay game identity.");
+  const response = await fetch(`${config.gameserverInternalUrl}/admin/games/${encodeURIComponent(gameId)}/reset`, {
+    method: "POST", headers: { Authorization: `Bearer ${await relayCleanupToken()}` }, signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`Relay game reset failed (${response.status}).`);
+}
+
+/** Relay-wide variant of the reset; returns how many games were affected. */
+export async function resetAllRelayGames(scoresOnly: boolean): Promise<number> {
+  const response = await fetch(`${config.gameserverInternalUrl}/admin/reset${scoresOnly ? "?scope=scores" : ""}`, {
+    method: "POST", headers: { Authorization: `Bearer ${await relayCleanupToken()}` }, signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`Relay-wide reset failed (${response.status}).`);
+  const body = (await response.json().catch(() => undefined)) as { games?: unknown } | undefined;
+  if (!body || typeof body.games !== "number") throw new Error("Unexpected relay reset payload.");
+  return body.games;
+}
+
 export async function listRelayGames(): Promise<string[]> {
   const response = await fetch(`${config.gameserverInternalUrl}/admin/games`, {
     headers: { Authorization: `Bearer ${await relayCleanupToken()}` }, signal: AbortSignal.timeout(15_000),

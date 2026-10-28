@@ -8,7 +8,7 @@ import type { SessionMessage, TurnUsage } from "../src/opencode.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { UsageLog } = await import("../src/usage.js");
-const { usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage } = await import("../src/opencode.js");
+const { annotateCatalogCosts, usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage } = await import("../src/opencode.js");
 
 function message(id: string, created: number, input = 100, output = 20): SessionMessage {
   return { info: { id, role: "assistant", providerID: "test", modelID: "model", time: { created },
@@ -99,6 +99,85 @@ test("the session split attributes root and subagent figures that sum to the tur
   assert.deepEqual(split[1].models?.map((entry) => entry.model), ["surplus/glm-5.3"]);
   // An unobserved child still gets a bucket, labeled as a generic subagent.
   assert.equal(sessionUsageFromMessages([step("x", "ses_ghost", 1500, 10, 1)], "ses_root", () => undefined)[0].agent, "subagent");
+});
+
+test("catalog rates re-price surplus-served models at another provider's list prices", () => {
+  const step = (id: string, modelID: string, input: number, cacheRead: number, output: number, cost: number): SessionMessage => ({
+    info: { id, role: "assistant", providerID: modelID.startsWith("opencode/") ? "opencode" : "surplus",
+      modelID: modelID.replace(/^[a-z-]+\//, ""), time: { created: 1000 },
+      tokens: { input, output, cache: { read: cacheRead, write: 0 } }, cost }, parts: [],
+  });
+  const usage = usageFromMessages([
+    step("s1", "surplus/deepseek-4.1", 900, 100, 200, 0.021),
+    step("s2", "surplus/glm-5.3", 50, 0, 10, 0.001),
+    step("s3", "opencode/deepseek-4.1", 10, 0, 5, 0),
+  ])!;
+  annotateCatalogCosts(usage, [
+    { id: "deepseek-4.1", providerID: "surplus", cost: [{ input: 0.27, output: 1.1 }] },
+    { id: "deepseek-4.1", providerID: "deepseek", cost: [
+      // Long-context tier first: the untiered base entry is the comparison.
+      { tier: { type: "context", size: 200_000 }, input: 4, output: 18, cache: { read: 0.4, write: 4 } },
+      { input: 2, output: 9, cache: { read: 0.2, write: 2 } },
+    ] },
+    { id: "glm-5.3", providerID: "zai" },
+  ]);
+  const deepseek = usage.models.find((entry) => entry.model === "surplus/deepseek-4.1")!;
+  // 900 fresh + 100 cached reads at $2/$0.20, 200 output at $9, per million.
+  assert.ok(Math.abs(deepseek.catalogCost! - (900 * 2 + 100 * 0.2 + 200 * 9) / 1_000_000) < 1e-12,
+    "the same tokens at the vendor's list rates, cache priced as reads");
+  assert.equal(usage.models.find((entry) => entry.model === "surplus/glm-5.3")!.catalogCost, undefined,
+    "a model no other provider prices keeps no comparison");
+  assert.equal(usage.models.find((entry) => entry.model === "opencode/deepseek-4.1")!.catalogCost, undefined,
+    "only surplus-served models are re-priced");
+  assert.ok(Math.abs(usage.catalogCost! - deepseek.catalogCost!) < 1e-12);
+
+  // Several providers listing the same id resolve deterministically to the
+  // alphabetically first priced one; without cache rates, cached tokens bill
+  // at the input rate.
+  const contested = usageFromMessages([step("c1", "surplus/deepseek-4.1", 900, 100, 200, 0.021)])!;
+  annotateCatalogCosts(contested, [
+    { id: "deepseek-4.1", providerID: "zzz-vendor", cost: [{ input: 3, output: 3 }] },
+    { id: "deepseek-4.1", providerID: "aaa-vendor", cost: [{ input: 1, output: 2 }] },
+  ]);
+  const priced = contested.models.find((entry) => entry.model === "surplus/deepseek-4.1")!;
+  assert.ok(Math.abs(priced.catalogCost! - ((900 + 100) * 1 + 200 * 2) / 1_000_000) < 1e-12,
+    "aaa-vendor wins the tie and its input rate covers the cache");
+});
+
+test("reconcile keeps the stream's catalog comparison when fuller history is unpriced", () => {
+  const observed = usageFromMessages([{
+    info: { id: "s1", role: "assistant", providerID: "surplus", modelID: "deepseek-4.1", time: { created: 1000 },
+      tokens: { input: 900, output: 200, cache: { read: 0, write: 0 } }, cost: 0.021 }, parts: [],
+  }])!;
+  annotateCatalogCosts(observed, [{ id: "deepseek-4.1", providerID: "deepseek", cost: [{ input: 2, output: 9 }] }]);
+  const saved = usageFromMessages([{
+    info: { id: "h1", role: "assistant", providerID: "surplus", modelID: "deepseek-4.1", time: { created: 1000 },
+      tokens: { input: 1_500, output: 300, cache: { read: 0, write: 0 } }, cost: 0 }, parts: [],
+  }])!;
+  const reconciled = reconcileUsage(observed, saved)!;
+  assert.equal(reconciled.inputTokens, 1_500, "the fuller token counts still win");
+  assert.equal(reconciled.cost, 0.021, "an unpriced snapshot does not erase stream-reported spend");
+  assert.ok(Math.abs(reconciled.models[0].catalogCost! - observed.models[0].catalogCost!) < 1e-12,
+    "the fuller snapshot adopts the stream's catalog comparison");
+  assert.ok(Math.abs(reconciled.catalogCost! - observed.catalogCost!) < 1e-12);
+});
+
+test("thread totals roll per-model catalog comparisons into lifetime figures", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-catalog-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const log = new UsageLog(path.join(root, "usage.jsonl"));
+  const usage = usageFromMessages([
+    message("a", 1000),
+    { info: { id: "b", role: "assistant", providerID: "surplus", modelID: "glm-5.3", time: { created: 1100 },
+      tokens: { input: 1_000, output: 100, cache: { read: 0, write: 0 } }, cost: 0.5 }, parts: [] },
+  ])!;
+  for (const model of usage.models) if (model.model === "surplus/glm-5.3") model.catalogCost = 4.2;
+  await log.record({ threadId: "thread", project: "Game", kind: "game-2d", usage });
+  const total = await log.threadTotal("thread");
+  assert.equal(total.cost, 0.51);
+  assert.ok(Math.abs(total.catalogCost - 4.2) < 1e-12);
+  assert.ok(Math.abs(total.models.get("surplus/glm-5.3")!.catalogCost! - 4.2) < 1e-12);
+  assert.equal(total.models.get("test/model")!.catalogCost, undefined, "an unannotated model gains no figure");
 });
 
 test("addUsage merges repair passes without double-counting a session", () => {

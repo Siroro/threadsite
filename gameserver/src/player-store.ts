@@ -167,5 +167,11 @@ export class PlayerStore {
     });
   }
 
+  /** Drop a game's leaderboards (scores cascade with them); players and their private saves survive. */
+  resetScores(game: string): void {
+    if (!this.database && !existsSync(this.file)) return;
+    this.transaction((db) => { db.prepare("DELETE FROM boards WHERE game = ?").run(game); });
+  }
+
   close(): void { this.database?.close(); this.database = undefined; }
 }

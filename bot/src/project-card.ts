@@ -1,12 +1,13 @@
 import { ButtonBuilder, ButtonStyle, ContainerBuilder, TextDisplayBuilder, ThumbnailBuilder } from "discord.js";
 import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, KIND_COLORS, safeCardUrl, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
-import { COLLABORATION_LABELS } from "./collaboration-service.js";
+import { COLLABORATION_LABELS, WIPE_POLICY_LABELS } from "./collaboration-service.js";
+import { modelDisplayName, SURPLUS_PROVIDER_ID } from "./opencode.js";
 import type { ProjectDescription } from "./project-docs.js";
 import { projectKindLabel } from "./templates.js";
 import type { ContributionTally, ProjectRecord } from "./types.js";
 import type { UsageTotal } from "./usage.js";
-import { formatTokens, truncate } from "./util.js";
+import { formatCost, formatTokens, truncate } from "./util.js";
 
 /**
  * State rendered into the pinned project card. The card is posted when a
@@ -86,6 +87,36 @@ function contributorSection(project: ProjectRecord): string | undefined {
   ].filter(Boolean).join("\n");
 }
 
+// The cost roster stops here; a long-lived thread summarizes the rest in one line.
+const COST_MODEL_ROWS = 4;
+
+/**
+ * The project's lifetime spend: the ledgered total, then one line per model
+ * that billed anything, provider-stripped like every public model name. A
+ * model served through the surplus provider quotes its billed figure plus,
+ * when another provider's catalog lists the same model, what those tokens
+ * would have cost at its list rates. A project with nothing priced returns
+ * nothing rather than a $0 field.
+ */
+function lifetimeCostLines(usage: UsageTotal): string | undefined {
+  if (!(usage.cost > 0 || usage.catalogCost > 0)) return undefined;
+  const rows = [...usage.models.values()]
+    .filter((entry) => entry.cost > 0 || (entry.catalogCost ?? 0) > 0)
+    .sort((a, b) => b.cost - a.cost || (b.catalogCost ?? 0) - (a.catalogCost ?? 0));
+  const lines = rows.slice(0, COST_MODEL_ROWS).map((entry) => {
+    const spend = formatCost(entry.cost);
+    if (!entry.model.startsWith(`${SURPLUS_PROVIDER_ID}/`)) return `\`${modelDisplayName(entry.model)}\`: ${spend}`;
+    const catalog = entry.catalogCost && entry.catalogCost > 0 ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : "";
+    return `\`${modelDisplayName(entry.model)}\`: ${spend} on surplus${catalog}`;
+  });
+  const more = rows.length - lines.length;
+  return [
+    `**Total ${formatCost(usage.cost)}**${usage.catalogCost > 0 ? ` · ${formatCost(usage.catalogCost)} at catalog rates` : ""}`,
+    ...lines,
+    more > 0 ? `+${more} more model${more === 1 ? "" : "s"}` : undefined,
+  ].filter(Boolean).join("\n");
+}
+
 /** The pinned, self-updating front page of a project thread. */
 export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   const { project, usage } = state;
@@ -115,6 +146,9 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
     new ButtonBuilder().setCustomId(cardId("project", project.threadId)).setLabel("Project details").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(cardId("queue", project.threadId)).setLabel(`Queue${project.pendingQueue?.length ? ` · ${project.pendingQueue.length}` : ""}`).setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(cardId("collaboration", project.threadId)).setLabel("Collaboration").setStyle(ButtonStyle.Secondary),
+    ...(kind !== "site"
+      ? [new ButtonBuilder().setCustomId(cardId("wipe", project.threadId)).setLabel("Wipe state").setEmoji("🧹").setStyle(ButtonStyle.Danger)]
+      : []),
   ]);
   addCardDivider(card);
 
@@ -122,7 +156,8 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   const settings = [`**Type** · ${projectKindLabel(project.projectKind)}`];
   settings.push(`**Editing** · ${COLLABORATION_LABELS[project.collaboration?.mode ?? "open"]}`);
   if (kind !== "site") {
-    settings.push(`**Engine** · ${kind === "game-3d" ? "Three.js" : "Excalibur"}`, `**Multiplayer** · ${multiplayerLine(project)}`);
+    settings.push(`**Engine** · ${kind === "game-3d" ? "Three.js" : "Excalibur"}`, `**Multiplayer** · ${multiplayerLine(project)}`,
+      `**Reset state** · ${WIPE_POLICY_LABELS[project.collaboration?.wipePolicy ?? "owner"]}`);
   }
   addCardField(card, "Project details", settings.join("\n"));
   const contributors = contributorSection(project);
@@ -139,9 +174,9 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
     addCardField(card, "Browser QA", `Advisory · ${findings ? `${findings} finding${findings === 1 ? "" : "s"}` : "no findings"}${checked ? ` · checked ${checked}` : ""}`);
   }
 
-  // Model, effort, and which models served the thread are deliberately absent:
-  // model routing is operational detail, kept in the admin-only
-  // /site-admin models view rather than on a public pinned card.
+  // Model routing (provider-qualified ids) is operational detail, kept in the
+  // admin-only /site-admin models view; the model names that billed the thread
+  // appear with their spend in the lifetime cost field.
 
   if (usage && usage.turns > 0) {
     const cached = usage.cacheTokens > 0 ? ` (${formatTokens(usage.cacheTokens)} cached)` : "";
@@ -150,8 +185,8 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
       ? `in ${formatTokens(usage.inputTokens)}${cached} · out ${formatTokens(usage.outputTokens)}`
       : "token counts unavailable";
     addCardField(card, "Lifetime usage", `${usage.turns} turn${usage.turns === 1 ? "" : "s"}${failed} · ${tokens}`);
-    // Cost is deliberately absent, like the tracking card: token counts are
-    // public, spend data is admin-only (/site info, /site-admin usage).
+    const cost = lifetimeCostLines(usage);
+    if (cost) addCardField(card, "Lifetime cost", cost);
   }
 
   addCardDivider(card);

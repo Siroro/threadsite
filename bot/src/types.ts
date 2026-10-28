@@ -3,7 +3,15 @@ export type ProjectKind = "site" | "game-2d" | "game-3d";
 /** Multiplayer architecture chosen at /makegam: shared arena, invite-code rooms, or none. */
 export type MultiplayerMode = "arena" | "rooms" | "singleplayer";
 export type CollaborationMode = "open" | "contributors" | "approval";
-export interface CollaborationSettings { mode: CollaborationMode; userIds: string[]; revision: number }
+/** Who may clear a game's shared relay state (arena world, rooms, scores). */
+export type WipePolicy = "owner" | "anyone";
+export interface CollaborationSettings {
+  mode: CollaborationMode;
+  userIds: string[];
+  revision: number;
+  /** Owner & server admins only (default), or anyone in the thread. */
+  wipePolicy?: WipePolicy;
+}
 export interface ApprovalAttachment { name: string; mime: string; dataUrl: string }
 export interface ProjectApproval {
   id: string;

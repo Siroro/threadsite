@@ -54,6 +54,8 @@ Settings, selected people and pending approvals survive restarts. Discord attach
 
 The policy covers messages, live steers, request/answer forms, Stop, queue cancellation, rollback, mutating `/site` commands and external-push Publish/Dismiss controls. Info, project details and queue viewing stay readable to thread members. Stale forms and controls recheck current settings; queued management actions recheck them when they run. A change already accepted into the update queue or already running retains its authorization and may finish. Repository push credentials are issued privately to the owner or administrators only; previously shared Git credentials remain valid until rotated, and external pushes still require an authorized Discord publication decision.
 
+Game threads carry one more owner setting in the same panel: **who can reset the game's relay state** (the **Wipe state** card button and `/site wipe`). It defaults to the owner and server administrators; the owner can open it to anyone in the thread. The toggle is independent of the editing mode — opening it does not grant any other editing rights, and a stricter editing mode does not revoke it. Server administrators can always reset.
+
 ## Project thread commands
 
 - `/site info` shows the live URL, source repository, model, and last error.
@@ -67,6 +69,7 @@ The policy covers messages, live steers, request/answer forms, Stop, queue cance
 - `/site revert` undoes the last accepted turn: it reverts the agent conversation, resets git to the previous commit, force-pushes the repository, and republishes the previous site.
 - `/site rename name:"Fresh Name"` renames the project and refreshes both links without asking the model.
 - `/site multiplayer mode:<arena|rooms|singleplayer>` switches a game's architecture live.
+- `/site wipe` clears a game's shared state on the multiplayer relay without touching the project: the durable arena world snapshot, any open rooms (connected players are disconnected with a recoverable close code and reconnect into a fresh, empty world on their next attempt) and every leaderboard score. Private per-player save slots survive, as do the site, repository and agent session. It works for singleplayer games too, where only leaderboard scores exist, and it is not queued behind a running turn. The pinned card's **Wipe state** button does the same through a private confirmation panel; the Collaboration panel decides who may use either.
 
 ## Live progress during a turn
 
@@ -154,6 +157,8 @@ Forgejo has no per-repository HTTP tokens, so a ThreadSite push key is a dedicat
 `/site-admin failover` shows the backup models used when a turn hits a provider quota block or a persistent upstream error. `/site-admin failover models:provider/a,provider/b` sets the list (quota-blocked or repeatedly failing turns retry the same prompt once on the first entry that is not the model just attempted); `default` follows `OPENCODE_FAILOVER_MODELS`, and `none` disables failover entirely.
 
 `/site-admin token provider:anthropic token:...` replaces the persisted provider credential. `/site-admin token-clear` removes it.
+
+`/site-admin wipe scope:<Everything|Leaderboard scores only>` clears relay state for **every** game at once: either all shared arena worlds, open rooms and leaderboard scores, or just the scores. Connected players are disconnected with a recoverable close code and reconnect into fresh, empty worlds; private save slots are untouched, as are all sites, repositories and agent sessions. The reply reports how many games were affected.
 
 The command is registered with Discord's **Manage Server** default permission and is also runtime-checked. `DISCORD_ADMIN_USER_IDS` can add explicit user IDs. Detailed failure DMs go only to `DISCORD_ERROR_REPORT_USER_IDS` (or the explicit admin-ID list when the error list is left blank). `/site-admin errors` is additionally restricted to those configured private error recipients, so other server managers do not get provider diagnostics.
 

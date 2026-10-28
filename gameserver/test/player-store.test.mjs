@@ -95,3 +95,19 @@ test("reopening persists committed saves/scores; deleting one game preserves oth
   assert.equal(request("save.get", { slot: "progress" }).revision, 0);
   assert.equal(request("save.get", { slot: "progress" }, "alice", "game-two").value, "keep");
 });
+
+test("resetScores wipes boards while saves survive and other games keep their scores", async (t) => {
+  const { store, request } = await fixture(t);
+  request("save.set", { slot: "progress", value: { level: 3 }, revision: 0 });
+  request("board.submit", { board: "points", score: 50 });
+  request("board.submit", { board: "points", score: 75 }, "bob");
+  request("board.submit", { board: "points", score: 5 }, "alice", "game-two");
+  store.resetScores("game-one");
+  assert.deepEqual(request("board.list", { board: "points" }), { order: null, entries: [] });
+  assert.deepEqual(request("save.get", { slot: "progress" }).value, { level: 3 });
+  assert.deepEqual(request("board.list", { board: "points" }, "alice", "game-two").entries.map((entry) => entry.score), [5]);
+  assert.equal(request("board.submit", { board: "points", score: 10, order: "asc" }).score, 10, "a wiped board may be recreated with a fresh order");
+  assert.deepEqual(store.games().sort(), ["game-one", "game-two"], "the tenant stays known through its saves");
+  store.deleteGame("game-one");
+  assert.deepEqual(request("board.list", { board: "points" }, "alice", "game-two").entries.map((entry) => entry.score), [5]);
+});

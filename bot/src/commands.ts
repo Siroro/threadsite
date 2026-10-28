@@ -56,6 +56,9 @@ export const siteCommand = new SlashCommandBuilder()
       .setDescription("Optional note: how you want the switch handled (the agent still asks about difficulties)")
       .setMaxLength(2000)))
   .addSubcommand((sub) => sub
+    .setName("wipe")
+    .setDescription("Clear this game's relay state: the shared arena world and leaderboard scores"))
+  .addSubcommand((sub) => sub
     .setName("compact")
     .setDescription("Compact this thread's agent session context now"))
   .addSubcommand((sub) => sub
@@ -188,6 +191,17 @@ export const adminCommand = new SlashCommandBuilder()
       .setDescription("How many incidents to show (default 5)")
       .setMinValue(1)
       .setMaxValue(10)))
+  .addSubcommand((sub) => sub
+    .setName("wipe")
+    .setDescription("Clear relay state for every game: shared arena worlds and/or leaderboard scores")
+    .addStringOption((option) => option
+      .setName("scope")
+      .setDescription("What to clear across every game")
+      .setRequired(true)
+      .addChoices(
+        { name: "Everything (worlds, rooms and scores)", value: "all" },
+        { name: "Leaderboard scores only", value: "scores" },
+      )))
   .addSubcommand((sub) => sub
     .setName("reset")
     .setDescription("Stop every running agent turn and start a fresh session in every thread (sites are kept)"));

@@ -44,6 +44,9 @@ interface UsageTotal {
   outputTokens: number;
   cacheTokens: number;
   cost: number;
+  /** Catalog-rate equivalent across surplus-served models; 0 when no recorded
+   * turn carries a comparison. */
+  catalogCost: number;
   models: Map<string, ModelUsage & { turns: number }>;
 }
 
@@ -59,7 +62,7 @@ function localDateKey(date: Date): string {
 }
 
 function emptyTotal(): UsageTotal {
-  return { turns: 0, failedTurns: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, models: new Map() };
+  return { turns: 0, failedTurns: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, catalogCost: 0, models: new Map() };
 }
 
 function addToTotal(
@@ -87,6 +90,9 @@ function addToTotal(
   total.outputTokens += entry.outputTokens;
   total.cacheTokens += entry.cacheTokens;
   total.cost += entry.cost;
+  // The comparison lives per model (a turn mixes surplus and other routing),
+  // so the total rolls up from the same breakdown.
+  total.catalogCost += (entry.models ?? []).reduce((sum, model) => sum + (model.catalogCost ?? 0), 0);
   for (const model of entry.models ?? []) {
     const bucket = total.models.get(model.model)
       ?? { model: model.model, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, turns: 0 };
@@ -94,6 +100,7 @@ function addToTotal(
     bucket.outputTokens += model.outputTokens;
     bucket.cacheTokens += model.cacheTokens;
     bucket.cost += model.cost;
+    if (model.catalogCost !== undefined) bucket.catalogCost = (bucket.catalogCost ?? 0) + model.catalogCost;
     // Pre-aggregated contributions (a whole day folded into one blob) carry
     // their own turn count; raw entries count as one.
     bucket.turns += model.turns ?? (isTurn ? 1 : 0);

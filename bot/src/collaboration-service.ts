@@ -9,11 +9,12 @@ import { addCardField, addCardHeader, addCardLinks, cardEdit, cardMessage, type 
 import { contributionAccess, CollaborationError, managesProject, ownerId, requireManager, type ProjectActor } from "./collaboration.js";
 import type { CardInteraction } from "./card-interactions.js";
 import type { Store } from "./store.js";
-import type { ApprovalAttachment, CollaborationMode, CommitAuthor, ProjectApproval, ProjectRecord, QueuedRequest } from "./types.js";
+import type { ApprovalAttachment, CollaborationMode, CommitAuthor, ProjectApproval, ProjectRecord, QueuedRequest, WipePolicy } from "./types.js";
 import { safeChild, truncate } from "./util.js";
 import { UPLOAD_DIR, uploadFileName, type UploadedFile } from "./uploads.js";
 
 export const COLLABORATION_LABELS = { open: "Anyone can edit", contributors: "Selected contributors", approval: "Owner approves requests" } as const;
+export const WIPE_POLICY_LABELS = { owner: "Owner & admins", anyone: "Anyone in the thread" } as const;
 const MAX_APPROVAL_BYTES = 8 * 1024 * 1024;
 const PAGE_SIZE = 5;
 
@@ -91,15 +92,19 @@ export class CollaborationService {
     if (!project || contributionAccess(project, actor) === "denied") throw new CollaborationError("The thread owner has restricted contributions to selected people.");
   }
 
-  update(threadId: string, actor: ProjectActor, revision: number, patch: { mode?: CollaborationMode; userIds?: string[] }): void {
+  update(threadId: string, actor: ProjectActor, revision: number, patch: { mode?: CollaborationMode; userIds?: string[]; wipePolicy?: WipePolicy }): void {
     const project = this.services.store.getProject(threadId);
     if (!project) throw new CollaborationError("This project is no longer available.");
     requireManager(project, actor);
     const current = project.collaboration ?? { mode: "open", userIds: [], revision: 0 };
     const mode = patch.mode ?? current.mode;
     const userIds = [...new Set(patch.userIds ?? current.userIds)];
-    if (!Object.hasOwn(COLLABORATION_LABELS, mode) || userIds.length > 25 || userIds.some((id) => !/^\d{5,25}$/.test(id))) throw new CollaborationError("Select up to 25 Discord contributors and a supported editing mode.");
-    try { this.services.store.setCollaboration(threadId, { mode, userIds, revision: current.revision + 1 }, revision, ownerId(project, actor)); }
+    const wipePolicy = patch.wipePolicy ?? current.wipePolicy;
+    if (!Object.hasOwn(COLLABORATION_LABELS, mode) || userIds.length > 25 || userIds.some((id) => !/^\d{5,25}$/.test(id))
+      || (wipePolicy !== undefined && !WIPE_POLICY_LABELS[wipePolicy])) {
+      throw new CollaborationError("Select up to 25 Discord contributors and a supported editing mode.");
+    }
+    try { this.services.store.setCollaboration(threadId, { mode, userIds, revision: current.revision + 1, ...(wipePolicy ? { wipePolicy } : {}) }, revision, ownerId(project, actor)); }
     catch (error) { throw new CollaborationError((error as Error).message); }
     this.services.changed(threadId);
   }
@@ -130,12 +135,14 @@ export class CollaborationService {
   panel(project: ProjectRecord, actor: ProjectActor, page = 0): CardMessage {
     const manager = managesProject(project, actor);
     const settings = project.collaboration ?? { mode: "open", userIds: [], revision: 0 };
+    const isGame = Boolean(project.projectKind && project.projectKind !== "site");
     const card = new ContainerBuilder().setAccentColor(0x5865f2);
     addCardHeader(card, "COLLABORATION", project.displayName, COLLABORATION_LABELS[settings.mode]);
     addCardField(card, "Who can contribute", [
       ownerId(project, actor) ? `Owner: <@${ownerId(project, actor)}>` : "Owner not recorded; a server administrator can manage this project.",
       settings.userIds.length ? `Selected contributors: ${settings.userIds.map((id) => `<@${id}>`).join(", ")}` : "No selected contributors.",
       "The owner and server administrators can always manage the project. In approval mode, selected contributors edit directly and other requests wait for review.",
+      ...(isGame ? [`Relay state reset (arena world & scores): ${WIPE_POLICY_LABELS[settings.wipePolicy ?? "owner"]} — the owner and server administrators always.`] : []),
     ].join("\n"));
     if (manager && actor.canSend) {
       card.addActionRowComponents(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder()
@@ -144,6 +151,9 @@ export class CollaborationService {
       card.addActionRowComponents(new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(new UserSelectMenuBuilder()
         .setCustomId(cardId("collabusers", project.threadId, settings.revision)).setPlaceholder("Choose contributors")
         .setMinValues(0).setMaxValues(25).setDefaultUsers(settings.userIds)));
+      if (isGame) card.addActionRowComponents(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder()
+        .setCustomId(cardId("collabwipe", project.threadId, settings.revision)).setPlaceholder("Who can reset relay state")
+        .addOptions(Object.entries(WIPE_POLICY_LABELS).map(([value, label]) => ({ label, value, default: value === (settings.wipePolicy ?? "owner") })))));
       const pending = this.services.store.listApprovals(project.threadId);
       const last = Math.max(0, Math.ceil(pending.length / PAGE_SIZE) - 1);
       page = Math.max(0, Math.min(page, last));
@@ -162,7 +172,7 @@ export class CollaborationService {
   }
 
   async handle(interaction: CardInteraction, project: ProjectRecord, actor: ProjectActor, route: CardRoute): Promise<void> {
-    if (["collabmode", "collabusers", "approve", "reject", "reviewrequest"].includes(route.action)) requireManager(project, actor);
+    if (["collabmode", "collabusers", "collabwipe", "approve", "reject", "reviewrequest"].includes(route.action)) requireManager(project, actor);
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     if (route.action === "reviewrequest") {
       const request = this.services.store.getApproval(project.threadId, route.args[0] ?? "");
@@ -176,10 +186,13 @@ export class CollaborationService {
       await interaction.editReply({ ...cardEdit(cardMessage(card)), files });
       return;
     }
-    if (route.action === "collabmode" || route.action === "collabusers") {
+    if (route.action === "collabmode" || route.action === "collabusers" || route.action === "collabwipe") {
       const revision = Number(route.args[0]);
       if (!Number.isSafeInteger(revision) || revision < 0) throw new CollaborationError("Refresh the collaboration panel.");
       if (route.action === "collabmode" && interaction.isStringSelectMenu()) this.update(project.threadId, actor, revision, { mode: interaction.values[0] as CollaborationMode });
+      else if (route.action === "collabwipe" && interaction.isStringSelectMenu()) {
+        this.update(project.threadId, actor, revision, { wipePolicy: interaction.values[0] as WipePolicy });
+      }
       else if (route.action === "collabusers" && interaction.isUserSelectMenu()) {
         if (interaction.users.some((user) => user.bot)) throw new CollaborationError("Choose people as contributors, not bots.");
         this.update(project.threadId, actor, revision, { userIds: interaction.values });

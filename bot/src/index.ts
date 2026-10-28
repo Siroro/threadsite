@@ -30,7 +30,7 @@ import { renderQueuePanel, type PanelSection } from "./card-panels.js";
 import { readProjectCardDocument } from "./project-docs.js";
 import { AdminReporter } from "./admin-reporter.js";
 import { commandJson } from "./commands.js";
-import { authorizeCard, CollaborationError, contributionAccess, interactionActor, ownerId, requireContributor, requireManager, type ProjectActor } from "./collaboration.js";
+import { authorizeCard, CollaborationError, contributionAccess, interactionActor, ownerId, requireContributor, requireManager, requireWipeAccess, type ProjectActor } from "./collaboration.js";
 import { approvalCard, CollaborationService, installApprovedUploads } from "./collaboration-service.js";
 import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
@@ -41,6 +41,7 @@ import { renderProjectCard, type ProjectCardMessage, type ProjectCardState } fro
 import { DiscordProgress, type ProgressCallback } from "./progress.js";
 import { ProjectService, TurnStoppedError, type MutationResult, type StopTurnOutcome } from "./project.js";
 import { recoverPublishRoot } from "./publish.js";
+import { resetAllRelayGames, resetRelayGame } from "./relay-cleanup.js";
 import { Store, pendingTurnMatches } from "./store.js";
 import { multiplayerModeLabel, projectKindLabel, restartInstruction } from "./templates.js";
 import type { CommitAuthor, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
@@ -199,6 +200,12 @@ const cardInteractions = new CardInteractions({
   cancel: cancelQueueRequest,
   submit: submitCardRequest,
   stop: async (threadId, statusMessageId) => stopOutcomeText(await projects.stopTurn(threadId, statusMessageId)),
+  wipe: async (threadId, userId) => {
+    const project = store.getProject(threadId);
+    if (!project || project.pendingDeletion) throw new CardUserError("This project is no longer available.");
+    if (!project.projectKind || project.projectKind === "site") throw new CardUserError("Only games keep state on the multiplayer relay.");
+    return wipeRelayState(project, userId);
+  },
   busy: (threadId) => projects.agentBusy(threadId),
   rollback: (threadId, expectedVersion, actor) => projects.enqueue(threadId, async () => {
     requireCurrentContributor(threadId, actor);
@@ -1382,12 +1389,13 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         "**/site republish**: rebuild and republish without the model\n" +
         "**/site compact**: summarize the session context now\n" +
         "**/site multiplayer**: switch a game between arena, rooms, and singleplayer (the agent asks how, then rewrites the netcode; you get pinged when it asks)\n" +
+        "**/site wipe**: clear a game's relay state: shared arena world, open rooms and leaderboard scores (private saves are kept)\n" +
         "**/site stop**: interrupt the running turn without dropping its session\n" +
         "**/site queue**: show queued messages and cancel individual entries\n" +
         "**/site revert**: undo the last accepted turn\n" +
         "**/site reset**: stop the running turn and drop the agent session (site kept)\n" +
         "**/site pushkey**: issue repo-scoped git push credentials\n" +
-        "**/site-admin** (admin only, Manage Server): model, effort, usage, errors, reset\n\n" +
+        "**/site-admin** (admin only, Manage Server): model, effort, usage, errors, wipe, reset\n\n" +
         "Deleting the Discord thread deletes the project, workspace, repository, and published site.",
       flags: MessageFlags.Ephemeral,
     });
@@ -1402,7 +1410,9 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     await interaction.reply({ ...collaboration.panel(project, actor), flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
     return;
   }
-  if (!["info", "queue"].includes(sub)) requireContributor(project, actor);
+  // Wipe access is its own collaboration axis; the generic contributor gate
+  // must not pre-empt the owner's toggle.
+  if (!["info", "queue", "wipe"].includes(sub)) requireContributor(project, actor);
   if (sub === "pushkey") requireManager(project, actor);
 
   if (sub === "info") {
@@ -1542,6 +1552,21 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     } finally {
       void refreshProjectCard(project.threadId);
     }
+    return;
+  }
+
+  if (sub === "wipe") {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    if (!project.projectKind || project.projectKind === "site") {
+      throw new Error("Only games keep state on the multiplayer relay. Create one with /makegam.");
+    }
+    // Wipe access is its own axis: the owner's Collaboration toggle decides
+    // between owner/admins-only (the default) and anyone in the thread, so the
+    // generic contributor gate must not pre-empt it.
+    requireWipeAccess(project, actor);
+    // Deliberately not queued: it never touches the workspace, and clearing bad
+    // relay state should not wait behind the very turn it exists to fix.
+    await interaction.editReply(await wipeRelayState(project, interaction.user.id));
     return;
   }
 
@@ -1778,6 +1803,19 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
       `Fresh sessions were started for ${summary.stopped}/${summary.total} project(s).` +
       `${summary.failed ? ` ${summary.failed} project(s) could not be re-sessioned: see the bot log.` : ""}\n`
       ,
+    );
+    return;
+  }
+
+  if (sub === "wipe") {
+    const scoresOnly = interaction.options.getString("scope", true) === "scores";
+    const games = await resetAllRelayGames(scoresOnly);
+    log("info", "admin.relay_wiped", { userId: interaction.user.id, games, scoresOnly });
+    await interaction.editReply(
+      `🧹 Relay-wide reset complete for ${games} game${games === 1 ? "" : "s"}: ` +
+      (scoresOnly
+        ? "every leaderboard score was cleared. Shared arena worlds and private save slots are untouched."
+        : "every shared arena world, open room and leaderboard score was cleared. Connected players reconnect into fresh, empty worlds; private save slots are untouched."),
     );
     return;
   }
@@ -2023,6 +2061,9 @@ async function projectDetailSections(project: ProjectRecord): Promise<PanelSecti
       usage.inputTokens || usage.outputTokens
         ? `Input **${formatTokens(usage.inputTokens)}** · Output **${formatTokens(usage.outputTokens)}** · Cached **${formatTokens(usage.cacheTokens)}**`
         : "Token counts unavailable",
+      usage.cost > 0 || usage.catalogCost > 0
+        ? `Spend **${formatCost(usage.cost)}**${usage.catalogCost > 0 ? ` · **${formatCost(usage.catalogCost)}** at catalog rates` : ""}`
+        : "",
       usage.lastTs ? `Last recorded ${usage.lastTs}` : "",
     ].filter(Boolean).join("\n") : "Provider usage counts unavailable." },
     { key: "qa", label: "Browser findings", text: project.browserQaFindings ? `Advisory · checked ${stamp(project.browserQaFindings.checkedAt) ?? project.browserQaFindings.checkedAt}\n\n${project.browserQaFindings.findings.map((finding) => `- ${finding}`).join("\n") || "No findings"}` : "No browser findings have been recorded." },
@@ -2412,6 +2453,17 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
     );
   }
   log("info", "discord.external_push_button_used", { action: publish ? "publish" : "dismiss", threadId: interaction.channel.id, userId: interaction.user.id });
+}
+
+/** Clear one game's shared relay state; shared by `/site wipe` and the pinned
+ * card's Wipe state button so both report the same outcome. */
+async function wipeRelayState(project: ProjectRecord, userId: string): Promise<string> {
+  const gameId = project.multiplayerGameId ?? project.siteSlug;
+  await resetRelayGame(gameId);
+  log("info", "discord.relay_wiped", { threadId: project.threadId, gameId, userId });
+  return (project.multiplayerMode ?? "arena") === "singleplayer"
+    ? "🧹 Cleared this game's leaderboard scores. It runs singleplayer, so there is no shared arena world. Private save slots are kept."
+    : "🧹 Cleared this game's relay state: the shared arena world, any open rooms, and every leaderboard score. Connected players reconnect into a fresh, empty world; private save slots are kept.";
 }
 
 /** One wording for the Stop button and `/site stop`; the slash command exists

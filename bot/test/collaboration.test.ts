@@ -10,7 +10,7 @@ import type { ProjectApproval, ProjectRecord } from "../src/types.js";
 
 const root = testRootSetup("collaboration");
 const { Store } = await import("../src/store.js");
-const { contributionAccess, authorizeCard, managesProject, requireContributor } = await import("../src/collaboration.js");
+const { contributionAccess, authorizeCard, canWipeRelayState, managesProject, requireContributor } = await import("../src/collaboration.js");
 const { CollaborationService, installApprovedUploads, captureApprovalAttachments } = await import("../src/collaboration-service.js");
 const { CardInteractions } = await import("../src/card-interactions.js");
 const { cardId } = await import("../src/card-actions.js");
@@ -181,6 +181,33 @@ test("maintenance refuses to forget requests awaiting approval until the owner d
   assert.equal(store.getProject(project.threadId), undefined);
 });
 
+test("the relay-state reset policy defaults to owner-only, opens to the whole thread on the owner's toggle, and survives later mode changes", async () => {
+  const { service, store, project } = await fixture();
+  const current = () => store.getProject(project.threadId)!;
+  assert.equal(canWipeRelayState(current(), guest), false, "no settings means owner-only");
+  assert.equal(canWipeRelayState(current(), owner), true);
+  assert.equal(canWipeRelayState(current(), { ...guest, admin: true }), true, "server administrators always pass");
+  assert.equal(canWipeRelayState({ ...current(), pendingDeletion: { requestedAt: "now", reason: "deleted" } }, owner), false);
+  assert.throws(() => service.update(project.threadId, guest, 0, { wipePolicy: "anyone" }));
+  assert.throws(() => service.update(project.threadId, owner, 0, { wipePolicy: "everyone" as never }));
+  service.update(project.threadId, owner, 0, { wipePolicy: "anyone" });
+  assert.equal(canWipeRelayState(current(), guest), true);
+  // The wipe policy is its own axis: a stricter editing mode must not revoke it,
+  // and a mode change must not silently reset it either.
+  service.update(project.threadId, owner, 1, { mode: "contributors", userIds: [] });
+  const settings = current().collaboration!;
+  assert.equal(settings.wipePolicy, "anyone");
+  assert.equal(settings.revision, 2);
+  assert.throws(() => authorizeCard(current(), guest, "change"));
+  assert.doesNotThrow(() => authorizeCard(current(), guest, "wipe"));
+  service.update(project.threadId, owner, 2, { wipePolicy: "owner" });
+  assert.throws(() => authorizeCard(current(), guest, "wipe"));
+  // The toggle is offered on game panels only; sites hold no relay state.
+  const game = { ...current(), projectKind: "game-2d" as const };
+  assert.ok(JSON.stringify(service.panel(game, owner)).includes(cardId("collabwipe", project.threadId, 3)));
+  assert.ok(!JSON.stringify(service.panel(current(), owner)).includes("collabwipe"));
+});
+
 test("approval rejection, request bounds and project deletion preserve other projects", async () => {
   const { store, project, service, calls } = await fixture();
   const other = testRecord("777777", path.join(root, "other"));
@@ -205,7 +232,7 @@ test("card routing blocks stale forms after permissions change and rechecks cont
   let submitted = 0, stopped = 0;
   const router = new CardInteractions({ store, collaboration: service, questions: {} as never,
     projectSections: () => [], queue: () => ({ requests: [], preparing: 0 }), cancel: async () => "", submit: async () => { submitted++; return "saved"; },
-    stop: async () => { stopped++; return "stopped"; }, rollback: async () => {}, busy: async () => false, error: () => {},
+    stop: async () => { stopped++; return "stopped"; }, wipe: async () => "", rollback: async () => {}, busy: async () => false, error: () => {},
   });
   const interaction = (customId: string, overrides: any = {}): any => ({ customId, channelId: project.threadId, guildId: project.guildId,
     user: { id: guest.userId }, memberPermissions: new PermissionsBitField(PermissionFlagsBits.SendMessagesInThreads),

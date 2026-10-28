@@ -201,9 +201,9 @@ test("turn details show every viewer the models it used, but spend only to site 
     durationMs: 90_000,
     usage: {
       inputTokens: 1_200_000, outputTokens: 45_000, cacheTokens: 980_000, contextTokens: 1_100_000,
-      contextLimit: 2_000_000, compactions: 0, steps: 18, cost: 3.42,
+      contextLimit: 2_000_000, compactions: 0, steps: 18, cost: 3.42, catalogCost: 16.4,
       models: [
-        { model: "surplus/deepseek-4.1", inputTokens: 1_000_000, outputTokens: 40_000, cacheTokens: 900_000, cost: 2.1 },
+        { model: "surplus/deepseek-4.1", inputTokens: 1_000_000, outputTokens: 40_000, cacheTokens: 900_000, cost: 2.1, catalogCost: 16.4 },
         { model: "opencode/glm-5.3", inputTokens: 200_000, outputTokens: 5_000, cacheTokens: 80_000, cost: 1.32 },
       ],
       sessions: [
@@ -231,8 +231,9 @@ test("turn details show every viewer the models it used, but spend only to site 
   assert.doesNotMatch(member.text, /\$/, "a non-admin viewer never sees spend figures");
 
   const admin = turnPanelSections({ result }, undefined, "turn", true).find((section) => section.key === "usage")!;
-  assert.match(admin.text, /Turn spend \*\*\$3\.42\*\*/);
-  assert.match(admin.text, /`surplus\/deepseek-4\.1`: in 1M · out 40k · \$2\.10/, "admins see the provider routing and per-model spend");
+  assert.match(admin.text, /Turn spend \*\*\$3\.42\*\* · \*\*\$16\.40\*\* at catalog rates/);
+  assert.match(admin.text, /`surplus\/deepseek-4\.1`: in 1M · out 40k · \$2\.10 · \$16\.40 at catalog rates/,
+    "admins see the provider routing, per-model spend and its catalog equivalent");
   assert.match(admin.text, /Root turn \(surplus\/deepseek-4\.1, surplus\/glm-5\.3\): in 900k · out 38k · 14 steps · \$1\.90/, "the split carries per-session models and spend for admins");
   assert.match(admin.text, /🤖 browser-qa \(opencode\/glm-5\.3-flash\): in 100k · out 2k · 1 step · \$0\.52/);
 

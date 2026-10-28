@@ -524,36 +524,98 @@ function statsPayload(): Record<string, unknown> {
   return { ok: true, protocol: PROTOCOL_VERSION, uptimeSec: Math.floor(process.uptime()), games: games.size, rooms, clients, durableWorlds: durableWorlds.size };
 }
 
+/** Close every peer of a game. Detach before closing: close/last-leave must not persist the old world. */
+function closeGamePeers(gameId: string, code: number, reason: string): void {
+  for (const room of games.get(gameId)?.values() ?? []) {
+    for (const peer of room.peers.values()) {
+      peer.room = null;
+      peer.game = null;
+      peer.ws.close(code, reason);
+    }
+    room.peers.clear();
+  }
+}
+
+/** Remove a game's durable world file and any in-flight tmp writes for it. */
+async function removeWorldFiles(gameId: string): Promise<void> {
+  await fs.rm(stateFile(gameId), { force: true });
+  const files = await fs.readdir(STATE_DIR).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
+  for (const name of files) {
+    if (new RegExp(`^${gameId}\\.json\\.\\d+\\.[a-f0-9]{8}\\.tmp$`).test(name)) await fs.rm(path.join(STATE_DIR, name), { force: true });
+  }
+}
+
 async function deleteGame(gameId: string): Promise<void> {
   deletedGames.add(gameId);
   for (const key of leaderboardLimits.keys()) if (key.startsWith(`${gameId}:`)) leaderboardLimits.delete(key);
   await fs.mkdir(STATE_DIR, { recursive: true });
   await fs.writeFile(path.join(STATE_DIR, `${gameId}.deleted`), "");
-  for (const room of games.get(gameId)?.values() ?? []) {
-    for (const peer of room.peers.values()) {
-      // Detach before closing: close/last-leave must not persist the old world.
-      peer.room = null;
-      peer.game = null;
-      peer.ws.close(4004, "project deleted");
-    }
-    room.peers.clear();
-  }
+  closeGamePeers(gameId, 4004, "project deleted");
   games.delete(gameId);
   playerStore.deleteGame(gameId);
   await durableTails.get(gameId);
-  await fs.rm(stateFile(gameId), { force: true });
-  for (const name of await fs.readdir(STATE_DIR)) {
-    if (new RegExp(`^${gameId}\\.json\\.\\d+\\.[a-f0-9]{8}\\.tmp$`).test(name)) await fs.rm(path.join(STATE_DIR, name), { force: true });
-  }
+  await removeWorldFiles(gameId);
   durableWorlds.delete(gameId);
   durableTails.delete(gameId);
+}
+
+/**
+ * Clear a game's shared state without deleting the project: live rooms are
+ * closed with a recoverable code (clients reconnect into fresh, empty ones),
+ * the durable ARENA world is forgotten, and leaderboard scores are dropped.
+ * Private save slots are player data, not game state, and survive.
+ */
+async function resetGame(gameId: string): Promise<void> {
+  for (const key of leaderboardLimits.keys()) if (key.startsWith(`${gameId}:`)) leaderboardLimits.delete(key);
+  closeGamePeers(gameId, 4005, "state reset");
+  games.delete(gameId);
+  playerStore.resetScores(gameId);
+  // No tombstone is written: the game keeps accepting joins. The tail is
+  // awaited before the file removal so an in-flight snapshot write cannot
+  // resurrect the old world on disk (or in durableWorlds) after the reset.
+  await durableTails.get(gameId);
+  durableWorlds.delete(gameId);
+  await removeWorldFiles(gameId);
+  durableTails.delete(gameId);
+}
+
+/** Every game the relay still knows about, deleted projects excluded. */
+async function knownGames(): Promise<Set<string>> {
+  const ids = new Set([...durableWorlds.keys(), ...games.keys(), ...playerStore.games()]);
+  const files = await fs.readdir(STATE_DIR).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
+  for (const file of files) {
+    const game = /^([a-z0-9][a-z0-9-]{2,63})\.json(?:\.\d+\.[a-f0-9]{8}\.tmp)?$/.exec(file)?.[1];
+    if (game) ids.add(game);
+  }
+  for (const id of ids) if (deletedGames.has(id)) ids.delete(id);
+  return ids;
+}
+
+/** Reset every known game at once; returns how many games were affected. */
+async function resetAllGames(scoresOnly: boolean): Promise<number> {
+  const ids = await knownGames();
+  for (const id of ids) {
+    if (!scoresOnly) { await resetGame(id); continue; }
+    for (const key of leaderboardLimits.keys()) if (key.startsWith(`${id}:`)) leaderboardLimits.delete(key);
+    playerStore.resetScores(id);
+  }
+  return ids.size;
 }
 
 const server = http.createServer((req, res) => {
   let pathname = "/";
   try { pathname = new URL(req.url ?? "/", "http://internal").pathname; } catch { /* invalid -> 404 */ }
   const deletion = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})$/.exec(pathname);
-  if ((req.method === "DELETE" && deletion) || (req.method === "GET" && pathname === "/admin/games")) {
+  const reset = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})\/reset$/.exec(pathname);
+  const adminDelete = Boolean(deletion && req.method === "DELETE");
+  const adminReset = Boolean(reset && req.method === "POST");
+  let wipeAll = false;
+  let wipeScoresOnly = false;
+  if (req.method === "POST" && pathname === "/admin/reset") {
+    wipeAll = true;
+    try { wipeScoresOnly = new URL(req.url ?? "/", "http://internal").searchParams.get("scope") === "scores"; } catch { /* invalid query: reset everything */ }
+  }
+  if (adminDelete || adminReset || wipeAll || (req.method === "GET" && pathname === "/admin/games")) {
     void (async () => {
       const token = (await fs.readFile(ADMIN_TOKEN_FILE, "utf8")).trim();
       const actual = Buffer.from(String(req.headers.authorization ?? ""));
@@ -562,20 +624,21 @@ const server = http.createServer((req, res) => {
         res.writeHead(403); res.end(); return;
       }
       if (req.method === "GET") {
-        const files = await fs.readdir(STATE_DIR).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
-        const gameIds = new Set([...durableWorlds.keys(), ...games.keys(), ...playerStore.games()]);
-        for (const file of files) {
-          const game = /^([a-z0-9][a-z0-9-]{2,63})\.json(?:\.\d+\.[a-f0-9]{8}\.tmp)?$/.exec(file)?.[1];
-          if (game) gameIds.add(game);
-        }
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-        res.end(JSON.stringify([...gameIds].filter((game) => !deletedGames.has(game)).sort()));
+        res.end(JSON.stringify([...await knownGames()].sort()));
         return;
       }
-      await deleteGame(deletion![1]!);
+      if (wipeAll) {
+        const games = await resetAllGames(wipeScoresOnly);
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ ok: true, games }));
+        return;
+      }
+      if (adminDelete) await deleteGame(deletion![1]!);
+      else await resetGame(reset![1]!);
       res.writeHead(204); res.end();
     })().catch((error) => {
-      console.warn(`[threadsite-gameserver] project_cleanup failed: ${String((error as Error).message)}`);
+      console.warn(`[threadsite-gameserver] admin_api failed: ${String((error as Error).message)}`);
       if (!res.headersSent) res.writeHead(503);
       res.end();
     });

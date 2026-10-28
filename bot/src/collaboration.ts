@@ -25,6 +25,20 @@ export function requireManager(project: ProjectRecord, actor: ProjectActor): voi
   if (!actor.canSend || !managesProject(project, actor) || project.pendingDeletion) throw new CollaborationError("Only the thread owner or a server administrator can manage collaboration and approve requests.");
 }
 
+/**
+ * Who may clear a game's shared relay state. Server administrators and the
+ * thread owner always can; otherwise the owner's collaboration toggle decides
+ * between them-only (the default) and anyone in the thread.
+ */
+export function canWipeRelayState(project: ProjectRecord, actor: ProjectActor): boolean {
+  if (project.pendingDeletion || !actor.canSend) return false;
+  if (managesProject(project, actor)) return true;
+  return project.collaboration?.wipePolicy === "anyone";
+}
+export function requireWipeAccess(project: ProjectRecord, actor: ProjectActor): void {
+  if (!canWipeRelayState(project, actor)) throw new CollaborationError("Only the thread owner or a server administrator can reset this game's relay state. The owner can open this up in Collaboration.");
+}
+
 export function interactionActor(interaction: BaseInteraction, extraAdmin = false): ProjectActor {
   const channel = interaction.channel;
   const threadOwner = channel?.isThread() && channel.ownerId !== interaction.client?.user?.id ? channel.ownerId : undefined;
@@ -35,12 +49,13 @@ export function interactionActor(interaction: BaseInteraction, extraAdmin = fals
   };
 }
 
-const READ_ACTIONS: readonly CardAction[] = ["details", "tab", "page", "project", "queue", "doc", "review", "retry", "collaboration"];
+const READ_ACTIONS: readonly CardAction[] = ["details", "tab", "page", "project", "queue", "doc", "review", "retry", "collaboration", "dismiss"];
 const REQUEST_ACTIONS: readonly CardAction[] = ["change", "steer", "request"];
 const QUESTION_ACTIONS: readonly CardAction[] = ["answer", "select", "questions", "form", "other", "custom", "skip", "send"];
 export function authorizeCard(project: ProjectRecord, actor: ProjectActor, action: CardAction): void {
   if (READ_ACTIONS.includes(action)) return;
-  if (["collabmode", "collabusers", "approve", "reject", "reviewrequest"].includes(action)) { requireManager(project, actor); return; }
+  if (action === "wipe") { requireWipeAccess(project, actor); return; }
+  if (["collabmode", "collabusers", "collabwipe", "approve", "reject", "reviewrequest"].includes(action)) { requireManager(project, actor); return; }
   if (REQUEST_ACTIONS.includes(action) && contributionAccess(project, actor) === "approval") return;
   // An approved request's author can answer that turn's questions without
   // receiving permission to steer or control unrelated work.
