@@ -984,7 +984,7 @@ export class OpenCodeV2Harness {
         const model = watch.models.get(step.assistantMessageID);
         watch.steps.set(step.assistantMessageID, { info: { id: step.assistantMessageID, sessionID: step.sessionID,
           role: "assistant", time: { created: watch.started.get(step.assistantMessageID) ?? event.created }, providerID: model?.providerID, modelID: model?.id,
-          tokens: step.tokens, cost: step.cost } });
+          tokens: step.tokens, cost: step.cost, native: step.native } });
         const timed = stepTiming(watch.started.get(step.assistantMessageID), watch.streamed.get(step.assistantMessageID), step.tokens);
         if (timed) watch.timings.set(step.assistantMessageID, timed);
         else watch.timings.delete(step.assistantMessageID);

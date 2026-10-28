@@ -8,7 +8,7 @@ import type { SessionMessage, TurnUsage } from "../src/opencode.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { UsageLog } = await import("../src/usage.js");
-const { annotateCatalogCosts, usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage } = await import("../src/opencode.js");
+const { annotateCatalogCosts, usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage, reportedCost } = await import("../src/opencode.js");
 
 function message(id: string, created: number, input = 100, output = 20): SessionMessage {
   return { info: { id, role: "assistant", providerID: "test", modelID: "model", time: { created },
@@ -99,6 +99,68 @@ test("the session split attributes root and subagent figures that sum to the tur
   assert.deepEqual(split[1].models?.map((entry) => entry.model), ["surplus/glm-5.3"]);
   // An unobserved child still gets a bucket, labeled as a generic subagent.
   assert.equal(sessionUsageFromMessages([step("x", "ses_ghost", 1500, 10, 1)], "ses_root", () => undefined)[0].agent, "subagent");
+});
+
+test("a gateway's own charge replaces the catalog estimate for the same tokens", () => {
+  // Surplus reports what it actually charged in usage.buyer_cost_micro
+  // (micro-dollars, sometimes a string); OpenCode leaves it unmapped, so the
+  // catalog estimate stands unless the native payload is read.
+  const step = (id: string, cost: number, native?: Record<string, unknown>): SessionMessage => ({
+    info: { id, role: "assistant", providerID: "surplus", modelID: "qwen3.8-max-0902", time: { created: 1000 },
+      tokens: { input: 2_000_000, output: 200_000, cache: { read: 1_800_000, write: 0 } }, cost, native }, parts: [],
+  });
+  const charged = usageFromMessages([step("a", 12.84, { buyer_cost_micro: 1_500_000 })])!;
+  assert.equal(charged.cost, 1.5, "the reported charge, not the $12.84 catalog estimate");
+  assert.equal(charged.models[0].reported, true);
+  assert.equal(charged.models[0].cost, 1.5);
+  assert.equal(charged.models[0].inputTokens, 3_800_000, "tokens still come from the provider's counts, cache included");
+  assert.equal(charged.models[0].cacheTokens, 1_800_000);
+
+  assert.equal(usageFromMessages([step("b", 12.84, { buyer_cost_micro: "1500000" })])!.cost, 1.5,
+    "a micro-dollar string decodes too");
+  assert.equal(usageFromMessages([step("c", 12.84, { buyer_cost_micro: 0 })])!.cost, 0,
+    "a reported zero is authoritative, not a reason to fall back");
+  assert.equal(usageFromMessages([step("d", 12.84)])!.cost, 12.84,
+    "without a reported charge the catalog estimate stands");
+  assert.equal(usageFromMessages([step("e", 12.84, { buyer_cost_micro: "n/a" })])!.cost, 12.84,
+    "a malformed charge does not zero the figure");
+  assert.equal(usageFromMessages([step("f", 12.84)])!.models[0].reported, undefined);
+  assert.equal(reportedCost(undefined), undefined);
+  assert.equal(reportedCost({ total_tokens: 5 }), undefined);
+});
+
+test("reconcile never lets a larger catalog estimate override a reported charge", () => {
+  const step = (id: string, tokens: number, cost: number, native?: Record<string, unknown>): SessionMessage => ({
+    info: { id, role: "assistant", providerID: "surplus", modelID: "qwen3.8-max-0902", time: { created: 1000 },
+      tokens: { input: tokens, output: 0, cache: { read: 0, write: 0 } }, cost, native }, parts: [],
+  });
+  // The live stream kept the provider's charge; the saved history only has
+  // OpenCode's estimate — and that estimate is larger.
+  const observed = usageFromMessages([step("s1", 1_000, 1.5, { buyer_cost_micro: 1_500_000 })])!;
+  const saved = usageFromMessages([step("h1", 1_500, 9.5)])!;
+  const reconciled = reconcileUsage(observed, saved)!;
+  assert.equal(reconciled.inputTokens, 1_500, "the fuller token counts still win");
+  assert.equal(reconciled.models[0].cost, 1.5, "the reported charge beats the bigger estimate");
+  assert.equal(reconciled.cost, 1.5, "and the total agrees with the model line");
+
+  // Both sides estimates: the larger figure still wins, as before.
+  const estA = usageFromMessages([step("s2", 1_000, 1.5)])!;
+  const estB = usageFromMessages([step("h2", 1_500, 2.5)])!;
+  assert.equal(reconcileUsage(estA, estB)!.cost, 2.5);
+});
+
+test("a turn total always equals the sum of its model lines", () => {
+  // The pinned card shows the total and the per-model lines together; a total
+  // that disagrees with them reads as a wrong price.
+  const mixed = usageFromMessages([
+    { info: { id: "a", role: "assistant", providerID: "surplus", modelID: "glm-5.3", time: { created: 1000 },
+      tokens: { input: 1_000, output: 100, cache: { read: 0, write: 0 } }, cost: 9.99, native: { buyer_cost_micro: 400_000 } }, parts: [] },
+    { info: { id: "b", role: "assistant", providerID: "opencode", modelID: "qwen-free", time: { created: 1100 },
+      tokens: { input: 2_000, output: 50, cache: { read: 0, write: 0 } }, cost: 0.5 }, parts: [] },
+  ])!;
+  const sum = mixed.models.reduce((total, entry) => total + entry.cost, 0);
+  assert.ok(Math.abs(mixed.cost - sum) < 1e-12);
+  assert.equal(mixed.cost, 0.9, "one reported charge plus one estimate");
 });
 
 test("catalog rates re-price surplus-served models at another provider's list prices", () => {

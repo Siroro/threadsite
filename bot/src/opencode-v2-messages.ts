@@ -11,7 +11,7 @@ export function applicationMessage(message: SessionMessageInfo, sessionID: strin
     Object.assign(info, { role: "assistant", agent: message.agent,
       providerID: message.model.providerID, modelID: message.model.id, variant: message.model.variant,
       model: { providerID: message.model.providerID, modelID: message.model.id, variant: message.model.variant },
-      tokens: message.tokens, cost: message.cost, error: message.error,
+      tokens: message.tokens, cost: message.cost, native: message.native, error: message.error,
       // Only an execution-level idle record proves that a v2 turn completed.
       finish: message.finish ? "tool-calls" : undefined,
     });

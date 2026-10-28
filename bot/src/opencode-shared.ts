@@ -16,6 +16,8 @@ export interface SessionMessage {
     error?: unknown;
     tokens?: Record<string, any>;
     cost?: number;
+    /** The provider's own usage object as sent, when OpenCode kept it. */
+    native?: Record<string, unknown>;
     time?: { created?: number; completed?: number };
   };
   parts?: Array<Record<string, any>>;
@@ -31,8 +33,12 @@ export interface ModelUsage {
   outputTokens: number;
   /** Portion of inputTokens served from the provider's prompt cache. */
   cacheTokens: number;
-  /** Provider-reported USD cost, when pricing is known. */
+  /** USD cost: the provider's own charge when it reports one, otherwise the
+   * catalog-rate estimate OpenCode computes from the same token counts. */
   cost: number;
+  /** Set when `cost` is the provider's reported charge rather than a rate
+   * estimate, so reconciliation never lets a larger estimate win. */
+  reported?: true;
   /** What these tokens would cost at another provider's catalog list rates;
    * carried only by surplus-served models, and undefined when no other
    * provider lists the same model id. */
@@ -168,23 +174,29 @@ export function reconcileUsage(observed: TurnUsage | undefined, saved: TurnUsage
     compactions: Math.max(observed.compactions ?? 0, saved.compactions ?? 0),
     ...(observed.generationMs ? { generationMs: observed.generationMs, timedOutputTokens: observed.timedOutputTokens,
       outputTokensPerSecond: observed.outputTokensPerSecond } : {}) };
-  // The two sides price the same steps independently: the stream can report a
-  // provider-quoted cost the saved messages lack (or vice versa), so a $0
-  // snapshot must not erase the other side's spend. Take the fuller figure
-  // per model and in total; tokens stay with the billing snapshot. The
-  // catalog-rate comparison follows the same rule: it is derived from the
-  // billing snapshot's tokens when that side has it, and adopted from the
-  // peer otherwise.
+  // The two sides price the same steps independently. A provider-reported
+  // charge is the truth and always wins, even when the other side's estimate is
+  // larger — the catalog cannot see market routing, so its figure drifts high.
+  // Between two estimates the larger figure is kept, so a $0 snapshot cannot
+  // erase the other side's spend. Tokens stay with the billing snapshot.
   const peer = billing === saved ? observed : saved;
-  if ((peer.cost ?? 0) > (billing.cost ?? 0)) result.cost = peer.cost;
   result.models = billing.models.map((entry) => {
     const priced = peer.models.find((candidate) => candidate.model === entry.model);
+    const cost = !priced ? entry.cost
+      : entry.reported ? entry.cost
+      : priced.reported ? priced.cost
+      : Math.max(entry.cost, priced.cost);
     return {
       ...entry,
-      cost: priced && priced.cost > entry.cost ? priced.cost : entry.cost,
+      cost,
+      ...(entry.reported || priced?.reported ? { reported: true as const } : {}),
       ...(entry.catalogCost === undefined && priced?.catalogCost !== undefined ? { catalogCost: priced.catalogCost } : {}),
     };
   });
+  // The turn total is exactly its models' spend: a total that disagrees with
+  // the per-model lines reads as a wrong price.
+  if (result.models.length) result.cost = result.models.reduce((sum, entry) => sum + entry.cost, 0);
+  else if ((peer.cost ?? 0) > (billing.cost ?? 0)) result.cost = peer.cost;
   const catalogCost = result.models.reduce((sum, entry) => sum + (entry.catalogCost ?? 0), 0);
   if (catalogCost > 0) result.catalogCost = catalogCost;
   else delete result.catalogCost;
@@ -197,6 +209,21 @@ export function reconcileUsage(observed: TurnUsage | undefined, saved: TurnUsage
  * carry a catalog-rate comparison — what the same tokens would cost elsewhere.
  */
 export const SURPLUS_PROVIDER_ID = "surplus";
+
+/**
+ * The amount a gateway says it actually charged, from the provider's own usage
+ * object. Surplus reports it as `buyer_cost_micro` (1 USD = 1,000,000
+ * micro-dollars, occasionally a string); OpenCode only maps an OpenRouter-style
+ * `cost`, so without this the figure degrades to a catalog-rate estimate —
+ * which drifts from what was billed because market routing picks a cheaper
+ * seller per request. Absent or malformed values read as "not reported".
+ */
+export function reportedCost(native: unknown): number | undefined {
+  if (!native || typeof native !== "object") return undefined;
+  const raw = (native as Record<string, unknown>).buyer_cost_micro;
+  const micro = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
+  return Number.isFinite(micro) && micro >= 0 ? micro / 1_000_000 : undefined;
+}
 
 /** "surplus/deepseek-4.1" -> "deepseek-4.1": the model identity without its provider. */
 export function modelDisplayName(model: string): string {
@@ -353,12 +380,17 @@ export function addUsage(a: TurnUsage | undefined, b: TurnUsage | undefined): Tu
 export function mergeModelUsage(entries: ModelUsage[]): ModelUsage[] {
   const merged = new Map<string, ModelUsage>();
   for (const entry of entries) {
-    const current = merged.get(entry.model)
+    const existing = merged.get(entry.model);
+    const current = existing
       ?? { model: entry.model, inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0 };
     current.inputTokens += entry.inputTokens;
     current.outputTokens += entry.outputTokens;
     current.cacheTokens += entry.cacheTokens;
     current.cost += entry.cost;
+    // Only an all-reported bucket is fully provider-billed: one estimated step
+    // in the mix keeps the figure a blend, not a charge.
+    if (existing) { if (!entry.reported) current.reported = undefined; }
+    else if (entry.reported) current.reported = true;
     if (entry.catalogCost !== undefined) current.catalogCost = (current.catalogCost ?? 0) + entry.catalogCost;
     merged.set(entry.model, current);
   }
@@ -419,7 +451,9 @@ export function sessionUsageFromMessages(
     const cacheTokens = Number(info.tokens.cache?.read ?? 0) + Number(info.tokens.cache?.write ?? 0);
     const inputTokens = Number(info.tokens.input ?? 0) + cacheTokens;
     const outputTokens = Number(info.tokens.output ?? 0) + Number(info.tokens.reasoning ?? 0);
-    const cost = Number(info.cost ?? 0);
+    // The provider's own charge wins over OpenCode's catalog-rate estimate.
+    const charged = reportedCost(info.native);
+    const cost = charged ?? Number(info.cost ?? 0);
     bucket.inputTokens += inputTokens;
     bucket.outputTokens += outputTokens;
     bucket.cacheTokens += cacheTokens;
@@ -434,6 +468,7 @@ export function sessionUsageFromMessages(
     model.outputTokens += outputTokens;
     model.cacheTokens += cacheTokens;
     model.cost += cost;
+    if (charged !== undefined) model.reported = true;
     bucket.modelMap.set(modelKey, model);
   }
   return [...bySession.values()]
@@ -575,9 +610,13 @@ export function usageFromMessages(
     const cacheTokens = Number(tokens.cache?.read ?? 0) + Number(tokens.cache?.write ?? 0);
     const inputTokens = Number(tokens.input ?? 0) + cacheTokens;
     contextTokens = inputTokens;
+    // A provider-reported charge is the truth; the catalog estimate only
+    // stands in when the endpoint reports nothing.
+    const charged = reportedCost(info.native);
     models.push({ model: info.providerID && info.modelID ? info.providerID + "/" + info.modelID : "unknown",
       inputTokens, outputTokens: Number(tokens.output ?? 0) + Number(tokens.reasoning ?? 0),
-      cacheTokens, cost: Number(info.cost ?? 0) });
+      cacheTokens, cost: charged ?? Number(info.cost ?? 0),
+      ...(charged !== undefined ? { reported: true as const } : {}) });
   }
   if (!models.length) return undefined;
   return { inputTokens: models.reduce((sum, model) => sum + model.inputTokens, 0),
