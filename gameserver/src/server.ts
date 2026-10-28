@@ -240,6 +240,19 @@ function flushDurableRooms(): Promise<unknown>[] {
 }
 
 /**
+ * Drain ARENA writes for shutdown: flush dirty rooms, then await the whole
+ * per-game chains. Clearing `durableDirty` happens at handoff, so a room whose
+ * interval or last-leave write is still in flight looks clean even though its
+ * newest snapshot has not been renamed into place yet. The second pass covers
+ * a world read (or a last-leave flush queued) while the first pass awaited.
+ */
+async function flushDurableWrites(): Promise<void> {
+  for (let pass = 0; pass < 2; pass += 1) {
+    await Promise.allSettled([...flushDurableRooms(), ...durableTails.values()]);
+  }
+}
+
+/**
  * Seed a fresh ARENA room with the persisted world so the first joiner's
  * welcome carries it. The snapshot is re-stamped with this room's brand-new
  * generation/epoch/seq: frames from before the restart must never validate.
@@ -822,14 +835,15 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  // Flush dirty ARENA worlds before tearing anything down; bounded so a hung
-  // disk still exits (the interval already kept on-disk state at most one
-  // interval stale).
+  // Stop periodic flushing and peer publishes first so the drain sees a fixed
+  // set of worlds. Then await every queued snapshot write, not just the rooms
+  // that are still dirty, bounded so a hung disk still exits.
+  clearInterval(durableFlush);
+  for (const socket of wss.clients) socket.close(1001, "server shutdown");
   await Promise.race([
-    Promise.allSettled(flushDurableRooms()),
+    flushDurableWrites(),
     new Promise((resolve) => setTimeout(resolve, SHUTDOWN_FLUSH_TIMEOUT_MS).unref()),
   ]);
-  for (const socket of wss.clients) socket.close(1001, "server shutdown");
   server.close(() => process.exit(0));
   // Idle keep-alive HTTP connections (health checks) would otherwise keep
   // server.close() pending forever; drop them, and keep the exit fallback

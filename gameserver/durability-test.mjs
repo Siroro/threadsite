@@ -32,6 +32,10 @@ async function startRelay() {
       ...process.env,
       GAMESERVER_HOST: "127.0.0.1", GAMESERVER_PORT: String(PORT),
       GAMESERVER_STATE_DIR: STATE_DIR, GAMESERVER_PERSIST_INTERVAL_MS: "1",
+      // The 1 ms flush interval plus six publishers keeps a deep write queue;
+      // shutdown must be allowed to drain it instead of abandoning the newest
+      // snapshot on a loaded machine.
+      GAMESERVER_SHUTDOWN_FLUSH_TIMEOUT_MS: "10000",
     },
     stdio: ["ignore", "ignore", "inherit"],
   });
@@ -48,9 +52,10 @@ async function stopRelay(relay) {
   if (relay.stopped) return;
   relay.stopped = true;
   relay.child.kill("SIGTERM");
-  // Grace: shutdown flush (<=1s) plus the exit fallback (1.5s). Anything
-  // slower gets terminated so the suite can never hang on a stubborn relay.
-  const graceful = await Promise.race([relay.exited, sleep(3000).then(() => false)]);
+  // Grace: the configured shutdown drain (10s) plus the exit fallback (1.5s).
+  // Anything slower gets terminated so the suite can never hang on a stubborn
+  // relay.
+  const graceful = await Promise.race([relay.exited, sleep(15_000).then(() => false)]);
   if (graceful !== true) relay.child.kill("SIGKILL");
   await relay.exited;
 }
@@ -153,7 +158,7 @@ try {
   // Phase 5: bursty updates while writes are still in flight must never lose
   // the final state. The 1 ms flush interval makes every flush overlap an
   // in-flight write; closing the host hands the last world to the last-leave
-  // flush, and the graceful shutdown awaits the queued chain.
+  // flush, and the graceful shutdown drains the queued chain.
   const BURSTS = 6;
   const burstIds = [];
   for (let i = 0; i < BURSTS; i += 1) {
@@ -167,6 +172,11 @@ try {
     await waitFor(() => burstState.tick >= 10, `burst ${i} publications`);
     burstState.bossHp = 777;
     await waitFor(() => burstState.tick >= 13, `burst ${i} final publications`);
+    // The relay acknowledges each world it accepts. Closing before the final
+    // snapshot is acknowledged (and then stopping the relay) would race frames
+    // still in transit, which proves nothing about durability.
+    await waitFor(() => net.world.snapshot?.state?.state?.bossHp === 777,
+      `burst ${i} final world acknowledgement`);
     net.close(); // last-leave flush races whatever is still in flight
   }
   await stopRelay(relay); // shutdown awaits every queued write
