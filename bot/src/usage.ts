@@ -8,8 +8,7 @@ import { costsHidden, formatCost, formatTokens, truncate } from "./util.js";
  * Indexed token/cost ledger behind `/site-admin usage`: one current row per
  * agent turn — completed or failed, initial, mutation, repair, restart-recovery
  * — plus, in older deployments, per AI thread-title prompt. Turn IDs allow
- * durable revisions without counting recovery twice. The legacy JSONL is imported
- * transactionally and preserved for recovery.
+ * durable revisions without counting recovery twice.
  */
 export interface UsageEntry {
   v: 1;
@@ -128,7 +127,7 @@ export class UsageLog {
   private writes: Promise<void> = Promise.resolve();
   private readonly forgottenThreads = new Set<string>();
   private readonly database: UsageDatabase;
-  constructor(legacyFile: string, databaseFile?: string) { this.database = new UsageDatabase(legacyFile, databaseFile); }
+  constructor(databaseFile: string) { this.database = new UsageDatabase(databaseFile); }
 
   /**
    * Persist one usage record, completed or failed. A write failure is propagated

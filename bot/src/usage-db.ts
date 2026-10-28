@@ -1,16 +1,12 @@
 import fs from "node:fs/promises";
-import { createReadStream } from "node:fs";
-import { createInterface } from "node:readline";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
-import { log } from "./logger.js";
 import type { UsageEntry, UsageTotal } from "./usage.js";
 import { UsageSummaries } from "./usage-summary.js";
 
 const openings = new Map<string, Promise<void>>();
 
-/** Indexed current revisions. The legacy JSONL is imported transactionally once and retained. */
+/** Indexed current revisions and transactional project summaries. */
 export class UsageDatabase {
   readonly file: string;
   private initialized = false;
@@ -19,10 +15,7 @@ export class UsageDatabase {
     deleted: ReturnType<DatabaseSync["prepare"]>; entry: ReturnType<DatabaseSync["prepare"]>;
     deleteModels: ReturnType<DatabaseSync["prepare"]>; model: ReturnType<DatabaseSync["prepare"]>;
   }>();
-  constructor(readonly legacyFile: string, file?: string) {
-    this.file = path.resolve(file ?? `${legacyFile}.sqlite`);
-    if (this.file === path.resolve(legacyFile)) throw new Error("Usage database and legacy ledger must be different files");
-  }
+  constructor(file: string) { this.file = path.resolve(file); }
 
   private open(): DatabaseSync {
     const db = new DatabaseSync(this.file);
@@ -68,29 +61,9 @@ export class UsageDatabase {
         CREATE INDEX IF NOT EXISTS usage_models_by_model ON usage_models(model, entry_id);
         PRAGMA user_version = 3;`);
       UsageSummaries.create(db);
-      if (db.prepare("SELECT value FROM usage_meta WHERE key = 'legacy_import_v1'").get()
-        && db.prepare("SELECT value FROM usage_meta WHERE key = 'thread_summary_v2'").get()) return;
+      if (db.prepare("SELECT value FROM usage_meta WHERE key = 'thread_summary_v2'").get()) return;
       db.exec("BEGIN IMMEDIATE");
       try {
-        // Check again after obtaining the write lock in case another process migrated it.
-        if (!db.prepare("SELECT value FROM usage_meta WHERE key = 'legacy_import_v1'").get()) {
-          let exists = true;
-          try { await fs.access(this.legacyFile); } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-            exists = false;
-          }
-          if (exists) {
-            const lines = createInterface({ input: createReadStream(this.legacyFile, { encoding: "utf8" }), crlfDelay: Infinity });
-            for await (const line of lines) {
-              if (!line.trim()) continue;
-              let entry: UsageEntry;
-              try { entry = JSON.parse(line) as UsageEntry; }
-              catch { log("warn", "usage.entry_parse_failed", { file: this.legacyFile }); continue; }
-              if (entry?.v === 1 && typeof entry.id === "string" && typeof entry.ts === "string" && typeof entry.threadId === "string") this.put(db, entry, false);
-            }
-          }
-          db.prepare("INSERT INTO usage_meta(key,value) VALUES ('legacy_import_v1','done')").run();
-        }
         if (!db.prepare("SELECT value FROM usage_meta WHERE key = 'thread_summary_v2'").get()) {
           // Summary tables are derived data: rebuild them atomically when the
           // schema changes or an earlier setup was interrupted.
@@ -106,7 +79,7 @@ export class UsageDatabase {
     } finally { db.close(); }
   }
 
-  private put(db: DatabaseSync, entry: UsageEntry, updateSummary = true, previous?: UsageEntry): void {
+  private put(db: DatabaseSync, entry: UsageEntry, previous?: UsageEntry): void {
     let statements = this.statements.get(db);
     if (!statements) {
       statements = {
@@ -123,10 +96,8 @@ export class UsageDatabase {
       this.statements.set(db, statements);
     }
     if (statements.deleted.get(entry.threadId)) return;
-    if (updateSummary) {
-      if (previous) this.summaries.adjust(db, previous, -1);
-      this.summaries.adjust(db, entry, 1);
-    }
+    if (previous) this.summaries.adjust(db, previous, -1);
+    this.summaries.adjust(db, entry, 1);
     statements.entry.run(entry.id, entry.threadId, entry.ts, entry.startedAt ?? null, JSON.stringify(entry),
       entry.generationMs ?? null, entry.timedOutputTokens ?? null);
     statements.deleteModels.run(entry.id);
@@ -156,7 +127,7 @@ export class UsageDatabase {
           return model.generationMs === undefined && old?.generationMs !== undefined
             ? { ...model, generationMs: old.generationMs, timedOutputTokens: old.timedOutputTokens } : model;
         });
-        this.put(db, entry, true, previous);
+        this.put(db, entry, previous);
         db.exec("COMMIT");
       } catch (error) { db.exec("ROLLBACK"); throw error; }
     } finally { db.close(); }
@@ -196,21 +167,6 @@ export class UsageDatabase {
 
   async forget(threadId: string): Promise<void> {
     await this.ready();
-    // Scrub every legacy revision before the database deletion; a failed scrub
-    // leaves the indexed entry in place so cleanup can safely be retried.
-    let raw: string | undefined;
-    try { raw = await fs.readFile(this.legacyFile, "utf8"); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    if (raw !== undefined) {
-      const lines = raw.split("\n").filter((line) => { try { return JSON.parse(line).threadId !== threadId; } catch { return true; } });
-      const temporary = `${this.legacyFile}.${randomUUID()}.tmp`;
-      try {
-        const handle = await fs.open(temporary, "wx", 0o600);
-        try { await handle.writeFile(lines.join("\n")); await handle.sync(); } finally { await handle.close(); }
-        await fs.rename(temporary, this.legacyFile);
-      } finally { await fs.rm(temporary, { force: true }); }
-    }
     const db = this.open();
     try {
       db.exec("BEGIN IMMEDIATE");

@@ -27,7 +27,7 @@ const env = {
   OPENCODE_FAILOVER_MODELS: "", OPENCODE_BLIP_NUDGES: "0",
   OPENCODE_RECONCILE_TIMEOUT_MS: "120000", OPENCODE_RECONCILE_POLL_MS: "500",
   WORKSPACE_ROOT: "/workspace", PUBLISH_ROOT: "/srv/sites", STATE_DB_FILE: "/data/state.db",
-  USAGE_LOG_FILE: "/data/usage.jsonl", LOG_FILE: "/data/e2e.jsonl", MULTIPLAYER_ENABLED: "false",
+  USAGE_DB_FILE: "/data/usage.sqlite", LOG_FILE: "/data/e2e.jsonl", MULTIPLAYER_ENABLED: "false",
   PUBLIC_SITES_BASE_URL: "http://static-web", PREVIEW_MCP_URL: "http://preview:8931/mcp",
   FORGEJO_INTERNAL_URL: "http://forgejo:3000", FORGEJO_PUBLIC_URL: "http://forgejo:3000",
   FORGEJO_OWNER: "e2eowner", FORGEJO_TOKEN_FILE: "/run/secrets/forgejo-token", WEBHOOK_ENABLED: "false",

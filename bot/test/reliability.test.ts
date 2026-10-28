@@ -329,7 +329,7 @@ async function projectFixture(id: string, forgejo = new LocalForgejo()) {
   const store = await openStore(path.join(root, `state-${id}.db`));
   await store.putProject(project);
   const opencode = { isBusy: async () => false, lastUserMessageId: async () => "message", revertSession: async () => {} } as unknown as OpenCodeHarness;
-  const usage = new UsageLog(path.join(root, `usage-${id}.jsonl`));
+  const usage = new UsageLog(path.join(root, `usage-${id}.sqlite`));
   const service = new ProjectService(store, opencode, forgejo, usage);
   await buildSite(dir);
   await validateSite(path.join(dir, "site"));
@@ -560,7 +560,7 @@ test("the first successful build adopts the agent-chosen DESCRIPTION.md title as
       return { text: "A fresh garden", usage: {} };
     },
   } as unknown as OpenCodeHarness;
-  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-title-usage.jsonl")));
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-title-usage.sqlite")));
   const titles: string[] = [];
   const result = await service.createProject({
     threadId: "123456789012345678", guildId: "100", parentChannelId: "200", displayName: "site-a-long-original-prompt",
@@ -697,7 +697,7 @@ test("an unnamed first build gets one repair turn whose reply becomes the card s
       return { text: "Neon Loom: weave light through the rift in short solo rounds.", usage: {} };
     },
   } as unknown as OpenCodeHarness;
-  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-naming-fix-usage.jsonl")));
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-naming-fix-usage.sqlite")));
   const result = await service.createProject({
     threadId: "123456789012345681", guildId: "100", parentChannelId: "200", displayName: "game-unnamed-request",
     initialPrompt: "Make a cool game", renameable: true,
@@ -729,7 +729,7 @@ test("a repair turn that still does not name the project falls back once without
       return { text: `Attempt ${prompts} done`, usage: {} };
     },
   } as unknown as OpenCodeHarness;
-  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-naming-fix-stubborn-usage.jsonl")));
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "auto-naming-fix-stubborn-usage.sqlite")));
   const result = await service.createProject({
     threadId: "123456789012345682", guildId: "100", parentChannelId: "200", displayName: "game-make-me-a-game",
     initialPrompt: "Make a cool game", renameable: true,
@@ -785,7 +785,7 @@ test("webhook outages do not block project creation or leave renames pending", a
       return { text: "Finished", usage: {} };
     },
   } as unknown as OpenCodeHarness;
-  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "webhook-outage-usage.jsonl")));
+  const service = new ProjectService(store, opencode, forgejo, new UsageLog(path.join(root, "webhook-outage-usage.sqlite")));
   const result = await service.createProject({
     threadId: "123456789012345679", guildId: "100", parentChannelId: "200", displayName: "Hook Outage Project",
     initialPrompt: "Make a small site",
@@ -1074,7 +1074,7 @@ test("only a reply to the running turn's status message steers the live session"
 });
 
 test("modelBreakdown rolls up per-model usage globally and per thread", async () => {
-  const usage = new UsageLog(path.join(root, "models-breakdown-usage.jsonl"));
+  const usage = new UsageLog(path.join(root, "models-breakdown-usage.sqlite"));
   await usage.record({ threadId: "t1", project: "Koi Pond", kind: "game-2d", usage: { models: [{ model: "surplus/glm-5.3-flash", inputTokens: 100, outputTokens: 10, cacheTokens: 0, cost: 0 }] } as never });
   await usage.record({ threadId: "t1", project: "Koi Pond", kind: "game-2d", usage: { models: [{ model: "opencode/muse-spark-1.3-contributor-free", inputTokens: 50, outputTokens: 5, cacheTokens: 0, cost: 0 }] } as never });
   await usage.record({ threadId: "t2", project: "Sumo Shove", kind: "game-2d", failed: true, usage: { models: [{ model: "surplus/glm-5.3-flash", inputTokens: 20, outputTokens: 2, cacheTokens: 0, cost: 0 }] } as never });

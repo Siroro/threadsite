@@ -194,7 +194,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   try {
     const forgejo = new ForgejoClient();
     const agent = new OpenCodeHarness();
-    const usage = new UsageLog(config.usageLogFile, config.usageDbFile);
+    const usage = new UsageLog(config.usageDbFile);
     if (command === "purge") {
       await purge(store, forgejo, agent, new ProjectService(store, agent, forgejo, usage), usage, apply, backup);
       return;

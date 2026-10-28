@@ -79,7 +79,7 @@ const opencode = new OpenCodeHarness();
 // The admin-set backup list wins; without one the configured env list applies.
 opencode.failoverModelSource = () => store.getFailoverModels() ?? null;
 const forgejo = new ForgejoClient();
-const usageLog = new UsageLog(config.usageLogFile, config.usageDbFile);
+const usageLog = new UsageLog(config.usageDbFile);
 const projects = new ProjectService(store, opencode, forgejo, usageLog, async (project, title) => {
   const channel = await client.channels.fetch(project.threadId, { force: true });
   if (!channel?.isThread()) throw new Error("The project Discord thread is unavailable.");

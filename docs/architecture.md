@@ -105,7 +105,7 @@ Project collaboration defaults to open editing. The persisted human owner, selec
 Every accepted thread update is saved before it is marked queued, including its author and attachments. Images travel with the request as data URIs when the next turn's model can see them; every other attachment type is downloaded at message receipt into the workspace under `scratch/uploads/` (gitignored, never published) and the prompt names the saved paths, so the agent reads reference material in place and installs binaries into `site/assets/` with the `asset_import` tool. Starting a batch atomically moves only its consumed requests into the in-flight turn record; startup restores queued requests even when no agent turn was running, and replacement status messages retain original request IDs so deleted Discord messages do not cause duplicate work.
 
 - Discord thread → project/session mappings: SQLite at `data/bot/state.db` (`STATE_DB_FILE`).
-- Usage ledger: indexed SQLite at `USAGE_DB_FILE` (default `data/bot/usage-log.jsonl.sqlite`); the legacy JSONL is retained after one-time import.
+- Usage ledger: indexed SQLite at `USAGE_DB_FILE` (default `data/bot/usage-log.jsonl.sqlite`).
 - Project worktrees: `data/workspaces/<guild>/<thread>`.
 - Published sites: `SITES_HOST_PATH`.
 - Agent auth/session state: the `opencode-data` Docker volume.

@@ -117,9 +117,8 @@ export const config = {
   publishRoot: path.resolve(env("PUBLISH_ROOT", "/srv/sites")),
   // SQLite store (projects + settings).
   stateDbFile: path.resolve(env("STATE_DB_FILE", "/data/state.db")),
-  // Append-only JSONL token/cost ledger backing /site-admin usage.
-  usageLogFile: path.resolve(env("USAGE_LOG_FILE", "/data/usage-log.jsonl")),
-  usageDbFile: path.resolve(env("USAGE_DB_FILE", `${env("USAGE_LOG_FILE", "/data/usage-log.jsonl")}.sqlite`)),
+  // Indexed SQLite token/cost ledger backing /site-admin usage.
+  usageDbFile: path.resolve(env("USAGE_DB_FILE", "/data/usage-log.jsonl.sqlite")),
   publicSitesBaseUrl: env("PUBLIC_SITES_BASE_URL", "http://localhost:8080").replace(/\/$/, ""),
   publicIndexEnabled: boolEnv("PUBLIC_INDEX_ENABLED", true),
 

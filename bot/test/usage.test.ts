@@ -9,6 +9,7 @@ import type { SessionMessage, TurnUsage } from "../src/opencode.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { UsageLog } = await import("../src/usage.js");
+const { UsageDatabase } = await import("../src/usage-db.js");
 const { annotateCatalogCosts, annotateMarketCosts, usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage, reportedCost } = await import("../src/opencode.js");
 const { formatCost } = await import("../src/util.js");
 
@@ -241,7 +242,7 @@ test("reconcile keeps the stream's catalog comparison when fuller history is unp
 test("hiding costs affects reports without changing recorded usage", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-hide-costs-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const log = new UsageLog(path.join(root, "usage.jsonl"));
+  const log = new UsageLog(path.join(root, "usage.sqlite"));
   const usage = usageFromMessages([message("a", Date.now())])!;
   await log.record({ threadId: "thread", project: "Game", kind: "site", usage });
   const previous = process.env.HIDE_COSTS;
@@ -264,7 +265,7 @@ test("hiding costs affects reports without changing recorded usage", async (t) =
 test("thread totals roll per-model catalog comparisons into lifetime figures", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-catalog-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const log = new UsageLog(path.join(root, "usage.jsonl"));
+  const log = new UsageLog(path.join(root, "usage.sqlite"));
   const usage = usageFromMessages([
     message("a", 1000),
     { info: { id: "b", role: "assistant", providerID: "surplus", modelID: "glm-5.3", time: { created: 1100 },
@@ -299,7 +300,7 @@ test("addUsage merges repair passes without double-counting a session", () => {
 test("thread totals keep whether a model's figure was a provider charge", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-reported-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const log = new UsageLog(path.join(root, "usage.jsonl"));
+  const log = new UsageLog(path.join(root, "usage.sqlite"));
   const charged = (id: string, model: string, cost: number, reported: boolean) => ({
     info: { id, role: "assistant", providerID: "surplus", modelID: model, time: { created: 1000 },
       tokens: { input: 1_000, output: 100, cache: { read: 0, write: 0 } }, cost: reported ? undefined : 9.9,
@@ -378,10 +379,10 @@ test("a model with no market price keeps its existing figure", () => {
   assert.equal(usage.cost, 0.05);
 });
 
-test("turn revisions survive reopening the ledger, concurrent appends and a torn final line", async (t) => {
+test("turn revisions survive reopening the ledger and concurrent writes", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const file = path.join(root, "usage.jsonl");
+  const file = path.join(root, "usage.sqlite");
   const input = { id: "turn", sessionId: "session", threadId: "thread", project: "Game", kind: "game-3d" };
   const log = new UsageLog(file);
   await log.record({ ...input, pending: true });
@@ -395,26 +396,21 @@ test("turn revisions survive reopening the ledger, concurrent appends and a torn
   assert.equal(total.inputTokens, 135);
   await reopened.record(input); // history unavailable during a second restart
   assert.equal((await reopened.threadTotal("thread")).inputTokens, 135);
-  await fs.appendFile(file, '{"v":1,"truncated":');
   await Promise.all(Array.from({ length: 5 }, (_, i) => reopened.record({ ...input, id: `extra-${i}`, usage })));
   total = await new UsageLog(file).threadTotal("thread");
   assert.equal(total.turns, 6);
   assert.equal(total.inputTokens, 810);
 });
 
-test("legacy revisions migrate atomically once and indexed timing survives sparse recovery", async (t) => {
+test("indexed timing survives sparse recovery and deletion", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-migrate-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const file = path.join(root, "legacy.jsonl");
-  const base = { v: 1, id: "turn", ts: new Date().toISOString(), label: "turn", threadId: "t",
-    project: "Game", kind: "site", inputTokens: 10, outputTokens: 5, cacheTokens: 0, cost: 0.1,
-    models: [{ model: "provider/a", inputTokens: 10, outputTokens: 5, cacheTokens: 0, cost: 0.1 }] };
-  const contents = [JSON.stringify(base), JSON.stringify({ ...base, inputTokens: 20, models: [{ ...base.models[0], inputTokens: 20 }] }), "{torn"].join("\n");
-  await fs.writeFile(file, contents);
+  const file = path.join(root, "usage.sqlite");
   const log = new UsageLog(file);
-  assert.equal((await log.threadTotal("t")).inputTokens, 20);
-  assert.equal(await fs.readFile(file, "utf8"), contents, "migration retains the original file");
-  const migrated = new DatabaseSync(`${file}.sqlite`, { readOnly: true });
+  const first: TurnUsage = { inputTokens: 20, outputTokens: 5, cacheTokens: 0, cost: 0.1, contextTokens: 0, compactions: 0, steps: 1,
+    models: [{ model: "provider/a", inputTokens: 20, outputTokens: 5, cacheTokens: 0, cost: 0.1 }] };
+  await log.record({ id: "turn", threadId: "t", project: "Game", kind: "site", usage: first });
+  const migrated = new DatabaseSync(file, { readOnly: true });
   try {
     assert.equal((migrated.prepare("SELECT output_tokens_per_second FROM usage_entries WHERE id = ?").get("turn") as any).output_tokens_per_second, null);
     assert.equal((migrated.prepare("SELECT output_tokens_per_second FROM usage_models WHERE entry_id = ?").get("turn") as any).output_tokens_per_second, null);
@@ -424,7 +420,7 @@ test("legacy revisions migrate atomically once and indexed timing survives spars
       cost: 0.2, generationMs: 4000, timedOutputTokens: 8 }] };
   await log.record({ id: "turn", threadId: "t", project: "Game", kind: "site", startedAt: "2026-01-01T00:00:00.000Z", usage });
   await new UsageLog(file).record({ id: "turn", threadId: "t", project: "Game", kind: "site" });
-  const db = new DatabaseSync(`${file}.sqlite`, { readOnly: true });
+  const db = new DatabaseSync(file, { readOnly: true });
   try {
     const entry = JSON.parse(String((db.prepare("SELECT record FROM usage_entries WHERE id = ?").get("turn") as any).record));
     assert.equal(entry.inputTokens, 30);
@@ -445,10 +441,8 @@ test("legacy revisions migrate atomically once and indexed timing survives spars
     assert.ok(db.prepare("EXPLAIN QUERY PLAN SELECT entry_id FROM usage_models WHERE model = ?").all("provider/a")
       .some((row: any) => String(row.detail).includes("usage_models_by_model")));
   } finally { db.close(); }
-  await fs.appendFile(file, "\n" + JSON.stringify({ ...base, id: "late-legacy" }));
-  assert.equal((await new UsageLog(file).threadTotal("t")).turns, 1, "legacy records are not reimported on restart");
+  assert.equal((await new UsageLog(file).threadTotal("t")).turns, 1);
   await log.forgetThread("t");
-  assert.doesNotMatch(await fs.readFile(file, "utf8"), /"threadId":"t"/);
   await new UsageLog(file).record({ id: "late", threadId: "t", project: "Game", kind: "site", usage });
   assert.equal((await new UsageLog(file).threadTotal("t")).turns, 0, "a late writer cannot restore a deleted project");
 });
@@ -456,7 +450,7 @@ test("legacy revisions migrate atomically once and indexed timing survives spars
 test("materialized project totals follow revisions, rollback and existing-database upgrades", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-summary-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const file = path.join(root, "legacy.jsonl");
+  const file = path.join(root, "usage.sqlite");
   const log = new UsageLog(file);
   const make = (model: string, input: number, cost: number, reported = false): TurnUsage => ({
     inputTokens: input, outputTokens: 10, cacheTokens: 5, contextTokens: 0, compactions: 0, steps: 1, cost,
@@ -472,7 +466,7 @@ test("materialized project totals follow revisions, rollback and existing-databa
   total = await new UsageLog(file).threadTotal("one");
   assert.deepEqual([total.turns, total.failedTurns, total.inputTokens, total.cost, total.models.size], [2, 0, 350, 3.5, 1]);
   assert.equal(total.models.get("provider/b")?.inputTokens, 350);
-  const db = new DatabaseSync(`${file}.sqlite`);
+  const db = new DatabaseSync(file);
   try {
     assert.ok(db.prepare("EXPLAIN QUERY PLAN SELECT * FROM usage_thread_totals WHERE thread_id = ?").all("one")
       .some((row: any) => String(row.detail).includes("INDEX")));
@@ -502,7 +496,7 @@ test("materialized project totals follow revisions, rollback and existing-databa
 test("a repair with unavailable provider counts remains recordable without inventing tokens", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-summary-unavailable-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const log = new UsageLog(path.join(root, "legacy.jsonl"));
+  const log = new UsageLog(path.join(root, "usage.sqlite"));
   const usage = addUsage({} as TurnUsage, {} as TurnUsage);
   await log.record({ id: "turn", threadId: "thread", project: "Game", kind: "site", usage });
   const total = await log.threadTotal("thread");
@@ -515,7 +509,7 @@ test("a repair with unavailable provider counts remains recordable without inven
 test("revisions to zero-priced models do not leave floating-point phantom spend", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-summary-zero-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const log = new UsageLog(path.join(root, "legacy.jsonl"));
+  const log = new UsageLog(path.join(root, "usage.sqlite"));
   const make = (cost: number): TurnUsage => ({ inputTokens: 1, outputTokens: 1, cacheTokens: 0,
     contextTokens: 0, steps: 1, compactions: 0, cost,
     models: [{ model: "provider/m", inputTokens: 1, outputTokens: 1, cacheTokens: 0, cost }] });
@@ -538,7 +532,7 @@ test("revisions to zero-priced models do not leave floating-point phantom spend"
 test("project summaries remain correct across separate ledger instances", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-summary-concurrency-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const file = path.join(root, "legacy.jsonl");
+  const file = path.join(root, "usage.sqlite");
   const logs = [new UsageLog(file), new UsageLog(file)];
   const usage = usageFromMessages([message("step", Date.now())])!;
   await Promise.all(Array.from({ length: 20 }, (_, i) => logs[i % 2].record({
@@ -567,32 +561,12 @@ test("fuller saved usage keeps only observed model timing when reconciled", () =
   assert.equal(result.outputTokensPerSecond, 11);
 });
 
-test("a failed legacy import rolls back and succeeds on retry without losing the source", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-retry-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const file = path.join(root, "legacy.jsonl");
-  const base = { v: 1, id: "first", ts: new Date().toISOString(), label: "turn", threadId: "t", project: "Game", kind: "site",
-    inputTokens: 10, outputTokens: 5, cacheTokens: 0, cost: 0, models: [] };
-  const invalid = { ...base, id: "bad", models: [{ model: "bad", inputTokens: 1 }] };
-  const broken = [base, invalid].map((entry) => JSON.stringify(entry)).join("\n");
-  await fs.writeFile(file, broken);
-  await assert.rejects(new UsageLog(file).threadTotal("t"));
-  assert.equal(await fs.readFile(file, "utf8"), broken);
-  const db = new DatabaseSync(`${file}.sqlite`, { readOnly: true });
-  try {
-    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM usage_entries").get() as any).count, 0);
-    assert.equal(db.prepare("SELECT value FROM usage_meta WHERE key = 'legacy_import_v1'").get(), undefined);
-  } finally { db.close(); }
-  await fs.writeFile(file, JSON.stringify(base));
-  assert.equal((await new UsageLog(file).threadTotal("t")).turns, 1);
-});
-
 test("database write failures surface and the same ledger can retry", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-write-fail-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const blocked = path.join(root, "blocked");
   await fs.writeFile(blocked, "not a directory");
-  const log = new UsageLog(path.join(root, "legacy.jsonl"), path.join(blocked, "usage.sqlite"));
+  const log = new UsageLog(path.join(blocked, "usage.sqlite"));
   const request = { id: "turn", threadId: "thread", project: "Game", kind: "site",
     usage: usageFromMessages([message("step", Date.now())]) };
   await assert.rejects(log.record(request));
@@ -605,7 +579,7 @@ test("database write failures surface and the same ledger can retry", async (t) 
 test("side prompts spend tokens without counting as turns", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-side-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const file = path.join(root, "usage.jsonl");
+  const file = path.join(root, "usage.sqlite");
   const log = new UsageLog(file);
   const usage = usageFromMessages([message("done", Date.now())])!;
   await log.record({ label: "turn", threadId: "thread", project: "Game", kind: "game-2d", usage });
@@ -618,13 +592,12 @@ test("side prompts spend tokens without counting as turns", async (t) => {
 test("missing turn usage reconciles within saved boundaries, retaining failures and turn counts", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-backfill-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const file = path.join(root, "usage.jsonl");
-  const entry = { v: 1, label: "turn", threadId: "thread", project: "Game", kind: "game-3d",
+  const file = path.join(root, "usage.sqlite");
+  const entry = { v: 1 as const, label: "turn" as const, threadId: "thread", project: "Game", kind: "game-3d",
     inputTokens: 0, outputTokens: 0, cacheTokens: 0, cost: 0, models: [] };
-  await fs.writeFile(file, [
-    { ...entry, id: "first-turn", sessionId: "session", startedAt: new Date(1000).toISOString(), ts: new Date(2000).toISOString(), failed: true },
-    { ...entry, id: "second-turn", sessionId: "session", startedAt: new Date(3000).toISOString(), ts: new Date(4000).toISOString() },
-  ].map((value) => JSON.stringify(value)).join("\n") + "\n");
+  const database = new UsageDatabase(file);
+  await database.putEntry({ ...entry, id: "first-turn", sessionId: "session", startedAt: new Date(1000).toISOString(), ts: new Date(2000).toISOString(), failed: true });
+  await database.putEntry({ ...entry, id: "second-turn", sessionId: "session", startedAt: new Date(3000).toISOString(), ts: new Date(4000).toISOString() });
   const log = new UsageLog(file);
   const messages = [message("first", 1000), message("second", 3000, 200, 40), message("future", 5000)];
   assert.equal(await log.reconcileThread("thread", "session", messages), true);
@@ -640,7 +613,7 @@ test("missing turn usage reconciles within saved boundaries, retaining failures 
 test("recovery prices fuller history and repairs existing catalog estimates without duplicating usage", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-reprice-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const log = new UsageLog(path.join(root, "usage.jsonl"));
+  const log = new UsageLog(path.join(root, "usage.sqlite"));
   const step = (id: string, time: number, input: number): SessionMessage => ({
     info: { id, role: "assistant", providerID: "surplus", modelID: "deepseek-v4.1-flash",
       time: { created: time }, tokens: { input, output: 100, cache: { read: 500, write: 0 } }, cost: 0.04 },
@@ -695,7 +668,7 @@ test("reported charges outrank market estimates even when history is fuller", ()
 test("project deletion erases every usage revision while preserving other projects and ignoring late events", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-delete-"));
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 5 }));
-  const file = path.join(root, "usage.jsonl");
+  const file = path.join(root, "usage.sqlite");
   const log = new UsageLog(file);
   const input = { id: "turn", threadId: "gone", project: "Private project name", kind: "site" };
   await log.record({ ...input, pending: true });
@@ -703,7 +676,9 @@ test("project deletion erases every usage revision while preserving other projec
   await log.record({ id: "other", threadId: "keep", project: "Keep", kind: "site" });
   await log.forgetThread("gone");
   await log.record(input);
-  assert.doesNotMatch(await fs.readFile(file, "utf8").catch(() => ""), /Private project name|gone/);
+  const db = new DatabaseSync(file, { readOnly: true });
+  try { assert.equal(db.prepare("SELECT id FROM usage_entries WHERE thread_id = ?").all("gone").length, 0); }
+  finally { db.close(); }
   assert.equal((await new UsageLog(file).threadTotal("gone")).turns, 0);
   assert.equal((await new UsageLog(file).threadTotal("keep")).turns, 1);
 });
