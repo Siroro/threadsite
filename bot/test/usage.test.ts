@@ -8,7 +8,7 @@ import type { SessionMessage, TurnUsage } from "../src/opencode.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { UsageLog } = await import("../src/usage.js");
-const { annotateCatalogCosts, usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage, reportedCost } = await import("../src/opencode.js");
+const { annotateCatalogCosts, annotateMarketCosts, usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage, reportedCost } = await import("../src/opencode.js");
 const { formatCost } = await import("../src/util.js");
 
 function message(id: string, created: number, input = 100, output = 20): SessionMessage {
@@ -295,6 +295,46 @@ test("thread totals keep whether a model's figure was a provider charge", async 
   assert.equal(total.models.get("surplus/real")!.unreported, undefined);
   assert.equal(total.models.get("surplus/estimate")!.unreported, true, "an estimate is marked");
   assert.equal(total.models.get("surplus/mixed")!.unreported, true, "one estimate makes the whole line an estimate");
+});
+
+test("a step the provider never charged for is estimated at live market prices, not list rates", () => {
+  // A discount route bills a fraction of a percent of list price: the catalog
+  // figure for this turn is ~$0.21 while the marketplace charged ~$0.002. When
+  // the endpoint reports nothing, market rates are the honest estimate.
+  const usage = usageFromMessages([{
+    info: { id: "a", role: "assistant", providerID: "surplus", modelID: "muse-spark", time: { created: 1000 },
+      tokens: { input: 1_750_000, output: 73_500, cache: { read: 10_750_000, write: 0 } }, cost: 0.2112 }, parts: [],
+  }])!;
+  // List rates, as OpenCode's fallback computes them.
+  annotateCatalogCosts(usage, [{ id: "muse-spark", providerID: "other", cost: [{ input: 0.10, output: 0.20, cache: { read: 0.002, write: 0.10 } }] }]);
+  assert.ok(Math.abs(usage.cost - 0.2112) < 1e-6, "starts at the catalog estimate");
+  assert.ok(Math.abs(usage.catalogCost! - 0.2112) < 1e-6);
+
+  // Market prices: 1000 / 20 / 2000 micro-dollars per 1M, i.e. USD per 1M.
+  annotateMarketCosts(usage, new Map([["muse-spark", { input: 0.001, output: 0.002, cacheRead: 0.00002 }]]));
+  assert.ok(Math.abs(usage.cost - 0.002112) < 1e-9, "re-priced at the marketplace's own seller rates");
+  assert.equal(usage.models[0].reported, undefined, "still an estimate, not a charge");
+  assert.ok(Math.abs(usage.catalogCost! - 0.2112) < 1e-6, "the list-rate comparison survives for context");
+});
+
+test("market re-pricing never overwrites a provider-reported charge", () => {
+  const usage = usageFromMessages([{
+    info: { id: "a", role: "assistant", providerID: "surplus", modelID: "glm", time: { created: 1000 },
+      tokens: { input: 1_000, output: 100, cache: { read: 0, write: 0 } },
+      cost: 9.9, native: { buyer_cost_micro: 1_500 } }, parts: [],
+  }])!;
+  annotateMarketCosts(usage, new Map([["glm", { input: 0.001, output: 0.002 }]]));
+  assert.equal(usage.cost, 0.0015, "the reported charge stands");
+  assert.equal(usage.models[0].reported, true);
+});
+
+test("a model with no market price keeps its existing figure", () => {
+  const usage = usageFromMessages([{
+    info: { id: "a", role: "assistant", providerID: "opencode", modelID: "free-model", time: { created: 1000 },
+      tokens: { input: 1_000, output: 100, cache: { read: 0, write: 0 } }, cost: 0.05 }, parts: [],
+  }])!;
+  annotateMarketCosts(usage, new Map([["some-other-model", { input: 0.001, output: 0.002 }]]));
+  assert.equal(usage.cost, 0.05);
 });
 
 test("turn revisions survive reopening the ledger, concurrent appends and a torn final line", async (t) => {

@@ -6,8 +6,8 @@ import { OpenCode, type OpenCodeClient, type ModelInfo, type ModelRef, type Sess
 import { config } from "./config.js";
 import { log, serializeError } from "./logger.js";
 import { applicationMessage, formQuestion } from "./opencode-v2-messages.js";
-import { annotateCatalogCosts, usageFromMessages, reconcileUsage, sessionUsageFromMessages, describeTool, toolLabel, type SessionMessage, type PromptImage,
-  type PromptResult, type TurnUsage, type QuotaBlock } from "./opencode-shared.js";
+import { annotateCatalogCosts, annotateMarketCosts, usageFromMessages, reconcileUsage, sessionUsageFromMessages, describeTool, toolLabel, type SessionMessage, type PromptImage,
+  type PromptResult, type TurnUsage, type QuotaBlock, type ModelRates } from "./opencode-shared.js";
 import type { ProgressCallback, ProgressUpdate, ProgressPlanItem, ProgressSubagent } from "./progress.js";
 import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
 import { steeringInstruction } from "./templates.js";
@@ -128,6 +128,7 @@ interface Watch {
 export class OpenCodeV2Harness {
   private readonly client: OpenCodeClient;
   private readonly catalogs = new Map<string, { expires: number; promise: Promise<ModelInfo[]> }>();
+  private marketCache?: { expires: number; promise: Promise<Map<string, ModelRates>> };
   readonly watches = new Map<string, Watch>();
   readonly stopped = new Set<string>();
   private readonly prompts = new Set<string>();
@@ -170,6 +171,41 @@ export class OpenCodeV2Harness {
   async listSelectableModels(): Promise<string[]> {
     return (await this.models()).filter((model) => model.enabled && model.status !== "deprecated")
       .map((model) => `${model.providerID}/${model.id}`).sort();
+  }
+
+  /**
+   * Live marketplace prices per model, cached for a few hours. A discount
+   * route can bill a fraction of a percent of list price, so these are the
+   * only sensible estimate for a step whose endpoint reported no charge of its
+   * own. Public endpoint; a failure leaves the cache empty and the figures at
+   * catalog list rates, which is no worse than before.
+   */
+  private marketRates(): Promise<Map<string, ModelRates>> {
+    const url = config.marketPricesUrl;
+    if (!url) return Promise.resolve(new Map());
+    if (this.marketCache && this.marketCache.expires > Date.now()) return this.marketCache.promise;
+    const promise = (async () => {
+      const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) throw new Error(`market prices responded ${response.status}`);
+      const payload = await response.json() as { markets?: Array<Record<string, unknown>> };
+      const rates = new Map<string, ModelRates>();
+      for (const market of payload.markets ?? []) {
+        const id = market.model;
+        // Prices are micro-dollars per million tokens; convert to USD per million.
+        const per = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value / 1e6 : undefined;
+        const input = per(market.best_input_per_1m);
+        const output = per(market.best_output_per_1m);
+        if (typeof id !== "string" || input === undefined || output === undefined) continue;
+        const cacheRead = per(market.best_cache_read_per_1m);
+        rates.set(id, { input, output, ...(cacheRead !== undefined ? { cacheRead } : {}) });
+      }
+      return rates;
+    })().catch((error) => {
+      log("warn", "opencode.v2_market_prices_failed", { error: serializeError(error) });
+      return new Map<string, ModelRates>();
+    });
+    this.marketCache = { expires: Date.now() + Math.max(60_000, config.marketPricesTtlMs), promise };
+    return promise;
   }
 
   async modelAcceptsAttachments(providerID: string, modelID: string, directory?: string): Promise<boolean | undefined> {
@@ -478,6 +514,7 @@ export class OpenCodeV2Harness {
         (id) => watch.subagents?.get(id)?.agent ?? entries.find((entry) => entry.sessionID === id)?.agent,
         since, Infinity, baseline);
       annotateCatalogCosts(result, await this.models(directory));
+      annotateMarketCosts(result, await this.marketRates());
       return result;
     }
     catch (error) {
@@ -485,6 +522,7 @@ export class OpenCodeV2Harness {
       observed.sessions = sessionUsageFromMessages(streamSteps, sessionID,
         (id) => watch.subagents?.get(id)?.agent, since);
       annotateCatalogCosts(observed, await this.models(directory));
+      annotateMarketCosts(observed, await this.marketRates());
       return observed;
     }
   }

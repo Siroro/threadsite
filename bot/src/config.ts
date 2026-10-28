@@ -59,6 +59,11 @@ export const config = {
   opencodeUrl: env("OPENCODE_URL", "http://opencode:4096").replace(/\/$/, ""),
   opencodePassword: env("OPENCODE_SERVER_PASSWORD"),
   defaultModel: env("OPENCODE_DEFAULT_MODEL"),
+  // Marketplace prices for the discount provider, used to estimate a turn's
+  // spend when the endpoint reports no charge of its own. Public, no auth.
+  // Empty disables the estimate (figures stay at catalog list rates).
+  marketPricesUrl: env("SURPLUS_MARKET_PRICES_URL", "https://api.surplusintelligence.ai/api/markets"),
+  marketPricesTtlMs: msEnv("SURPLUS_MARKET_PRICES_TTL_MS", 6 * 60 * 60 * 1000),
   opencodeMaxSteps: intEnv("OPENCODE_MAX_STEPS", 200),
   opencodeReconcileTimeoutMs: intEnv("OPENCODE_RECONCILE_TIMEOUT_MS", 30 * 60 * 1000),
   opencodeReconcilePollMs: intEnv("OPENCODE_RECONCILE_POLL_MS", 1500),

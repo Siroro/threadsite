@@ -315,6 +315,31 @@ export function annotateCatalogCosts(usage: TurnUsage, catalog: ReadonlyArray<Ca
   if (catalogCost > 0) usage.catalogCost = catalogCost;
 }
 
+/**
+ * Re-price the steps a provider did not charge for — it reported no usage at
+ * all, so OpenCode fell back to catalog list rates — at the marketplace's own
+ * live seller prices instead. List rates overstate a discounted route by
+ * orders of magnitude, so this is the honest estimate for such a turn; the
+ * figure stays marked as an estimate (`reported` absent), and the list-rate
+ * comparison computed earlier is left in `catalogCost`. Rates are USD per
+ * million tokens; models without a market price keep their existing figure.
+ */
+export function annotateMarketCosts(usage: TurnUsage, rates: ReadonlyMap<string, ModelRates>): void {
+  if (!rates.size) return;
+  let changed = false;
+  for (const entry of usage.models) {
+    if (entry.reported) continue;
+    const modelID = entry.model.startsWith(`${SURPLUS_PROVIDER_ID}/`)
+      ? entry.model.slice(SURPLUS_PROVIDER_ID.length + 1) : entry.model;
+    const modelRates = rates.get(modelID);
+    if (!modelRates) continue;
+    entry.cost = costAtRates(entry, modelRates);
+    changed = true;
+  }
+  if (!changed) return;
+  usage.cost = usage.models.reduce((sum, entry) => sum + entry.cost, 0);
+}
+
 /** Public turn-usage line: context size, cumulative billed tokens, cache share, model steps. */
 export function formatTurnUsage(usage: TurnUsage): string {
   const parts: string[] = [];
