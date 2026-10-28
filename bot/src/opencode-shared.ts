@@ -43,6 +43,9 @@ export interface ModelUsage {
    * the endpoint reported no charge of its own. Absent on catalog-rate
    * estimates, which is how a reader tells the two apart. */
   marketEstimated?: true;
+  /** Measured provider-active windows and their output/reasoning tokens. */
+  generationMs?: number;
+  timedOutputTokens?: number;
   /** What these tokens would cost at another provider's catalog list rates;
    * carried only by surplus-served models, and undefined when no other
    * provider lists the same model id. */
@@ -195,6 +198,8 @@ export function reconcileUsage(observed: TurnUsage | undefined, saved: TurnUsage
     const { reported: _reported, marketEstimated: _marketEstimated, ...base } = entry;
     return {
       ...base, cost: winner.cost,
+      ...(entry.generationMs === undefined && priced?.generationMs !== undefined
+        ? { generationMs: priced.generationMs, timedOutputTokens: priced.timedOutputTokens } : {}),
       ...(winner.reported ? { reported: true as const } : {}),
       ...(winner.marketEstimated ? { marketEstimated: true as const } : {}),
       ...(entry.catalogCost === undefined && priced?.catalogCost !== undefined ? { catalogCost: priced.catalogCost } : {}),
@@ -420,6 +425,10 @@ export function mergeModelUsage(entries: ModelUsage[]): ModelUsage[] {
     current.outputTokens += entry.outputTokens;
     current.cacheTokens += entry.cacheTokens;
     current.cost += entry.cost;
+    if (entry.generationMs !== undefined && entry.timedOutputTokens !== undefined) {
+      current.generationMs = (current.generationMs ?? 0) + entry.generationMs;
+      current.timedOutputTokens = (current.timedOutputTokens ?? 0) + entry.timedOutputTokens;
+    }
     // Only an all-reported bucket is fully provider-billed: one estimated step
     // in the mix keeps the figure a blend, not a charge.
     if (existing) { if (!entry.reported) current.reported = undefined; }

@@ -1,17 +1,15 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { log } from "./logger.js";
+import { UsageDatabase } from "./usage-db.js";
 import { usageFromMessages, type SessionMessage, type ModelUsage, type TurnUsage } from "./opencode.js";
 import { costsHidden, formatCost, formatTokens, truncate } from "./util.js";
 
 /**
- * Append-only token/cost ledger behind `/site-admin usage`: one JSONL line per
+ * Indexed token/cost ledger behind `/site-admin usage`: one current row per
  * agent turn — completed or failed, initial, mutation, repair, restart-recovery
  * — plus, in older deployments, per AI thread-title prompt. Turn IDs allow
- * durable revisions without counting recovery twice. A separate file from
- * project state so day-by-day history survives without growing the store, and
- * so a corrupt line costs one entry, not the whole bot state.
+ * durable revisions without counting recovery twice. The legacy JSONL is imported
+ * transactionally and preserved for recovery.
  */
 export interface UsageEntry {
   v: 1;
@@ -35,6 +33,8 @@ export interface UsageEntry {
   cacheTokens: number;
   cost: number;
   models: ModelUsage[];
+  generationMs?: number;
+  timedOutputTokens?: number;
 }
 
 interface UsageTotal {
@@ -127,11 +127,12 @@ function figuresLine(total: UsageTotal): string {
 export class UsageLog {
   private writes: Promise<void> = Promise.resolve();
   private readonly forgottenThreads = new Set<string>();
-  constructor(private readonly file: string) {}
+  private readonly database: UsageDatabase;
+  constructor(legacyFile: string, databaseFile?: string) { this.database = new UsageDatabase(legacyFile, databaseFile); }
 
   /**
-   * Persist one usage record, completed or failed. Best-effort: a ledger
-   * failure is logged and never fails the turn it describes. Turns whose usage
+   * Persist one usage record, completed or failed. A write failure is propagated
+   * so recovery markers are not cleared before usage is durable. Turns whose usage
    * could not be observed (e.g. recovered after finishing while the bot was
    * down, or dropped before the first model step) retain their turn count;
    * persisted OpenCode history can later fill missing token figures.
@@ -154,11 +155,20 @@ export class UsageLog {
   }): Promise<void> {
     if (this.forgottenThreads.has(input.threadId)) return;
     const usage = input.usage;
-    const inputTokens = usage?.inputTokens ?? usage?.models?.reduce((sum, model) => sum + model.inputTokens, 0) ?? 0;
-    const outputTokens = usage?.outputTokens ?? usage?.models?.reduce((sum, model) => sum + model.outputTokens, 0) ?? 0;
-    const cacheTokens = usage?.cacheTokens ?? usage?.models?.reduce((sum, model) => sum + model.cacheTokens, 0) ?? 0;
-    const cost = usage?.cost ?? usage?.models?.reduce((sum, model) => sum + model.cost, 0) ?? 0;
-    let models = (usage?.models ?? []).filter((entry) => entry.inputTokens || entry.outputTokens || entry.cost);
+    // Incomplete provider snapshots can produce NaN during repair-turn
+    // aggregation. Keep them unavailable instead of passing NaN to SQLite.
+    const count = (value: unknown): number => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+    let models = (usage?.models ?? []).map((model) => ({ ...model,
+      inputTokens: count(model.inputTokens), outputTokens: count(model.outputTokens),
+      cacheTokens: count(model.cacheTokens), cost: count(model.cost),
+    })).filter((entry) => entry.inputTokens || entry.outputTokens || entry.cost);
+    const sum = (key: "inputTokens" | "outputTokens" | "cacheTokens" | "cost") => models.reduce((total, model) => total + model[key], 0);
+    const measured = (value: unknown, fallback: number): number =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+    const inputTokens = measured(usage?.inputTokens, sum("inputTokens"));
+    const outputTokens = measured(usage?.outputTokens, sum("outputTokens"));
+    const cacheTokens = measured(usage?.cacheTokens, sum("cacheTokens"));
+    const cost = measured(usage?.cost, sum("cost"));
     if (!models.length && (inputTokens || outputTokens || cost)) {
       models = [{ model: input.fallbackModel || "unknown", inputTokens, outputTokens, cacheTokens, cost }];
     }
@@ -180,6 +190,9 @@ export class UsageLog {
       cacheTokens,
       cost,
       models,
+      ...(usage?.generationMs && Number.isFinite(usage.generationMs) && usage.timedOutputTokens && Number.isFinite(usage.timedOutputTokens)
+        && usage.generationMs > 0 && usage.timedOutputTokens > 0
+        ? { generationMs: usage.generationMs, timedOutputTokens: usage.timedOutputTokens } : {}),
     };
     await this.append(entry);
   }
@@ -187,24 +200,12 @@ export class UsageLog {
   private async append(entry: UsageEntry): Promise<void> {
     const write = this.writes.then(async () => {
       if (this.forgottenThreads.has(entry.threadId)) return;
-      const previous = (await this.readEntries(false)).find((value) => value.id === entry.id);
-      // Keep durable counts if recovery temporarily cannot read history.
-      if (previous && previous.inputTokens + previous.outputTokens > entry.inputTokens + entry.outputTokens) {
-        entry = { ...entry, inputTokens: previous.inputTokens, outputTokens: previous.outputTokens,
-          cacheTokens: previous.cacheTokens, cost: previous.cost, models: previous.models };
-      }
-      await fs.mkdir(path.dirname(this.file), { recursive: true });
-      const handle = await fs.open(this.file, "a");
-      try {
-        // The leading newline isolates a torn last line from a previous crash.
-        await handle.writeFile(`\n${JSON.stringify(entry)}\n`, "utf8");
-        await handle.sync();
-      } finally { await handle.close(); }
+      await this.database.putEntry(entry);
     });
     this.writes = write.catch((error) => {
-      log("warn", "usage.record_failed", { file: this.file, error: String(error) });
+      log("warn", "usage.record_failed", { file: this.database.file, error: String(error) });
     });
-    await this.writes;
+    await write;
   }
 
   /** Reconcile saved turn usage and repair catalog estimates when market prices are available. */
@@ -212,8 +213,8 @@ export class UsageLog {
     priceUsage?: (usage: TurnUsage) => Promise<void>): Promise<boolean> {
     if (this.forgottenThreads.has(threadId)) return false;
     let changed = false;
-    for (const entry of await this.readEntries()) {
-      if (entry.threadId !== threadId || entry.pending) continue;
+    for (const entry of await this.readEntries(threadId)) {
+      if (entry.pending) continue;
       const canRecoverHistory = entry.label === "turn" && entry.sessionId === sessionId && Boolean(entry.startedAt);
       const saved = canRecoverHistory
         ? usageFromMessages(messages, Date.parse(entry.startedAt!), Date.parse(entry.ts)) : undefined;
@@ -233,25 +234,14 @@ export class UsageLog {
 
   /** Remove every revision, and ignore late billing from the aborted turn. */
   async threadIds(): Promise<string[]> {
-    return [...new Set((await this.readEntries()).map((entry) => entry.threadId))];
+    await this.writes;
+    return this.database.threadIds();
   }
 
   async forgetThread(threadId: string): Promise<void> {
     this.forgottenThreads.add(threadId);
     const write = this.writes.then(async () => {
-      const raw = await fs.readFile(this.file, "utf8").catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return ""; throw error;
-      });
-      const lines = raw.split("\n").filter((line) => {
-        try { return JSON.parse(line).threadId !== threadId; } catch { return true; }
-      });
-      await fs.mkdir(path.dirname(this.file), { recursive: true });
-      const temporary = `${this.file}.${randomUUID()}.tmp`;
-      try {
-        const handle = await fs.open(temporary, "wx", 0o600);
-        try { await handle.writeFile(lines.join("\n")); await handle.sync(); } finally { await handle.close(); }
-        await fs.rename(temporary, this.file);
-      } finally { await fs.rm(temporary, { force: true }); }
+      await this.database.forget(threadId);
     });
     this.writes = write.catch(() => undefined);
     await write;
@@ -259,14 +249,8 @@ export class UsageLog {
 
   /** Lifetime ledgered usage for one thread (completed + failed turns and title prompts). */
   async threadTotal(threadId: string): Promise<UsageTotal & { lastTs?: string }> {
-    const total = emptyTotal();
-    let lastTs: string | undefined;
-    for (const entry of await this.readEntries()) {
-      if (entry.threadId !== threadId) continue;
-      addToTotal(total, entry);
-      if (!lastTs || entry.ts > lastTs) lastTs = entry.ts;
-    }
-    return { ...total, lastTs };
+    await this.writes;
+    return this.database.threadTotal(threadId);
   }
 
   /**
@@ -356,10 +340,10 @@ export class UsageLog {
 
   /** Per-local-day totals within the window, newest first; days without usage are skipped. */
   private async summarize(days: number): Promise<Array<{ date: string } & UsageTotal>> {
-    const entries = await this.readEntries();
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const since = startOfToday.getTime() - (days - 1) * DAY_MS;
+    const entries = await this.readEntries(undefined, new Date(since).toISOString());
 
     const byDay = new Map<string, { date: string } & UsageTotal>();
     for (const entry of entries) {
@@ -376,29 +360,8 @@ export class UsageLog {
     return [...byDay.values()].sort((a, b) => b.date.localeCompare(a.date));
   }
 
-  private async readEntries(waitForWrites = true): Promise<UsageEntry[]> {
-    if (waitForWrites) await this.writes;
-    let raw: string;
-    try {
-      raw = await fs.readFile(this.file, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      log("warn", "usage.read_failed", { file: this.file, error: String(error) });
-      return [];
-    }
-    const entries = new Map<string, UsageEntry>();
-    for (const line of raw.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const parsed = JSON.parse(trimmed) as UsageEntry;
-        if (parsed?.v === 1 && typeof parsed.id === "string" && typeof parsed.ts === "string") {
-          entries.set(parsed.id, parsed);
-        }
-      } catch {
-        log("warn", "usage.entry_parse_failed", { file: this.file });
-      }
-    }
-    return [...entries.values()];
+  private async readEntries(threadId?: string, since?: string): Promise<UsageEntry[]> {
+    await this.writes;
+    return this.database.entries(threadId, since);
   }
 }

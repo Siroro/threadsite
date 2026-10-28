@@ -6,7 +6,7 @@ export class StorageError extends Error {
   constructor(readonly code: string, message: string) { super(message); }
 }
 
-type SaveRow = { value: string | null; revision: number; updatedAt: number };
+type SaveRow = { value: string | null; bytes: number; revision: number; updatedAt: number };
 type ScoreRow = { playerId: string; name: string; score: number; updatedAt: number };
 type Order = "desc" | "asc";
 const KEY = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$/;
@@ -48,7 +48,30 @@ export class PlayerStore {
           FOREIGN KEY (game, player) REFERENCES players(game, player) ON DELETE CASCADE,
           FOREIGN KEY (game, board) REFERENCES boards(game, board) ON DELETE CASCADE);
         CREATE INDEX IF NOT EXISTS score_ranking ON scores(game, board, score, updated_at, player);
+        CREATE INDEX IF NOT EXISTS score_ranking_desc ON scores(game, board, score DESC, updated_at ASC, player ASC);
         CREATE INDEX IF NOT EXISTS score_player ON scores(game, player);`);
+      // Build the per-game byte counter once for existing databases. Triggers
+      // and the initial snapshot are committed together, including after a crash.
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        db.exec(`CREATE TABLE IF NOT EXISTS storage_meta (key TEXT PRIMARY KEY);
+          CREATE TABLE IF NOT EXISTS game_save_bytes (game TEXT PRIMARY KEY, bytes INTEGER NOT NULL CHECK(bytes >= 0));`);
+        if (!db.prepare("SELECT 1 FROM storage_meta WHERE key = 'save_bytes_v1'").get()) {
+          db.exec(`INSERT INTO game_save_bytes(game, bytes) SELECT game, SUM(bytes) FROM saves GROUP BY game;
+            CREATE TRIGGER save_bytes_insert AFTER INSERT ON saves BEGIN
+              INSERT INTO game_save_bytes(game, bytes) VALUES (NEW.game, NEW.bytes)
+                ON CONFLICT(game) DO UPDATE SET bytes = bytes + NEW.bytes;
+            END;
+            CREATE TRIGGER save_bytes_update AFTER UPDATE OF bytes ON saves BEGIN
+              UPDATE game_save_bytes SET bytes = bytes + NEW.bytes - OLD.bytes WHERE game = NEW.game;
+            END;
+            CREATE TRIGGER save_bytes_delete AFTER DELETE ON saves BEGIN
+              UPDATE game_save_bytes SET bytes = bytes - OLD.bytes WHERE game = OLD.game;
+            END;
+            INSERT INTO storage_meta(key) VALUES ('save_bytes_v1');`);
+        }
+        db.exec("COMMIT");
+      } catch (error) { db.exec("ROLLBACK"); throw error; }
       this.database = db;
       return db;
     } catch (error) { db.close(); throw error; }
@@ -74,7 +97,7 @@ export class PlayerStore {
   }
 
   private save(db: DatabaseSync, game: string, player: string, slot: string): SaveRow | undefined {
-    return db.prepare("SELECT value, revision, updated_at AS updatedAt FROM saves WHERE game = ? AND player = ? AND slot = ?").get(game, player, slot) as SaveRow | undefined;
+    return db.prepare("SELECT value, bytes, revision, updated_at AS updatedAt FROM saves WHERE game = ? AND player = ? AND slot = ?").get(game, player, slot) as SaveRow | undefined;
   }
 
   private decoded(row: SaveRow | undefined): { value: unknown; revision: number; updatedAt: number | null } {
@@ -103,9 +126,8 @@ export class PlayerStore {
             const count = db.prepare("SELECT COUNT(*) AS n FROM saves WHERE game = ? AND player = ?").get(game, player) as { n: number };
             if (count.n >= MAX_SLOTS) throw new StorageError("slot_limit", "A player may use at most 16 save slot names, including deleted slots.");
           }
-          const total = db.prepare("SELECT COALESCE(SUM(bytes), 0) AS n FROM saves WHERE game = ?").get(game) as { n: number };
-          const old = db.prepare("SELECT bytes FROM saves WHERE game = ? AND player = ? AND slot = ?").get(game, player, slot) as { bytes: number } | undefined;
-          if (total.n - (old?.bytes ?? 0) + bytes > this.limits.gameBytes) throw new StorageError("storage_full", "This game's save storage is full.");
+          const total = db.prepare("SELECT bytes AS n FROM game_save_bytes WHERE game = ?").get(game) as { n: number } | undefined;
+          if ((total?.n ?? 0) - (previous?.bytes ?? 0) + bytes > this.limits.gameBytes) throw new StorageError("storage_full", "This game's save storage is full.");
           const revision = (previous?.revision ?? 0) + 1;
           const updatedAt = Date.now();
           db.prepare(`INSERT INTO saves VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -164,6 +186,7 @@ export class PlayerStore {
     this.transaction((db) => {
       db.prepare("DELETE FROM players WHERE game = ?").run(game);
       db.prepare("DELETE FROM boards WHERE game = ?").run(game);
+      db.prepare("DELETE FROM game_save_bytes WHERE game = ?").run(game);
     });
   }
 

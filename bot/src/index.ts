@@ -79,7 +79,7 @@ const opencode = new OpenCodeHarness();
 // The admin-set backup list wins; without one the configured env list applies.
 opencode.failoverModelSource = () => store.getFailoverModels() ?? null;
 const forgejo = new ForgejoClient();
-const usageLog = new UsageLog(config.usageLogFile);
+const usageLog = new UsageLog(config.usageLogFile, config.usageDbFile);
 const projects = new ProjectService(store, opencode, forgejo, usageLog, async (project, title) => {
   const channel = await client.channels.fetch(project.threadId, { force: true });
   if (!channel?.isThread()) throw new Error("The project Discord thread is unavailable.");
@@ -107,13 +107,16 @@ const webhookServer = startWebhookServer({
   port: config.webhookPort,
   secret: webhookSecret,
   onPush: (event) => (config.webhookEnabled ? handleForgejoPush(event) : Promise.resolve()),
-  health: () => ({
-    uptimeSec: Math.round(process.uptime()),
-    projects: store.listProjects().length,
-    activeTurns: projects.activeTurnCount(),
-    pendingTurns: store.listProjects().filter((project) => project.pendingTurn).length,
-    agentService: config.opencodeUrl,
-  }),
+  health: () => {
+    const records = store.listProjects();
+    return {
+      uptimeSec: Math.round(process.uptime()),
+      projects: records.length,
+      activeTurns: projects.activeTurnCount(),
+      pendingTurns: records.filter((project) => project.pendingTurn).length,
+      agentService: config.opencodeUrl,
+    };
+  },
 });
 const webhookListenerLive = await webhookServer.listening.then(
   () => true,

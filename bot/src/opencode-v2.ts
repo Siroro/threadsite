@@ -53,6 +53,25 @@ function timingTotals(samples: Iterable<StepTiming>): Pick<TurnUsage, "generatio
     ? { generationMs, timedOutputTokens, outputTokensPerSecond: timedOutputTokens * 1000 / generationMs } : {};
 }
 
+/** Attribute each measured window to the model that produced the same step. */
+function modelTimings(usage: TurnUsage, samples: Map<string, StepTiming>, messages: SessionMessage[]): void {
+  const modelById = new Map(messages.map((message) => [message.info?.id, message.info]));
+  const totals = new Map<string, StepTiming>();
+  for (const [id, sample] of samples) {
+    const info = modelById.get(id);
+    if (!info?.providerID || !info.modelID) continue;
+    const key = `${info.providerID}/${info.modelID}`;
+    const total = totals.get(key) ?? { generationMs: 0, timedOutputTokens: 0 };
+    total.generationMs += sample.generationMs;
+    total.timedOutputTokens += sample.timedOutputTokens;
+    totals.set(key, total);
+  }
+  for (const model of usage.models) {
+    const timing = totals.get(model.model);
+    if (timing) Object.assign(model, timing);
+  }
+}
+
 /** Server-clock provider windows exclude tool waits. History and live samples
  * overlap, so replace by message ID before summing; never divide all billed
  * tokens by a subset's time or use event-arrival gaps as generation time. */
@@ -486,6 +505,7 @@ export class OpenCodeV2Harness {
     observed.contextLimit = watch.contextLimit;
     observed.compactions = watch.compactions;
     Object.assign(observed, timingTotals(watch.timings.values()));
+    modelTimings(observed, watch.timings, streamSteps);
     if (watch.lastRequest) Object.assign(observed, { lastRequestMs: watch.lastRequest.generationMs,
       ...(watch.lastRequest.firstTokenMs !== undefined ? { firstTokenMs: watch.lastRequest.firstTokenMs } : {}) });
     try {
@@ -499,6 +519,7 @@ export class OpenCodeV2Harness {
       const samples = new Map(watch.timings);
       for (const [id, timed] of turnTiming(entries, since, baseline)) samples.set(id, timed);
       Object.assign(result, timingTotals(samples.values()));
+      modelTimings(result, samples, [...streamSteps, ...messages]);
       // Last-request figures describe whichever anchored root step is newest,
       // live-observed or history-persisted; the first-token lag survives only
       // when it was measured for that very step.

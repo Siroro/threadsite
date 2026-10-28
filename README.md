@@ -28,7 +28,7 @@ See the [install guide](docs/deployment.md#caddy-quickstart) for custom domains,
 
 ## Usage
 
-Set `HIDE_COSTS=true` in `.env` to hide monetary figures in Discord cards and reports. It defaults to `false`; usage and cost accounting remain recorded.
+Set `HIDE_COSTS=true` in `.env` to hide monetary figures in Discord cards and reports. It defaults to `false`; usage and cost accounting remain recorded. Usage is stored in indexed SQLite (`USAGE_DB_FILE`, default `/data/usage-log.jsonl.sqlite`); an existing JSONL ledger is imported once and retained.
 
 Create a website:
 

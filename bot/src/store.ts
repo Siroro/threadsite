@@ -24,19 +24,20 @@ export class Store {
   static async open(file: string, defaultModel?: string): Promise<Store> {
     await fs.mkdir(path.dirname(file), { recursive: true });
     const db = new DatabaseSync(file);
-    db.exec("PRAGMA journal_mode = WAL");
-    db.exec("PRAGMA synchronous = NORMAL");
-    // Without a busy timeout node:sqlite fails a write immediately when
-    // another process (a rolling restart, a backup, an admin script) holds
-    // the write lock, turning ordinary contention into a failed turn.
-    db.exec("PRAGMA busy_timeout = 5000");
-    db.exec("CREATE TABLE IF NOT EXISTS projects (thread_id TEXT PRIMARY KEY, record TEXT NOT NULL)");
-    db.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    db.exec("CREATE TABLE IF NOT EXISTS card_state (thread_id TEXT NOT NULL, card_key TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY (thread_id, card_key))");
-    db.exec("CREATE TABLE IF NOT EXISTS project_approvals (thread_id TEXT NOT NULL, id TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(thread_id, id))");
-    const store = new Store(file, db);
-    if (!store.getModel() && defaultModel) await store.setModel(defaultModel);
-    return store;
+    try {
+      // Set the busy timeout before changing the journal mode or writing schema.
+      db.exec("PRAGMA busy_timeout = 5000");
+      db.exec("PRAGMA journal_mode = WAL");
+      // Queue claims and recovery markers must survive host power loss.
+      db.exec("PRAGMA synchronous = FULL");
+      db.exec("CREATE TABLE IF NOT EXISTS projects (thread_id TEXT PRIMARY KEY, record TEXT NOT NULL)");
+      db.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+      db.exec("CREATE TABLE IF NOT EXISTS card_state (thread_id TEXT NOT NULL, card_key TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY (thread_id, card_key))");
+      db.exec("CREATE TABLE IF NOT EXISTS project_approvals (thread_id TEXT NOT NULL, id TEXT NOT NULL, record TEXT NOT NULL, PRIMARY KEY(thread_id, id))");
+      const store = new Store(file, db);
+      if (!store.getModel() && defaultModel) await store.setModel(defaultModel);
+      return store;
+    } catch (error) { db.close(); throw error; }
   }
 
   private getSetting<T>(key: string): T | undefined {
@@ -136,9 +137,13 @@ export class Store {
   }
 
   async deleteProject(threadId: string): Promise<void> {
-    this.db.prepare("DELETE FROM project_approvals WHERE thread_id = ?").run(threadId);
-    this.db.prepare("DELETE FROM card_state WHERE thread_id = ?").run(threadId);
-    this.db.prepare("DELETE FROM projects WHERE thread_id = ?").run(threadId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM project_approvals WHERE thread_id = ?").run(threadId);
+      this.db.prepare("DELETE FROM card_state WHERE thread_id = ?").run(threadId);
+      this.db.prepare("DELETE FROM projects WHERE thread_id = ?").run(threadId);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   /** Public card snapshots and interaction drafts, kept separate from project lifecycle writes. */

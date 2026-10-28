@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { PermissionFlagsBits, PermissionsBitField, type Attachment } from "discord.js";
 import { testRecord, testRootSetup, trackStore } from "./fixtures/root.js";
 import { assertV2 } from "./fixtures/cards.js";
@@ -42,6 +43,25 @@ async function fixture() {
 function pending(id = "555555"): ProjectApproval {
   return { id, requesterId: guest.userId, author: { name: "Guest", email: "guest@example.test" }, prompt: "Add a checkpoint", createdAt: new Date().toISOString(), attachmentCount: 0, attachments: [] };
 }
+
+test("project deletion rolls back card and approval cleanup if the final delete fails", async () => {
+  const { store, project, file } = await fixture();
+  store.patchCardState(project.threadId, "card", { value: "preserved" });
+  store.addApproval(project.threadId, pending());
+  const db = new DatabaseSync(file);
+  try {
+    db.exec(`CREATE TRIGGER fail_project_delete BEFORE DELETE ON projects BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
+    await assert.rejects(store.deleteProject(project.threadId), /injected failure/);
+    assert.ok(store.getProject(project.threadId));
+    assert.deepEqual(store.getCardState(project.threadId, "card"), { value: "preserved" });
+    assert.ok(store.getApproval(project.threadId, "555555"));
+    db.exec("DROP TRIGGER fail_project_delete");
+    await store.deleteProject(project.threadId);
+    assert.equal(store.getProject(project.threadId), undefined);
+    assert.equal(store.getCardState(project.threadId, "card"), undefined);
+    assert.equal(store.getApproval(project.threadId, "555555"), undefined);
+  } finally { db.close(); }
+});
 
 test("existing projects default to open editing while Discord send permission and deletion still block mutation", async () => {
   const { project } = await fixture();

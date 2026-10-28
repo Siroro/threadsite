@@ -3,6 +3,7 @@ import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { SessionMessage, TurnUsage } from "../src/opencode.js";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
@@ -401,6 +402,206 @@ test("turn revisions survive reopening the ledger, concurrent appends and a torn
   assert.equal(total.inputTokens, 810);
 });
 
+test("legacy revisions migrate atomically once and indexed timing survives sparse recovery", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-migrate-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "legacy.jsonl");
+  const base = { v: 1, id: "turn", ts: new Date().toISOString(), label: "turn", threadId: "t",
+    project: "Game", kind: "site", inputTokens: 10, outputTokens: 5, cacheTokens: 0, cost: 0.1,
+    models: [{ model: "provider/a", inputTokens: 10, outputTokens: 5, cacheTokens: 0, cost: 0.1 }] };
+  const contents = [JSON.stringify(base), JSON.stringify({ ...base, inputTokens: 20, models: [{ ...base.models[0], inputTokens: 20 }] }), "{torn"].join("\n");
+  await fs.writeFile(file, contents);
+  const log = new UsageLog(file);
+  assert.equal((await log.threadTotal("t")).inputTokens, 20);
+  assert.equal(await fs.readFile(file, "utf8"), contents, "migration retains the original file");
+  const migrated = new DatabaseSync(`${file}.sqlite`, { readOnly: true });
+  try {
+    assert.equal((migrated.prepare("SELECT output_tokens_per_second FROM usage_entries WHERE id = ?").get("turn") as any).output_tokens_per_second, null);
+    assert.equal((migrated.prepare("SELECT output_tokens_per_second FROM usage_models WHERE entry_id = ?").get("turn") as any).output_tokens_per_second, null);
+  } finally { migrated.close(); }
+  const usage: TurnUsage = { inputTokens: 30, outputTokens: 10, cacheTokens: 0, cost: 0.2, contextTokens: 0, compactions: 0, steps: 2,
+    generationMs: 4000, timedOutputTokens: 8, models: [{ model: "provider/a", inputTokens: 30, outputTokens: 10, cacheTokens: 0,
+      cost: 0.2, generationMs: 4000, timedOutputTokens: 8 }] };
+  await log.record({ id: "turn", threadId: "t", project: "Game", kind: "site", startedAt: "2026-01-01T00:00:00.000Z", usage });
+  await new UsageLog(file).record({ id: "turn", threadId: "t", project: "Game", kind: "site" });
+  const db = new DatabaseSync(`${file}.sqlite`, { readOnly: true });
+  try {
+    const entry = JSON.parse(String((db.prepare("SELECT record FROM usage_entries WHERE id = ?").get("turn") as any).record));
+    assert.equal(entry.inputTokens, 30);
+    assert.equal(entry.startedAt, "2026-01-01T00:00:00.000Z");
+    assert.equal((db.prepare("SELECT started_at FROM usage_entries WHERE id = ?").get("turn") as any).started_at, entry.startedAt);
+    assert.equal(entry.generationMs, 4000);
+    assert.equal(entry.timedOutputTokens, 8);
+    const model = db.prepare("SELECT input_tokens, generation_ms, timed_output_tokens, output_tokens_per_second FROM usage_models WHERE model = ?").get("provider/a") as any;
+    assert.deepEqual([model.input_tokens, model.generation_ms, model.timed_output_tokens, model.output_tokens_per_second], [30, 4000, 8, 2]);
+    for (const [query, value, index] of [
+      ["SELECT record FROM usage_entries WHERE thread_id = ? ORDER BY ts, id", "t", "usage_by_thread_order"],
+      ["SELECT record FROM usage_entries WHERE ts >= ? ORDER BY ts, id", "2026-01-01", "usage_by_time_order"],
+    ]) {
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(value);
+      assert.ok(plan.some((row: any) => String(row.detail).includes(index)));
+      assert.equal(plan.some((row: any) => String(row.detail).includes("TEMP B-TREE")), false);
+    }
+    assert.ok(db.prepare("EXPLAIN QUERY PLAN SELECT entry_id FROM usage_models WHERE model = ?").all("provider/a")
+      .some((row: any) => String(row.detail).includes("usage_models_by_model")));
+  } finally { db.close(); }
+  await fs.appendFile(file, "\n" + JSON.stringify({ ...base, id: "late-legacy" }));
+  assert.equal((await new UsageLog(file).threadTotal("t")).turns, 1, "legacy records are not reimported on restart");
+  await log.forgetThread("t");
+  assert.doesNotMatch(await fs.readFile(file, "utf8"), /"threadId":"t"/);
+  await new UsageLog(file).record({ id: "late", threadId: "t", project: "Game", kind: "site", usage });
+  assert.equal((await new UsageLog(file).threadTotal("t")).turns, 0, "a late writer cannot restore a deleted project");
+});
+
+test("materialized project totals follow revisions, rollback and existing-database upgrades", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-summary-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "legacy.jsonl");
+  const log = new UsageLog(file);
+  const make = (model: string, input: number, cost: number, reported = false): TurnUsage => ({
+    inputTokens: input, outputTokens: 10, cacheTokens: 5, contextTokens: 0, compactions: 0, steps: 1, cost,
+    models: [{ model, inputTokens: input, outputTokens: 10, cacheTokens: 5, cost,
+      ...(reported ? { reported: true as const } : { marketEstimated: true as const }) }],
+  });
+  await log.record({ id: "first", threadId: "one", project: "A", kind: "site", failed: true, usage: make("provider/a", 100, 1, true) });
+  await log.record({ id: "second", threadId: "one", project: "A", kind: "site", usage: make("provider/b", 200, 2) });
+  await log.record({ id: "elsewhere", threadId: "two", project: "B", kind: "site", usage: make("provider/a", 999, 3) });
+  let total = await log.threadTotal("one");
+  assert.deepEqual([total.turns, total.failedTurns, total.inputTokens, total.cost, total.models.size], [2, 1, 300, 3, 2]);
+  await log.record({ id: "first", threadId: "one", project: "A", kind: "site", usage: make("provider/b", 150, 1.5) });
+  total = await new UsageLog(file).threadTotal("one");
+  assert.deepEqual([total.turns, total.failedTurns, total.inputTokens, total.cost, total.models.size], [2, 0, 350, 3.5, 1]);
+  assert.equal(total.models.get("provider/b")?.inputTokens, 350);
+  const db = new DatabaseSync(`${file}.sqlite`);
+  try {
+    assert.ok(db.prepare("EXPLAIN QUERY PLAN SELECT * FROM usage_thread_totals WHERE thread_id = ?").all("one")
+      .some((row: any) => String(row.detail).includes("INDEX")));
+    db.exec(`CREATE TRIGGER reject_sample BEFORE INSERT ON usage_models WHEN NEW.model = 'provider/reject'
+      BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
+    await assert.rejects(log.record({ id: "first", threadId: "one", project: "A", kind: "site", usage: make("provider/reject", 500, 10) }), /injected failure/);
+    total = await log.threadTotal("one");
+    assert.deepEqual([total.turns, total.inputTokens, total.cost, total.models.size], [2, 350, 3.5, 1]);
+    db.exec("DROP TRIGGER reject_sample");
+    // Simulate the earlier summary schema: opening it must rebuild both
+    // summaries from the authoritative turn rows exactly once.
+    db.exec(`ALTER TABLE usage_thread_totals DROP COLUMN priced_entries;
+      ALTER TABLE usage_thread_totals DROP COLUMN catalog_priced_entries;
+      ALTER TABLE usage_thread_models DROP COLUMN priced_entries;
+      ALTER TABLE usage_thread_models DROP COLUMN catalog_priced_entries;
+      DELETE FROM usage_meta WHERE key = 'thread_summary_v2';
+      INSERT OR IGNORE INTO usage_meta(key,value) VALUES ('thread_summary_v1','done');
+      PRAGMA user_version = 2`);
+  } finally { db.close(); }
+  total = await new UsageLog(file).threadTotal("one");
+  assert.deepEqual([total.turns, total.inputTokens, total.cost, total.models.size], [2, 350, 3.5, 1]);
+  await new UsageLog(file).forgetThread("one");
+  assert.equal((await new UsageLog(file).threadTotal("one")).turns, 0);
+  assert.equal((await new UsageLog(file).threadTotal("two")).inputTokens, 999);
+});
+
+test("a repair with unavailable provider counts remains recordable without inventing tokens", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-summary-unavailable-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const log = new UsageLog(path.join(root, "legacy.jsonl"));
+  const usage = addUsage({} as TurnUsage, {} as TurnUsage);
+  await log.record({ id: "turn", threadId: "thread", project: "Game", kind: "site", usage });
+  const total = await log.threadTotal("thread");
+  assert.equal(total.turns, 1);
+  assert.equal(total.inputTokens, 0);
+  assert.equal(total.outputTokens, 0);
+  assert.equal(total.models.size, 0);
+});
+
+test("revisions to zero-priced models do not leave floating-point phantom spend", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-summary-zero-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const log = new UsageLog(path.join(root, "legacy.jsonl"));
+  const make = (cost: number): TurnUsage => ({ inputTokens: 1, outputTokens: 1, cacheTokens: 0,
+    contextTokens: 0, steps: 1, compactions: 0, cost,
+    models: [{ model: "provider/m", inputTokens: 1, outputTokens: 1, cacheTokens: 0, cost }] });
+  const record = (id: string, cost: number) => log.record({ id, threadId: "thread", project: "Game", kind: "site", usage: make(cost) });
+  await record("a", 0.1);
+  await record("b", 0.2);
+  await record("c", 0);
+  await record("a", 0);
+  await record("b", 0);
+  const total = await log.threadTotal("thread");
+  assert.equal(total.cost, 0);
+  assert.equal(total.models.get("provider/m")?.cost, 0);
+  assert.equal(total.turns, 3);
+  await record("c", 0.000000000001);
+  const later = await log.threadTotal("thread");
+  assert.equal(later.cost, 0.000000000001);
+  assert.equal(later.models.get("provider/m")?.cost, 0.000000000001);
+});
+
+test("project summaries remain correct across separate ledger instances", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-summary-concurrency-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "legacy.jsonl");
+  const logs = [new UsageLog(file), new UsageLog(file)];
+  const usage = usageFromMessages([message("step", Date.now())])!;
+  await Promise.all(Array.from({ length: 20 }, (_, i) => logs[i % 2].record({
+    id: `turn-${i}`, threadId: "thread", project: "Game", kind: "site", usage,
+  })));
+  const total = await new UsageLog(file).threadTotal("thread");
+  assert.equal(total.turns, 20);
+  assert.equal(total.inputTokens, usage.inputTokens * 20);
+  assert.equal(total.models.get("test/model")?.turns, 20);
+  assert.ok(Math.abs(total.cost - usage.cost * 20) < 1e-10);
+});
+
+test("fuller saved usage keeps only observed model timing when reconciled", () => {
+  const observed = usageFromMessages([message("a", 1000, 100, 20)])!;
+  observed.generationMs = 2000;
+  observed.timedOutputTokens = 22;
+  observed.outputTokensPerSecond = 11;
+  observed.models[0].generationMs = 2000;
+  observed.models[0].timedOutputTokens = 22;
+  const saved = usageFromMessages([message("a", 1000, 100, 20), message("b", 1200, 200, 40)])!;
+  const result = reconcileUsage(observed, saved)!;
+  assert.equal(result.steps, 2);
+  assert.equal(result.outputTokens, 64);
+  assert.equal(result.models[0].timedOutputTokens, 22);
+  assert.equal(result.models[0].generationMs, 2000);
+  assert.equal(result.outputTokensPerSecond, 11);
+});
+
+test("a failed legacy import rolls back and succeeds on retry without losing the source", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-retry-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "legacy.jsonl");
+  const base = { v: 1, id: "first", ts: new Date().toISOString(), label: "turn", threadId: "t", project: "Game", kind: "site",
+    inputTokens: 10, outputTokens: 5, cacheTokens: 0, cost: 0, models: [] };
+  const invalid = { ...base, id: "bad", models: [{ model: "bad", inputTokens: 1 }] };
+  const broken = [base, invalid].map((entry) => JSON.stringify(entry)).join("\n");
+  await fs.writeFile(file, broken);
+  await assert.rejects(new UsageLog(file).threadTotal("t"));
+  assert.equal(await fs.readFile(file, "utf8"), broken);
+  const db = new DatabaseSync(`${file}.sqlite`, { readOnly: true });
+  try {
+    assert.equal((db.prepare("SELECT COUNT(*) AS count FROM usage_entries").get() as any).count, 0);
+    assert.equal(db.prepare("SELECT value FROM usage_meta WHERE key = 'legacy_import_v1'").get(), undefined);
+  } finally { db.close(); }
+  await fs.writeFile(file, JSON.stringify(base));
+  assert.equal((await new UsageLog(file).threadTotal("t")).turns, 1);
+});
+
+test("database write failures surface and the same ledger can retry", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-write-fail-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const blocked = path.join(root, "blocked");
+  await fs.writeFile(blocked, "not a directory");
+  const log = new UsageLog(path.join(root, "legacy.jsonl"), path.join(blocked, "usage.sqlite"));
+  const request = { id: "turn", threadId: "thread", project: "Game", kind: "site",
+    usage: usageFromMessages([message("step", Date.now())]) };
+  await assert.rejects(log.record(request));
+  await fs.unlink(blocked);
+  await fs.mkdir(blocked);
+  await log.record(request);
+  assert.equal((await log.threadTotal("thread")).turns, 1);
+});
+
 test("side prompts spend tokens without counting as turns", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-side-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -502,7 +703,7 @@ test("project deletion erases every usage revision while preserving other projec
   await log.record({ id: "other", threadId: "keep", project: "Keep", kind: "site" });
   await log.forgetThread("gone");
   await log.record(input);
-  assert.doesNotMatch(await fs.readFile(file, "utf8"), /Private project name|gone/);
+  assert.doesNotMatch(await fs.readFile(file, "utf8").catch(() => ""), /Private project name|gone/);
   assert.equal((await new UsageLog(file).threadTotal("gone")).turns, 0);
   assert.equal((await new UsageLog(file).threadTotal("keep")).turns, 1);
 });
