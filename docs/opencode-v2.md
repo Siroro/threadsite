@@ -121,7 +121,7 @@ the parent, which adapts — and never block or switch the builder's provider.
 
 Set `OPENCODE_SUBAGENT_MODEL=provider/model-id` in `.env` to select the model for
 both `general` and `explore` subagents independently of the builder.
-An unset or blank value keeps their configured default (`opencode/mimo-v2.6-flash-free`).
+An unset or blank value uses the parent session's selected model and variant.
 The selected provider must be available and have any required credentials.
 Malformed model references fail service startup.
 

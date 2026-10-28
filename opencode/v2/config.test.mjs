@@ -13,7 +13,7 @@ test("native v2 config preserves builder features and isolated subagent models w
   assert.equal(config.experimental.todo, true);
   assert.equal(config.snapshots, false);
   for (const id of ["general", "explore"]) {
-    assert.equal(config.agents[id].model, original.agents[id].model);
+    assert.equal(config.agents[id].model, undefined);
     assert.ok(config.agents[id].permissions.some((rule) => rule.action === "threadsite_browser" && rule.effect === "deny"));
   }
   assert.ok(config.permissions.some((rule) => rule.action === "shell" && rule.resource === "git *" && rule.effect === "deny"));
@@ -40,7 +40,7 @@ test("v2 subagent model override applies to general and explore while preserving
   }
   for (const value of [undefined, "", "  "]) {
     const config = buildV2Config(base, { env: { OPENCODE_SUBAGENT_MODEL: value } });
-    for (const id of ["general", "explore"]) assert.equal(config.agents[id].model, original.agents[id].model);
+    for (const id of ["general", "explore"]) assert.equal(config.agents[id].model, undefined);
   }
   assert.deepEqual(base, original);
 });

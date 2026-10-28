@@ -174,8 +174,29 @@ test("detail sections without recorded information stay out of the dropdown and 
   assert.deepEqual(sections.map((section) => section.key), ["overview", "subagents"],
     "empty plan, files, usage, updates, questions and request pages are not offered");
   const subagents = sections.find((section) => section.key === "subagents")!;
-  assert.match(subagents.text, /\*\*explore\*\* · 3 steps · finished/);
+  assert.match(subagents.text, /\*\*explore\*\* · 3 steps · inactive/);
   assert.match(subagents.text, /Last action: 📚 Reading · site\/src\/arena\.ts/);
+});
+
+test("subagent details freeze finished durations and show reconciled per-session usage", () => {
+  const state = buildingSnapshot();
+  state.now = 120_000;
+  state.subagentHistory = [
+    { id: "a", agent: "general", status: "running", steps: 1, startedAt: 60_000, inputTokens: 1000, cacheTokens: 500, outputTokens: 200 },
+    { id: "b", agent: "explore", status: "finished", steps: 2, startedAt: 60_000, endedAt: 90_000, inputTokens: 2, outputTokens: 3 },
+  ];
+  const live = turnPanelSections(undefined, state, "turn").find((entry) => entry.key === "subagents")!.text;
+  assert.match(live, /active · elapsed 1m/);
+  assert.match(live, /Input \*\*1k\*\* · Output \*\*200\*\* · Cached \*\*500\*\*/);
+  assert.match(live, /inactive · elapsed 30s/);
+  state.now = 180_000;
+  const later = turnPanelSections(undefined, state, "turn").find((entry) => entry.key === "subagents")!.text;
+  assert.match(later, /active · elapsed 2m/);
+  assert.match(later, /inactive · elapsed 30s/);
+  const result = { usage: { inputTokens: 5000, outputTokens: 500, cacheTokens: 1000, contextTokens: 0, compactions: 0, steps: 3, cost: 0, models: [],
+    sessions: [{ sessionID: "b", inputTokens: 5000, outputTokens: 500, cacheTokens: 1000, cost: 0, steps: 2 }] } };
+  const final = turnPanelSections({ result } as any, state, "turn").find((entry) => entry.key === "subagents")!.text;
+  assert.match(final, /Input \*\*5k\*\* · Output \*\*500\*\* · Cached \*\*1k\*\*/);
 });
 
 test("finished turns only list pages the turn actually recorded", () => {
@@ -236,6 +257,23 @@ test("turn details show every viewer the models it used, but spend only to site 
     "admins see the provider routing, per-model spend and its catalog equivalent");
   assert.match(admin.text, /Root turn \(surplus\/deepseek-4\.1, surplus\/glm-5\.3\): in 900k · out 38k · 14 steps · \$1\.90/, "the split carries per-session models and spend for admins");
   assert.match(admin.text, /🤖 browser-qa \(opencode\/glm-5\.3-flash\): in 100k · out 2k · 1 step · \$0\.52/);
+
+  const previousHideCosts = process.env.HIDE_COSTS;
+  try {
+    process.env.HIDE_COSTS = "true";
+    const hidden = turnPanelSections({ result }, undefined, "turn", true).find((section) => section.key === "usage")!;
+    assert.doesNotMatch(hidden.text, /\$|\*\*Cost\*\*/);
+    assert.match(hidden.text, /surplus\/deepseek-4\.1/);
+    assert.match(hidden.text, /in 1M/);
+    const snapshot = buildingSnapshot();
+    snapshot.metrics = { currentModel: "test/model", inputTokens: 100, cost: 2 };
+    const live = turnPanelSections(undefined, snapshot, "turn", true).find((section) => section.key === "usage")!;
+    assert.doesNotMatch(live.text, /\$|Current cost/);
+    assert.match(live.text, /test\/model/);
+  } finally {
+    if (previousHideCosts === undefined) delete process.env.HIDE_COSTS;
+    else process.env.HIDE_COSTS = previousHideCosts;
+  }
 
   const unpriced = { ...result, usage: { ...result.usage, cost: 0, models: result.usage.models.map((entry) => ({ ...entry, cost: 0 })) } };
   const explained = turnPanelSections({ result: unpriced }, undefined, "turn", true).find((section) => section.key === "usage")!;

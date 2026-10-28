@@ -8,7 +8,7 @@ import { addCardHeader, cardEdit, cardMessage, renderStatusCard, type CardMessag
 import { renderDetailPanel, renderQueuePanel, requestModal, wipeModal, type PanelSection, type PanelScope } from "./card-panels.js";
 import type { RequestFormState, StoredTurnCard } from "./card-state.js";
 import { elapsed, hasUsageData, modelUsageLines, sessionUsageLines, progressDetailSections, subagentDetailText, subagentHistory, usageDetailText, type ProgressSnapshot } from "./progress-view.js";
-import { formatCost } from "./util.js";
+import { costsHidden, formatCost } from "./util.js";
 import { answerModal, customAnswerModal, readAnswerForm, renderQuestionReview } from "./question-ui.js";
 import type { QuestionService } from "./question-service.js";
 import type { Store } from "./store.js";
@@ -342,7 +342,7 @@ export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: Pr
     const split = children.length && result.usage.sessions
       ? `**Root & subagents**\n${sessionUsageLines(result.usage.sessions.filter((entry) => entry.root || entry.inputTokens || entry.outputTokens), admin)}`
       : "";
-    const spend = admin
+    const spend = admin && !costsHidden()
       ? result.usage.cost > 0
         ? `**Cost**\nTurn spend **${formatCost(result.usage.cost)}**${result.usage.catalogCost ? ` · **${formatCost(result.usage.catalogCost)}** at catalog rates` : ""}`
         : `**Cost**\n$0; the provider's pricing is not reported for these models`
@@ -358,9 +358,16 @@ export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: Pr
     if (position >= 0) sections[position] = finalUsage;
     else sections.push(finalUsage);
   }
-  const subagents = snapshot ? subagentHistory(snapshot) : result?.subagents ?? [];
-  if (subagents.length && !sections.some((entry) => entry.key === "subagents")) {
-    sections.push({ key: "subagents", label: "Subagents", text: subagentDetailText(subagents, snapshot?.now) });
+  const subagents = (snapshot ? subagentHistory(snapshot) : result?.subagents ?? []).map((sub) => {
+    const usage = result?.usage?.sessions?.find((entry) => entry.sessionID === sub.id);
+    return { ...sub, ...(result ? { status: "finished" as const } : {}),
+      ...(usage ? { inputTokens: usage.inputTokens, cacheTokens: usage.cacheTokens, outputTokens: usage.outputTokens } : {}) };
+  });
+  if (subagents.length) {
+    const section = { key: "subagents", label: "Subagents", text: subagentDetailText(subagents, snapshot?.now) };
+    const position = sections.findIndex((entry) => entry.key === "subagents");
+    if (position >= 0) sections[position] = section;
+    else sections.push(section);
   }
   const scoped = scope === "doc" ? sections.filter((entry) => entry.key === "description" || entry.key === "changelog") : sections;
   if (scoped.length) return scoped;

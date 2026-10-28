@@ -237,6 +237,29 @@ test("reconcile keeps the stream's catalog comparison when fuller history is unp
   assert.ok(Math.abs(reconciled.catalogCost! - observed.catalogCost!) < 1e-12);
 });
 
+test("hiding costs affects reports without changing recorded usage", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-hide-costs-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const log = new UsageLog(path.join(root, "usage.jsonl"));
+  const usage = usageFromMessages([message("a", Date.now())])!;
+  await log.record({ threadId: "thread", project: "Game", kind: "site", usage });
+  const previous = process.env.HIDE_COSTS;
+  try {
+    delete process.env.HIDE_COSTS;
+    assert.match(await log.renderReport(7), /\$0\.01/);
+    process.env.HIDE_COSTS = "true";
+    const report = await log.renderReport(7);
+    assert.doesNotMatch(report, /\$|Costs show/);
+    assert.match(report, /test\/model/);
+    assert.equal((await log.threadTotal("thread")).cost, 0.01);
+    process.env.HIDE_COSTS = "false";
+    assert.match(await log.renderReport(7), /\$0\.01/);
+  } finally {
+    if (previous === undefined) delete process.env.HIDE_COSTS;
+    else process.env.HIDE_COSTS = previous;
+  }
+});
+
 test("thread totals roll per-model catalog comparisons into lifetime figures", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-usage-catalog-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

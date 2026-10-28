@@ -32,6 +32,20 @@ function usage(overrides: Partial<UsageTotal> = {}): UsageTotal {
   } as UsageTotal;
 }
 
+test("hidden costs leave the lifetime token totals on the project card", () => {
+  const previous = process.env.HIDE_COSTS;
+  try {
+    process.env.HIDE_COSTS = "true";
+    const card = cardView(renderProjectCard({ project: record(), usage: usage() }));
+    assert.equal(card.fields.some((field) => field.name === "Lifetime cost"), false);
+    assert.match(card.fields.find((field) => field.name === "Lifetime usage")!.value, /82\.3k/);
+    assert.doesNotMatch(card.text, /\$/);
+  } finally {
+    if (previous === undefined) delete process.env.HIDE_COSTS;
+    else process.env.HIDE_COSTS = previous;
+  }
+});
+
 test("a live project links its site and repo and carries lifetime spend with model names", () => {
   const card = cardView(renderProjectCard({
     project: record({

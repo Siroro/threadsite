@@ -86,6 +86,16 @@ export default {
       // and shell commands — finishes before the parent continues.
       const backgroundAgents = new Set(["browser-qa", "asset-forge"]);
       if (event.tool === "shell" || (event.tool === "subagent" && !backgroundAgents.has(event.input.agent))) event.input.background = false;
+      if (event.tool === "subagent" && ["general", "explore"].includes(event.input.agent)) {
+        const selected = ctx.options?.subagentModel;
+        if (selected) event.input.model = selected;
+        else {
+          const session = await ctx.session.get({ sessionID: event.sessionID });
+          if (!session?.model) throw new Error("Subagent unavailable: the parent session has no selected model.");
+          const model = session.model;
+          event.input.model = `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
+        }
+      }
       if (event.tool === "subagent" && event.input.agent === "browser-qa") {
         const catalog = await models();
         const model = browserQaModel && catalog.data.find(configuredQaModel);

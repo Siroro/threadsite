@@ -134,6 +134,11 @@ export function formatTokensPerSecond(rate: number): string {
   return rate >= 10 ? String(Math.round(rate)) : rate.toFixed(1).replace(/\.0$/, "");
 }
 
+/** Hide monetary figures from Discord views while retaining accounting data. */
+export function costsHidden(): boolean {
+  return ["1", "true", "yes", "on"].includes((process.env.HIDE_COSTS ?? "").trim().toLowerCase());
+}
+
 /** USD cost with enough precision for sub-cent per-turn amounts, micro-dollar
  * marketplace charges and large totals alike. */
 export function formatCost(cost: number): string {

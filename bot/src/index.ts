@@ -50,7 +50,7 @@ import { UsageLog, type UsageTotal } from "./usage.js";
 import { startWebhookServer } from "./webhook.js";
 import { renderPlayCard, renderTechnicalCard, type TurnCardState } from "./turn-card.js";
 import { reconcileProjectThreads } from "./thread-cleanup.js";
-import { commitAuthorIdentity, errorText, formatCost, formatShortDuration, formatTokens, formatUtcClock, MAX_DISCORD_MESSAGE_CHARS, requestDisplayText, slugify, stripSummaryPreamble, truncate, withTimeout } from "./util.js";
+import { commitAuthorIdentity, costsHidden, errorText, formatCost, formatShortDuration, formatTokens, formatUtcClock, MAX_DISCORD_MESSAGE_CHARS, requestDisplayText, slugify, stripSummaryPreamble, truncate, withTimeout } from "./util.js";
 
 // Stray async failures must log instead of killing the process: an unhandled
 // rejection is process-fatal on Node 22 and would take every in-flight thread
@@ -1710,7 +1710,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     const breakdown = await usageLog.modelBreakdown();
     const header = `🎛️ Active model: \`${store.getModel() || "the model default"}\` · effort \`${store.getEffort() || "auto"}\``;
     const modelLines = breakdown.models.map((model) =>
-      `\`${model.model}\`: ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)} · ${formatCost(model.cost)}`,
+      `\`${model.model}\`: ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)}${costsHidden() ? "" : ` · ${formatCost(model.cost)}`}`,
     );
     const projectLines = breakdown.threads.map(({ threadId, project, turns, models }) => {
       const context = store.getProject(threadId)?.lastTurnUsage;
@@ -1993,6 +1993,7 @@ async function sendOutcomeFollowUp(
 // /site info usage block: the thread's lifetime ledgered usage. Token counts
 // are public; the spend figure stays admin-only, matching /site-admin usage.
 function threadUsageText(total: UsageTotal, includeCost: boolean): string {
+  includeCost = includeCost && !costsHidden();
   if (!total.turns) return "Usage: none recorded yet";
   const cached = total.cacheTokens > 0 ? ` (${formatTokens(total.cacheTokens)} cached)` : "";
   const cost = includeCost ? ` · ${formatCost(total.cost)}` : "";
@@ -2065,7 +2066,7 @@ async function projectDetailSections(project: ProjectRecord): Promise<PanelSecti
       usage.inputTokens || usage.outputTokens
         ? `Input **${formatTokens(usage.inputTokens)}** · Output **${formatTokens(usage.outputTokens)}** · Cached **${formatTokens(usage.cacheTokens)}**`
         : "Token counts unavailable",
-      usage.cost > 0 || usage.catalogCost > 0
+      !costsHidden() && (usage.cost > 0 || usage.catalogCost > 0)
         ? `Spend **${formatCost(usage.cost)}**${usage.catalogCost > 0 ? ` · **${formatCost(usage.catalogCost)}** at catalog rates` : ""}`
         : "",
       usage.lastTs ? `Last recorded ${usage.lastTs}` : "",

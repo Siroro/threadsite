@@ -658,9 +658,13 @@ test("the live card counts executing children and removes the section after all 
     send("ses_root", "session.step.started", { assistantMessageID: "msg_root", model: { providerID: "test", id: "builder" }, started: Date.now() });
     assert.equal(progress.readSnapshot().metrics?.currentModel, "test/builder");
     send("ses_child", "session.step.ended", { assistantMessageID: "msg_qa", tokens: { input: 1, output: 1, reasoning: 0 }, finish: "tool-calls" });
+    const childUsage = progress.readSnapshot().subagentHistory?.find((sub) => sub.id === "ses_child");
+    assert.equal(childUsage?.inputTokens, 1);
+    assert.equal(childUsage?.outputTokens, 1);
     assert.equal(progress.readSnapshot().activeSubagents, 2, "a model step ending is not session completion");
     send("ses_child", "session.execution.succeeded");
     assert.equal(progress.readSnapshot().activeSubagents, 1);
+    assert.ok(progress.readSnapshot().subagentHistory?.find((sub) => sub.id === "ses_child")?.endedAt);
     send("ses_nested", "session.execution.failed");
     assert.equal(progress.readSnapshot().activeSubagents, 0);
     assert.equal(cardView(renderProgressCard(progress.readSnapshot())).fields.length, fields);
@@ -708,7 +712,7 @@ test("the subagent lines name each child, its steps and its current tool", async
     assert.equal(roster[0].status, "finished");
     assert.equal(roster[0].steps, 2);
     const detail = progressDetailSections(progress.readSnapshot()).find((section) => section.key === "subagents");
-    assert.match(detail!.text, /\*\*explore\*\* · 2 steps · finished/);
+    assert.match(detail!.text, /\*\*explore\*\* · 2 steps · inactive/);
     assert.match(detail!.text, /Last action: 📚 Reading · site\/src\/arena\.ts/);
   } finally { await stop(); await progress.close(); }
 });

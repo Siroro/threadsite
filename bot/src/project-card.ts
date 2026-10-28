@@ -7,7 +7,7 @@ import type { ProjectDescription } from "./project-docs.js";
 import { projectKindLabel } from "./templates.js";
 import type { ContributionTally, ProjectRecord } from "./types.js";
 import type { UsageTotal } from "./usage.js";
-import { formatCost, formatTokens, truncate } from "./util.js";
+import { costsHidden, formatCost, formatTokens, truncate } from "./util.js";
 
 /**
  * State rendered into the pinned project card. The card is posted when a
@@ -210,7 +210,7 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
       ? `in ${formatTokens(usage.inputTokens)}${cached} · out ${formatTokens(usage.outputTokens)}`
       : "token counts unavailable";
     addCardField(card, "Lifetime usage", `${usage.turns} turn${usage.turns === 1 ? "" : "s"}${failed} · ${tokens}`);
-    const cost = lifetimeCostLines(usage);
+    const cost = costsHidden() ? undefined : lifetimeCostLines(usage);
     if (cost) addCardField(card, "Lifetime cost", cost);
   }
 

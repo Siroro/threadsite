@@ -5,7 +5,7 @@ import type { PanelSection } from "./card-panels.js";
 import type { QuestionRow } from "./question-ui.js";
 import type { QuestionStatus } from "./card-state.js";
 import { modelDisplayName, modelNameSummary, type ModelUsage, type SessionUsage } from "./opencode-shared.js";
-import { formatCost, formatTokens, formatTokensPerSecond } from "./util.js";
+import { costsHidden, formatCost, formatTokens, formatTokensPerSecond } from "./util.js";
 
 export type ProgressPhase = "queued" | "preparing" | "working" | "checking" | "publishing";
 /**
@@ -33,6 +33,10 @@ export interface ProgressSubagent {
   activityAt?: number;
   /** When the child session was first observed. */
   startedAt?: number;
+  endedAt?: number;
+  inputTokens?: number;
+  cacheTokens?: number;
+  outputTokens?: number;
 }
 export interface ProgressMetrics {
   currentModel?: string;
@@ -389,8 +393,8 @@ export function modelUsageLines(models: ModelUsage[], admin = false): string {
   return models
     .filter((entry) => entry.model && entry.model !== "unknown")
     .map((entry) => `\`${admin ? entry.model : modelDisplayName(entry.model)}\`: in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)}`
-      + (admin && entry.cost > 0 ? ` · ${formatCost(entry.cost)}` : "")
-      + (admin && entry.catalogCost ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : ""))
+      + (admin && !costsHidden() && entry.cost > 0 ? ` · ${formatCost(entry.cost)}` : "")
+      + (admin && !costsHidden() && entry.catalogCost ? ` · ${formatCost(entry.catalogCost)} at catalog rates` : ""))
     .join("\n");
 }
 
@@ -406,7 +410,7 @@ export function sessionUsageLines(sessions: SessionUsage[], admin = false): stri
       const models = entry.models ? modelNameSummary(entry.models, 2, admin) : "";
       return `${entry.root ? "Root turn" : `🤖 ${entry.agent ?? "subagent"}`}${models ? ` (${models})` : ""}`
         + `: in ${formatTokens(entry.inputTokens)} · out ${formatTokens(entry.outputTokens)} · ${entry.steps} step${entry.steps === 1 ? "" : "s"}`
-        + (admin && entry.cost > 0 ? ` · ${formatCost(entry.cost)}` : "");
+        + (admin && !costsHidden() && entry.cost > 0 ? ` · ${formatCost(entry.cost)}` : "");
     })
     .join("\n");
 }
@@ -442,11 +446,12 @@ export function subagentHistory(state: ProgressSnapshot): ProgressSubagent[] {
 /** Full subagent roster for the private details page: what ran, how far, and its last action. */
 export function subagentDetailText(subagents: ProgressSubagent[], now?: number): string {
   return subagents.map((sub) => {
-    const status = sub.status === "running" ? "running now" : sub.status === "finished" ? "finished" : "";
+    const status = sub.status === "running" ? "active" : sub.status === "finished" ? "inactive" : "";
     const facts = [`${sub.steps} step${sub.steps === 1 ? "" : "s"}`, status, subagentSpan(sub, now)].filter(Boolean).join(" · ");
     return [
       `🤖 **${plain(sub.agent, 40)}** · ${facts}`,
       sub.model ? `Model: ${plain(modelDisplayName(sub.model), 100)}` : "",
+      usageDetailText({ inputTokens: sub.inputTokens, cacheTokens: sub.cacheTokens, outputTokens: sub.outputTokens }),
       sub.activity ? `Last action: ${plain(sub.activity, 180)}` : "",
     ].filter(Boolean).join("\n");
   }).join("\n\n");
@@ -455,9 +460,9 @@ export function subagentDetailText(subagents: ProgressSubagent[], now?: number):
 /** How long a child ran, anchored to its first observed activity. */
 function subagentSpan(sub: ProgressSubagent, now?: number): string {
   if (!sub.startedAt || !Number.isFinite(sub.startedAt)) return "";
-  const end = sub.status === "running" ? now : sub.activityAt;
+  const end = sub.status === "running" ? now : sub.endedAt;
   if (!end || end <= sub.startedAt) return "";
-  return elapsed(end - sub.startedAt);
+  return `elapsed ${elapsed(end - sub.startedAt)}`;
 }
 
 /** A compact roster for the public technical card. */
@@ -510,7 +515,7 @@ const detailSections = {
     const text = [
       metrics?.currentModel ? `**Current model**
 ${plain(admin ? metrics.currentModel : modelDisplayName(metrics.currentModel), 120)}` : "",
-      admin && metrics && (metrics.cost || metrics.catalogCost) ? `**Current cost**
+      admin && !costsHidden() && metrics && (metrics.cost || metrics.catalogCost) ? `**Current cost**
 ${formatCost(metrics.cost || metrics.catalogCost!)}${metrics.cost ? "" : " at catalog rates"}` : "",
       hasUsageData(metrics) && metrics ? usageDetailText(metrics) : "",
       stats ?? "",

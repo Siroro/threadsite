@@ -5,7 +5,10 @@ export function buildV2Config(base, { pluginPath = "/opt/threadsite/v2", env = p
   if (subagentModel && !/^[^\s/]+\/\S+$/.test(subagentModel)) {
     throw new Error("OPENCODE_SUBAGENT_MODEL must use provider/model-id format.");
   }
-  for (const id of ["general", "explore"]) if (subagentModel) config.agents[id].model = subagentModel;
+  for (const id of ["general", "explore"]) {
+    if (subagentModel) config.agents[id].model = subagentModel;
+    else if (config.agents[id]) delete config.agents[id].model;
+  }
   const browserQaModel = env.OPENCODE_BROWSER_QA_MODEL?.trim();
   if (browserQaModel && !/^[^\s/]+\/\S+$/.test(browserQaModel)) {
     throw new Error("OPENCODE_BROWSER_QA_MODEL must use provider/model-id format.");
@@ -86,7 +89,7 @@ export function buildV2Config(base, { pluginPath = "/opt/threadsite/v2", env = p
   };
 
   config.websearch = websearchSelection(env);
-  config.plugins = [{ package: pluginPath, options: { lsp: lspSettings(config.lsp), browserQaModel,
+  config.plugins = [{ package: pluginPath, options: { lsp: lspSettings(config.lsp), browserQaModel, subagentModel,
     assetModel: assetAgent.model === false ? false : assetAgent.model,
     assetFallbacks: assetAgent.fallbacks,
     // The prompt hook re-applies this profile to asset-forge children so an

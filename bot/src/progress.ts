@@ -155,8 +155,12 @@ export class DiscordProgress {
       this.schedule();
     }
     if (update.subagentHistory !== undefined && update.subagentHistory !== this.subagentHistory) {
-      const history = update.subagentHistory;
       const previous = this.subagentHistory;
+      const history = update.subagentHistory.map((entry) => {
+        const saved = previous.find((item) => item.id === entry.id);
+        return { ...entry, startedAt: entry.startedAt ?? saved?.startedAt,
+          endedAt: entry.status === "running" ? undefined : entry.endedAt ?? saved?.endedAt };
+      });
       this.subagentHistory = history;
       // A new child or a completion changes what a details reader sees; a
       // child's routine tool label is covered by the active-subagent schedule.

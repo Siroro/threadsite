@@ -99,7 +99,7 @@ interface Watch {
   children: Set<string>;
   activeChildren: Set<string>;
   /** Per-child detail for the card's subagent lines; keyed by child session id. */
-  subagents: Map<string, { agent: string; steps: Set<string>; model?: string; startedAt?: number; activity?: { text: string; at: number } }>;
+  subagents: Map<string, { agent: string; steps: Set<string>; model?: string; startedAt?: number; endedAt?: number; activity?: { text: string; at: number } }>;
   callback?: ProgressCallback;
   backgroundChildren: Set<string>;
   lastProgress: number;
@@ -792,7 +792,7 @@ export class OpenCodeV2Harness {
               watch.children.add(child.id); changed = true;
               if (isBackgroundAgent(child.agent)) watch.backgroundChildren.add(child.id);
               const info = watch.subagents.get(child.id);
-              if (!info) watch.subagents.set(child.id, { agent: child.agent || "subagent", steps: new Set(), startedAt: Date.now() });
+              if (!info) watch.subagents.set(child.id, { agent: child.agent || "subagent", steps: new Set() });
               else if (child.agent) info.agent = child.agent;
               const childInfo = watch.subagents.get(child.id);
               if (childInfo && child.model) childInfo.model = `${child.model.providerID}/${child.model.id}`;
@@ -822,8 +822,7 @@ export class OpenCodeV2Harness {
     watch.controller.abort();
     await watch.budget?.stop();
     await watch.done;
-    watch.activeChildren.clear();
-    this.publishSubagents(watch);
+    this.restoreSubagents(watch, {});
     if (this.watches.get(sessionID) === watch) this.watches.delete(sessionID);
   }
 
@@ -838,8 +837,10 @@ export class OpenCodeV2Harness {
   private publishSubagents(watch: Watch): void {
     // The live card only needs running children; the durable roster keeps every
     // child so turn details can still name a finished subagent and what it did.
+    const usage = new Map(sessionUsageFromMessages([...watch.steps.values()], "", () => undefined).map((entry) => [entry.sessionID, entry]));
     const history = [...watch.subagents].map(([id, info]): ProgressSubagent => ({
-      id, agent: info.agent, model: info.model, steps: info.steps.size, startedAt: info.startedAt,
+      id, agent: info.agent, model: info.model, steps: info.steps.size, startedAt: info.startedAt, endedAt: info.endedAt,
+      ...(usage.has(id) ? { inputTokens: usage.get(id)!.inputTokens, cacheTokens: usage.get(id)!.cacheTokens, outputTokens: usage.get(id)!.outputTokens } : {}),
       status: watch.activeChildren.has(id) ? "running" : "finished",
       activity: info.activity?.text, activityAt: info.activity?.at,
     }));
@@ -848,7 +849,14 @@ export class OpenCodeV2Harness {
   }
 
   private restoreSubagents(watch: Watch, active: Record<string, unknown>): void {
-    watch.activeChildren = new Set([...watch.children].filter((id) => active[id]));
+    const next = new Set([...watch.children].filter((id) => active[id]));
+    for (const id of watch.children) {
+      const info = watch.subagents.get(id);
+      if (!info) continue;
+      if (next.has(id)) info.endedAt = undefined;
+      else if (watch.activeChildren.has(id)) info.endedAt = Date.now();
+    }
+    watch.activeChildren = next;
     this.publishSubagents(watch);
   }
 
@@ -1001,6 +1009,12 @@ export class OpenCodeV2Harness {
         || (event.type === "session.status" && event.data.status.type !== "idle")) watch.activeChildren.add(data.sessionID);
       if (["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)
         || (event.type === "session.status" && event.data.status.type === "idle")) watch.activeChildren.delete(data.sessionID);
+      const info = watch.subagents.get(data.sessionID);
+      if (info) {
+        if (watch.activeChildren.has(data.sessionID)) info.endedAt = undefined;
+        else if (["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.deleted"].includes(event.type)
+          || (event.type === "session.status" && event.data.status.type === "idle")) info.endedAt ??= "created" in event ? event.created : Date.now();
+      }
       this.publishSubagents(watch);
     }
     switch (event.type) {
@@ -1054,10 +1068,8 @@ export class OpenCodeV2Harness {
         }
         if (child) {
           const info = watch.subagents.get(data.sessionID);
-          if (info && !info.steps.has(step.assistantMessageID)) {
-            info.steps.add(step.assistantMessageID);
-            this.publishSubagents(watch);
-          }
+          if (info) info.steps.add(step.assistantMessageID);
+          this.publishSubagents(watch);
         } else watch.budget?.observe(step.assistantMessageID);
         watch.liveSamples = [];
         this.metrics(watch, callback);

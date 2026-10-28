@@ -3,7 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { log } from "./logger.js";
 import { usageFromMessages, type SessionMessage, type ModelUsage, type TurnUsage } from "./opencode.js";
-import { formatCost, formatTokens, truncate } from "./util.js";
+import { costsHidden, formatCost, formatTokens, truncate } from "./util.js";
 
 /**
  * Append-only token/cost ledger behind `/site-admin usage`: one JSONL line per
@@ -121,7 +121,7 @@ function addToTotal(
 function figuresLine(total: UsageTotal): string {
 
   const cached = total.cacheTokens > 0 ? ` (${formatTokens(total.cacheTokens)} cached)` : "";
-  return `in ${formatTokens(total.inputTokens)}${cached} · out ${formatTokens(total.outputTokens)} · ${formatCost(total.cost)}`;
+  return `in ${formatTokens(total.inputTokens)}${cached} · out ${formatTokens(total.outputTokens)}${costsHidden() ? "" : ` · ${formatCost(total.cost)}`}`;
 }
 
 export class UsageLog {
@@ -316,9 +316,9 @@ export class UsageLog {
     }
 
     const modelLines = [...total.models.values()]
-      .sort((a, b) => b.cost - a.cost || (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens))
+      .sort((a, b) => (costsHidden() ? 0 : b.cost - a.cost) || (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens))
       .map((model) =>
-        `\`${model.model}\`: ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)} · ${formatCost(model.cost)}`
+        `\`${model.model}\`: ${model.turns} turn${model.turns === 1 ? "" : "s"} · in ${formatTokens(model.inputTokens)} · out ${formatTokens(model.outputTokens)}${costsHidden() ? "" : ` · ${formatCost(model.cost)}`}`
       );
     const shownModels = modelLines.slice(0, 8);
     const hiddenModels = modelLines.length - shownModels.length;
@@ -326,7 +326,7 @@ export class UsageLog {
     const footer =
       `**${days}-day total**: ${total.turns} turn${total.turns === 1 ? "" : "s"}${total.failedTurns > 0 ? ` (${total.failedTurns} failed)` : ""} · ${figuresLine(total)}\n\n`
       + `**Models**\n${shownModels.join("\n")}${hiddenModels > 0 ? `\n+${hiddenModels} more model${hiddenModels === 1 ? "" : "s"}` : ""}`
-      + (total.cost === 0 && (total.inputTokens || total.outputTokens) > 0
+      + (!costsHidden() && total.cost === 0 && (total.inputTokens || total.outputTokens) > 0
         ? "\n-# Costs show $0 because the provider's pricing is not reported for these models."
         : "");
 

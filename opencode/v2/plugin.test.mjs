@@ -250,6 +250,23 @@ function assetDelegationFixture(options, sessionModel, catalog) {
   }).then((cleanup) => ({ hooks, cleanup }));
 }
 
+test("general and explore use the parent model unless an operator pins one", async () => {
+  for (const agent of ["general", "explore"]) {
+    for (const [options, expected] of [[{}, "test/builder#high"], [{ subagentModel: "test/override" }, "test/override"]]) {
+      const { hooks, cleanup } = await assetDelegationFixture(options, { providerID: "test", id: "builder", variant: "high" });
+      try {
+        const input = { agent, model: "test/other" };
+        await hooks["execute.before"]({ tool: "subagent", sessionID: "ses_root", input });
+        assert.equal(input.model, expected);
+      } finally { await cleanup(); }
+    }
+  }
+  const { hooks, cleanup } = await assetDelegationFixture({}, undefined);
+  try {
+    await assert.rejects(hooks["execute.before"]({ tool: "subagent", sessionID: "ses_root", input: { agent: "general" } }), /no selected model/);
+  } finally { await cleanup(); }
+});
+
 test("asset-forge delegation defaults to the selected model, then falls back; the parent cannot choose", async () => {
   // Selected model is image-capable: it is pinned with its variant.
   {
