@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { log } from "./logger.js";
 import { UsageDatabase } from "./usage-db.js";
-import { usageFromMessages, type SessionMessage, type ModelUsage, type TurnUsage } from "./opencode.js";
+import { usageFromMessages, type SessionMessage, type ModelUsage, type TurnUsage } from "./opencode-shared.js";
 import { costsHidden, formatCost, formatTokens, truncate } from "./util.js";
 
 /**

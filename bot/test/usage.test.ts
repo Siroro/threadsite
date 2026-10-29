@@ -4,13 +4,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { SessionMessage, TurnUsage } from "../src/opencode.js";
+import type { SessionMessage, TurnUsage } from "../src/opencode-shared.js";
 
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { UsageLog } = await import("../src/usage.js");
 const { UsageDatabase } = await import("../src/usage-db.js");
-const { annotateCatalogCosts, annotateMarketCosts, usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage, reportedCost } = await import("../src/opencode.js");
+const { annotateCatalogCosts, annotateMarketCosts, usageFromMessages, sessionUsageFromMessages, addUsage, reconcileUsage, reportedCost } = await import("../src/opencode-shared.js");
 const { formatCost } = await import("../src/util.js");
 
 function message(id: string, created: number, input = 100, output = 20): SessionMessage {

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { mergeUpdateBatch } from "./update-batch.js";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -26,7 +27,7 @@ import { cardId } from "./card-actions.js";
 import { CardInteractions, CardUserError } from "./card-interactions.js";
 import type { RequestFormState, StoredTurnCard } from "./card-state.js";
 import { QuestionService } from "./question-service.js";
-import { renderQueuePanel, type PanelSection } from "./card-panels.js";
+import { renderQueuePanel } from "./card-panels.js";
 import { readProjectCardDocument } from "./project-docs.js";
 import { AdminReporter } from "./admin-reporter.js";
 import { commandJson } from "./commands.js";
@@ -36,8 +37,9 @@ import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
 import { getLogFile, log, logError, recentIncidents, recordIncident, serializeError } from "./logger.js";
 import { multiplayerRelayStatus } from "./multiplayer.js";
-import { OpenCodeHarness, formatTurnUsage, type PromptImage, type QuotaBlock } from "./opencode.js";
-import { lifetimeModelLines, renderProjectCard, type ProjectCardMessage, type ProjectCardState } from "./project-card.js";
+import { OpenCodeV2Harness as OpenCodeHarness } from "./opencode-v2.js";
+import { formatTurnUsage, type PromptImage, type QuotaBlock } from "./opencode-shared.js";
+import { ProjectCardService } from "./project-card-service.js";
 import { DiscordProgress, type ProgressCallback } from "./progress.js";
 import { ProjectService, TurnStoppedError, type MutationResult, type StopTurnOutcome } from "./project.js";
 import { recoverPublishRoot } from "./publish.js";
@@ -50,7 +52,7 @@ import { UsageLog, type UsageTotal } from "./usage.js";
 import { startWebhookServer } from "./webhook.js";
 import { renderPlayCard, renderTechnicalCard, type TurnCardState } from "./turn-card.js";
 import { reconcileProjectThreads } from "./thread-cleanup.js";
-import { commitAuthorIdentity, costsHidden, errorText, formatCost, formatShortDuration, formatTokens, formatUtcClock, MAX_DISCORD_MESSAGE_CHARS, requestDisplayText, slugify, stripSummaryPreamble, truncate, withTimeout } from "./util.js";
+import { commitAuthorIdentity, costsHidden, errorText, formatCost, formatShortDuration, formatTokens, formatUtcClock, MAX_DISCORD_MESSAGE_CHARS, slugify, stripSummaryPreamble, truncate, withTimeout } from "./util.js";
 
 // Stray async failures must log instead of killing the process: an unhandled
 // rejection is process-fatal on Node 22 and would take every in-flight thread
@@ -84,7 +86,7 @@ const projects = new ProjectService(store, opencode, forgejo, usageLog, async (p
   const channel = await client.channels.fetch(project.threadId, { force: true });
   if (!channel?.isThread()) throw new Error("The project Discord thread is unavailable.");
   await applyAiThreadTitle(channel, title);
-  await refreshProjectCard(project.threadId);
+  await projectCards.refresh(project.threadId);
 });
 
 await registerCommands();
@@ -97,6 +99,7 @@ const client = new Client({
   ],
 });
 const adminReporter = new AdminReporter(client);
+const projectCards = new ProjectCardService(store, client, usageLog, projects);
 
 // The HTTP listener always runs (it serves /healthz for the container
 // healthcheck); WEBHOOK_ENABLED decides whether push events are acted on and
@@ -188,14 +191,14 @@ const collaboration = new CollaborationService({
     const channel = await client.channels.fetch(threadId).catch(() => undefined);
     if (channel?.isTextBased()) await channel.messages.fetch(id).then((message) => setStatusMessage(message, "🚫 The thread owner rejected this request.")).catch(() => undefined);
   },
-  changed: (threadId) => { void refreshProjectCard(threadId); },
+  changed: (threadId) => { void projectCards.refresh(threadId); },
 });
 const cardInteractions = new CardInteractions({
   collaboration,
   adminUser: (userId) => config.adminUserIds.has(userId),
   store, questions: questionService,
   liveSnapshot: (resource) => liveProgress.get(resource)?.readSnapshot(),
-  projectSections: projectDetailSections,
+  projectSections: (project) => projectCards.details(project),
   queue: (threadId) => {
     const requests = store.getProject(threadId)?.pendingQueue ?? [];
     return { requests: requests.filter((entry) => !inFlightQueuedRequests.has(entry.statusMessageId)), preparing: requests.filter((entry) => inFlightQueuedRequests.has(entry.statusMessageId)).length };
@@ -532,7 +535,7 @@ async function recoverInterruptedTurns(): Promise<void> {
           );
         } finally {
           void recheckExternalPush(project.threadId);
-          void refreshProjectCard(project.threadId);
+          void projectCards.refresh(project.threadId);
         }
       }).catch((error) => logError("project.queue_failed", error, { threadId: project.threadId }));
     }
@@ -849,6 +852,7 @@ client.on(Events.MessageCreate, async (message) => {
 async function enqueueUserRequest(threadId: string, status: Message, prompt: string, images: PromptImage[], author: CommitAuthor | undefined, requesterId: string, displayPrompt?: string, files?: readonly UploadedFile[], authorization?: ProjectActor | true): Promise<void> {
   try {
     if (authorization !== true) requireCurrentContributor(threadId, authorization ?? { userId: requesterId, admin: config.adminUserIds.has(requesterId), canSend: true });
+    if (prompt.length > config.maxPromptChars) throw new CollaborationError("This request exceeds the prompt limit. Please send a shorter request.");
     await store.appendQueuedRequest(threadId, { prompt, displayPrompt, author, requesterId, statusMessageId: status.id,
       images: images.length ? images : undefined, files: files?.length ? [...files] : undefined });
   } catch (error) {
@@ -1038,49 +1042,6 @@ function takeUpdateBatch(threadId: string): QueuedUpdate[] | undefined {
   return entries;
 }
 
-/**
- * Merge a batch into one prompt (first message plus a numbered list of the
- * rest, so the commit subject still reads as the user's own request). Entries
- * that no longer fit under the prompt cap overflow back into the accumulator
- * and become their own follow-up turn.
- */
-function mergeUpdateBatch(batch: QueuedUpdate[]): { prompt: string; display: string | undefined; images: PromptImage[]; overflow: QueuedUpdate[] } {
-  const head = batch[0].prompt;
-  const images = [...batch[0].images];
-  const rest: string[] = [];
-  // The card repeats the user's own words only when this turn merges several
-  // messages: a single message is still visible in the thread. The merged
-  // prompt's harness preamble is never shown — that text is for the model.
-  const requests = [head];
-  let used = head.length;
-  for (let index = 1; index < batch.length; index += 1) {
-    const entry = batch[index];
-    if (used + entry.prompt.length + 8 > config.maxPromptChars - 160) {
-      return {
-        prompt: composeMergedPrompt(head, rest),
-        display: mergedDisplay(requests),
-        images,
-        overflow: batch.slice(index),
-      };
-    }
-    rest.push(`${rest.length + 2}. ${entry.prompt}`);
-    requests.push(entry.prompt);
-    images.push(...entry.images);
-    used += entry.prompt.length + 8;
-  }
-  return { prompt: composeMergedPrompt(head, rest), display: mergedDisplay(requests), images, overflow: [] };
-}
-
-/** Display text for a merged batch, or undefined when only one message ran. */
-function mergedDisplay(requests: readonly string[]): string | undefined {
-  return requests.length > 1 ? requestDisplayText(requests) : undefined;
-}
-
-function composeMergedPrompt(head: string, rest: string[]): string {
-  if (!rest.length) return head;
-  return `${head}\n\nWhile updates were queued, the user sent ${rest.length} more message${rest.length === 1 ? "" : "s"}: apply all of them in this same pass:\n${rest.join("\n")}`;
-}
-
 async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpdate[], instructionOverride?: string): Promise<void> {
   const first = batch[0];
   const project = store.getProject(threadId);
@@ -1091,19 +1052,19 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
   const progress = first.progress ?? new DiscordProgress(first.status, `${isGame ? "🎮 Updating" : "🛠️ Updating"} ${project.displayName}`, first.startedAt);
   if (!first.progress) registerQuestionButtons(first.status, progress);
   const callback = withQuestionPings(progress.callback, threadId, first.requesterId);
-  const merged = mergeUpdateBatch(batch);
-  const consumed = batch.slice(0, batch.length - merged.overflow.length);
-  for (const entry of consumed.slice(1)) {
-    await entry.progress?.close();
-    unregisterQuestionButtons(entry.status.id);
-    await setStatusMessage(entry.status, "🔗 Merged into the update above").catch(() => undefined);
-  }
-  if (merged.overflow.length) {
-    const pending = pendingUpdates.get(threadId);
-    if (pending) pending.entries.unshift(...merged.overflow);
-  }
-  progress.enableStopButton();
   try {
+    const merged = mergeUpdateBatch<PromptImage, QueuedUpdate>(batch, config.maxPromptChars);
+    const consumed = batch.slice(0, batch.length - merged.overflow.length);
+    for (const entry of consumed.slice(1)) {
+      await entry.progress?.close();
+      unregisterQuestionButtons(entry.status.id);
+      await setStatusMessage(entry.status, "🔗 Merged into the update above").catch(() => undefined);
+    }
+    if (merged.overflow.length) {
+      const pending = pendingUpdates.get(threadId);
+      if (pending) pending.entries.unshift(...merged.overflow);
+    }
+    progress.enableStopButton();
     const result = await projects.mutate(threadId, merged.prompt, false, callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id), merged.display ?? first.displayPrompt, first.requesterId, instructionOverride);
     await progress.close();
     if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
@@ -1147,7 +1108,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
     );
   } finally {
     void recheckExternalPush(threadId);
-    void refreshProjectCard(threadId);
+    void projectCards.refresh(threadId);
   }
 }
 
@@ -1243,7 +1204,7 @@ async function startProjectThread(
     try {
       // The pinned project card goes up FIRST — before the turn's status
       // message — so the thread opens with its front page on top.
-      const card = await postProjectCard(thread, previewProjectRecord(
+      const card = await projectCards.post(thread, previewProjectRecord(
         thread.id, interaction.guildId, thread.parentId || interaction.channelId, requestedName || thread.name, prompt,
         options.projectKind, options.multiplayerMode, interaction.user.id,
       ));
@@ -1333,7 +1294,7 @@ async function startProjectThread(
       creatingThreads.delete(thread.id);
       abandonedThreads.delete(thread.id);
       void recheckExternalPush(thread.id);
-      if (store.getProject(thread.id)) void refreshProjectCard(thread.id);
+      if (store.getProject(thread.id)) void projectCards.refresh(thread.id);
     }
   }).catch((error) => logError("project.queue_failed", error, { threadId: thread.id }));
 }
@@ -1427,7 +1388,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       log("warn", "project.thread_rename_failed", { threadId: project.threadId, error: serializeError(error) });
     });
     await interaction.editReply(`Renamed to **${renamed.displayName}**.\n[open site](${projects.siteLink(renamed)}) · [source](${projects.repoLink(renamed)})\nOld site links redirect to the new address.${titleUpdated ? "" : "\nThe thread title could not be updated yet; it will be retried."}`);
-    void refreshProjectCard(project.threadId);
+    void projectCards.refresh(project.threadId);
     return;
   }
 
@@ -1462,7 +1423,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       }
     } finally {
       await progress?.close();
-      void refreshProjectCard(project.threadId);
+      void projectCards.refresh(project.threadId);
     }
     return;
   }
@@ -1532,7 +1493,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       );
       await interaction.editReply(`The switch failed: reference \`${incident.id}\`.`);
     } finally {
-      void refreshProjectCard(project.threadId);
+      void projectCards.refresh(project.threadId);
     }
     return;
   }
@@ -1548,7 +1509,10 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     requireWipeAccess(project, actor);
     const raw = interaction.options.getString("scope", true);
     const singleplayer = (project.multiplayerMode ?? "arena") === "singleplayer";
-    const scope: RelayResetScope = { world: raw !== "scores" && !singleplayer, scores: raw !== "world" };
+    if (singleplayer && raw === "world") throw new Error("This singleplayer game has no shared world to clear.");
+    const scope: RelayResetScope = raw === "scores" || singleplayer
+      ? { world: false, scores: true }
+      : { world: true, scores: raw !== "world" };
     // Deliberately not queued: it never touches the workspace, and clearing bad
     // relay state should not wait behind the very turn it exists to fix.
     await interaction.editReply(await wipeRelayState(project, interaction.user.id, scope));
@@ -1596,7 +1560,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       "Anything waiting in this thread's queue was released, and the next message starts a fresh conversation: " +
       "the site, git history, and project notes are all kept.",
     );
-    void refreshProjectCard(project.threadId);
+    void projectCards.refresh(project.threadId);
     return;
   }
 
@@ -1611,7 +1575,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       `${body}${result.conversationReverted ? "" : "\n⚠️ The agent conversation revert failed (see the bot log); files and git were still reverted."}\n` +
       `[open site](${projects.siteLink(updated)}) · [source](${projects.repoLink(updated)})`,
     );
-    void refreshProjectCard(project.threadId);
+    void projectCards.refresh(project.threadId);
     return;
   }
 
@@ -1716,7 +1680,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
     await store.setModel(model);
     log("info", "admin.model_changed", { userId: interaction.user.id, model: model || "default" });
     await interaction.editReply(`Future turns will use \`${model || "the model default"}\`. Existing thread sessions switch on their next message too.`);
-    for (const project of store.listProjects()) void refreshProjectCard(project.threadId);
+    for (const project of store.listProjects()) void projectCards.refresh(project.threadId);
     return;
   }
 
@@ -1757,7 +1721,7 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
         ? "Future turns will use the model's default reasoning effort."
         : `Future turns will request \`${level}\` reasoning effort. Availability depends on the model and provider.`,
     );
-    for (const project of store.listProjects()) void refreshProjectCard(project.threadId);
+    for (const project of store.listProjects()) void projectCards.refresh(project.threadId);
     return;
   }
 
@@ -1794,7 +1758,9 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
 
   if (sub === "wipe") {
     const raw = interaction.options.getString("scope", true);
-    const scope: RelayResetScope = { world: raw !== "scores", scores: raw !== "world" };
+    const scope: RelayResetScope = raw === "scores"
+      ? { world: false, scores: true }
+      : { world: true, scores: raw !== "world" };
     const games = await resetAllRelayGames(scope);
     log("info", "admin.relay_wiped", { userId: interaction.user.id, games, ...scope });
     const cleared = [scope.world ? "every shared arena world, open room and leaderboard score" : "", scope.scores && !scope.world ? "every leaderboard score" : ""].filter(Boolean);
@@ -1990,117 +1956,6 @@ function threadUsageText(total: UsageTotal, includeCost: boolean): string {
     + `Models:\n${models.join("\n")}${more > 0 ? `\n+${more} more model${more === 1 ? "" : "s"}` : ""}`;
 }
 
-// --- The pinned project card -------------------------------------------------
-// Posted when a project thread is created, pinned to it, and edited in place
-// after every outcome: the durable front page (original request, model,
-// settings, lifetime usage, links), unlike the per-turn tracking card.
-
-async function projectCardState(project: ProjectRecord): Promise<ProjectCardState> {
-  const last = project.lastCardMessageId ? store.getCardState<StoredTurnCard>(project.threadId, project.lastCardMessageId)?.result : undefined;
-  const channel = project.previewMessageId ? await client.channels.fetch(project.threadId).catch(() => undefined) : undefined;
-  const preview = project.previewMessageId && channel?.isTextBased() ? await channel.messages.fetch(project.previewMessageId).catch(() => undefined) : undefined;
-  return {
-    project,
-    usage: await usageLog.threadTotal(project.threadId),
-    siteUrl: project.status !== "creating" ? projects.siteLink(project) : undefined,
-    repoUrl: project.repoName ? projects.repoLink(project) : undefined,
-    description: last?.description,
-    thumbnailUrl: preview?.attachments.find((attachment) => attachment.contentType?.startsWith("image/"))?.url,
-  };
-}
-
-async function projectDetailSections(project: ProjectRecord): Promise<PanelSection[]> {
-  const state = await projectCardState(project);
-  const last = project.lastCardMessageId ? store.getCardState<StoredTurnCard>(project.threadId, project.lastCardMessageId) : undefined;
-  const [description, changelog] = await Promise.all([
-    last?.documents?.description ?? readProjectCardDocument(project.workspacePath, "description"),
-    last?.documents?.changelog ?? readProjectCardDocument(project.workspacePath, "changelog"),
-  ]);
-  const usage = state.usage;
-  const stamp = (iso: string | undefined): string | undefined => {
-    const epoch = iso ? Date.parse(iso) : NaN;
-    return Number.isFinite(epoch) ? `<t:${Math.floor(epoch / 1000)}:f>` : undefined;
-  };
-  const status = project.status === "creating"
-    ? "🛠️ Building the first version"
-    : project.status === "error"
-      ? "⚠️ The last turn failed: the published version is unchanged"
-      : "✅ Live";
-  return [
-    { key: "overview", label: "Project overview", text: [
-      `**${project.displayName}**`,
-      projectKindLabel(project.projectKind),
-      project.projectKind !== "site" ? multiplayerModeLabel(project.multiplayerMode ?? "arena") : "",
-      status,
-      state.siteUrl ? `[Live site](${state.siteUrl})` : "",
-      state.repoUrl ? `[Source](${state.repoUrl})` : "",
-      `Created ${stamp(project.createdAt) ?? "not recorded"}`,
-      project.lastTurnAt ? `Last turn ${stamp(project.lastTurnAt)}` : "",
-      project.lastCommit ? `Last commit \`${project.lastCommit}\`` : "",
-    ].filter(Boolean).join("\n") },
-    { key: "request", label: "Original request", text: project.initialPrompt
-      ? project.initialPrompt.trim().split("\n").map((line) => `> ${line}`).join("\n")
-      : "The original request was not recorded." },
-    { key: "description", label: "Description & how to play", text: description || "The agent has not written a description yet." },
-    { key: "changelog", label: "Changelog", text: changelog || "No changelog entry has been written yet." },
-    { key: "usage", label: "Lifetime usage", text: usage ? [
-      `**${usage.turns} turn${usage.turns === 1 ? "" : "s"}**${usage.failedTurns ? ` · ${usage.failedTurns} failed` : ""}`,
-      usage.inputTokens || usage.outputTokens
-        ? `Input **${formatTokens(usage.inputTokens)}** · Output **${formatTokens(usage.outputTokens)}** · Cached **${formatTokens(usage.cacheTokens)}**`
-        : "Token counts unavailable",
-      !costsHidden() && (usage.cost > 0 || usage.catalogCost > 0)
-        ? `Spend **${formatCost(usage.cost)}**${usage.catalogCost > 0 ? ` · **${formatCost(usage.catalogCost)}** at catalog rates` : ""}`
-        : "",
-      ...lifetimeModelLines(usage, !costsHidden()),
-      usage.lastTs ? `Last recorded ${usage.lastTs}` : "",
-    ].filter(Boolean).join("\n") : "Provider usage counts unavailable." },
-    { key: "qa", label: "Browser findings", text: project.browserQaFindings ? `Advisory · checked ${stamp(project.browserQaFindings.checkedAt) ?? project.browserQaFindings.checkedAt}\n\n${project.browserQaFindings.findings.map((finding) => `- ${finding}`).join("\n") || "No findings"}` : "No browser findings have been recorded." },
-  ];
-}
-
-/** Any channel a project card can be posted into (project threads, in practice). */
-interface CardChannel {
-  send(options: ProjectCardMessage): Promise<Message>;
-}
-
-/** Send the card, pin it, and link it to the project record when one exists. */
-async function postProjectCard(thread: CardChannel, project: ProjectRecord): Promise<Message | undefined> {
-  const message = await thread.send({ ...renderProjectCard(await projectCardState(project)) }).catch((error: unknown) => {
-    log("warn", "discord.project_card_post_failed", { threadId: project.threadId, error: serializeError(error) });
-    return undefined;
-  });
-  if (!message) return undefined;
-  // Pinning needs Manage Messages; an unpinned card still works, it just does
-  // not sit at the top of the thread.
-  await message.pin().catch((error) => log("warn", "discord.project_card_pin_failed", { threadId: project.threadId, error: serializeError(error) }));
-  if (store.getProject(project.threadId)) {
-    await store.patchProject(project.threadId, { infoMessageId: message.id }).catch(() => undefined);
-  }
-  log("info", "discord.project_card_posted", { threadId: project.threadId, messageId: message.id });
-  return message;
-}
-
-/** Edit the pinned card in place; (re)post and pin when missing or deleted. */
-async function refreshProjectCard(threadId: string): Promise<void> {
-  try {
-    const project = store.getProject(threadId);
-    if (!project) return;
-    const channel = await client.channels.fetch(threadId).catch(() => undefined);
-    const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
-    if (!thread) return;
-    if (project.infoMessageId) {
-      const card = await thread.messages.fetch(project.infoMessageId).catch(() => undefined);
-      if (card && card.author.id === client.user?.id) {
-        await card.edit(cardEdit(renderProjectCard(await projectCardState(project))));
-        return;
-      }
-    }
-    await postProjectCard(thread, project);
-  } catch (error) {
-    log("warn", "discord.project_card_refresh_failed", { threadId, error: serializeError(error) });
-  }
-}
-
 /** A stand-in record so the card can render before createProject persists the real one. */
 function previewProjectRecord(
   threadId: string, guildId: string, parentChannelId: string, displayName: string, prompt: string,
@@ -2120,7 +1975,7 @@ async function reconcileProjectCards(): Promise<void> {
   for (const project of store.listProjects()) {
     if (project.pendingDeletion) continue;
     await projects.reconcileProjectUsage(project.threadId);
-    await refreshProjectCard(project.threadId);
+    await projectCards.refresh(project.threadId);
   }
 }
 

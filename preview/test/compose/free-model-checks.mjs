@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { OpenCodeHarness } from "./dist/opencode.js";
+import { OpenCodeV2Harness as OpenCodeHarness } from "./dist/opencode-v2.js";
 
 const hash = (content) => createHash("sha256").update(content).digest("hex");
 const report = JSON.parse(await fs.readFile("/artifacts/report.json", "utf8"));

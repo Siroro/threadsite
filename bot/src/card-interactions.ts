@@ -12,6 +12,7 @@ import { costsHidden, formatCost } from "./util.js";
 import { answerModal, customAnswerModal, readAnswerForm, renderQuestionReview } from "./question-ui.js";
 import type { QuestionService } from "./question-service.js";
 import type { Store } from "./store.js";
+import type { RelayResetScope } from "./relay-cleanup.js";
 import type { ProjectRecord, QueuedRequest } from "./types.js";
 import { authorizeCard, CollaborationError, interactionActor, requireWipeAccess, type ProjectActor } from "./collaboration.js";
 import type { CollaborationService } from "./collaboration-service.js";
@@ -28,7 +29,7 @@ export interface CardInteractionServices {
   submit(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, attachments: Attachment[]): Promise<string>;
   stop(threadId: string, statusMessageId: string): Promise<string>;
   /** Clear the game's shared relay state; resolves to the reply text. */
-  wipe(threadId: string, userId: string, scope: { world: boolean; scores: boolean }): Promise<string>;
+  wipe(threadId: string, userId: string, scope: RelayResetScope): Promise<string>;
   rollback(threadId: string, expectedVersion: string, actor: ProjectActor): Promise<void>;
   busy(threadId: string): Promise<boolean>;
   error(error: unknown, interaction: CardInteraction): void;
@@ -192,7 +193,8 @@ export class CardInteractions {
         const world = singleplayer ? false : interaction.fields.getCheckbox("world");
         const scores = interaction.fields.getCheckbox("scores");
         if (!world && !scores) throw new CardUserError("Choose at least one thing to clear.");
-        await this.respond(interaction, renderStatusCard(await this.services.wipe(threadId, interaction.user.id, { world, scores })));
+        const scope: RelayResetScope = world ? { world: true, scores } : { world: false, scores: true };
+        await this.respond(interaction, renderStatusCard(await this.services.wipe(threadId, interaction.user.id, scope)));
         return;
       }
       if (!interaction.isButton()) throw new CardUserError("Open the wipe form from the project card.");

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { ChannelType, REST, Routes } from "discord.js";
 import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
-import { OpenCodeHarness } from "./opencode.js";
+import { OpenCodeV2Harness as OpenCodeHarness } from "./opencode-v2.js";
 import { publishIndex } from "./publish.js";
 import { Store } from "./store.js";
 import type { ProjectRecord } from "./types.js";

@@ -395,7 +395,7 @@ bash ./scripts/bootstrap-forgejo.sh --no-restart-bot
 if (( ! SKIP_BOT )); then
   say "Checking the selected model (no inference request)"
   docker compose run --rm --no-deps -T --entrypoint node bot --input-type=module - <<'CHECK_MODEL'
-import { OpenCodeHarness } from './dist/opencode.js';
+import { OpenCodeV2Harness as OpenCodeHarness } from './dist/opencode-v2.js';
 const available = await new OpenCodeHarness().listSelectableModels();
 if (!available.includes(process.env.OPENCODE_DEFAULT_MODEL)) {
   console.error('The selected model is unavailable. Check its ID and provider credentials, then rerun the installer.');

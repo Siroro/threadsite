@@ -67,10 +67,13 @@ jobs:
         env:
           GAMESERVER_STATE_DIR: ${{ runner.temp }}/threadsite-recovery
         run: |
+          node --test test/admin-api.test.mjs
           npm run test:storage
           npm run test:restart
           npm run test:durable
           npm run test:stall
           npm run test:delete
+          npm run test:rename
+          npm run test:reset
           npm run test:persistence
           npm run test:leaderboards

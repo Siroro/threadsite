@@ -6,7 +6,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { test } from "node:test";
 import { testRootSetup, trackStore } from "./fixtures/root.js";
-import type { OpenCodeHarness, PromptResult } from "../src/opencode.js";
+import type { OpenCodeV2Harness as OpenCodeHarness } from "../src/opencode-v2.js";
+import type { PromptResult } from "../src/opencode-shared.js";
 import type { ProjectRecord } from "../src/types.js";
 
 const root = testRootSetup("reliability");

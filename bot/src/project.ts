@@ -6,11 +6,13 @@ import { ForgejoClient } from "./forgejo.js";
 import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, turnRevertTarget, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
 import { ensureMultiplayerFiles, multiplayerContext, removeMultiplayerFiles } from "./multiplayer.js";
 import { ensureLeaderboardFiles } from "./leaderboards.js";
-import { OpenCodeHarness, addUsage, errorUsage, isTerminalAssistant, reconcileUsage, usageFromMessages, type PromptImage, type PromptResult, type TurnUsage } from "./opencode.js";
+import { OpenCodeV2Harness as OpenCodeHarness } from "./opencode-v2.js";
+import { addUsage, errorUsage, isTerminalAssistant, reconcileUsage, usageFromMessages, type PromptImage, type PromptResult, type TurnUsage } from "./opencode-shared.js";
 import { moveGalleryPreview, publishIndex, publishSite, publishSiteRedirects, saveGalleryPreview, siteUrl, validateSite } from "./publish.js";
 import { buildSite, GENERATED_GITIGNORE } from "./build.js";
 import { enginePackages, ensureEnginePackages } from "./engines.js";
 import { ensureSkillFiles, skillNames } from "./skills.js";
+import { ThreadQueue } from "./thread-queue.js";
 import { Store, pendingTurnMatches } from "./store.js";
 import { initialProjectInstruction, multiplayerModeLabel, multiplayerSwapInstruction, mutationInstruction, namingFixInstruction, projectAgents, projectKindLabel, recoveryInstruction, renameNoteInstruction, repairInstruction } from "./templates.js";
 import { starterHtml, starterSource } from "./starter.js";
@@ -69,14 +71,10 @@ export interface RevertResult {
 }
 
 /** What a Stop request actually managed to do (see ProjectService.stopTurn). */
-export interface StopTurnOutcome {
-  /** An agent turn was running and the abort landed. */
-  stopped: boolean;
-  /** The turn is past the agent phase (build/commit/publish) and finishes on its own. */
-  delivering: boolean;
-  /** The agent service did not answer, so the wedged queue was freed instead. */
-  queueFreed: boolean;
-}
+export type StopTurnOutcome =
+  | { stopped: boolean; delivering: false; queueFreed: false }
+  | { stopped: false; delivering: true; queueFreed: false }
+  | { stopped: false; delivering: false; queueFreed: true };
 
 /**
  * A turn stopped mid-flight at the user's request (the Stop button): the agent
@@ -86,24 +84,6 @@ export interface StopTurnOutcome {
  */
 export class TurnStoppedError extends Error {}
 
-/**
- * Per-thread queue state. `tail` orders newly enqueued work; `waiters` holds
- * the not-yet-started items' gates, oldest first, so a hard reset can sever
- * the chain when the item holding the queue can never settle on its own
- * (agent HTTP timeouts are disabled by design, so a turn wedged on a dead
- * agent connection would otherwise block the thread forever).
- */
-interface QueueState {
-  tail: Promise<unknown>;
-  waiters: Array<{ resolve: () => void }>;
-}
-
-function unreleased(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((res) => { resolve = res; });
-  return { promise, resolve };
-}
-
 /** Real-progress view over a reattached agent stream (see attachTracker). */
 interface TurnActivity {
   progress: ProgressCallback;
@@ -112,7 +92,7 @@ interface TurnActivity {
 }
 
 export class ProjectService {
-  private readonly queues = new Map<string, QueueState>();
+  private readonly queue = new ThreadQueue();
   /**
    * Threads whose running turn the user asked to stop via the Stop button,
    * mapped to the pending-turn marker id the stop targets. A mark set for one
@@ -294,59 +274,17 @@ export class ProjectService {
 
   enqueue<T>(threadId: string, work: () => Promise<T>): Promise<T> {
     if (this.store.getProject(threadId)?.pendingDeletion) return Promise.reject(new TurnStoppedError("Project deletion is pending."));
-    let state = this.queues.get(threadId);
-    if (!state) {
-      state = { tail: Promise.resolve(), waiters: [] };
-      this.queues.set(threadId, state);
-    }
-    const previous = state.tail;
-    const gate = unreleased();
-    state.waiters.push(gate);
-    const next = (async () => {
-      // Wait for the previous item — unless a hard reset severs the chain,
-      // which means the item holding the queue was abandoned and may never
-      // settle; waiting on it would wedge the thread forever.
-      await Promise.race([previous.catch(() => undefined), gate.promise]);
-      const index = state.waiters.indexOf(gate);
-      if (index >= 0) state.waiters.splice(index, 1);
+    return this.queue.enqueue(threadId, async () => {
       if (this.store.getProject(threadId)?.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
       this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 0) + 1);
       try { return await work(); }
       finally { this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 1) - 1); }
-    })();
-    const tracked = next.finally(() => {
-      if (this.queues.get(threadId) === state && state.tail === tracked) this.queues.delete(threadId);
     });
-    // The map only tracks ordering. Without a handler here, a failed work item
-    // would surface its rejection through this promise as an unhandled
-    // rejection, which is process-fatal on Node 22 and kills every in-flight
-    // thread turn instead of failing just this one.
-    tracked.catch(() => undefined);
-    state.tail = tracked;
-    return next;
   }
 
-  /**
-   * Detach the thread's queue from an item that may never settle, used by the
-   * hard resets. Only the FIRST waiter is released: the item directly behind
-   * the abandoned queue holder proceeds (concurrently with the abandoned
-   * item, which reports its own failure in the thread), and every waiter
-   * behind it stays serialized through its predecessor — releasing them all
-   * at once would run N concurrent mutate pipelines on one worktree. When
-   * nothing is waiting, the tail itself is the abandoned item, so the chain
-   * is rebased: work enqueued after the sever must not wait on a promise
-   * that may never settle.
-   */
   private severQueue(threadId: string): void {
-    const state = this.queues.get(threadId);
-    if (!state) return;
-    const head = state.waiters.shift();
-    if (head) {
-      head.resolve();
-    } else {
-      state.tail = Promise.resolve();
-    }
-    log("warn", "project.queue_severed", { threadId, releasedWaiter: Boolean(head) });
+    const result = this.queue.sever(threadId);
+    if (result) log("warn", "project.queue_severed", { threadId, ...result });
   }
 
   async createProject(input: {

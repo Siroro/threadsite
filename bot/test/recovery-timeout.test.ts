@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import type { ProgressCallback } from "../src/progress.js";
-import type { PromptResult } from "../src/opencode.js";
+import type { PromptResult } from "../src/opencode-shared.js";
 
 process.env.DISCORD_BOT_TOKEN = "test";
 process.env.DISCORD_APPLICATION_ID = "test";

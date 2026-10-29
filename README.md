@@ -88,6 +88,7 @@ Published projects appear in a shared gallery. Search, filter by game type, save
 - [Gallery](docs/gallery.md): browsing and sharing projects
 - [Maintenance](docs/maintenance.md): updates, cleanup and tests
 - [Architecture](docs/architecture.md) and [OpenCode](docs/opencode-v2.md): how it works
+- [Physics comparison](docs/physics-comparison.md): Rapier versus Box3D features, local browser measurements and demo
 
 For local development, use Node 24 and run the [checks](docs/maintenance.md#local-regression-checks) in the component you're changing. GitHub Actions runs the main checks on pushes and pull requests.
 

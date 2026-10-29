@@ -13,7 +13,7 @@ import {
 import { addCardDivider, addCardField, addCardHeader, addCardTitle, addCardLinks, cardLink, cardMessage, cardTextLength, CARD_TEXT_LIMIT, KIND_COLORS, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
 import { subagentSummaryLines } from "./progress-view.js";
-import { turnModelSummary, type TurnUsage } from "./opencode.js";
+import { turnModelSummary, type TurnUsage } from "./opencode-shared.js";
 import type { ProgressSubagent } from "./progress.js";
 import type { ProjectKind } from "./types.js";
 import { formatShortDuration, formatTokens, stripSummaryPreamble, truncate } from "./util.js";

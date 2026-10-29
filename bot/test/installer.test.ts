@@ -26,7 +26,7 @@ async function fixture(t: TestContext) {
   await fs.mkdir(path.join(root, "bin"));
   await fs.mkdir(path.join(root, "model-check/dist"), { recursive: true });
   await fs.writeFile(path.join(root, "model-check/package.json"), '{"type":"module"}');
-  await fs.writeFile(path.join(root, "model-check/dist/opencode.js"), `export class OpenCodeHarness {
+  await fs.writeFile(path.join(root, "model-check/dist/opencode-v2.js"), `export class OpenCodeV2Harness {
     async listSelectableModels() { return JSON.parse(process.env.TEST_MODELS ?? '["opencode/hy3-free","openai/coder","surplus/coder"]'); }
   }`);
   await fs.writeFile(path.join(root, "scripts/bootstrap-forgejo.sh"), `#!/usr/bin/env bash

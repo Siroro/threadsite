@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate as nextTick } from "node:timers/promises";
 import { TurnStepBudget, finishUpInstruction } from "../src/step-budget.js";
-import type { SessionMessage } from "../src/opencode.js";
+import type { SessionMessage } from "../src/opencode-shared.js";
 
 const since = Date.now();
 function savedSteps(count: number): SessionMessage[] {

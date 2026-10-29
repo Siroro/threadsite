@@ -1,4 +1,4 @@
-import type { SessionMessage } from "./opencode.js";
+import type { SessionMessage } from "./opencode-shared.js";
 
 export const FORCE_FINISH_MARKER = "[THREADSITE_FORCE_FINISH]";
 

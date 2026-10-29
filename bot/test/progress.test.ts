@@ -10,7 +10,7 @@ import { buildingSnapshot } from "./fixtures/progress.js";
 process.env.DISCORD_BOT_TOKEN ||= "test";
 process.env.DISCORD_APPLICATION_ID ||= "test";
 const { DiscordProgress } = await import("../src/progress.js");
-const { OpenCodeHarness } = await import("../src/opencode.js");
+const { OpenCodeV2Harness: OpenCodeHarness } = await import("../src/opencode-v2.js");
 
 test("long streamed text and adversarial markdown stay within Discord V2 text and component budgets", () => {
   const state = buildingSnapshot();

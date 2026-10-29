@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { OpenCode } from "@opencode/client";
-import { OpenCodeHarness } from "./dist/opencode.js";
+import { OpenCodeV2Harness as OpenCodeHarness } from "./dist/opencode-v2.js";
 import { ProjectService } from "./dist/project.js";
 import { ForgejoClient } from "./dist/forgejo.js";
 import { Store } from "./dist/store.js";

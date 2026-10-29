@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { OpenCodeHarness } from "./dist/opencode.js";
+import { OpenCodeV2Harness as OpenCodeHarness } from "./dist/opencode-v2.js";
 import { buildSite } from "./dist/build.js";
 import { validateSite, publishSite } from "./dist/publish.js";
 import { ensureEnginePackages } from "./dist/engines.js";

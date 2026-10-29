@@ -2,7 +2,7 @@ import { ButtonBuilder, ButtonStyle, ContainerBuilder, TextDisplayBuilder, Thumb
 import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, KIND_COLORS, safeCardUrl, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
 import { COLLABORATION_LABELS, WIPE_POLICY_LABELS } from "./collaboration-service.js";
-import { modelDisplayName } from "./opencode.js";
+import { modelDisplayName } from "./opencode-shared.js";
 import type { ProjectDescription } from "./project-docs.js";
 import { projectKindLabel } from "./templates.js";
 import type { ContributionTally, ProjectRecord } from "./types.js";

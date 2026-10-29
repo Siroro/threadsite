@@ -3,7 +3,7 @@ import path from "node:path";
 import { config } from "./config.js";
 import { MULTIPLAYER_PROTOCOL_VERSION, projectAgents } from "./templates.js";
 import type { MultiplayerContext, MultiplayerMode, ProjectKind } from "./types.js";
-import { safeChild } from "./util.js";
+import { removeWorkspaceInput, writeWorkspaceInput } from "./workspace-inputs.js";
 
 const PROTOCOL_VERSION = MULTIPLAYER_PROTOCOL_VERSION;
 
@@ -46,16 +46,13 @@ export async function ensureMultiplayerFiles(
   multiplayer: MultiplayerContext,
   kind: ProjectKind,
 ): Promise<boolean> {
-  const netDir = safeChild(workspacePath, "site", "net");
-  await fs.mkdir(netDir, { recursive: true });
-
   let changed = false;
   const client = await fs.readFile(path.join(ASSETS_DIR, NET_CLIENT_STEM), "utf8");
-  changed = (await writeIfChanged(safeChild(netDir, NET_CLIENT_STEM), `${client.trimEnd()}\n`)) || changed;
+  changed = (await writeWorkspaceInput(workspacePath, ["site", "net", NET_CLIENT_STEM], `${client.trimEnd()}\n`)) || changed;
   const clientTypes = await fs.readFile(path.join(ASSETS_DIR, NET_CLIENT_TYPES_STEM), "utf8");
-  changed = (await writeIfChanged(safeChild(netDir, NET_CLIENT_TYPES_STEM), `${clientTypes.trimEnd()}\n`)) || changed;
+  changed = (await writeWorkspaceInput(workspacePath, ["site", "net", NET_CLIENT_TYPES_STEM], `${clientTypes.trimEnd()}\n`)) || changed;
   for (const name of ["threadsite-player.js", "threadsite-player.d.ts"]) {
-    changed = (await writeIfChanged(safeChild(netDir, name), await fs.readFile(path.join(ASSETS_DIR, name), "utf8"))) || changed;
+    changed = (await writeWorkspaceInput(workspacePath, ["site", "net", name], await fs.readFile(path.join(ASSETS_DIR, name), "utf8"))) || changed;
   }
 
   const netConfig = [
@@ -71,7 +68,7 @@ export async function ensureMultiplayerFiles(
     `});`,
     "",
   ].join("\n");
-  changed = (await writeIfChanged(safeChild(netDir, "net-config.js"), netConfig)) || changed;
+  changed = (await writeWorkspaceInput(workspacePath, ["site", "net", "net-config.js"], netConfig)) || changed;
   const netConfigTypes = [
     "// Type declarations for the harness-owned net-config.js.",
     "export declare const NET_CONFIG: {",
@@ -81,27 +78,20 @@ export async function ensureMultiplayerFiles(
     "};",
     "",
   ].join("\n");
-  changed = (await writeIfChanged(safeChild(netDir, "net-config.d.ts"), netConfigTypes)) || changed;
+  changed = (await writeWorkspaceInput(workspacePath, ["site", "net", "net-config.d.ts"], netConfigTypes)) || changed;
 
-  changed = (await writeIfChanged(
-    safeChild(workspacePath, "AGENTS.md"),
+  changed = (await writeWorkspaceInput(
+    workspacePath, ["AGENTS.md"],
     await projectAgents(kind, multiplayer),
   )) || changed;
   // The on-demand companion to AGENTS.md's multiplayer section: budgets,
   // gotchas, and a symptom->fix table. Written to the project root so agents
   // can read it when debugging sync without paying its tokens every turn.
-  changed = (await writeIfChanged(
-    safeChild(workspacePath, "NETWORKING.md"),
+  changed = (await writeWorkspaceInput(
+    workspacePath, ["NETWORKING.md"],
     `${(await fs.readFile(NETWORKING_GUIDE, "utf8")).trimEnd()}\n`,
   )) || changed;
   return changed;
-}
-
-async function writeIfChanged(file: string, content: string): Promise<boolean> {
-  const current = await fs.readFile(file, "utf8").catch(() => undefined);
-  if (current === content) return false;
-  await fs.writeFile(file, content, "utf8");
-  return true;
 }
 
 /**
@@ -113,17 +103,9 @@ async function writeIfChanged(file: string, content: string): Promise<boolean> {
  * Returns true when anything had to be removed.
  */
 export async function removeMultiplayerFiles(workspacePath: string): Promise<boolean> {
-  let changed = false;
-  const netDir = safeChild(workspacePath, "site", "net");
-  if (await fs.lstat(netDir).then(() => true, () => false)) {
-    await fs.rm(netDir, { recursive: true, force: true }).catch(() => undefined);
-    changed = true;
-  }
-  if (await fs.lstat(safeChild(workspacePath, "NETWORKING.md")).then(() => true, () => false)) {
-    await fs.rm(safeChild(workspacePath, "NETWORKING.md"), { force: true }).catch(() => undefined);
-    changed = true;
-  }
-  return changed;
+  const netRemoved = await removeWorkspaceInput(workspacePath, ["site", "net"], true);
+  const guideRemoved = await removeWorkspaceInput(workspacePath, ["NETWORKING.md"]);
+  return netRemoved || guideRemoved;
 }
 
 /** One-line health summary of the shared relay for /site-admin status. */

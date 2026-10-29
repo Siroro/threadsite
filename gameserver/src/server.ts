@@ -2,12 +2,13 @@
 // The relay owns rooms, routing, host authority, epochs, timestamps and caches.
 // It deliberately does not interpret or simulate game state.
 
-import fs from "node:fs/promises";
 import http from "node:http";
 import crypto from "node:crypto";
 import path from "node:path";
 import zlib from "node:zlib";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
+import { createAdminApi } from "./admin-api.js";
+import { GameConflict, type ResetScope } from "./game-lifecycle.js";
 import { PlayerStore, StorageError } from "./player-store.js";
 import { WorldStore, relayDatabaseFile } from "./world-store.js";
 
@@ -551,6 +552,7 @@ function closeGamePeers(gameId: string, code: number, reason: string): void {
 /** Delete a project's relay presence: world, saves, scores and live rooms. */
 async function deleteGame(rawGameId: string): Promise<void> {
   const gameId = canonicalGame(rawGameId);
+  if (gameId !== rawGameId) throw new GameConflict("Cannot delete through an old name.");
   deletedGames.add(gameId);
   for (const key of leaderboardLimits.keys()) if (key.startsWith(`${gameId}:`)) leaderboardLimits.delete(key);
   closeGamePeers(gameId, 4004, "project deleted");
@@ -602,6 +604,11 @@ function moveLiveRooms(from: string, to: string): void {
  */
 async function renameGame(rawFrom: string, to: string): Promise<void> {
   const from = canonicalGame(rawFrom);
+  if (deletedGames.has(from)) throw new GameConflict("Cannot rename a deleted game.");
+  if (from === to) return;
+  const redirect = gameAliases.get(to);
+  if (redirect !== undefined && redirect !== from) throw new GameConflict("Name belongs to another game.");
+  if (worldStore.has(to) && !deletedGames.has(to)) throw new GameConflict("Name owns a live world.");
   worldStore.rename(from, to);
   playerStore.deleteGame(from);
   playerStore.deleteGame(to);
@@ -624,21 +631,6 @@ async function renameGame(rawFrom: string, to: string): Promise<void> {
   moveLiveRooms(from, to);
 }
 
-/** What a reset removes. Scores and worlds are asked for independently. */
-type ResetScope = { world: boolean; scores: boolean };
-
-/**
- * Parse `?scope=` for the admin reset endpoints. `all` (the default) clears
- * both, `world` and `scores` clear one, and anything unrecognized is a bad
- * request rather than a silent full wipe.
- */
-function parseResetScope(params: URLSearchParams): ResetScope | undefined {
-  const scope = (params.get("scope") ?? "all").trim().toLowerCase();
-  if (scope === "all") return { world: true, scores: true };
-  if (scope === "world" || scope === "scores") return { world: scope === "world", scores: scope === "scores" };
-  return undefined;
-}
-
 /**
  * Clear a game's shared state without deleting the project. Leaderboard scores
  * and the arena world are independent: scores drop their boards, while a world
@@ -648,6 +640,7 @@ function parseResetScope(params: URLSearchParams): ResetScope | undefined {
  */
 async function resetGame(rawGameId: string, scope: ResetScope = { world: true, scores: true }): Promise<void> {
   const gameId = canonicalGame(rawGameId);
+  if (gameId !== rawGameId) throw new GameConflict("Cannot reset through an old name.");
   if (scope.scores) {
     for (const key of leaderboardLimits.keys()) if (key.startsWith(`${gameId}:`)) leaderboardLimits.delete(key);
     playerStore.resetScores(gameId);
@@ -678,75 +671,20 @@ async function resetAllGames(scope: ResetScope): Promise<number> {
   return ids.size;
 }
 
-const server = http.createServer((req, res) => {
-  let pathname = "/";
-  try { pathname = new URL(req.url ?? "/", "http://internal").pathname; } catch { /* invalid -> 404 */ }
-  const deletion = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})$/.exec(pathname);
-  const reset = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})\/reset$/.exec(pathname);
-  const rename = /^\/admin\/games\/([a-z0-9][a-z0-9-]{2,63})\/rename$/.exec(pathname);
-  const adminDelete = Boolean(deletion && req.method === "DELETE");
-  const adminReset = Boolean(reset && req.method === "POST");
-  const adminRename = Boolean(rename && req.method === "POST");
-  const wipeAll = req.method === "POST" && pathname === "/admin/reset";
-  if (adminDelete || adminReset || adminRename || wipeAll || (req.method === "GET" && pathname === "/admin/games")) {
-    void (async () => {
-      const token = (await fs.readFile(ADMIN_TOKEN_FILE, "utf8")).trim();
-      const actual = Buffer.from(String(req.headers.authorization ?? ""));
-      const expected = Buffer.from(`Bearer ${token}`);
-      if (!token || actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
-        res.writeHead(403); res.end(); return;
-      }
-      if (req.method === "GET") {
-        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-        res.end(JSON.stringify([...knownGames()].sort()));
-        return;
-      }
-      // Old names of renamed projects redirect for players, but never for
-      // admins: wiping through a stale name must not touch the live game.
-      if ((adminDelete || adminReset) && canonicalGame((adminDelete ? deletion : reset)![1]!) !== (adminDelete ? deletion : reset)![1]!) {
-        res.writeHead(409); res.end(); return;
-      }
-      let searchParams: URLSearchParams | undefined;
-      if (adminReset || adminRename || wipeAll) {
-        try { searchParams = new URL(req.url ?? "/", "http://internal").searchParams; } catch { /* invalid query: 400 below */ }
-      }
-      let scope: ResetScope | undefined;
-      if (adminReset || wipeAll) {
-        scope = searchParams ? parseResetScope(searchParams) : undefined;
-        if (!scope) { res.writeHead(400); res.end(); return; }
-      }
-      if (adminRename) {
-        const from = rename![1]!;
-        const to = (searchParams?.get("to") ?? "").trim();
-        const canonical = canonicalGame(from);
-        // Idempotent: renaming to the current name (or re-delivering a rename
-        // that already landed) succeeds without touching anything.
-        if (!GAME_ID_PATTERN.test(to)) { res.writeHead(400); res.end(); return; }
-        if (deletedGames.has(canonical)) { res.writeHead(409); res.end(); return; }
-        if (canonical === to) { res.writeHead(204); res.end(); return; }
-        const redirect = gameAliases.get(to);
-        if (redirect !== undefined && redirect !== canonical) { res.writeHead(409); res.end(); return; } // live name of another game
-        if (worldStore.has(to) && !deletedGames.has(to)) { res.writeHead(409); res.end(); return; } // live world owns the name
-        await renameGame(from, to);
-        res.writeHead(204); res.end();
-        return;
-      }
-      if (wipeAll) {
-        const games = await resetAllGames(scope!);
-        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-        res.end(JSON.stringify({ ok: true, games }));
-        return;
-      }
-      if (adminDelete) await deleteGame(deletion![1]!);
-      else await resetGame(reset![1]!, scope);
-      res.writeHead(204); res.end();
-    })().catch((error) => {
-      console.warn(`[threadsite-gameserver] admin_api failed: ${String((error as Error).message)}`);
-      if (!res.headersSent) res.writeHead(503);
-      res.end();
-    });
-    return;
-  }
+const adminApi = createAdminApi({
+  tokenFile: ADMIN_TOKEN_FILE,
+  games: knownGames,
+  delete: deleteGame,
+  reset: resetGame,
+  resetAll: resetAllGames,
+  rename: renameGame,
+});
+const server = http.createServer(async (req, res) => {
+  let url: URL;
+  try { url = new URL(req.url ?? "/", "http://internal"); }
+  catch { res.writeHead(404); res.end(); return; }
+  if (await adminApi(req, res, url)) return;
+  const pathname = url.pathname;
   if (req.method === "GET" && (pathname === "/health" || pathname === "/stats")) {
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(JSON.stringify(statsPayload()));

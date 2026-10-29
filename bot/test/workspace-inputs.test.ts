@@ -1,0 +1,36 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { test } from "node:test";
+import { removeWorkspaceInput, writeWorkspaceInput } from "../src/workspace-inputs.js";
+
+test("workspace inputs create parents, avoid unchanged writes and reject unsafe paths", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threadsite-inputs-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  const workspace = path.join(root, "workspace");
+  const outside = path.join(root, "outside");
+  await fs.mkdir(outside);
+  assert.equal(await writeWorkspaceInput(workspace, ["site", "net", "client.js"], "first"), true);
+  const target = path.join(workspace, "site", "net", "client.js");
+  const before = await fs.stat(target);
+  assert.equal(await writeWorkspaceInput(workspace, ["site", "net", "client.js"], "first"), false);
+  assert.equal((await fs.stat(target)).mtimeMs, before.mtimeMs);
+  assert.equal(await writeWorkspaceInput(workspace, ["site", "net", "client.js"], "second"), true);
+  await assert.rejects(writeWorkspaceInput(workspace, ["..", "outside", "escape"], "bad"));
+  await fs.symlink(outside, path.join(workspace, "linked"), process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(writeWorkspaceInput(workspace, ["linked", "escape"], "bad"));
+  await assert.rejects(removeWorkspaceInput(workspace, ["linked", "escape"], true));
+  assert.deepEqual(await fs.readdir(outside), []);
+  const shared = path.join(outside, "shared");
+  await fs.writeFile(shared, "keep");
+  await fs.link(shared, path.join(workspace, "shared"));
+  await assert.rejects(writeWorkspaceInput(workspace, ["shared"], "bad"));
+  assert.equal(await fs.readFile(shared, "utf8"), "keep");
+  await assert.rejects(writeWorkspaceInput(workspace, ["site"], "bad"));
+  await assert.rejects(removeWorkspaceInput(workspace, [], true));
+  assert.equal(await removeWorkspaceInput(workspace, ["linked"], true), true);
+  assert.equal(await fs.readFile(shared, "utf8"), "keep");
+  assert.equal(await removeWorkspaceInput(workspace, ["site", "net"], true), true);
+  assert.equal(await removeWorkspaceInput(workspace, ["site", "net"], true), false);
+});
