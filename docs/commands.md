@@ -59,6 +59,7 @@ Game threads carry one more owner setting in the same panel: **who can reset the
 ## Project thread commands
 
 - `/site info` shows the live URL, source repository, model, and last error.
+- `/site model model:provider/model-id` (site admins only) overrides the model for every future turn in this thread: prompts, validation repairs, restart recovery, compaction fallbacks and image gating all follow it. Use `default` to follow the bot-wide model again. The session switches on its next message, and a model that does not advertise image input loses browser tools and image attachments in that thread.
 - `/site collaboration` shows editing mode, contributor selection and pending approval requests; only the owner and administrators can change settings or decide approvals.
 - `/site republish` republishes the current static tree without spending model tokens.
 - `/site sync` pulls commits that were pushed to the repository from outside the bot (e.g. with a repo push key) into the workspace, rebases any local-only commits on top, rebuilds, and republishes from the result. It is the manual recovery path when a push from Discord was rejected because the remote had moved ahead.
@@ -132,7 +133,7 @@ Rename commits are metadata, not an additional agent turn: `/site revert` uses t
 
 ### `/site compact` and `/site revert`
 
-- `/site compact` requests on-demand compaction for the thread's session using the model the session last used (or the globally configured model). Useful after very long threads even with automatic compaction. The published site is untouched.
+- `/site compact` requests on-demand compaction for the thread's session using the model the session last used (or the thread's model override, or the globally configured model). Useful after very long threads even with automatic compaction. The published site is untouched.
 - `/site revert` undoes the prior turn end-to-end: the agent conversation is reverted to before the last request (the model will not remember the undone turn), the workspace is reset to the previous commit, the commit is force-pushed away from the public Forgejo repository, and the previously published site is restored. If the last turn had failed before publishing, only its conversation is removed and git is left alone. Reverting below the initial creation commit is refused.
 
 ## Repo push keys (`/site pushkey`)
@@ -152,7 +153,7 @@ Forgejo has no per-repository HTTP tokens, so a ThreadSite push key is a dedicat
 
 `/site-admin status` shows the active model, agent-service health, web/asset status, multiplayer relay health, private-error recipient count, and log path.
 
-`/site-admin model model:provider/model-id` changes the model for all future turns, including existing site threads. Use `default` to go back to the platform's default selection.
+`/site-admin model model:provider/model-id` changes the model for all future turns, including existing site threads. Use `default` to go back to the platform's default selection. For a single thread, `/site model` (run inside that thread, same permission gate) sets a per-thread override that takes precedence over the bot-wide model.
 
 `/site-admin failover` shows the backup models used when a turn hits a provider quota block or a persistent upstream error. `/site-admin failover models:provider/a,provider/b` sets the list (quota-blocked or repeatedly failing turns retry the same prompt once on the first entry that is not the model just attempted); `default` follows `OPENCODE_FAILOVER_MODELS`, and `none` disables failover entirely.
 

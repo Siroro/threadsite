@@ -236,7 +236,7 @@ client.once(Events.ClientReady, (ready) => {
     user: ready.user.tag,
     version: botVersion ?? "unknown",
     projects: store.listProjects().length,
-    model: store.getModel() || "the model default",
+    model: store.getModel() || "the model default (per-thread overrides may differ)",
     multiplayer: config.multiplayerEnabled ? config.gameserverPublicUrl : "disabled",
     webhook: pushWebhooksLive
       ? `listening on :${config.webhookPort}`
@@ -528,7 +528,7 @@ async function recoverInterruptedTurns(): Promise<void> {
             guildId: project.guildId,
             threadId: project.threadId,
             project,
-            model: store.getModel() || "the model default",
+            model: threadModelLabel(project),
           });
           await deliver(
             `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Could not recover the interrupted turn from the last restart · reference \`${incident.id}\`. Partial edits were kept: send a message to try again.`,
@@ -1099,7 +1099,7 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
       guildId: project.guildId,
       threadId,
       project,
-      model: store.getModel() || "the model default",
+      model: threadModelLabel(project),
     });
     await setStatusMessage(
       first.status,
@@ -1273,7 +1273,7 @@ async function startProjectThread(
         threadId: thread.id,
         requesterId: interaction.user.id,
         project,
-        model: store.getModel() || "the model default",
+        model: threadModelLabel(project),
       });
       const retry = project
         ? "Reply in this thread to retry after the configuration/provider issue is fixed."
@@ -1326,6 +1326,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         "**/site start**: create a site (works in any channel)\n" +
         "**/makegam**: create a 2D or 3D game thread\n" +
         "**/site info**: links, project type, model, usage\n" +
+        "**/site model**: override this thread's model (site admin)\n" +
         "**/site collaboration**: choose contributors and review requests (owner/admin)\n" +
         "**/site rename name:…**: change the project name and links (old site links redirect)\n" +
         "**/site sync**: adopt commits pushed to the repo from outside the bot\n" +
@@ -1353,6 +1354,23 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     await interaction.reply({ ...collaboration.panel(project, actor), flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
     return;
   }
+  // The model override is admin-only for now, so the contributor gate below
+  // must not pre-empt an admin who is not a contributor.
+  if (sub === "model") {
+    if (!actor.admin) throw new Error("Only site admins (Manage Server, or a DISCORD_ADMIN_USER_IDS entry) can change this thread's model.");
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const raw = interaction.options.getString("model", true).trim();
+    const model = /^default$/i.test(raw) ? undefined : raw;
+    if (model && !/^[^/\s]+\/.+/.test(model)) throw new Error("Model must use provider/model-id format.");
+    await store.patchProject(project.threadId, { modelOverride: model });
+    log("info", "site.model_override_changed", { threadId: project.threadId, userId: interaction.user.id, model: model || "default" });
+    const vision = model ? await projects.modelAcceptsImages(project.threadId).catch(() => undefined) : true;
+    await interaction.editReply(
+      `Future turns in this thread will use \`${model || "the model default"}\`; the session switches on its next message.` +
+      (vision === false ? "\n⚠️ This model doesn't advertise image input: browser tools and image attachments are unavailable on it." : ""),
+    );
+    return;
+  }
   // Wipe access is its own collaboration axis; the generic contributor gate
   // must not pre-empt the owner's toggle.
   if (!["info", "queue", "wipe"].includes(sub)) requireContributor(project, actor);
@@ -1369,7 +1387,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         `**${project.displayName}**: ${project.status}\n` +
         `[open site](${projects.siteLink(project)}) · [source](${projects.repoLink(project)})\n` +
         `Type: ${projectKindLabel(project.projectKind)}${project.multiplayerMode && project.projectKind !== "site" ? ` (${project.multiplayerMode === "arena" ? "arena multiplayer" : project.multiplayerMode === "rooms" ? "invite-code rooms" : "singleplayer"})` : ""}\n` +
-        `Model: \`${store.getModel() || "the model default"}\` · Effort: \`${store.getEffort() || "auto"}\`` +
+        `Model: \`${threadModelLabel(project)}\`${project.modelOverride ? " (thread override)" : ""} · Effort: \`${store.getEffort() || "auto"}\`` +
         contextLine + "\n" +
         threadUsageText(usage, isAdmin(interaction)) +
         (project.lastError && config.errorReportUserIds.has(interaction.user.id) ? `\nLast private error summary: ${truncate(project.lastError, 900)}` : ""),
@@ -1485,7 +1503,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         threadId: project.threadId,
         project,
         requesterId: interaction.user.id,
-        model: store.getModel() || "the model default",
+        model: threadModelLabel(project),
       });
       await setStatusMessage(
         status,
@@ -1792,14 +1810,15 @@ async function handleAdminCommand(interaction: ChatInputCommandInteraction): Pro
   }
 }
 
-// Autocomplete currently serves only /site-admin model: the agent service's
-// current free OpenCode models plus host-configured provider models, filtered by
-// what the admin has typed. Choice names are the exact "provider/model-id"
-// strings the command accepts; "default" is offered too since it clears the
-// override. The command stays free-text — unlisted provider/model ids remain
-// valid.
+// Autocomplete serves /site-admin model and /site model (the per-thread
+// override): the agent service's current free OpenCode models plus
+// host-configured provider models, filtered by what the admin has typed. Choice
+// names are the exact "provider/model-id" strings the commands accept;
+// "default" is offered too since it clears the override. The commands stay
+// free-text — unlisted provider/model ids remain valid.
 async function handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
-  if (interaction.commandName !== "site-admin" || interaction.options.getSubcommand(false) !== "model") {
+  if (!((interaction.commandName === "site-admin" || interaction.commandName === "site")
+    && interaction.options.getSubcommand(false) === "model")) {
     await interaction.respond([]);
     return;
   }
@@ -1928,7 +1947,7 @@ async function sendOutcomeFollowUp(
       threadId: result.project.threadId,
       requesterId: context.requesterId,
       project: result.project,
-      model: store.getModel() || "the model default",
+      model: threadModelLabel(result.project),
     });
     blocks.push(!result.commit
       ? `❌ Committing the finished work failed · reference \`${incident.id}\`.\n${truncate(result.deliveryError ?? "", 600)}\nThe agent's edits are preserved in the workspace: reply in this thread to try again.`
@@ -2024,6 +2043,11 @@ function withQuestionPings(callback: ProgressCallback, threadId: string, request
 function isAdmin(interaction: ChatInputCommandInteraction | AutocompleteInteraction): boolean {
   if (config.adminUserIds.has(interaction.user.id)) return true;
   return interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false;
+}
+
+/** The model a thread's turns run on, for display: the thread's admin override, else the bot-wide model. */
+function threadModelLabel(project?: ProjectRecord | null): string {
+  return project?.modelOverride ?? store.getModel() ?? "the model default";
 }
 
 function requireCurrentContributor(threadId: string, actor: ProjectActor): void {

@@ -22,6 +22,15 @@ export const siteCommand = new SlashCommandBuilder()
     .setName("info")
     .setDescription("Show the live site and source repository for this thread"))
   .addSubcommand((sub) => sub
+    .setName("model")
+    .setDescription("Override the model used for every future turn in this thread (site admin only)")
+    .addStringOption((option) => option
+      .setName("model")
+      .setDescription("provider/model-id, or 'default' to follow the bot-wide model")
+      .setRequired(true)
+      .setMaxLength(200)
+      .setAutocomplete(true)))
+  .addSubcommand((sub) => sub
     .setName("collaboration")
     .setDescription("Choose who can contribute and review requests awaiting owner approval"))
   .addSubcommand((sub) => sub

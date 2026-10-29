@@ -22,7 +22,7 @@ function recovery(t: TestContext) {
     }, abortTurn: async () => { aborted += 1; return true; } } as any,
     {} as any, {} as any,
   );
-  const result = service.recoveryPrompt("workspace", "session", "Continue", undefined, "thread") as Promise<PromptResult>;
+  const result = service.recoveryPrompt("workspace", "session", "Continue", undefined, "thread", undefined) as Promise<PromptResult>;
   // Attach immediately so a mocked deadline rejection is always observed.
   const outcome = result.then((value) => ({ value, error: undefined }), (error: Error) => ({ value: undefined, error }));
   return { outcome, progress: (update: Parameters<ProgressCallback>[0]) => callback?.(update), complete, aborted: () => aborted };

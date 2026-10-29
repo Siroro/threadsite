@@ -239,7 +239,7 @@ export class ProjectService {
       id: pending?.id,
       sessionId: project.sessionId, startedAt: pending?.startedAt,
       threadId: project.threadId, project: project.displayName, kind: project.projectKind ?? "site",
-      durationMs, usage, fallbackModel: this.store.getModel(), failed,
+      durationMs, usage, fallbackModel: this.threadModel(project), failed,
     });
     return usage;
   }
@@ -635,7 +635,7 @@ export class ProjectService {
       // vision-capable is dropped rather than sent.
       let turnImages = images;
       if (images?.length) {
-        const parsed = parseModel(this.store.getModel())
+        const parsed = parseModel(this.threadModel(project))
           ?? await this.opencode.lastAssistantModel(workspacePath, project.sessionId);
         const accepts = parsed ? await this.opencode.modelAcceptsAttachments(parsed.providerID, parsed.modelID, project.workspacePath) : undefined;
         if (accepts !== true) {
@@ -669,7 +669,7 @@ export class ProjectService {
         if (lifecycle) project = lifecycle;
       }
 
-      const requestedModel = this.store.getModel();
+      const requestedModel = this.threadModel(project);
 
       const turnBaseline = await captureWorkingTreeSnapshot(workspacePath);
       let stopChangesTimer = () => {};
@@ -764,7 +764,7 @@ export class ProjectService {
       return result;
     } catch (error) {
       const stoppedByUser = await this.settleFailedTurn(threadId, project, pendingMarker, usage, error, turnStartedAt, queueClaimed, queuedStatusIds, "project.mutation_superseded");
-      logError("project.mutation_failed", error, { threadId, initial, model: this.store.getModel() || "default", stoppedByUser });
+      logError("project.mutation_failed", error, { threadId, initial, model: this.threadModel(project) || "default", stoppedByUser });
       throw stoppedByUser
         ? new TurnStoppedError("The update was stopped at the user's request.", { cause: error })
         : error;
@@ -870,7 +870,7 @@ export class ProjectService {
             workspacePath,
             project.sessionId,
             repairInstruction(firstError),
-            this.store.getModel(),
+            this.threadModel(project),
             input.onProgress,
             "sitebuilder",
             this.store.getEffort(),
@@ -1116,7 +1116,7 @@ export class ProjectService {
         const notes = [savedNotes, project.browserQaFindings ? browserQaFeedback(project.browserQaFindings) : "",
           project.renameNote ? renameNoteInstruction(project.renameNote) : ""].filter(Boolean).join("\n\n") || undefined;
         try {
-          const result = await this.recoveryPrompt(project.workspacePath, project.sessionId, recoveryInstruction(pending.prompt, notes), onProgress, threadId, pending.images);
+          const result = await this.recoveryPrompt(project.workspacePath, project.sessionId, recoveryInstruction(pending.prompt, notes), onProgress, threadId, this.threadModel(project), pending.images);
           agentSummary = result.text;
           usage = result.usage;
         } catch (error) {
@@ -1126,7 +1126,7 @@ export class ProjectService {
             ? initialProjectInstruction(projectKind, pending.prompt, notes, project.multiplayerMode)
             : mutationInstruction(projectKind, pending.prompt, notes, project.multiplayerMode);
           const retry = await this.repromptOnVanishedSession(threadId, project!, error,
-            (sessionId) => this.recoveryPrompt(project!.workspacePath, sessionId, instruction, onProgress, threadId, pending.images));
+            (sessionId) => this.recoveryPrompt(project!.workspacePath, sessionId, instruction, onProgress, threadId, this.threadModel(project!), pending.images));
           project = retry.project;
           agentSummary = retry.text;
           usage = retry.usage;
@@ -1242,6 +1242,7 @@ export class ProjectService {
     instruction: string,
     onProgress: ProgressCallback | undefined,
     threadId: string,
+    model: string | undefined,
     images?: readonly PromptImage[],
   ): Promise<PromptResult> {
     let timedOut = false;
@@ -1265,7 +1266,7 @@ export class ProjectService {
       return tracker.progress(update);
     };
     armTimeout();
-    const pending = this.promptWithFailover(workspacePath, sessionId, instruction, progress, images, this.store.getModel());
+    const pending = this.promptWithFailover(workspacePath, sessionId, instruction, progress, images, model);
     try {
       return await Promise.race([pending, inactivity]);
     } catch (error) {
@@ -1412,7 +1413,7 @@ export class ProjectService {
     emit(onProgress, `🧹 Context was ${percent}% full after the last turn, compacting before this one`);
     try {
       const model = (await this.opencode.lastAssistantModel(project.workspacePath, project.sessionId))
-        ?? parseModel(this.store.getModel());
+        ?? parseModel(this.threadModel(project));
       if (!model) {
         log("warn", "project.session_auto_compact_skipped", { threadId, reason: "no model known for the session" });
         return undefined;
@@ -1876,15 +1877,25 @@ export class ProjectService {
   }
 
   /**
+   * The model a thread's turns run on: the per-thread admin override when set,
+   * else the deployment-wide model. Every thread-scoped model read (prompts,
+   * repair, recovery, image gating, compaction fallbacks) goes through this so
+   * one thread cannot prompt, repair, or compact on different models.
+   */
+  private threadModel(project: ProjectRecord | undefined): string | undefined {
+    return project?.modelOverride ?? this.store.getModel();
+  }
+
+  /**
    * Whether the model the thread's next turn will run on accepts image
-   * attachments: the admin model override when set, else the model the
-   * session last used. Undefined when no model can be determined — callers
-   * treat that as "do not forward images".
+   * attachments: the thread's model override or bot-wide model when set, else
+   * the model the session last used. Undefined when no model can be
+   * determined — callers treat that as "do not forward images".
    */
   async modelAcceptsImages(threadId: string): Promise<boolean | undefined> {
     const project = this.store.getProject(threadId);
     if (!project) return undefined;
-    const parsed = parseModel(this.store.getModel())
+    const parsed = parseModel(this.threadModel(project))
       ?? await this.opencode.lastAssistantModel(project.workspacePath, project.sessionId);
     if (!parsed) return undefined;
     return this.opencode.modelAcceptsAttachments(parsed.providerID, parsed.modelID, project.workspacePath);
@@ -2161,9 +2172,9 @@ export class ProjectService {
     if (!project) throw new Error("This thread is not attached to a site.");
     await this.assertIdle(project, "compacting");
     const model = (await this.opencode.lastAssistantModel(project.workspacePath, project.sessionId))
-      ?? parseModel(this.store.getModel());
+      ?? parseModel(this.threadModel(project));
     if (!model) {
-      throw new Error("No model is known for this session yet. Send at least one message first, or set /site-admin model.");
+      throw new Error("No model is known for this session yet. Send at least one message first, or have a site admin set /site model.");
     }
     log("info", "project.compact_requested", { threadId, model: `${model.providerID}/${model.modelID}` });
     await this.opencode.compactSession(project.workspacePath, project.sessionId, model.providerID, model.modelID);

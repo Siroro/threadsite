@@ -90,6 +90,13 @@ export interface ProjectRecord {
   ownerId?: string;
   /** Missing settings mean anyone can edit, including on existing projects. */
   collaboration?: CollaborationSettings;
+  /**
+   * Site-admin model override for this thread (provider/model-id): every turn
+   * the thread runs — prompts, repair, recovery, compaction fallbacks, image
+   * gating — uses it instead of the bot-wide model. Unset follows the bot-wide
+   * model.
+   */
+  modelOverride?: string;
   /** Lifetime per-user contributions (requested turns, live steers, delivered answers), shown on the pinned card. */
   contributors?: Record<string, ContributionTally>;
   /** The pinned project-card message; edited in place after every turn outcome. */

@@ -1122,3 +1122,37 @@ test("modelBreakdown rolls up per-model usage globally and per thread", async ()
   assert.deepEqual(breakdown.threads.map((thread) => thread.project), ["Koi Pond", "Sumo Shove"]);
   assert.deepEqual(breakdown.threads[0].models.map((model) => model.model), ["surplus/glm-5.3-flash", "opencode/muse-spark-1.3-contributor-free"]);
 });
+
+test("a thread's model override drives turn prompts until cleared", async () => {
+  const f = await projectFixture("model-override");
+  await f.store.setModel("global/primary");
+  await f.store.patchProject(f.project.threadId, { modelOverride: "override/model" });
+  const prompted: (string | undefined)[] = [];
+  f.opencode.prompt = async (...args: unknown[]): Promise<PromptResult> => {
+    prompted.push(args[3] as string | undefined);
+    await fs.writeFile(path.join(f.dir, "site/src/main.ts"), `console.log("turn ${prompted.length}");`);
+    return { text: "Changed", usage: {} };
+  };
+  await f.service.mutate(f.project.threadId, "change it", false, undefined, undefined, "override-status");
+  assert.deepEqual(prompted, ["override/model"]);
+  // Clearing the override ("default" in /site model) falls back to the bot-wide model.
+  await f.store.patchProject(f.project.threadId, { modelOverride: undefined });
+  await f.service.mutate(f.project.threadId, "change it again", false, undefined, undefined, "cleared-status");
+  assert.deepEqual(prompted, ["override/model", "global/primary"]);
+});
+
+test("the image gate follows the thread's model override, not the bot-wide model", async () => {
+  const f = await projectFixture("model-override-gate");
+  await f.store.setModel("global/vision");
+  await f.store.patchProject(f.project.threadId, { modelOverride: "override/text-only" });
+  const queried: string[] = [];
+  Object.assign(f.opencode, {
+    lastAssistantModel: async () => "session/last",
+    modelAcceptsAttachments: async (providerID: string, modelID: string) => {
+      queried.push(`${providerID}/${modelID}`);
+      return false;
+    },
+  });
+  assert.equal(await f.service.modelAcceptsImages(f.project.threadId), false);
+  assert.deepEqual(queried, ["override/text-only"]);
+});
