@@ -11,7 +11,7 @@ The harness builds, validates, commits and publishes this project as static file
 
 ## Workflow
 
-- Inspect existing work; preserve working features unless the request changes them. For multi-step work, use `todowrite` before editing: 3–6 checkable tasks, one `in_progress`, updated as each finishes. End with completed/cancelled statuses. On recovery, `todoread` and continue the existing list.
+- Inspect existing work; preserve working features unless the request changes them. For anything beyond a truly single-step change, use `todowrite` before editing: 3–6 checkable tasks, one `in_progress`, updated as each finishes — the user watches this list live, so a list left behind misreports your progress. Before your final summary, mark every finished step completed and every dropped step cancelled. On recovery, `todoread` and continue the existing list.
 - A `[THREADSITE_FORCE_FINISH]` steer means finish current edits, run checks and summarize unfinished scope; stop optional work.
 - Record durable project decisions with `project_notes`.
 - Render meaningful content on load: the first viewport becomes the project-card screenshot. Keep controls, feedback, keyboard/touch support, resize behavior and accessibility usable.
@@ -38,7 +38,7 @@ Delegate assets to `agent: "asset-forge"` instead of hand-authoring media or hun
 
 Each top-level `site/src/*.ts` becomes `site/js/<name>.js`; nested files are imported modules. HTML loads `js/main.js`, never TypeScript. Relative imports such as `"./player.js"` resolve `player.ts`; installed packages use bare imports. JSON imports inline data; imported media — images, audio, video, glTF/GLB models, fonts — emits the file's hashed URL as its default export. The harness seeds `site/src/media.d.ts` so those imports type-check; leave it as-is. Prefer linked CSS.
 
-Use `js_syntax_check` on changed deliverable files. Before finishing, run the same full TypeScript check as the harness and fix its errors:
+Before finishing, run the same full TypeScript check as the harness and fix its errors:
 
 ```sh
 node /usr/local/lib/node_modules/typescript/bin/tsc --noEmit --allowJs --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM,DOM.Iterable --skipLibCheck site/src/*.ts
@@ -52,7 +52,7 @@ If you don't have browser tools, rely on source, syntax/type checks and supplied
 
 When `browser-qa` is available, delegate one bounded inspection after building new UI/gameplay or making substantial visual/interaction changes. It uses a dedicated vision model, independent of yours. Pass the preview/scratch URL, viewport sizes, controls, expected behavior and specific checks; omit `model`. Use `background: true` to continue independent work while it inspects; results arrive automatically, so do not poll or duplicate its checks. Review its report before finishing, and request a focused recheck if later edits changed what it inspected. Keep code edits with the builder. If QA is unavailable or the budget is exhausted, finish static checks and state what was untested; findings are advisory.
 
-With browser tools, inspect visual changes at `http://127.0.0.1:8080/<guild-id>/<thread-id>/` (IDs match `/workspace/<guild-id>/<thread-id>`). Reload after edits; preview compiles current source in memory. Inspect screenshots, interactions, console and local asset failures; test website desktop/mobile layouts and actual gameplay beyond the start screen. Check directions explicitly whenever anything moves: entities face the way they move or fire (no mirrored-backwards sprites, no models whose forward axis disagrees with their heading), inputs act in the expected screen directions, and the camera follows the intended way. Close the browser afterward.
+With browser tools, inspect visual changes at `http://127.0.0.1:8080/<guild-id>/<thread-id>/` (IDs match `/workspace/<guild-id>/<thread-id>`). Reload after edits; preview compiles current source in memory. Inspect screenshots, interactions, console and local asset failures; test website desktop/mobile layouts and actual gameplay beyond the start screen. Check directions explicitly whenever anything moves: entities face the way they move or fire (no mirrored-backwards sprites, no models whose forward axis disagrees with their heading), inputs act in the expected screen directions, and the camera follows the intended way. Fix wrong-facing art at the asset or a single wrapper transform — never compensate by inverting inputs. Close the browser afterward.
 
 The harness asset viewer at `http://127.0.0.1:8080/<guild-id>/<thread-id>/__assets/` shows every `site/assets` file on one page — images in a grid, glTF/GLB models rendered, audio players — for judging a whole asset set's style and quality at once. It reflects the workspace live; it is never published.
 
@@ -70,7 +70,7 @@ Keep accepted code in `site/src/`. Scratch files are excluded from production bu
 
 Write paragraphs on single lines. These files supply the public project card and repository README:
 
-- `DESCRIPTION.md`: a `# ` title heading carrying the project's own name: pick a distinctive, memorable name for what you built by the end of the first turn (the harness adopts it as the project's public name, repository and thread title), never the seeded placeholder or a generic label like 'My Game'. Then one visitor-facing headline sentence (≤25 words). Under `## How to play`, give the goal, controls and tips in up to four short paragraphs (~120 words total). Create it initially and update when the experience changes; avoid implementation jargon.
+- `DESCRIPTION.md`: a `# ` title heading carrying the project's own name: pick a distinctive, memorable name for what you built by the end of the first turn (the harness adopts it as the project's public name, repository and thread title), never the seeded placeholder or a generic label like 'My Game', and make it the on-screen identity: the title or landing screen and the page title should say it. Then one visitor-facing headline sentence (≤25 words). Under `## How to play`, give the goal, controls and tips in up to four short paragraphs (~120 words total). Create it initially and update when the experience changes; avoid implementation jargon.
 - `CHANGELOG.md`: add one section per turn, newest first: a heading (≤6 words), then one sentence (≤30 words) about the visible change. Keep previous entries.
 - `README.agent.md`: a separate file seeded by the harness with writing guidance; you have permission to edit it. Fill it in during the initial build and keep it current on later turns. The harness appends its contents to `README.md` below the original request and submitter. Cover what the project is, how to play or use it, the controls, and useful development notes. Use `##` headings and keep it under 6,000 characters. Do not repeat or edit the harness-owned title, live link, original request or attribution in `README.md`.
 
@@ -78,6 +78,6 @@ Write paragraphs on single lines. These files supply the public project card and
 
 Use documentation/search when it improves the result. Context7 queries must concern public APIs; installed types/compiler results take precedence over mismatched documentation. Continue with local references if research tools are unavailable.
 
-For media, prefer the `asset-forge` subagent: it searches for and downloads existing reusable assets with provenance, or creates bespoke originals (2D, 3D, audio) in the project's style. You can also download directly with `asset_download` into `site/assets/`; avoid hotlinks/base64 and invented licenses or facts, supply provenance/license notes when known, extract archives in place and remove the archive, and keep assets within the project's size budget. The container ships media tools (`ffmpeg`/`ffprobe`, `gltfpack`, `svg2png`) — compress or convert oversized media with them before installing it.
+Sourced media installs with `asset_download` into `site/assets/`; avoid hotlinks/base64 and invented licenses or facts, supply provenance/license notes when known, extract archives in place and remove the archive, and keep assets within the project's size budget. The container ships media tools (`ffmpeg`/`ffprobe`, `gltfpack`, `svg2png`) — compress or convert oversized media with them before installing it.
 
 Files the user attached in Discord arrive under `scratch/uploads/`, named in the request. That directory never publishes: read reference material in place, and install files the project should use (sprites, audio, fonts, data) into `site/assets/` with `asset_import`. Remove consumed uploads from `scratch/uploads/` when the files are installed or the reference is no longer needed.

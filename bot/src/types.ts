@@ -106,8 +106,10 @@ export interface ProjectRecord {
   /** Saved presentation of the last published turn; keeps pinned descriptions tied to the live version. */
   lastCardMessageId?: string;
   lastError?: string;
-  /** Confirmed advisory browser findings carried into the next turn. */
-  browserQaFindings?: { checkedAt: string; findings: string[] };
+  /** Confirmed advisory browser findings carried into the next turn. `deliveredAt`
+   * marks a record whose feedback already rode one instruction; it is replaced by
+   * the next QA pass and never re-read by later turns. */
+  browserQaFindings?: { checkedAt: string; findings: string[]; deliveredAt?: string };
   /** Short hash of the commit belonging to the last accepted turn; used by /site revert. */
   lastCommit?: string;
   /** Pre-turn commit; metadata-only rename commits belong to the same undo boundary. */

@@ -151,6 +151,35 @@ test("browser findings publish without a repair turn and reach the next agent pr
   assert.equal(next.browserQaFindings, undefined);
 });
 
+test("delivered browser findings are not re-read while QA produces no fresh pass", async () => {
+  const f = await projectFixture("702345678901234567");
+  const instructions: string[] = [];
+  Object.assign(f.opencode, {
+    prompt: async (_dir: string, _session: string, instruction: string) => {
+      instructions.push(instruction);
+      await fs.writeFile(path.join(f.dir, "site/src/main.ts"), `console.log("qa delivery ${instructions.length}");`);
+      return { text: "Updated", usage: {} };
+    },
+  });
+  // undefined models QA being unavailable for a turn: no fresh record replaces the stored one.
+  let report: { findings: string[] } | undefined = { findings: ["ReferenceError: player is not defined at main.js:42"] };
+  Object.assign(f.service, { runBrowserQa: async () => report });
+  await f.service.mutate(f.project.threadId, "Add a scoreboard");
+  // QA unavailable for the turn that receives the feedback: no fresh record replaces the stored one.
+  report = undefined;
+  const next = await f.service.mutate(f.project.threadId, "Improve the scoreboard");
+  assert.match(instructions[1], /BROWSER QA FEEDBACK/);
+  const delivered = next.project.browserQaFindings!;
+  assert.equal(delivered.findings[0], "ReferenceError: player is not defined at main.js:42");
+  assert.ok(delivered.deliveredAt, "findings whose feedback rode the turn are stamped delivered at settlement");
+  report = { findings: ["TypeError: boards.list is not a function at main.js:9"] };
+  await f.service.mutate(f.project.threadId, "Polish the scoreboard");
+  assert.doesNotMatch(instructions[2], /BROWSER QA FEEDBACK/, "delivered findings never re-read on later turns");
+  const fresh = await f.service.mutate(f.project.threadId, "Ship the scoreboard");
+  assert.match(instructions[3], /Runtime finding: TypeError: boards\.list/);
+  assert.equal(fresh.project.browserQaFindings!.deliveredAt, undefined, "a fresh QA pass is undelivered again");
+});
+
 test("the play card shows the project's own description and newest changelog entry", async () => {
   const f = await projectFixture("705234567890123456");
   Object.assign(f.opencode, {

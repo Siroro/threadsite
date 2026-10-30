@@ -49,11 +49,9 @@ const top = await boards.list("points-v1", { limit: 10 });
 
 ### Board shape
 
-- A board is one competition, not a run log. The relay keeps one personal best per persistent player per board, so render one row per `playerId`; attempts, detailed records and recent clears belong in a save slot or a separate local history view.
-- Use one board for a single comparable competition (`best-run-v1`, `fastest-clear-v1`) or a tabbed set for levels/operations/modes (`level-01-v1`, `career-v1`). A career aggregate gets its own career board and tab; never merge it with level boards or run history. Never concatenate boards into one table: that repeats players and compares incomparable scores.
-- Keep the set within the 16-board cap, hide empty boards, show one board at a time with a clear title, and default to the most useful/populated board. Rotating challenges use a period key (`daily-2026-10-23`).
+Board design — one competition per board, tabbed sets, one personal-best row per player, board selection and presentation, stable versioned keys, name handling and tie-breaking — is specified in `LEADERBOARDS.md`; follow it rather than re-deriving it here. The networking-side facts:
+
 - Board keys identify the competition and its scoring rules, not a player's progress: use stable descriptive keys and a new version when rules change; never derive keys from run IDs, player names or current level progress. Keep the injected game ID stable for every level/mode: separate board keys, never separate game identities, or the same browser becomes a different player.
-- Names come from the dedicated score client's `setName()` and are sanitized, capped at 32 characters and not unique; never dedupe or merge by name. First submission fixes ascending/descending order. Equal scores keep their original timestamp; ties sort by timestamp then player ID. An equal or worse submission leaves the stored name untouched, so a rename takes effect only on the next improved score. List returns up to 100 entries. Both the scores and names are untrusted client input: render names as text and do not claim cheat-proof rankings.
 - Gameplay-connection storage allows 5 requests/s per connection (burst 10); the dedicated score API has the same budget per persistent player and game across short connections. Defaults: 10,000 persistent players, 16 boards and 16 MiB total save JSON per game. Capacity/rate/disk failures are explicit errors; keep solo play available and offer a later retry.
 
 ## Choosing rates and the latency budget

@@ -651,9 +651,14 @@ export class ProjectService {
       // A harness-driven turn (e.g. the multiplayer switch) brings its own
       // instruction; the prompt then stays the user-facing display text.
       let instruction = instructionOverride ?? (initial
-        ? initialProjectInstruction(projectKind, prompt, notes, multiplayerMode)
+        ? initialProjectInstruction(projectKind, prompt, notes)
         : mutationInstruction(projectKind, prompt, notes, multiplayerMode));
-      if (project.browserQaFindings) instruction += browserQaFeedback(project.browserQaFindings);
+      // Advisory browser findings ride exactly one turn: the next instruction
+      // after the pass that recorded them. The delivery tail marks a consumed
+      // record delivered when this turn's own QA pass produces no fresh one,
+      // so stale findings are never re-read on later turns.
+      const consumedQaFindings = project.browserQaFindings?.deliveredAt ? undefined : project.browserQaFindings;
+      if (consumedQaFindings) instruction += browserQaFeedback(consumedQaFindings);
       // A rename the user made between turns: told once, at the start of the
       // next submitted turn, then cleared with that turn's settlement.
       if (project.renameNote) instruction += renameNoteInstruction(project.renameNote);
@@ -760,6 +765,7 @@ export class ProjectService {
       const result = await this.completeTurn({
         project, prompt, initial, projectKind, multiplayer, agentSummary, author, onProgress, usage, startedAt: turnStartedAt,
         pendingTurn: pendingMarker,
+        consumedQaFindings,
       });
       return result;
     } catch (error) {
@@ -805,6 +811,9 @@ export class ProjectService {
     startedAt: number;
     /** The in-flight marker this turn wrote, if any — see the clear below. */
     pendingTurn?: ProjectRecord["pendingTurn"];
+    /** Findings whose feedback this turn's instruction carried; stamped
+     * delivered at settlement when no fresh QA record replaces them. */
+    consumedQaFindings?: ProjectRecord["browserQaFindings"];
   }): Promise<MutationResult> {
     const threadId = input.project.threadId;
     let project = input.project;
@@ -972,7 +981,11 @@ export class ProjectService {
         // Keep the external-push poller in sync: after the bot's own push,
         // origin/main's tip is exactly this turn's commit.
         ...(commitStats ? { lastSeenCommit: await currentHead(workspacePath) } : {}),
-        ...(qaFindings ? { browserQaFindings: qaFindings } : {}),
+        // A fresh QA record replaces the consumed one; when this turn's pass
+        // produced none, mark the delivered findings so they are not re-read.
+        ...(qaFindings ? { browserQaFindings: qaFindings }
+          : input.consumedQaFindings
+            ? { browserQaFindings: { ...input.consumedQaFindings, deliveredAt: new Date().toISOString() } } : {}),
         pendingTurn: undefined,
         // The turn that carried the rename note has settled; it never repeats.
         renameNote: undefined,
@@ -1105,6 +1118,10 @@ export class ProjectService {
       if (this.stopMarkApplies(this.stopRequested.get(threadId), pending.id)) throw new Error("Stopped while waiting for the interrupted agent turn.");
 
       let agentSummary: string;
+      // Findings delivered into a recovery prompt are consumed exactly like a
+      // normal turn's; the already-completed branch consumed them in the
+      // pre-crash instruction, so both stamp delivery at settlement.
+      const consumedQaFindings = project.browserQaFindings?.deliveredAt ? undefined : project.browserQaFindings;
       if (await this.turnCompletedSince(project.workspacePath, project.sessionId, pending.startedAt)) {
         // The turn finished on the agent side while the bot was down; only the
         // commit/publish tail was lost. Saved billing is reconciled below.
@@ -1113,7 +1130,7 @@ export class ProjectService {
         agentSummary = "This turn had already finished on the agent side before the restart; it was committed and published by recovery.";
       } else {
         const savedNotes = await readProjectNotes(project.workspacePath);
-        const notes = [savedNotes, project.browserQaFindings ? browserQaFeedback(project.browserQaFindings) : "",
+        const notes = [savedNotes, consumedQaFindings ? browserQaFeedback(consumedQaFindings) : "",
           project.renameNote ? renameNoteInstruction(project.renameNote) : ""].filter(Boolean).join("\n\n") || undefined;
         try {
           const result = await this.recoveryPrompt(project.workspacePath, project.sessionId, recoveryInstruction(pending.prompt, notes), onProgress, threadId, this.threadModel(project), pending.images);
@@ -1123,7 +1140,7 @@ export class ProjectService {
           log("warn", "project.recovery_session_lost", { threadId, sessionId: project.sessionId });
           emit(onProgress, "♻️ Recreating a missing agent session");
           const instruction = pending.initial
-            ? initialProjectInstruction(projectKind, pending.prompt, notes, project.multiplayerMode)
+            ? initialProjectInstruction(projectKind, pending.prompt, notes)
             : mutationInstruction(projectKind, pending.prompt, notes, project.multiplayerMode);
           const retry = await this.repromptOnVanishedSession(threadId, project!, error,
             (sessionId) => this.recoveryPrompt(project!.workspacePath, sessionId, instruction, onProgress, threadId, this.threadModel(project!), pending.images));
@@ -1147,6 +1164,7 @@ export class ProjectService {
         usage,
         startedAt: turnStartedAt,
         pendingTurn: pending,
+        consumedQaFindings,
       });
       log("info", "project.recovery_completed", { threadId, commit: result.commit, published: !result.validationError && !result.deliveryError });
       return result;

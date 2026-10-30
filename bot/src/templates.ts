@@ -97,49 +97,30 @@ export function namingFixInstruction(kind: ProjectKind): string {
     + "Then reply with a short summary of the project for the person who requested it: its name, what it is, and what they can do, in a few sentences of visitor words, no file lists.";
 }
 
-/**
- * The project documents the harness shows to the thread and the repository.
- * DESCRIPTION.md and CHANGELOG.md supply the cards; README.agent.md supplies
- * the long-form repository README. All are agent-maintained, so the prompt has
- * to ask for them by name.
- */
-const documentsInstruction = "Three documents in the project root are shown to everyone who opens the project, so keep them true and tight. DESCRIPTION.md: a `# ` title heading carrying the project's name. Choose a distinctive, memorable name for what you built by the end of the first turn and keep it unless the user asks for a new one; the harness adopts that heading as the project's public name, repository and thread title, so never leave the seeded placeholder or a generic label like 'My Game' there. Below it, a headline of one sentence, at most 25 words, in a visitor's words (no file names, no code, no jargon); the card shows the headline alone. Then a 'How to play' section of up to four short paragraphs (about 120 words): the goal first, then the controls, then one or two tips; it opens from the card's How to play view. CHANGELOG.md: one new section per turn, newest at the top: a heading of at most six words, then one sentence of at most 30 words on what a visitor will notice. README.agent.md: the long-form repository README appended to README.md at the end of every turn: what the project is, how to play or use it, the controls, and useful development notes; use ## headings and keep it under 6,000 characters. Never edit README.md itself: the harness owns its title, ownership marker, live link, original request and attribution. Write each paragraph on a single line; never break a sentence across lines by hand. Write DESCRIPTION.md when the project first exists and whenever its shape changes, add the CHANGELOG.md section before your final summary, and keep README.agent.md current.";
+// The project-document and todo-list rules live only in AGENTS.md
+// (bot/assets/agents/shared.md): it is in the session context on every turn,
+// so per-turn instructions stay request + deltas and never restate it.
 
-const planningInstruction = "For any request that needs multiple steps or changes across multiple files, call the todowrite tool before the first edit: create 3–6 concrete, checkable steps. Keep exactly one step in_progress, and mark a step completed as soon as it is finished while promoting the next one; the user watches this list live, so a list left behind misreports your progress. Before your final summary, mark every finished step completed and every dropped step cancelled. A prose plan does not replace the todo list. Skip todowrite only for a truly single-step change.";
-
-/** How the game connects, phrased for the initial-build instruction. */
-function multiplayerPhrase(mode: MultiplayerMode): string {
-  if (mode === "singleplayer") return "singleplayer gameplay with optional global leaderboards through the dedicated score-only client; no gameplay networking";
-  if (mode === "rooms") return "room-based multiplayer through the harness relay (invite-code rooms), solo fallback";
-  return "multiplayer-first through the harness relay, solo fallback";
-}
-
-/** Naming is part of the deliverable: a project with its own name reads as intentional. */
-const namingInstruction = "Give what you build a name of its own: a distinctive, memorable title a visitor would recall, never a restatement of the request or a generic label. Set it as the `# ` title heading of DESCRIPTION.md by the end of this build (the harness adopts that heading as the project's public name, repository and thread title) and make it the on-screen identity: the title or landing screen and the page title should say it.";
-
-export function initialProjectInstruction(kind: ProjectKind, userPrompt: string, notes?: string, mode: MultiplayerMode = "arena"): string {
-  const common = `Inspect the starter files. ${planningInstruction} Research the web when it will materially improve the result, and implement the deliverable rather than only describing it. Browser code is authored in TypeScript under site/src/; the harness compiles and bundles it after your reply. Prefer a clear multi-file structure over one giant index.html.`;
+export function initialProjectInstruction(kind: ProjectKind, userPrompt: string, notes?: string): string {
+  const common = `Inspect the starter files. Research the web when it will materially improve the result, and implement the deliverable rather than only describing it. Browser code is authored in TypeScript under site/src/; the harness compiles and bundles it after your reply. Prefer a clear multi-file structure over one giant index.html.`;
   const gameDesign = "Identify the core action, challenge and player decisions in your plan, then implement a complete, enjoyable round before optional polish. Match the requested genre; do not substitute a generic collect-N-pickups loop unless the user explicitly asks for a collection game.";
-  const directionCheck = "Before finishing this first build, verify directions with the game actually running, using your browser tools or a `browser-qa` delegation: every character, vehicle and projectile visibly faces the way it moves or fires (no mirrored-backwards sprites, no models whose forward axis disagrees with their heading), input axes respond in the expected screen directions, and camera/scroll follows the intended way. Fix wrong-facing art at the asset or a single wrapper transform — never compensate by inverting inputs.";
   if (kind === "game-2d") {
-    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below using the installed engine, ${multiplayerPhrase(mode)}. ${gameDesign} ${namingInstruction} ${directionCheck} Delegate bespoke art and audio to the \`asset-forge\` subagent (it searches for or creates 2D assets and reviews each one) and use asset_download yourself for suitable reusable media. ${documentsInstruction}${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 2D browser game from the request below using the installed engine. ${gameDesign}${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
   if (kind === "game-3d") {
-    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below using the installed engine, ${multiplayerPhrase(mode)}. ${gameDesign} ${namingInstruction} ${directionCheck} Delegate bespoke art, textures, models and audio to the \`asset-forge\` subagent (it searches for or creates 2D and 3D assets and reviews each one) and use asset_download yourself for suitable reusable media. ${documentsInstruction}${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
+    return `${common}\n\nCreate a complete, polished, playable 3D browser game from the request below using the installed engine. ${gameDesign}${notesSection(notes)}\n\nGAME REQUEST:\n${userPrompt}`;
   }
-  return `${common}\n\nCreate the static website described below. Make it feel intentionally designed and interactive where appropriate. Use real researched/reusable media when it improves the result, delegate bespoke graphics and imagery to the \`asset-forge\` subagent (it searches for or creates assets and reviews each one), and keep any remaining visuals as tasteful local CSS/SVG/Canvas. ${namingInstruction} ${documentsInstruction}${notesSection(notes)}\n\nSITE REQUEST:\n${userPrompt}`;
+  return `${common}\n\nCreate the static website described below. Make it feel intentionally designed and interactive where appropriate. Use real researched/reusable media when it improves the result, and keep any remaining visuals as tasteful local CSS/SVG/Canvas.${notesSection(notes)}\n\nSITE REQUEST:\n${userPrompt}`;
 }
 
 export function mutationInstruction(kind: ProjectKind, userPrompt: string, notes?: string, mode: MultiplayerMode = "arena"): string {
   const noun = kind === "site" ? "website" : kind === "game-2d" ? "2D web game" : "3D web game";
   const multiplayerClause = kind === "site"
     ? ""
-    : mode === "singleplayer"
-      ? " This game is singleplayer-only: keep gameplay local and fully playable offline. Global leaderboards use the dedicated score-only client; do not add gameplay networking or rooms."
-      : mode === "rooms"
-        ? " Preserve working room-based multiplayer (invite-code rooms, room isolation, sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client."
-        : " Preserve working multiplayer (arena sync, host migration, solo fallback) unless the request changes it, and keep using the harness-provided net client.";
-  return `Inspect the current project before editing. ${planningInstruction} Revise the existing ${noun} according to the request below. Preserve working features/mechanics unless the request changes them.${multiplayerClause} Keep browser code in TypeScript under site/src/ (never hand-edit the generated, gitignored bundles under site/js/), use websearch when it would materially improve the result, delegate new bespoke assets to the \`asset-forge\` subagent, and use asset_download for suitable reusable media. Leave a complete buildable deliverable. ${documentsInstruction}${notesSection(notes)}\n\nREQUEST:\n${userPrompt}`;
+    : mode === "rooms"
+      ? " Preserve working room-based multiplayer (invite-code rooms, room isolation, sync, host migration, solo fallback) unless the request changes it."
+      : " Preserve working multiplayer (arena sync, host migration, solo fallback) unless the request changes it.";
+  return `Inspect the current project before editing. Revise the existing ${noun} according to the request below. Preserve working features/mechanics unless the request changes them.${multiplayerClause} Keep browser code in TypeScript under site/src/ (never hand-edit the generated, gitignored bundles under site/js/) and use websearch when it would materially improve the result. Leave a complete buildable deliverable.${notesSection(notes)}\n\nREQUEST:\n${userPrompt}`;
 }
 
 /** Short human label for a multiplayer mode, used in prompts and replies. */
@@ -190,7 +171,7 @@ export function steeringInstruction(texts: readonly string[]): string {
 }
 
 export function repairInstruction(validationError: string): string {
-  return `Automated validation rejected the previous output with a build or type error. Fix it now: open the listed file(s) under site/src/ and correct every reported syntax, type, resolution, and DOM id error. For a repair spanning multiple files or steps, use todowrite before editing and mark each fix completed as you finish it. Errors naming a site/js/ file point at compiled output; fix the site/src/ module it was built from; the harness rebuilds after your reply. Make the whole import graph resolve (every import names an existing file and a real export of it). Use js_syntax_check on the affected files before finishing. Do not change anything unrelated and do not remove or stub working functionality to make the error go away.\n\nVALIDATION ERROR:\n${validationError}`;
+  return `Automated validation rejected the previous output with a build or type error. Fix it now: open the listed file(s) under site/src/ and correct every reported syntax, type, resolution, and DOM id error. For a repair spanning multiple files or steps, use todowrite before editing and mark each fix completed as you finish it. Errors naming a site/js/ file point at compiled output; fix the site/src/ module it was built from; the harness rebuilds after your reply. Make the whole import graph resolve (every import names an existing file and a real export of it). Do not change anything unrelated and do not remove or stub working functionality to make the error go away.\n\nVALIDATION ERROR:\n${validationError}`;
 }
 
 /** Nudge used by boot recovery when a turn was interrupted by a restart. */
