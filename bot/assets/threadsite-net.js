@@ -27,7 +27,11 @@ const TRANSFORM_BUFFER_SIZE = 12;
 const TRANSFORM_BUFFER_WINDOW_MS = 500;
 const DEFAULT_MAX_EXTRAPOLATION_MS = 100;
 const MAX_BUFFERED_BYTES = 256 * 1024;
+const HEARTBEAT_INTERVAL_MS = 10_000;
 const HEARTBEAT_TIMEOUT_MS = 30_000;
+// A hidden tab's reconnect setTimeout can be throttled minutes past its due
+// time; the background tick fires it once it is this far overdue.
+const RECONNECT_NUDGE_MS = 2_000;
 const INTERPOLATED_KEYS = new Set(["x", "y", "z", "vx", "vy", "vz", "rotation", "angle", "facing"]);
 const CID_STORAGE_KEY = "threadsite-session-cid-v4";
 const RESUME_STORAGE_PREFIX = "threadsite-resume-room-v4:";
@@ -108,6 +112,49 @@ function playerIdentity(game, supplied) {
     if (supplied !== undefined && !/^[a-f0-9]{64}$/.test(supplied))
         throw new ThreadSiteNetError("playerToken must be 64 lowercase hex characters.", "bad_config");
     return getPlayerIdentity(game, supplied);
+}
+// Hidden tabs throttle timers down to ~1 Hz and, after a few minutes, to about
+// once a minute — but worker timers keep running and posted messages still
+// execute on the throttled main thread. This one-second metronome lets a
+// hidden tab keep yielding host authority, heartbeating and reconnecting
+// instead of freezing the room or silently decaying; a plain interval is the
+// degraded fallback when workers are unavailable (Node, older engines) or
+// blocked by page policy.
+const METRONOME_INTERVAL_MS = 1000;
+function createMetronome(onTick) {
+    try {
+        const source = `setInterval(() => postMessage(0), ${METRONOME_INTERVAL_MS});`;
+        const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+        const worker = new Worker(url);
+        let disposed = false;
+        let fallback = null;
+        worker.onmessage = () => { if (!disposed)
+            onTick(); };
+        worker.onerror = () => {
+            if (disposed || fallback)
+                return;
+            worker.terminate();
+            URL.revokeObjectURL(url);
+            fallback = createIntervalMetronome(onTick);
+        };
+        return {
+            dispose() {
+                disposed = true;
+                worker.onmessage = null;
+                worker.onerror = null;
+                worker.terminate();
+                URL.revokeObjectURL(url);
+                fallback?.dispose();
+            },
+        };
+    }
+    catch {
+        return createIntervalMetronome(onTick);
+    }
+}
+function createIntervalMetronome(onTick) {
+    const timer = setInterval(onTick, METRONOME_INTERVAL_MS);
+    return { dispose() { clearInterval(timer); } };
 }
 export class ThreadSiteNet {
     static roomFromUrl() {
@@ -217,6 +264,9 @@ export class ThreadSiteNet {
     resumeRequested = false;
     hasJoined = false;
     yieldPending = false;
+    hiddenYieldDone = false;
+    metronome = null;
+    reconnectDueAt = 0;
     constructor(options = {}) {
         const game = String(options.game ?? "").trim();
         if (!/^[a-z0-9][a-z0-9-]{2,63}$/.test(game)) {
@@ -258,8 +308,10 @@ export class ThreadSiteNet {
         });
         this.opened.catch(() => undefined);
         this.visibilityHandler = () => {
-            if (this.autoYieldOnHidden && document.hidden && this.isHost && this.peers.length > 0)
-                this.yieldHost();
+            if (document.hidden)
+                this.maybeYieldForHiddenTab();
+            else
+                this.resumeFromHiddenTab();
         };
         this.onlineHandler = () => {
             if (this.manuallyClosed || this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING)
@@ -274,6 +326,7 @@ export class ThreadSiteNet {
             document.addEventListener("visibilitychange", this.visibilityHandler);
         if (typeof window !== "undefined")
             window.addEventListener("online", this.onlineHandler);
+        this.metronome = createMetronome(() => this.backgroundTick());
         this.transforms = new NetTransforms(this);
         this.authority = new NetAuthority(this);
         this.world = new NetWorld(this);
@@ -536,9 +589,58 @@ export class ThreadSiteNet {
         return result;
     }
     /** @internal */ latestWorldSnapshot() { return this.latestWorld; }
+    /**
+     * A hidden tab must not keep authority while peers wait. One sent yield per
+     * hidden period: the background tick retries until a yield actually goes
+     * out, then stops — repeated handoffs would ping-pong authority between
+     * hidden tabs. Becoming visible or a peer joining re-arms the handoff.
+     */
+    maybeYieldForHiddenTab() {
+        if (!this.autoYieldOnHidden || this.hiddenYieldDone)
+            return;
+        if (typeof document === "undefined" || !document.hidden || !this.isHost || this.peers.length === 0)
+            return;
+        if (this.yieldHost())
+            this.hiddenYieldDone = true;
+    }
+    /** Foreground return: refresh liveness and shared state immediately. */
+    resumeFromHiddenTab() {
+        this.hiddenYieldDone = false;
+        if (this.socket?.readyState === WebSocket.OPEN)
+            this.ping();
+        this.worldSync?.publishNow();
+    }
+    /**
+     * One-second supervisor behind the worker metronome. Visible tabs need
+     * nothing here — their own intervals already run at full rate. A hidden
+     * tab's throttled timers would otherwise stall the authority-yield retry,
+     * the heartbeat and reconnect backoff, so this compensates while hidden.
+     */
+    backgroundTick() {
+        if (this.manuallyClosed)
+            return;
+        if (typeof document === "undefined" || !document.hidden)
+            return;
+        this.maybeYieldForHiddenTab();
+        if (this.socket?.readyState === WebSocket.OPEN) {
+            if (Date.now() - this.lastPingTs >= HEARTBEAT_INTERVAL_MS)
+                this.ping();
+            return;
+        }
+        if (this.currentStatus === NET_STATUS.RECONNECTING && this.reconnectTimer
+            && Date.now() >= this.reconnectDueAt + RECONNECT_NUDGE_MS) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+            this.connectSocket();
+        }
+    }
     /** @internal Use `world.yieldAuthority()`. */
     yieldHost(finalWorld = this.lastPublishedWorld) {
         if (!this.isHost || !this.authorityGeneration || this.peers.length === 0 || this.yieldPending)
+            return false;
+        // An unsent yield must not latch: the visibility change, a joining peer or
+        // the background tick retries until the frame actually goes out.
+        if (this.socket?.readyState !== WebSocket.OPEN)
             return false;
         if (finalWorld !== undefined)
             this.publishWorld(finalWorld);
@@ -562,6 +664,8 @@ export class ThreadSiteNet {
             clearInterval(this.heartbeatTimer);
         if (this.playerStateTimer)
             clearInterval(this.playerStateTimer);
+        this.metronome?.dispose();
+        this.metronome = null;
         if (typeof document !== "undefined")
             document.removeEventListener("visibilitychange", this.visibilityHandler);
         if (typeof window !== "undefined")
@@ -722,6 +826,7 @@ export class ThreadSiteNet {
             this.id = null;
             this.hostId = null;
             this.yieldPending = false;
+            this.hiddenYieldDone = false;
             this.bootstrapDone = false;
             this.worldRestored = false;
             this.peersById.clear();
@@ -787,7 +892,7 @@ export class ThreadSiteNet {
                         return;
                     }
                     this.ping();
-                }, 10_000);
+                }, HEARTBEAT_INTERVAL_MS);
                 this.ping();
                 if (!this.openedSettled) {
                     this.openedSettled = true;
@@ -819,6 +924,11 @@ export class ThreadSiteNet {
                 if (peer?.id)
                     this.peersById.set(peer.id, { id: peer.id, name: peer.name ?? null, cid: peer.cid ?? null });
                 this.emitPeers();
+                // A host hidden before this peer joined never saw a hide-time yield,
+                // and a fresh arrival deserves a live host even after an earlier
+                // hidden-period yield.
+                this.hiddenYieldDone = false;
+                this.maybeYieldForHiddenTab();
                 return;
             }
             case "peer-leave":
@@ -1125,7 +1235,9 @@ export class ThreadSiteNet {
             return;
         this.attempt += 1;
         const backoff = Math.min(8000, 500 * 2 ** Math.min(this.attempt, 4));
-        this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; this.connectSocket(); }, backoff * (0.7 + Math.random() * 0.6));
+        const delay = backoff * (0.7 + Math.random() * 0.6);
+        this.reconnectDueAt = Date.now() + delay;
+        this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; this.connectSocket(); }, delay);
     }
 }
 /** Personal JSON checkpoint slots. CAS revisions prevent stale tabs overwriting newer progress. */

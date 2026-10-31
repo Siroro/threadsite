@@ -31,6 +31,8 @@ The first-turn prompt and the `sitebuilder` agent configuration both reinforce t
 
 Protocol v4 uses JSON text frames over one WebSocket per player. The relay owns a random room generation, explicit `hostId`, monotonically increasing authority epoch and world-state sequence. Only the current host for that generation and epoch can publish the shared world. Host disconnect and `yield-host` both migrate authority with the latest cached snapshot attached, so the new host restores before simulating. Hosts receive cache acknowledgements too, allowing a reconnecting client to restore and republish the last complete world if a relay restart erased room memory.
 
+A host whose tab is backgrounded never freezes the room: the client yields authority on hide and again when a peer joins an already-hidden host (at most one handoff per hidden period, so hidden tabs cannot ping-pong authority). A hidden tab also keeps its connection alive through browser timer throttling via a small worker-driven keepalive, so returning to the tab resumes instantly. A fully suspended host (worker and all) is caught by the relay's host-stall watchdog (`GAMESERVER_HOST_STALL_MS`), which re-elects a waiting peer with the cached snapshot attached.
+
 Player transforms are transient latest-wins state with monotonic relay timestamps, never replayed after reconnect. Application events carry reload-safe unique IDs, expire after a short TTL, retry once after rate limiting, and are deduplicated per sender. The relay stays game-agnostic: it stores the newest complete world and live peers' newest player state, stamps relay time, and never interprets or simulates gameplay.
 
 Generated games use explicit channels: reliable events are TTL/retry/dedupe protected, ephemeral signals drop instead of building stale backlogs, host-routed intents carry the accepted run ID and are rejected before game code when stale, and slow-changing presence is cached separately from high-frequency transforms. Stable-ID `syncCollection()` controllers reconcile guest entity views from complete snapshots without embedding game rules in the relay.
@@ -164,7 +166,7 @@ A separate games hostname is optional. Pass `--games-domain games.example.com` t
 
 ### Cloudflare
 
-Cloudflare's proxy (orange cloud) works for the relay: WebSockets are supported on every plan, and the net client's 10-second heartbeat keeps connections alive below Cloudflare's idle cutoff. Requirements:
+Cloudflare's proxy (orange cloud) works for the relay: WebSockets are supported on every plan, and the net client's 10-second heartbeat keeps connections alive below Cloudflare's idle cutoff (in hidden tabs a worker-driven keepalive keeps the heartbeat firing through browser timer throttling). Requirements:
 
 - SSL/TLS mode **Full (strict)**; Flexible terminates at port 80 and never reaches the `/ws` directives in the HTTPS vhost.
 - The public URL must use standard port 443 (Cloudflare does not proxy port 8090).

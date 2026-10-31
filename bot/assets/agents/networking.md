@@ -166,11 +166,13 @@ Authority can migrate after:
 * disconnect
 * `yield-host`
 * background-tab auto-yield
-* the relay's host-stall watchdog (a connected host stopped publishing while peers waited, e.g. a frozen or pre-watchdog tab whose socket still answers pings)
+* the relay's host-stall watchdog (a connected host stopped publishing while peers waited, e.g. a fully suspended tab whose socket still answers pings)
 
 It does not automatically return to the previous host.
 
-* If the current host tab becomes hidden and another peer exists, ThreadSiteNet automatically yields authority by default.
+* If the current host tab becomes hidden and another peer exists, ThreadSiteNet automatically yields authority by default. The yield also fires when a peer joins an already-hidden host, and is retried until it is actually sent — but at most once per hidden period, so hidden tabs cannot ping-pong authority between each other.
+
+* A hidden tab stays connected: a small worker-driven keepalive keeps the heartbeat and reconnect backoff running through browser timer throttling, and returning to the tab pings and republishes immediately. Only a fully suspended tab (worker and all) falls back to the host-stall watchdog.
 
 * `isHost` becomes false while disconnected.
 
@@ -515,7 +517,7 @@ When authority changes, the old host must stop shared simulation immediately and
 | Every timer instantly ends after durable resume | Absolute deadline was persisted                                       | Store remaining/elapsed simulation time and rebase on restore               |
 | Remote player slides across map after teleport  | `publish()` used for discontinuity                                    | Use `transforms.teleport()`                                                 |
 | Game freezes when host tab hides                | Newly authoritative peer isn't advancing simulation                   | Drive simulation from authority lifecycle, never a cached startup-host flag |
-| World frozen for everyone; an old or hidden tab is (or was) connected | That tab held host authority while its JS was frozen: the socket still answers the relay's pings, so nothing dropped it | Relay-side: the host-stall watchdog re-elects a waiting peer within ~15 s of the host going silent; keep hosts publishing so it never triggers |
+| World frozen for everyone; an old or hidden tab is (or was) connected | That tab held host authority while its JS was frozen: the socket still answers the relay's pings, so nothing dropped it | A hidden host yields automatically — on hide and when a peer joins — with the retry healed by a worker keepalive tick. A fully suspended tab is caught relay-side: the host-stall watchdog re-elects a waiting peer within ~15 s of the host going silent |
 | `bad_world_sync` on startup                     | World lifecycle API mixed with raw world/authority callbacks          | Use one synchronization style; prefer the high-level lifecycle              |
 | Host sees nothing in `world.onSnapshot()`       | Own world acknowledgements are silent                                 | Expected; use local authoritative state / `net.run`                         |
 | Persisted ARENA restarts fresh                  | Snapshot schema rejected or capture never successfully persisted      | Check `schemaVersion`, `capture()` errors and relay persistence logs        |

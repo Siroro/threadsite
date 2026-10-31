@@ -223,7 +223,12 @@ export interface ThreadSiteNetOptions {
     transformHz?: number;
     /** Reliable-event lifetime through a disconnect, 250-30000 ms. Default 3000. */
     eventTtlMs?: number;
-    /** Automatically yield host authority when the tab is hidden. Default true. */
+    /** Automatically yield host authority when the tab is hidden. Default true.
+     * The yield also fires when a peer joins an already-hidden host and is
+     * retried until it is actually sent, so a hidden tab never keeps authority
+     * over waiting peers — but hands off at most once per hidden period, so
+     * hidden tabs cannot ping-pong authority between each other.
+     */
     autoYieldOnHidden?: boolean;
     /** Safe, high-level complete-world replication lifecycle. */
     world?: NetWorldSyncOptions;
@@ -319,6 +324,9 @@ export declare class ThreadSiteNet {
     private resumeRequested;
     private hasJoined;
     private yieldPending;
+    private hiddenYieldDone;
+    private metronome;
+    private reconnectDueAt;
     constructor(options?: ThreadSiteNetOptions);
     get status(): NetStatus;
     /** Public leaderboard identity; separate from live peer IDs and never a credential. */
@@ -345,6 +353,22 @@ export declare class ThreadSiteNet {
     peerLastSeen(peerId: string): number | null;
     isStale(peerId: string, maxAgeMs?: number): boolean;
     inviteUrl(): string | null;
+    /**
+     * A hidden tab must not keep authority while peers wait. One sent yield per
+     * hidden period: the background tick retries until a yield actually goes
+     * out, then stops — repeated handoffs would ping-pong authority between
+     * hidden tabs. Becoming visible or a peer joining re-arms the handoff.
+     */
+    private maybeYieldForHiddenTab;
+    /** Foreground return: refresh liveness and shared state immediately. */
+    private resumeFromHiddenTab;
+    /**
+     * One-second supervisor behind the worker metronome. Visible tabs need
+     * nothing here — their own intervals already run at full rate. A hidden
+     * tab's throttled timers would otherwise stall the authority-yield retry,
+     * the heartbeat and reconnect backoff, so this compensates while hidden.
+     */
+    private backgroundTick;
     close(): void;
     private emitEvent;
     private queuePlayerState;
