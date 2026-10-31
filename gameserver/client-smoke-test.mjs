@@ -244,5 +244,51 @@ await sleep(200);
 assert.equal(safeGuest.isHost, true);
 assert.equal(restored.state.bossHp, 10, "new authority restores the latest accepted complete world before starting");
 
+// A forced transport drop leaves no ghost presence: after everyone reconnects
+// under fresh per-connection peer ids, the presence list matches live peers.
+{
+  const dropHost = await ThreadSiteNet.connect({ game: GAME, url: URL, createRoom: true, name: "DropHost" });
+  const dropGuest = await ThreadSiteNet.connect({ game: GAME, url: URL, room: dropHost.room, name: "DropGuest" });
+  dropHost.presence.set({ character: "ranger" });
+  await sleep(80);
+  assert.equal(dropGuest.presence.list().length, 1, "the guest sees the host's presence before the drop");
+  const staleId = dropHost.id;
+  dropGuest.socket.close(4001, "forced drop");
+  const offline = Date.now() + 5000;
+  while (dropGuest.status !== NET_STATUS.RECONNECTING && Date.now() < offline) await sleep(20);
+  dropHost.socket.close(4001, "forced drop"); // its peer-leave cannot reach the offline guest
+  const settled = Date.now() + 8000;
+  while (Date.now() < settled) {
+    const entries = dropGuest.presence.list();
+    if (dropGuest.status === NET_STATUS.ONLINE && dropGuest.peers.length === 1
+      && entries.length >= 1 && entries[0].id !== staleId) break;
+    await sleep(50);
+  }
+  const entries = dropGuest.presence.list();
+  assert.equal(dropGuest.peers.length, 1);
+  assert.equal(entries.length, 1, `presence matches live peers only (got ${entries.map((entry) => entry.id).join(", ")})`);
+  assert.notEqual(entries[0].id, staleId, "the entry belongs to the reconnected host");
+  assert.equal(entries[0].state.character, "ranger", "presence survives the reconnect");
+  dropHost.close(); dropGuest.close();
+}
+
+// A superseded socket cannot clobber its replacement: a new attempt while the
+// old socket lingers detaches the old handlers first, so exactly one guest
+// peer stays connected to the room.
+{
+  const superHost = await ThreadSiteNet.connect({ game: GAME, url: URL, createRoom: true, name: "SuperHost" });
+  const superGuest = await ThreadSiteNet.connect({ game: GAME, url: URL, room: superHost.room, name: "SuperGuest" });
+  const stale = superGuest.socket;
+  superGuest.connectSocket(); // the online-event race: reconnect while the old socket lingers
+  assert.equal(stale.onclose, null, "the superseded socket's handlers are detached");
+  const settled = Date.now() + 5000;
+  while (Date.now() < settled && superGuest.status !== NET_STATUS.ONLINE) await sleep(50);
+  await sleep(200);
+  assert.equal(superGuest.status, NET_STATUS.ONLINE, "the replacement connection takes over");
+  assert.equal(superGuest.id !== null && superGuest.socket !== stale, true);
+  assert.equal(superHost.peers.length, 1, "the room still sees exactly one guest peer");
+  superHost.close(); superGuest.close();
+}
+
 for (const net of [host, guest, late, single, safeGuest]) net.close();
 console.log("ALL CLIENT V4 CONFORMANCE TESTS PASSED");

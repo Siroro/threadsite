@@ -1,9 +1,10 @@
 // Hidden-tab host behavior against a live relay: a hidden host must hand
 // authority to waiting peers — on the visibilitychange event, when a peer
 // joins an already-hidden host, via the worker-metronome retry when the event
-// was missed, and without latching when the frame could not be sent — while
-// hidden tabs never ping-pong authority between each other and keep
-// heartbeating through browser timer throttling.
+// was missed, and without latching when the frame could not be sent (closed
+// socket, full send buffer, or a refused final world) — while hidden tabs
+// never ping-pong authority between each other and keep heartbeating through
+// browser timer throttling.
 //
 // The Page Visibility API is mocked globally; guests standing in for active
 // visible players disable autoYieldOnHidden so only the simulated hidden host
@@ -206,7 +207,48 @@ const closeCase = (...nets) => { for (const net of nets) net.close(); };
   globalThis.Worker = FakeWorker;
 }
 
-// 7. close() disposes the metronome worker.
+// 7. A yield blocked by a full send buffer does not latch either: the frame
+//    would be silently dropped, so the retry must continue until it goes out.
+{
+  show();
+  const host = await connect({ createRoom: true, name: "BufferHost" });
+  await sleep(30);
+  host.publishWorld({ tick: 13, note: "case-7" });
+  const guest = await connect({ room: host.room, name: "BufferGuest", autoYieldOnHidden: false });
+  await sleep(80);
+  hide(false);
+  // Simulate a stalled send buffer: transient frames would be dropped silently.
+  Object.defineProperty(host.socket, "bufferedAmount", { value: 500_000, configurable: true });
+  hide(true);
+  await sleep(120);
+  assert.equal(host.yieldPending, false, "a yield a full buffer would drop must not latch");
+  assert.equal(host.isHost, true);
+  assert.equal(guest.isHost, false);
+  delete host.socket.bufferedAmount;
+  tickMetronomes();
+  await sleep(150);
+  assert.equal(guest.isHost, true, "once the buffer drains, the retry hands authority over");
+  closeCase(host, guest);
+}
+
+// 8. A final world the client refuses (frame_too_large) neither latches as
+//    the last published world nor stops the hidden-tab handoff.
+{
+  show();
+  const host = await connect({ createRoom: true, name: "HugeHost" });
+  await sleep(30);
+  const huge = { tick: 15, blob: "x".repeat(300 * 1024) };
+  assert.throws(() => host.publishWorld(huge), (error) => error.code === "frame_too_large");
+  assert.notEqual(host.lastPublishedWorld, huge, "a refused publish must not become the final world");
+  const guest = await connect({ room: host.room, name: "HugeGuest", autoYieldOnHidden: false });
+  await sleep(80);
+  hide(true); // must not throw out of the visibilitychange listener
+  await sleep(150);
+  assert.equal(guest.isHost, true, "the handoff still goes out without the refused final world");
+  closeCase(host, guest);
+}
+
+// 9. close() disposes the metronome worker.
 {
   show();
   const before = FakeWorker.instances.length;

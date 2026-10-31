@@ -619,11 +619,12 @@ export class ThreadSiteNet {
     }
     if (!this.isHost) throw new ThreadSiteNetError("Only the current host may publish world state.", "not_host");
     if (!this.authorityGeneration) throw new ThreadSiteNetError("No active room generation is available.", "stale_authority");
-    this.lastPublishedWorld = state ?? null;
-    this.sendFrame({
+    // Latch only a world the relay actually received: a dropped or refused
+    // frame must not become the "final world" a later yield republishes.
+    if (this.sendFrame({
       t: "world", generation: this.authorityGeneration,
-      epoch: this.authorityEpoch, s: this.lastPublishedWorld,
-    }, true);
+      epoch: this.authorityEpoch, s: state ?? null,
+    }, true)) this.lastPublishedWorld = state ?? null;
   }
   /** @internal World requests are automatic. */
   requestWorld(): void { this.sendFrame({ t: "world-req" }, true); }
@@ -757,17 +758,31 @@ export class ThreadSiteNet {
       this.connectSocket();
     }
   }
-  /** @internal Use `world.yieldAuthority()`. */
+  /** @internal Use `world.yieldAuthority()`. Never throws: an unsent yield
+   * must not latch, so the visibility change, a joining peer or the background
+   * tick retries until the frame actually goes out. */
   yieldHost(finalWorld: any = this.lastPublishedWorld): boolean {
     if (!this.isHost || !this.authorityGeneration || this.peers.length === 0 || this.yieldPending) return false;
-    // An unsent yield must not latch: the visibility change, a joining peer or
-    // the background tick retries until the frame actually goes out.
-    if (this.socket?.readyState !== WebSocket.OPEN) return false;
-    if (finalWorld !== undefined) this.publishWorld(finalWorld);
+    // A full send buffer silently drops transient frames; refusing here keeps
+    // the yield unlatched for the retry once the buffer drains.
+    if (this.socket?.readyState !== WebSocket.OPEN || this.socket.bufferedAmount > MAX_BUFFERED_BYTES) return false;
+    try {
+      if (finalWorld !== undefined) this.publishWorld(finalWorld);
+    } catch (error) {
+      // The final world is best-effort; waiting peers must still get authority.
+      console.warn("[threadsite-net] final-world publish before yield failed:", error);
+    }
+    let sent = false;
+    try {
+      sent = this.sendFrame({
+        t: "yield-host", generation: this.authorityGeneration, epoch: this.authorityEpoch,
+      }, true);
+    } catch (error) {
+      console.warn("[threadsite-net] authority yield failed:", error);
+      return false;
+    }
+    if (!sent) return false;
     this.yieldPending = true;
-    this.sendFrame({
-      t: "yield-host", generation: this.authorityGeneration, epoch: this.authorityEpoch,
-    }, true);
     return true;
   }
   /** @internal */ ping(): void {
@@ -776,17 +791,27 @@ export class ThreadSiteNet {
   }
   close(): void {
     this.manuallyClosed = true;
+    if (!this.openedSettled) {
+      this.openedSettled = true;
+      this.rejectOpened(new ThreadSiteNetError("Client closed before the relay welcomed it.", "closed"));
+    }
     this.rejectStorageRequests();
     this.flushPlayerState();
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    if (this.playerStateTimer) clearInterval(this.playerStateTimer);
-    this.metronome?.dispose(); this.metronome = null;
-    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.visibilityHandler);
-    if (typeof window !== "undefined") window.removeEventListener("online", this.onlineHandler);
+    this.detachEventSources();
     this.worldSync?.dispose();
     try { this.socket?.close(1000, "client left"); } catch { /* closing */ }
     this.setStatus(NET_STATUS.CLOSED, null);
+  }
+
+  /** Stop owning timers, page listeners and the metronome worker; shared by
+   * close() and terminal relay rejections so a dead client leaks neither. */
+  private detachEventSources(): void {
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+    if (this.playerStateTimer) { clearInterval(this.playerStateTimer); this.playerStateTimer = null; }
+    this.metronome?.dispose(); this.metronome = null;
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.visibilityHandler);
+    if (typeof window !== "undefined") window.removeEventListener("online", this.onlineHandler);
   }
 
   private emitEvent(to: string | null, type: string, data: any): string {
@@ -806,7 +831,10 @@ export class ThreadSiteNet {
     this.pendingPlayerState = { state, transformTick, reset };
     if (this.playerStateTimer) return;
     this.flushPlayerState();
-    this.playerStateTimer = setInterval(() => this.flushPlayerState(), this.transformIntervalMs);
+    this.playerStateTimer = setInterval(() => {
+      try { this.flushPlayerState(); }
+      catch (error) { console.error("[threadsite-net] player-state flush failed:", error); }
+    }, this.transformIntervalMs);
   }
   private sendReliable(item: ReliableFrame): void {
     if (Date.now() >= item.expiresAt) return;
@@ -818,14 +846,16 @@ export class ThreadSiteNet {
     }
     this.sendFrame(item.frame, true);
   }
-  private sendFrame(frame: WireFrame, transient: boolean): void {
+  /** @internal Returns true only when the frame reached the socket; false when
+   * an offline transient or a full send buffer dropped it. Throws unchanged. */
+  private sendFrame(frame: WireFrame, transient: boolean): boolean {
     if (this.socket?.readyState !== WebSocket.OPEN) {
       if (!transient) this.sendReliable({ frame, expiresAt: Date.now() + this.eventTtlMs });
-      return;
+      return false;
     }
     if (this.socket.bufferedAmount > MAX_BUFFERED_BYTES) {
       this.droppedTransient += 1;
-      return;
+      return false;
     }
     let payload: string;
     try { payload = JSON.stringify(frame); }
@@ -841,11 +871,12 @@ export class ThreadSiteNet {
         this.lastBudgetWarnAt = now;
         console.warn(`[threadsite-net] send budget reached (${SEND_BUDGET_PER_SECOND}/s sustained): dropping ${frame.t} frames; reduce transformHz/publishHz or event volume`);
       }
-      return;
+      return false;
     }
     if (frame.t === "world") this.lastWorldBytesValue = size;
     try { this.socket.send(payload); }
     catch (error) { throw new ThreadSiteNetError("Send failed; the connection is closing.", "send_failed", error); }
+    return true;
   }
 
   /** @internal Token bucket pacing sends just under the relay's frame limiter. */
@@ -874,6 +905,15 @@ export class ThreadSiteNet {
     let socket: WebSocket;
     try { socket = new WebSocket(this.url); }
     catch (error) { this.failOrRetry(new ThreadSiteNetError(`Could not open ${this.url}.`, "bad_url", error)); return; }
+    // A previous attempt may still be open or closing (the online event can
+    // fire while a dying socket is CLOSING). Detach it first so its handlers
+    // can never null this newer socket or reset a live connection's state.
+    const previous = this.socket;
+    if (previous) {
+      previous.onopen = previous.onmessage = previous.onclose = previous.onerror = null;
+      this.rejectStorageRequests();
+      try { previous.close(4000, "superseded"); } catch { /* already closing */ }
+    }
     this.socket = socket;
     const failTimer = setTimeout(() => {
       if (socket.readyState !== WebSocket.OPEN) {
@@ -908,7 +948,11 @@ export class ThreadSiteNet {
         const lostAuthorityEpoch = this.isHost ? this.authorityEpoch : null;
         this.id = null; this.hostId = null; this.yieldPending = false; this.hiddenYieldDone = false;
         this.bootstrapDone = false; this.worldRestored = false;
-        this.peersById.clear(); this.statesByPeer.clear(); this.transformBuffers.clear(); this.socket = null;
+        this.peersById.clear(); this.statesByPeer.clear(); this.transformBuffers.clear();
+        // Peer ids are per-connection: without this sweep a reconnect keeps
+        // presence and liveness for dead ids as unreachable ghosts forever.
+        this.lastSeenByPeer.clear(); this.transformInfo.clear(); this.presence._clear();
+        this.socket = null;
       if (lostAuthorityEpoch !== null) this.onAuthorityLost?.(lostAuthorityEpoch);
       if (this.manuallyClosed) { this.setStatus(NET_STATUS.CLOSED, null); return; }
       if (!wasOnline) this.failOrRetry(new ThreadSiteNetError(`Relay at ${this.url} refused the connection (${event.code}).`, "connect_failed"));
@@ -931,9 +975,10 @@ export class ThreadSiteNet {
         this.room = this.mode === "rooms" && typeof frame.room === "string" ? frame.room : null;
         this.requestedRoom = this.room ?? ""; this.createRoom = false;
         this.hasJoined = true; this.resumeRequested = false; saveResumeRoom(this.game, this.room);
-        const recoveryWorld = this.adoptGeneration(String(frame.generation ?? ""));
-        this.peersById.clear(); this.statesByPeer.clear(); this.transformBuffers.clear();
-        for (const raw of Array.isArray(frame.peers) ? frame.peers : []) this.acceptWelcomePeer(raw);
+    const recoveryWorld = this.adoptGeneration(String(frame.generation ?? ""));
+    this.peersById.clear(); this.statesByPeer.clear(); this.transformBuffers.clear();
+    this.lastSeenByPeer.clear(); this.transformInfo.clear(); this.presence._clear();
+    for (const raw of Array.isArray(frame.peers) ? frame.peers : []) this.acceptWelcomePeer(raw);
         if (finite(frame.serverTs)) this.serverTimeOffset = frame.serverTs - Date.now();
         const world = frame.world ? this.parseWorld(frame.world) : null;
         this.applyAuthority(frame.host ?? null, Number(frame.epoch) || 0, world, true);
@@ -1029,7 +1074,9 @@ export class ThreadSiteNet {
     if (raw.presence !== undefined && raw.presence !== null) {
       this.presence._accept({ from: id, cid: raw.cid ?? null, state: raw.presence, ts: finite(raw.presenceTs) ? raw.presenceTs : 0 });
     }
-    if (isTransform(raw.s) && finite(raw.ts)) this.addTransform(id, raw.s, raw.ts, finite(raw.pt) ? raw.pt : 0, raw.pr === true);
+    // Same gate as live pstate frames: only transform streams (which carry a
+    // publish tick) seed the jitter buffer, never plain player states.
+    if (isTransform(raw.s) && finite(raw.ts) && finite(raw.pt)) this.addTransform(id, raw.s, raw.ts, raw.pt, raw.pr === true);
   }
   private acceptPlayerState(frame: WireFrame): void {
     const peerId = String(frame.from ?? ""); if (!peerId || !finite(frame.ts)) return;
@@ -1133,7 +1180,9 @@ export class ThreadSiteNet {
     }
     if (["room_not_found", "bad_version", "bad_game", "bad_room", "room_full", "too_many_rooms", "project_deleted"].includes(code)) {
       if (!this.openedSettled) { this.openedSettled = true; this.rejectOpened(error); }
-      this.manuallyClosed = true; try { this.socket?.close(4000, code); } catch { /* ignored */ }
+      this.manuallyClosed = true;
+      this.detachEventSources();
+      try { this.socket?.close(4000, code); } catch { /* ignored */ }
       this.setStatus(NET_STATUS.CLOSED, code); return;
     }
     console.warn("[threadsite-net]", code, error.message);
@@ -1405,6 +1454,7 @@ export class NetPresence {
     for (const handler of this.handlers) safeCall(() => handler(presence), "presence handler");
   }
   _remove(peerId: string): void { this.remote.delete(peerId); }
+  _clear(): void { this.remote.clear(); }
 }
 
 export class NetRun {

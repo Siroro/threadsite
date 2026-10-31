@@ -370,10 +370,12 @@ export declare class ThreadSiteNet {
      */
     private backgroundTick;
     close(): void;
+    /** Stop owning timers, page listeners and the metronome worker; shared by
+     * close() and terminal relay rejections so a dead client leaks neither. */
+    private detachEventSources;
     private emitEvent;
     private queuePlayerState;
     private sendReliable;
-    private sendFrame;
     private connectSocket;
     private handleFrame;
     private acceptWelcomePeer;
@@ -547,6 +549,7 @@ export declare class NetPresence {
     _resend(): void;
     _accept(presence: NetPlayerState): void;
     _remove(peerId: string): void;
+    _clear(): void;
 }
 export declare class NetRun {
     private readonly net;
