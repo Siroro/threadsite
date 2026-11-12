@@ -1,5 +1,10 @@
 export type ProjectStatus = "creating" | "ready" | "error";
 export type ProjectKind = "site" | "game-2d" | "game-3d";
+
+/** Whether the kind is a game (2D/3D) rather than a plain site. */
+export function isGameKind(kind: ProjectKind | undefined | null): boolean {
+  return kind === "game-2d" || kind === "game-3d";
+}
 /** Multiplayer architecture chosen at /makegam: shared arena, invite-code rooms, or none. */
 export type MultiplayerMode = "arena" | "rooms" | "singleplayer";
 export type CollaborationMode = "open" | "contributors" | "approval";

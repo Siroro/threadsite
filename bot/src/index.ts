@@ -22,10 +22,11 @@ import {
   type TextBasedChannel,
   type ThreadChannel,
 } from "discord.js";
-import { cardEdit, disableMessageControls, renderStatusCard } from "./card-ui.js";
-import { cardId } from "./card-actions.js";
+import { cardEdit, disableMessageControls, renderStatusCard, STATUS_TONE_COLORS, type StatusTone } from "./card-ui.js";
+import { cardId, parseCardId } from "./card-actions.js";
+import { createExternalPushMonitor } from "./external-push.js";
 import { CardInteractions, CardUserError } from "./card-interactions.js";
-import type { RequestFormState, StoredTurnCard } from "./card-state.js";
+import { failureVersionOf, requestFormKey, type RequestFormState, type StoredTurnCard } from "./card-state.js";
 import { QuestionService } from "./question-service.js";
 import { renderQueuePanel } from "./card-panels.js";
 import { readProjectCardDocument } from "./project-docs.js";
@@ -40,14 +41,15 @@ import { multiplayerRelayStatus } from "./multiplayer.js";
 import { OpenCodeV2Harness as OpenCodeHarness } from "./opencode-v2.js";
 import { formatTurnUsage, type PromptImage, type QuotaBlock } from "./opencode-shared.js";
 import { ProjectCardService } from "./project-card-service.js";
-import { DiscordProgress, type ProgressCallback } from "./progress.js";
+import { DiscordProgress, queueUpdate, type ProgressCallback } from "./progress.js";
 import { ProjectService, TurnStoppedError, type MutationResult, type StopTurnOutcome } from "./project.js";
 import { recoverPublishRoot } from "./publish.js";
 import { resetAllRelayGames, resetRelayGame, type RelayResetScope } from "./relay-cleanup.js";
 import { Store, pendingTurnMatches } from "./store.js";
+import { COMMIT_SHORT_HASH_CHARS, isBotCreatedIdentity, relayTenantId, temporaryRepoName } from "./project-identity.js";
 import { multiplayerModeLabel, projectKindLabel, restartInstruction } from "./templates.js";
-import type { CommitAuthor, MultiplayerMode, ProjectKind, ProjectRecord } from "./types.js";
-import { saveUploadAttachments, uploadPromptNote, type UploadedFile } from "./uploads.js";
+import { isGameKind, type CommitAuthor, type MultiplayerMode, type ProjectKind, type ProjectRecord } from "./types.js";
+import { MAX_ATTACHMENTS, MAX_ATTACHMENT_TOTAL_BYTES, saveUploadAttachments, uploadPromptNote, type UploadedFile } from "./uploads.js";
 import { UsageLog, type UsageTotal } from "./usage.js";
 import { startWebhookServer } from "./webhook.js";
 import { renderPlayCard, renderTechnicalCard, type TurnCardState } from "./turn-card.js";
@@ -109,7 +111,7 @@ const webhookSecret = await store.ensureWebhookSecret();
 const webhookServer = startWebhookServer({
   port: config.webhookPort,
   secret: webhookSecret,
-  onPush: (event) => (config.webhookEnabled ? handleForgejoPush(event) : Promise.resolve()),
+  onPush: (event) => (config.webhookEnabled ? externalPush.handleForgejoPush(event) : Promise.resolve()),
   health: () => {
     const records = store.listProjects();
     return {
@@ -130,6 +132,10 @@ const webhookListenerLive = await webhookServer.listening.then(
   },
 );
 const pushWebhooksLive = config.webhookEnabled && webhookListenerLive;
+const externalPush = createExternalPushMonitor({
+  store, forgejo, projects, client,
+  webhooksLive: () => pushWebhooksLive,
+});
 
 // Set once shutdown begins: new turns are refused, in-flight ones drain.
 let shuttingDown = false;
@@ -189,7 +195,7 @@ const collaboration = new CollaborationService({
   },
   rejected: async (threadId, id) => {
     const channel = await client.channels.fetch(threadId).catch(() => undefined);
-    if (channel?.isTextBased()) await channel.messages.fetch(id).then((message) => setStatusMessage(message, "🚫 The thread owner rejected this request.")).catch(() => undefined);
+    if (channel?.isTextBased()) await channel.messages.fetch(id).then((message) => setStatusMessage(message, "🚫 The thread owner rejected this request.", undefined, "error")).catch(() => undefined);
   },
   changed: (threadId) => { void projectCards.refresh(threadId); },
 });
@@ -205,7 +211,7 @@ const cardInteractions = new CardInteractions({
   },
   cancel: cancelQueueRequest,
   submit: submitCardRequest,
-  stop: async (threadId, statusMessageId) => stopOutcomeText(await projects.stopTurn(threadId, statusMessageId)),
+  stop: async (threadId, statusMessageId) => stopOutcome(await projects.stopTurn(threadId, statusMessageId)),
   wipe: async (threadId, userId, scope) => {
     const project = store.getProject(threadId);
     if (!project || project.pendingDeletion) throw new CardUserError("This project is no longer available.");
@@ -255,8 +261,8 @@ client.once(Events.ClientReady, (ready) => {
     await sweepDeletedThreads();
     void recoverInterruptedTurns();
     void reconcileProjectCards();
-    if (pushWebhooksLive) void ensureExistingProjectWebhooks();
-    startExternalPushPoller();
+    if (pushWebhooksLive) void externalPush.ensureWebhooks();
+    externalPush.startPoller();
   })().catch((error) => logError("project.startup_cleanup_failed", error, {}));
   const cleanupTimer = setInterval(() => { void sweepDeletedThreads(); }, config.projectCleanupIntervalMs);
   cleanupTimer.unref();
@@ -273,143 +279,6 @@ async function sweepDeletedThreads(): Promise<void> {
       remove: (id, reason) => handleThreadDeleted(id, reason),
     });
   } finally { cleanupSweepRunning = false; }
-}
-
-// Push-key holders push straight to the repo's main branch. With webhooks on
-// (default), Forgejo tells the bot the moment it happens; the poller also runs
-// as a safety net for missing hooks, rejected deliveries and lost events.
-let externalPushTimer: NodeJS.Timeout | undefined;
-
-function startExternalPushPoller(): void {
-  if (externalPushTimer || config.externalPushPollMs <= 0) return;
-  let scanning = false;
-  externalPushTimer = setInterval(() => {
-    if (scanning) return;
-    scanning = true;
-    void scanForExternalPushes().finally(() => { scanning = false; });
-  }, config.externalPushPollMs);
-  externalPushTimer.unref();
-}
-
-function stopExternalPushPoller(): void {
-  if (externalPushTimer) clearInterval(externalPushTimer);
-  externalPushTimer = undefined;
-}
-
-async function scanForExternalPushes(): Promise<void> {
-  const candidates = store.listProjects().filter((project) => project.status === "ready" && !project.pendingDeletion);
-  for (const project of candidates) {
-    try {
-      const sha = await forgejo.mainCommitSha(project.repoName);
-      if (!sha) continue;
-      await notifyExternalPushIfNeeded(project, sha, "poll");
-    } catch (error) {
-      logError("project.external_push_scan_failed", error, { threadId: project.threadId });
-    }
-  }
-}
-
-/**
- * One shared external-push decision for the webhook and the poller. Guards,
- * in order: nothing new on main; a bot turn mid-flight (its own push, or a
- * user push that the post-turn recheck will pick up); and the bot's own
- * commit landing before the store catches up — recognized silently via
- * lastCommit so the thread never gets a bogus "external push" for its own
- * turn. Only a genuinely foreign, fully idle push prompts the thread.
- */
-async function notifyExternalPushIfNeeded(project: ProjectRecord, sha: string, source: "webhook" | "poll" | "recheck"): Promise<void> {
-  if (sha === project.lastSeenCommit) return;
-  if (project.pendingDeletion || project.pendingTurn || project.pendingRename) return;
-  if (await projects.agentBusy(project.threadId).catch(() => true)) return;
-  if (project.lastCommit && sha.startsWith(project.lastCommit)) {
-    await store.patchProject(project.threadId, { lastSeenCommit: sha });
-    return;
-  }
-  // lastSeenCommit is written only after a successful send, so two deliveries
-  // arriving together (a webhook plus the poller, or a retried hook with a new
-  // delivery id) would otherwise both reach the thread. The key is
-  // thread+commit: a later commit still gets its own prompt.
-  const key = `${project.threadId}:${sha}`;
-  if (externalPushInFlight.has(key)) return;
-  externalPushInFlight.add(key);
-  try {
-    await deliverExternalPushPrompt(project, sha, source);
-  } finally {
-    externalPushInFlight.delete(key);
-  }
-}
-
-async function deliverExternalPushPrompt(project: ProjectRecord, sha: string, source: "webhook" | "poll" | "recheck"): Promise<void> {
-  const channel = await client.channels.fetch(project.threadId).catch(() => undefined);
-  const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
-  // Mark the commit seen only after the prompt is actually delivered. Patching
-  // first meant a failed send (thread deleted, permissions revoked) suppressed
-  // the push permanently: neither the webhook nor the poller would mention it
-  // again.
-  if (!thread) {
-    log("warn", "project.external_push_undeliverable", { source, threadId: project.threadId, commit: sha.slice(0, 10) });
-    return;
-  }
-  try {
-    await thread.send(renderStatusCard(
-      `📥 **External push detected** on \`${project.repoName}\` · commit \`${sha.slice(0, 10)}\` · pushed with a repo push key.\n` +
-      "Publish it to the live site, or dismiss it (the commit stays in git history either way).",
-      [externalPushRow()],
-    ));
-  } catch (error) {
-    logError("project.external_push_notify_failed", error, { source, threadId: project.threadId, commit: sha.slice(0, 10) });
-    return;
-  }
-  await store.patchProject(project.threadId, { lastSeenCommit: sha });
-  log("info", "project.external_push_detected", { source, threadId: project.threadId, commit: sha.slice(0, 10) });
-}
-
-/** Signed Forgejo push event: react instantly when it touches a known repo's main. */
-async function handleForgejoPush(event: { ref?: string; after?: string; repository?: { name?: string } }): Promise<void> {
-  if (event.ref !== "refs/heads/main" || !event.after) return;
-  const repoName = event.repository?.name;
-  if (!repoName) return;
-  const project = store.listProjects().find((candidate) => candidate.repoName === repoName && candidate.status !== "creating");
-  if (!project) return;
-  await notifyExternalPushIfNeeded(project, event.after, "webhook");
-}
-
-/**
- * A push that arrived while a turn was running was skipped by the guards in
- * notifyExternalPushIfNeeded; once the turn settles, look once more so it is
- * not lost to the one-shot webhook.
- */
-async function recheckExternalPush(threadId: string): Promise<void> {
-  if (!pushWebhooksLive) return;
-  const project = store.getProject(threadId);
-  if (!project || project.pendingDeletion || project.pendingTurn || project.pendingRename) return;
-  try {
-    const sha = await forgejo.mainCommitSha(project.repoName);
-    if (sha) await notifyExternalPushIfNeeded(project, sha, "recheck");
-  } catch (error) {
-    logError("project.external_push_recheck_failed", error, { threadId });
-  }
-}
-
-/** Retry webhook registration after service outages or configuration changes. */
-async function ensureExistingProjectWebhooks(): Promise<void> {
-  const secret = store.getWebhookSecret();
-  if (!secret) return;
-  const url = `${config.webhookPublicUrl}/hooks/forgejo`;
-  const list = store.listProjects().filter((project) => project.status !== "creating" && !project.pendingDeletion);
-  await Promise.all(list.map(async (project) => {
-    await forgejo.ensurePushWebhook(project.repoName, url, secret).catch((error) => {
-      log("warn", "webhook.ensure_failed", { repoName: project.repoName, error: serializeError(error) });
-    });
-  }));
-  log("info", "webhook.boot_sweep_done", { projects: list.length });
-}
-
-function externalPushRow(): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId("threadsite:extpub").setLabel("Publish").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId("threadsite:extdismiss").setLabel("Dismiss").setStyle(ButtonStyle.Secondary),
-  );
 }
 
 // Turns that were in flight when the bot stopped are marked in the store.
@@ -446,7 +315,7 @@ async function recoverInterruptedTurns(): Promise<void> {
   for (const project of interrupted) {
     const channel = await client.channels.fetch(project.threadId).catch(() => undefined);
     const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
-    if (!project.pendingTurn && (project.pendingRename || project.pendingThreadName || project.pendingNaming || project.repoName === `site-${project.siteSlug}` || /^(?:site|game)-/i.test(project.displayName))) {
+    if (!project.pendingTurn && (project.pendingRename || project.pendingThreadName || project.pendingNaming || project.repoName === temporaryRepoName(project.siteSlug) || isBotCreatedIdentity(project.displayName))) {
       projects.enqueue(project.threadId, async () => {
         await projects.ensureProjectName(project.threadId);
       }).catch((error) => logError("project.rename_recovery_failed", error, { threadId: project.threadId }));
@@ -478,10 +347,10 @@ async function recoverInterruptedTurns(): Promise<void> {
         phase: "preparing",
         active: false,
       });
-      const deliver: (content: string) => Promise<unknown> = status
-        ? (content) => setStatusMessage(status, content).catch(() => undefined)
+      const deliver: (content: string, tone?: StatusTone) => Promise<unknown> = status
+        ? (content, tone) => setStatusMessage(status, content, undefined, tone).catch(() => undefined)
         : thread
-          ? (content) => thread.send(renderStatusCard(content)).catch(() => undefined)
+          ? (content, tone) => thread.send(renderStatusCard(content, { tone })).catch(() => undefined)
           : async () => undefined;
       // The recovered turn is presented like any other: the report goes to the
       // status message when it survived the restart, and both messages go to
@@ -503,7 +372,8 @@ async function recoverInterruptedTurns(): Promise<void> {
           const result = await projects.recoverTurn(project.threadId, recoveryCallback);
           await progress?.close();
           if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
-            await deliver(finishedWithErrorsMessageText(result));
+            const finished = finishedWithErrorsMessageText(result);
+            await deliver(finished.text, finished.tone);
             await sendOutcomeFollowUp(thread, result, { operation: "restart-recovery", guildId: project.guildId });
           } else {
             const recoveryHead = result.noChanges
@@ -517,7 +387,7 @@ async function recoverInterruptedTurns(): Promise<void> {
             // Same handoff as a stopped live turn: a stop-and-restart steer
             // continues on this card, so the recovered pass reports nothing.
             if (status && pendingRestarts.delete(status.id)) {
-              await deliver("🔁 Stopped at your request — continuing this turn with the added instruction…").catch(() => undefined);
+              await deliver("🔁 Stopped at your request — continuing this turn with the added instruction…", "warn").catch(() => undefined);
               return;
             }
             await deliver("🛑 **Stopped at your request**: the recovered turn's partial edits are preserved in the workspace.");
@@ -532,9 +402,10 @@ async function recoverInterruptedTurns(): Promise<void> {
           });
           await deliver(
             `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Could not recover the interrupted turn from the last restart · reference \`${incident.id}\`. Partial edits were kept: send a message to try again.`,
+            "error",
           );
         } finally {
-          void recheckExternalPush(project.threadId);
+          void externalPush.recheck(project.threadId);
           void projectCards.refresh(project.threadId);
         }
       }).catch((error) => logError("project.queue_failed", error, { threadId: project.threadId }));
@@ -554,7 +425,7 @@ async function recoverInterruptedTurns(): Promise<void> {
           const accumulator = pendingUpdates.get(project.threadId);
           if (accumulator) {
             accumulator.scheduled = false;
-            if (accumulator.entries.length) scheduleUpdateDrain(project.threadId, project.projectKind === "game-2d" || project.projectKind === "game-3d");
+            if (accumulator.entries.length) scheduleUpdateDrain(project.threadId, isGameKind(project.projectKind));
             else pendingUpdates.delete(project.threadId);
           }
           return;
@@ -564,7 +435,7 @@ async function recoverInterruptedTurns(): Promise<void> {
           ? live
           : await thread.send(`🔁 Re-running ${queued.length} message${queued.length === 1 ? "" : "s"} that were queued when the bot restarted…`).catch(() => undefined);
         if (!status) return;
-        const isGame = fresh.projectKind === "game-2d" || fresh.projectKind === "game-3d";
+        const isGame = isGameKind(fresh.projectKind);
         const progress = new DiscordProgress(status, `🔁 Catching up ${fresh.displayName}`);
         registerQuestionButtons(status, progress);
         const entries: QueuedUpdate[] = [];
@@ -596,7 +467,7 @@ async function recoverInterruptedTurns(): Promise<void> {
       const accumulator = pendingUpdates.get(project.threadId);
       if (accumulator) {
         accumulator.scheduled = false;
-        if (accumulator.entries.length) scheduleUpdateDrain(project.threadId, project.projectKind === "game-2d" || project.projectKind === "game-3d");
+        if (accumulator.entries.length) scheduleUpdateDrain(project.threadId, isGameKind(project.projectKind));
         else pendingUpdates.delete(project.threadId);
       }
     }
@@ -612,7 +483,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (project) authorizeCard(project, interactionActor(interaction, config.adminUserIds.has(interaction.user.id)),
           "stop");
       }
-      if (interaction.customId.startsWith("threadsite:ext")) {
+      // Buttons rendered before the codec migration carry the legacy literal prefix.
+      if (interaction.customId.startsWith("threadsite:ext") || ["extpublish", "extdismiss"].includes(parseCardId(interaction.customId)?.action ?? "")) {
         await handleExternalPushButton(interaction);
       } else {
         await interaction.reply({ ...renderStatusCard("That control is no longer supported. Use the current project card."), flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
@@ -713,8 +585,6 @@ const creatingThreads = new Set<string>();
 // Threads deleted while their project was being created. The creation closure
 // checks this when it finishes and tears the fresh project down.
 const abandonedThreads = new Set<string>();
-// External-push prompts currently being delivered, keyed thread:commit.
-const externalPushInFlight = new Set<string>();
 
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.guildId || !message.channel.isThread()) return;
@@ -769,7 +639,7 @@ client.on(Events.MessageCreate, async (message) => {
     try {
       await collaboration.request(project.threadId, actor, status.id, content || "Use the attached reference material to update the project.", author, [...message.attachments.values()]);
     } catch (error) {
-      await setStatusMessage(status, `🚫 ${error instanceof CollaborationError ? error.message : "Could not save this request for approval. Please try again."}`).catch(() => undefined);
+      await setStatusMessage(status, `🚫 ${error instanceof CollaborationError ? error.message : "Could not save this request for approval. Please try again."}`, undefined, "error").catch(() => undefined);
       return;
     }
     await status.edit({ ...cardEdit(approvalCard(project, status.id, ownerId(project))), allowedMentions: { parse: [], users: ownerId(project) ? [ownerId(project)!] : [] } }).catch(() => undefined);
@@ -824,7 +694,7 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
   try { requireCurrentContributor(project.threadId, actor); }
-  catch (error) { await setStatusMessage(status, `🚫 ${(error as Error).message}`).catch(() => undefined); return; }
+  catch (error) { await setStatusMessage(status, `🚫 ${(error as Error).message}`, undefined, "error").catch(() => undefined); return; }
 
   // Only an explicit Discord reply to the current turn's status can steer it.
   // Ordinary messages, replies to other messages, attachments and late replies
@@ -856,7 +726,7 @@ async function enqueueUserRequest(threadId: string, status: Message, prompt: str
     await store.appendQueuedRequest(threadId, { prompt, displayPrompt, author, requesterId, statusMessageId: status.id,
       images: images.length ? images : undefined, files: files?.length ? [...files] : undefined });
   } catch (error) {
-    await setStatusMessage(status, error instanceof CollaborationError ? `🚫 ${error.message}` : "❌ Could not save this request. Please send it again.").catch(() => undefined);
+    await setStatusMessage(status, error instanceof CollaborationError ? `🚫 ${error.message}` : "❌ Could not save this request. Please send it again.", undefined, "error").catch(() => undefined);
     throw error;
   }
   await status.edit(cardEdit(renderStatusCard("✅ Request saved: queued for the next update pass."))).catch(() => undefined);
@@ -864,10 +734,8 @@ async function enqueueUserRequest(threadId: string, status: Message, prompt: str
   if (!pending) { pending = { entries: [], scheduled: false }; pendingUpdates.set(threadId, pending); }
   if (!pending.entries.some((entry) => (entry.requestStatusId ?? entry.status.id) === status.id)) pending.entries.push({ prompt, displayPrompt, images, author, requesterId, status });
   const running = store.getProject(threadId);
-  if (running?.pendingTurn?.statusMessageId) liveProgress.get(running.pendingTurn.statusMessageId)?.callback({
-    kind: "queue", text: "Saved requests", queuedRequests: running.pendingQueue?.length ?? 0,
-  });
-  scheduleUpdateDrain(threadId, running?.projectKind === "game-2d" || running?.projectKind === "game-3d");
+  if (running?.pendingTurn?.statusMessageId) liveProgress.get(running.pendingTurn.statusMessageId)?.callback(queueUpdate(running.pendingQueue?.length ?? 0));
+  scheduleUpdateDrain(threadId, isGameKind(running?.projectKind));
 }
 
 async function submitCardRequest(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, attachments: Attachment[]): Promise<string> {
@@ -884,9 +752,9 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
     });
     try {
       await collaboration.request(project.threadId, actor, status.id, prompt, commitAuthorIdentity({ globalName: interaction.user.globalName, username: interaction.user.username, id: interaction.user.id }), attachments);
-      store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: status.id });
+      store.patchCardState<RequestFormState>(project.threadId, requestFormKey(nonce), { statusMessageId: status.id });
       await status.edit({ ...cardEdit(approvalCard(current, status.id, ownerId(current))), allowedMentions: { parse: [], users: ownerId(current) ? [ownerId(current)!] : [] } }).catch(() => undefined);
-    } catch (error) { await setStatusMessage(status, "🚫 Could not save this request for approval. Please try again.").catch(() => undefined); throw error; }
+    } catch (error) { await setStatusMessage(status, "🚫 Could not save this request for approval. Please try again.", undefined, "error").catch(() => undefined); throw error; }
     return "Your request is saved and waiting for the thread owner's approval. It has not been sent to the agent.";
   }
   requireCurrentContributor(project.threadId, actor);
@@ -921,12 +789,12 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
   const channel = interaction.channel;
   if (!channel || !("send" in channel)) throw new CardUserError("This project thread is unavailable.");
   const status = await channel.send(renderStatusCard("⏳ Saving your request…"));
-  store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: status.id });
+  store.patchCardState<RequestFormState>(project.threadId, requestFormKey(nonce), { statusMessageId: status.id });
   try { await enqueueUserRequest(project.threadId, status, fullPrompt, images, author, interaction.user.id, prompt, uploads, actor); }
   catch (error) {
     // appendQueuedRequest failed before accepting anything. A new submission
     // can safely retry without duplicating an accepted prompt.
-    store.patchCardState<RequestFormState>(project.threadId, `request:${nonce}`, { statusMessageId: undefined });
+    store.patchCardState<RequestFormState>(project.threadId, requestFormKey(nonce), { statusMessageId: undefined });
     throw error;
   }
   return form.steer ? "✅ That turn had finished accepting instructions, so your request was queued for the next pass." : "✅ Your request was saved in the project's update queue.";
@@ -955,7 +823,7 @@ async function restartTurnWithInstruction(project: ProjectRecord, form: RequestF
   const author = pending.author ?? fallbackAuthor;
   const notes = await projects.projectNotes(threadId);
   const instructionOverride = restartInstruction(originalPrompt, instruction, notes);
-  const isGame = (store.getProject(threadId)?.projectKind ?? "site") !== "site";
+  const isGame = isGameKind(store.getProject(threadId)?.projectKind);
   // The continuation presents as the same turn: its card keeps counting from
   // the interrupted pass's start.
   const startedAt = Date.parse(pending.startedAt);
@@ -987,7 +855,7 @@ async function restartTurnWithInstruction(project: ProjectRecord, form: RequestF
     // fresh status message, exactly like restart recovery.
     let status = await thread.messages.fetch(form.resource).catch(() => undefined);
     if (status && status.author.id !== client.user?.id) status = undefined;
-    if (!status) status = await thread.send(renderStatusCard("🔁 Continuing the stopped turn with your instruction…")).catch(() => undefined);
+    if (!status) status = await thread.send(renderStatusCard("🔁 Continuing the stopped turn with your instruction…", { tone: "warn" })).catch(() => undefined);
     if (!status) return;
     await runUpdateTurn(threadId, isGame, [{ prompt: instruction, displayPrompt: instruction, images, author, requesterId, status, startedAt }], instructionOverride);
   }).catch((error) => {
@@ -999,7 +867,7 @@ async function restartTurnWithInstruction(project: ProjectRecord, form: RequestF
       const thread = await client.channels.fetch(threadId).catch(() => undefined);
       if (!thread?.isThread()) return;
       const status = await thread.messages.fetch(form.resource).catch(() => undefined);
-      if (status) await setStatusMessage(status, "❌ The stopped turn could not be restarted. Its partial edits are preserved; send your instruction as a new message to continue.").catch(() => undefined);
+      if (status) await setStatusMessage(status, "❌ The stopped turn could not be restarted. Its partial edits are preserved; send your instruction as a new message to continue.", undefined, "error").catch(() => undefined);
     })();
   });
   return true;
@@ -1046,14 +914,14 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
   const first = batch[0];
   const project = store.getProject(threadId);
   if (!project) {
-    for (const entry of batch) await setStatusMessage(entry.status, "❌ This thread's project no longer exists.").catch(() => undefined);
+    for (const entry of batch) await setStatusMessage(entry.status, "❌ This thread's project no longer exists.", undefined, "error").catch(() => undefined);
     return;
   }
   const progress = first.progress ?? new DiscordProgress(first.status, `${isGame ? "🎮 Updating" : "🛠️ Updating"} ${project.displayName}`, first.startedAt);
   if (!first.progress) registerQuestionButtons(first.status, progress);
   const callback = withQuestionPings(progress.callback, threadId, first.requesterId);
   try {
-    const merged = mergeUpdateBatch<PromptImage, QueuedUpdate>(batch, config.maxPromptChars);
+    const merged = mergeUpdateBatch(batch, config.maxPromptChars);
     const consumed = batch.slice(0, batch.length - merged.overflow.length);
     for (const entry of consumed.slice(1)) {
       await entry.progress?.close();
@@ -1065,10 +933,21 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
       if (pending) pending.entries.unshift(...merged.overflow);
     }
     progress.enableStopButton();
-    const result = await projects.mutate(threadId, merged.prompt, false, callback, first.author, first.status.id, merged.images, consumed.map((entry) => entry.requestStatusId ?? entry.status.id), merged.display ?? first.displayPrompt, first.requesterId, instructionOverride);
+    const result = await projects.mutate(threadId, {
+      prompt: merged.prompt,
+      author: first.author,
+      statusMessageId: first.status.id,
+      images: merged.images,
+      queuedStatusIds: consumed.map((entry) => entry.requestStatusId ?? entry.status.id),
+      displayRequest: merged.display ?? first.displayPrompt,
+      requesterId: first.requesterId,
+      instruction: instructionOverride,
+      onProgress: callback,
+    });
     await progress.close();
     if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
-      await setStatusMessage(first.status, finishedWithErrorsMessageText(result));
+      const finished = finishedWithErrorsMessageText(result);
+      await setStatusMessage(first.status, finished.text, undefined, finished.tone);
       const outcomeChannel = first.status.channel;
       await sendOutcomeFollowUp("send" in outcomeChannel ? outcomeChannel : undefined, result, {
         operation: "thread-update",
@@ -1084,13 +963,14 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
       // interrupted pass must not post a stopped-turn outcome — the restart
       // closure behind it continues the work here, edits preserved.
       if (pendingRestarts.delete(first.status.id)) {
-        await setStatusMessage(first.status, "🔁 Stopped at your request — continuing this turn with the added instruction…").catch(() => undefined);
+        await setStatusMessage(first.status, "🔁 Stopped at your request — continuing this turn with the added instruction…", undefined, "warn").catch(() => undefined);
         return;
       }
       await setStatusMessage(
         first.status,
         "🛑 **Stopped at your request**: the agent's partial edits are preserved in the workspace. Reply here to build on them, or roll them back below.",
         (await offerEditsChoice(store.getProject(threadId), error)) ? [failureEditsRow(first.status.id)] : undefined,
+        "warn",
       );
       return;
     }
@@ -1105,9 +985,10 @@ async function runUpdateTurn(threadId: string, isGame: boolean, batch: QueuedUpd
       first.status,
       `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Update failed · reference \`${incident.id}\`. The previous published version is unchanged.`,
       (await offerEditsChoice(project, error)) ? [failureEditsRow(first.status.id)] : undefined,
+      "error",
     );
   } finally {
-    void recheckExternalPush(threadId);
+    void externalPush.recheck(threadId);
     void projectCards.refresh(threadId);
   }
 }
@@ -1243,8 +1124,9 @@ async function startProjectThread(
       }, callback, (title) => applyAiThreadTitle(thread, title));
       await progress.close();
       if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
-        await setStatusMessage(status, finishedWithErrorsMessageText(result,
-          options.outcome === "site" ? "Every message in this thread edits this same site. Run `/site help` for details." : undefined));
+        const finished = finishedWithErrorsMessageText(result,
+          options.outcome === "site" ? "Every message in this thread edits this same site. Run `/site help` for details." : undefined);
+        await setStatusMessage(status, finished.text, undefined, finished.tone);
         await sendOutcomeFollowUp(thread, result, {
           operation: options.operation,
           guildId: interaction.guildId,
@@ -1260,6 +1142,8 @@ async function startProjectThread(
         await setStatusMessage(
           status,
           "🛑 **Stopped at your request**: the partial first build is preserved in the workspace. Reply here to continue from it.",
+          undefined,
+          "warn",
         );
         return;
       }
@@ -1282,6 +1166,7 @@ async function startProjectThread(
         status,
         `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ ${options.outcome === "site" ? "Initial generation" : "Initial game generation"} failed · reference \`${incident.id}\`. ${retry}`,
         (await offerEditsChoice(project, error)) ? [failureEditsRow(status.id)] : undefined,
+        "error",
       );
     } finally {
       // A thread deleted mid-setup must not leave a repository and a live
@@ -1293,7 +1178,7 @@ async function startProjectThread(
       }
       creatingThreads.delete(thread.id);
       abandonedThreads.delete(thread.id);
-      void recheckExternalPush(thread.id);
+      void externalPush.recheck(thread.id);
       if (store.getProject(thread.id)) void projectCards.refresh(thread.id);
     }
   }).catch((error) => logError("project.queue_failed", error, { threadId: thread.id }));
@@ -1386,7 +1271,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       content:
         `**${project.displayName}**: ${project.status}\n` +
         `[open site](${projects.siteLink(project)}) · [source](${projects.repoLink(project)})\n` +
-        `Type: ${projectKindLabel(project.projectKind)}${project.multiplayerMode && project.projectKind !== "site" ? ` (${project.multiplayerMode === "arena" ? "arena multiplayer" : project.multiplayerMode === "rooms" ? "invite-code rooms" : "singleplayer"})` : ""}\n` +
+        `Type: ${projectKindLabel(project.projectKind)}${project.multiplayerMode && isGameKind(project.projectKind) ? ` (${project.multiplayerMode === "arena" ? "arena multiplayer" : project.multiplayerMode === "rooms" ? "invite-code rooms" : "singleplayer"})` : ""}\n` +
         `Model: \`${threadModelLabel(project)}\`${project.modelOverride ? " (thread override)" : ""} · Effort: \`${store.getEffort() || "auto"}\`` +
         contextLine + "\n" +
         threadUsageText(usage, isAdmin(interaction)) +
@@ -1479,7 +1364,8 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
         projects.switchMultiplayer(project.threadId, mode, status.id, callback, interaction.user.id, userNote));
       await progress.close();
       if (result.validationError || result.deliveryError || (!result.commit && !result.noChanges)) {
-        await setStatusMessage(status, finishedWithErrorsMessageText(result));
+        const finished = finishedWithErrorsMessageText(result);
+        await setStatusMessage(status, finished.text, undefined, finished.tone);
         await sendOutcomeFollowUp(interaction.channel, result, {
           operation: "multiplayer-switch",
           guildId: interaction.guildId,
@@ -1493,7 +1379,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     } catch (error) {
       await progress.close();
       if (error instanceof TurnStoppedError) {
-        await setStatusMessage(status, "🛑 **Stopped at your request**: the half-finished network rewrite is preserved in the workspace. Reply here to continue it.");
+        await setStatusMessage(status, "🛑 **Stopped at your request**: the half-finished network rewrite is preserved in the workspace. Reply here to continue it.", undefined, "warn");
         await interaction.editReply("Stopped. The architecture setting is switched; reply in the thread to finish the rewrite.");
         return;
       }
@@ -1508,6 +1394,8 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       await setStatusMessage(
         status,
         `${quotaNotice(error) ? `${quotaNotice(error)}\n` : ""}❌ Multiplayer switch failed · reference \`${incident.id}\`. The architecture setting is switched; reply here to have the agent finish or revert the rewrite.`,
+        undefined,
+        "error",
       );
       await interaction.editReply(`The switch failed: reference \`${incident.id}\`.`);
     } finally {
@@ -1543,7 +1431,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
     // would be useless when the turn is wedged on an unreachable provider.
     requireCurrentContributor(project.threadId, actor);
     const outcome = await projects.stopTurn(project.threadId);
-    await interaction.editReply(stopOutcomeText(outcome));
+    await interaction.editReply(stopOutcome(outcome).text);
     if (outcome.stopped) log("info", "discord.stop_command_used", { threadId: project.threadId, userId: interaction.user.id });
     return;
   }
@@ -1570,7 +1458,7 @@ async function handleSiteCommand(interaction: ChatInputCommandInteraction): Prom
       unregisterQuestionButtons(stoppedStatusId);
       const stopped = await interaction.channel?.messages.fetch(stoppedStatusId).catch(() => undefined);
       if (stopped && stopped.author.id === client.user?.id) {
-        await setStatusMessage(stopped, "🛑 This turn was stopped by `/site reset`: its agent session was dropped. Send a new message to continue.").catch(() => undefined);
+        await setStatusMessage(stopped, "🛑 This turn was stopped by `/site reset`: its agent session was dropped. Send a new message to continue.", undefined, "warn").catch(() => undefined);
       }
     }
     await interaction.editReply(
@@ -1877,7 +1765,7 @@ function successMessageText(result: MutationResult, isGame: boolean, note?: stri
 // (committed, not live), or the commit itself failed (edits kept in the
 // workspace). The agent's summary still leads; the error detail follows in a
 // separate thread message (sendOutcomeFollowUp).
-function finishedWithErrorsMessageText(result: MutationResult, note?: string): string {
+function finishedWithErrorsMessageText(result: MutationResult, note?: string): { text: string; tone: StatusTone } {
   const head = !result.commit
     ? result.noChanges
       ? result.validationError
@@ -1887,11 +1775,13 @@ function finishedWithErrorsMessageText(result: MutationResult, note?: string): s
     : result.validationError
       ? `⚠️ **${result.project.displayName}** · validation failed: committed \`${result.commit}\`, not published · ${commitStatsText(result)}`
       : `⚠️ **${result.project.displayName}** · committed \`${result.commit}\`, but publishing failed: not live · ${commitStatsText(result)}`;
+  const tone: StatusTone = head.startsWith("⚠️") ? "warn" : "neutral";
   const stats = turnStatsText(result);
   const noteLine = note ? `\n${note}\n` : "\n";
   const links = `[git](<${projects.repoLink(result.project)}>)`;
   const budget = MAX_DISCORD_MESSAGE_CHARS - head.length - stats.length - noteLine.length - links.length - 1;
-  return `${head}${agentSummaryText(result.agentSummary, budget)}\n${stats}${noteLine}${links}`;
+  return { text: `${head}${agentSummaryText(result.agentSummary, budget)}
+${stats}${noteLine}${links}`, tone };
 }
 
 /** `12 files changed (+300/−20)` — shared by the success and outcome heads. */
@@ -2219,7 +2109,7 @@ async function publishTurnResult(status: Message, result: MutationResult, isGame
     await setTurnCards(status, result, note);
   } catch (error) {
     log("warn", "discord.turn_cards_failed", { messageId: status.id, error: String(error) });
-    await setStatusMessage(status, successMessageText(result, isGame, note)).catch(() => undefined);
+    await setStatusMessage(status, successMessageText(result, isGame, note), undefined, result.browserQaFindings?.length ? "warn" : "neutral").catch(() => undefined);
   }
 }
 
@@ -2241,16 +2131,17 @@ async function setStatusMessage(
   status: Message,
   content: string,
   components?: ActionRowBuilder<ButtonBuilder>[],
+  tone: StatusTone = "neutral",
 ): Promise<void> {
   // The outcome message replaces the live status: any pending agent-question
   // buttons on it are gone, so stop routing clicks for this message.
   await liveProgress.get(status.id)?.close();
   unregisterQuestionButtons(status.id);
-  const payload = renderStatusCard(truncate(content, MAX_DISCORD_MESSAGE_CHARS), components);
+  const payload = renderStatusCard(truncate(content, MAX_DISCORD_MESSAGE_CHARS), { rows: components, tone });
   const project = store.getProject(status.channelId);
   if (project && !project.pendingDeletion) {
-    store.patchCardState<StoredTurnCard & { failureVersion?: string }>(project.threadId, status.id, {
-      closed: true, failureVersion: components?.length ? `${project.lastCommit ?? ""}/${project.lastTurnAt ?? ""}` : undefined,
+    store.patchCardState<StoredTurnCard>(project.threadId, status.id, {
+      closed: true, failureVersion: components?.length ? failureVersionOf(project) : undefined,
     });
   }
   try {
@@ -2285,7 +2176,8 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
   if (!interaction.inGuild() || !interaction.channel?.isThread()) {
     throw new Error("This button only works inside a project thread.");
   }
-  const publish = interaction.customId === "threadsite:extpub";
+  const action = parseCardId(interaction.customId)?.action;
+  const publish = action === "extpublish" || interaction.customId === "threadsite:extpub";
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   if (shuttingDown) throw new Error("The bot is restarting: try again in a moment.");
   if (await projects.agentBusy(interaction.channel.id)) {
@@ -2331,19 +2223,19 @@ async function wipeRelayState(project: ProjectRecord, userId: string, scope: Rel
 /** One wording for the Stop button and `/site stop`; the slash command exists
  * so a deleted status message or a turn that never rendered one is still
  * interruptible. */
-function stopOutcomeText(outcome: StopTurnOutcome): string {
+function stopOutcome(outcome: StopTurnOutcome): { text: string; tone: StatusTone } {
   if (outcome.stopped) {
-    return "🛑 Stop requested: the running update is being interrupted. Its partial edits are kept; the status message will show the outcome.";
+    return { tone: "warn", text: "🛑 Stop requested: the running update is being interrupted. Its partial edits are kept; the status message will show the outcome." };
   }
   if (outcome.queueFreed) {
-    return "⚠️ The agent service is not answering, so the running update could not be aborted. " +
-      "The thread's queue has been freed so new messages are not blocked.";
+    return { tone: "warn", text: "⚠️ The agent service is not answering, so the running update could not be aborted. " +
+      "The thread's queue has been freed so new messages are not blocked." };
   }
   if (outcome.delivering) {
-    return "⏳ The agent has already finished and the update is now being validated, committed, and published. " +
-      "There is nothing left to interrupt; the status message will show the result.";
+    return { tone: "neutral", text: "⏳ The agent has already finished and the update is now being validated, committed, and published. " +
+      "There is nothing left to interrupt; the status message will show the result." };
   }
-  return "No model turn is currently running in this thread. Waiting messages, if any, can be cancelled with `/site queue`.";
+  return { tone: "neutral", text: "No model turn is currently running in this thread. Waiting messages, if any, can be cancelled with `/site queue`." };
 }
 
 /**
@@ -2376,7 +2268,7 @@ async function cancelQueueRequest(threadId: string, statusId: string): Promise<s
   const original = memory?.status
     ?? await client.channels.fetch(threadId).then((channel) => channel?.isTextBased() ? channel.messages.fetch(statusId) : undefined).catch(() => undefined);
   if (original && original.author.id === client.user?.id) {
-    await setStatusMessage(original, "🚫 **Cancelled**").catch(() => undefined);
+    await setStatusMessage(original, "🚫 **Cancelled**", undefined, "error").catch(() => undefined);
   }
   if (memory) {
     await memory.progress?.close();
@@ -2386,7 +2278,7 @@ async function cancelQueueRequest(threadId: string, statusId: string): Promise<s
   const fresh = store.getProject(threadId);
   const remaining = fresh?.pendingQueue?.length ?? 0;
   if (fresh?.pendingTurn?.statusMessageId) {
-    liveProgress.get(fresh.pendingTurn.statusMessageId)?.callback({ kind: "queue", text: "Saved requests", queuedRequests: remaining });
+    liveProgress.get(fresh.pendingTurn.statusMessageId)?.callback(queueUpdate(remaining));
   }
   const preview = truncate((stored.prompt ?? memory?.prompt ?? "").replace(/\s+/g, " ").trim(), 120);
   return `🚫 Cancelled${preview ? `: **${preview}**` : " that request"} · **${remaining}** still queued.`;
@@ -2441,13 +2333,12 @@ async function reportFailure(  error: unknown,
 // Discord CDN attachment URLs expire, so image bytes are downloaded at message
 // receipt — before the turn waits behind the project queue — and embedded as
 // data URIs that travel with the prompt request itself.
-const MAX_TURN_IMAGES = 4;
-const MAX_TURN_IMAGE_BYTES = 8 * 1024 * 1024;
+
 
 async function downloadImageAttachments(attachments: Attachment[]): Promise<PromptImage[]> {
   const images: PromptImage[] = [];
-  for (const attachment of attachments.slice(0, MAX_TURN_IMAGES)) {
-    if (attachment.size > MAX_TURN_IMAGE_BYTES) {
+  for (const attachment of attachments.slice(0, MAX_ATTACHMENTS)) {
+    if (attachment.size > MAX_ATTACHMENT_TOTAL_BYTES) {
       log("warn", "discord.image_attachment_too_large", { bytes: attachment.size });
       continue;
     }
@@ -2474,7 +2365,7 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   log("info", "process.shutdown_begin", { signal, activeTurns: projects.activeTurnCount(), drainMs: config.shutdownDrainMs });
-  stopExternalPushPoller();
+  externalPush.stopPoller();
   webhookServer?.close();
   const deadline = Date.now() + config.shutdownDrainMs;
   while (Date.now() < deadline && projects.activeTurnCount() > 0) {

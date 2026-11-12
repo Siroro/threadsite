@@ -622,7 +622,7 @@ test("root tool events retain their targets while child work stays out of the pu
 });
 
 test("shell activity labels lead with the command, not the implied workspace", async () => {
-  const { describeTool } = await import("../src/opencode-shared.js");
+  const { describeTool } = await import("../src/tool-labels.js");
   const workspace = "/workspace/83572303320842240/1564225654235467837";
   const running = (command: string): string => describeTool("shell", { command }, "running", undefined, workspace)!.text;
   // The cd into the thread's own workspace and the node_modules install path are noise.

@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import type { Store } from "./store.js";
 import type { ProjectRecord } from "./types.js";
 import { checkedRemovalPath, projectAccounts, projectRepos, projectSlugs, removalPaths } from "./project-removal.js";
+import { PUSH_ACCOUNT_PATTERN, REPO_NAME_PATTERN, SLUG_PATTERN, publishLeftoverSlug, relayTenantId } from "./project-identity.js";
 
 export interface PurgeServices {
   thread(threadId: string): Promise<{ guild_id?: string; type: number }>;
@@ -48,8 +49,7 @@ function workspaceIdentity(directory: string): { directory: string; threadId: st
 }
 
 function gameIds(projects: ProjectRecord[]): Set<string> {
-  return new Set(projects.flatMap((project) => project.multiplayerGameId ? [project.multiplayerGameId]
-    : project.projectKind?.startsWith("game-") && project.multiplayerMode !== "singleplayer" ? [project.siteSlug] : []));
+  return new Set(projects.flatMap((project) => { const id = relayTenantId(project); return id ? [id] : []; }));
 }
 
 /** Inventory is read-only. A failed lookup never turns a registered resource into an orphan. */
@@ -100,18 +100,18 @@ export async function planPurge(store: Store, services: PurgeServices): Promise<
   for (const session of sessions) await addWorkspace(session.directory, session.id);
   plan.workspaces = [...groups.values()];
   for (const repo of repositories) {
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/.test(repo.name)) continue;
+    if (!REPO_NAME_PATTERN.test(repo.name)) continue;
     if (!protectedRepos.has(repo.name) && !protectedRepoIds.has(repo.id) && await services.managedRepository(repo)) plan.repositories.push({ id: repo.id, name: repo.name });
   }
   const protectedSlugs = new Set(projects.flatMap(projectSlugs));
   for (const entry of await entries(config.publishRoot)) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-    const slug = /^(?:\.staging-|\.backup-)(.+)-[a-f0-9]{10}$/.exec(entry.name)?.[1] ?? entry.name;
-    if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug) || protectedSlugs.has(slug)) continue;
+    const slug = publishLeftoverSlug(entry.name) ?? entry.name;
+    if (!SLUG_PATTERN.test(slug) || protectedSlugs.has(slug)) continue;
     plan.published.push(await checkedRemovalPath(config.publishRoot, path.join(config.publishRoot, entry.name)));
   }
   const protectedAccounts = new Set(projects.flatMap(projectAccounts));
-  try { plan.accounts = (await services.accounts()).filter((name) => /^push-[a-z0-9]{6}$/.test(name) && !protectedAccounts.has(name)); }
+  try { plan.accounts = (await services.accounts()).filter((name) => PUSH_ACCOUNT_PATTERN.test(name) && !protectedAccounts.has(name)); }
   catch (error) { plan.warnings.push(`Push-account inventory unavailable; retained accounts: ${String((error as Error).message)}`); }
   try { const protectedGames = gameIds(projects); plan.games = (await services.games()).filter((game) => !protectedGames.has(game)); }
   catch (error) { plan.warnings.push(`Relay inventory unavailable; retained worlds: ${String((error as Error).message)}`); }
@@ -166,7 +166,7 @@ export async function applyPurge(store: Store, plan: PurgePlan, services: PurgeS
     if (repo) await services.removeRepository(repo.name);
   });
   for (const directory of plan.published) await attempt(`published folder ${directory}`, async () => {
-    const slug = /^(?:\.staging-|\.backup-)(.+)-[a-f0-9]{10}$/.exec(path.basename(directory))?.[1] ?? path.basename(directory);
+    const slug = publishLeftoverSlug(path.basename(directory)) ?? path.basename(directory);
     if (store.listProjects().flatMap(projectSlugs).includes(slug)) throw new Error("Published folder is registered now; retained.");
     await fs.rm(await checkedRemovalPath(config.publishRoot, directory), { recursive: true, force: true, maxRetries: 3 });
   });

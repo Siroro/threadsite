@@ -55,10 +55,10 @@ export default {
       const allowed = new Set(["read", "write", "edit", "apply_patch", "glob", "grep", "list", "shell", "skill", "subagent", "webfetch", "websearch", "question", "todowrite", "lsp"]);
       const docs = new Set(["context7_resolve-library-id", "context7_query-docs"]);
       for (const tool of tools.list()) {
-        if (!allowed.has(tool.id) && !docs.has(tool.id) && !/^playwright[._]/.test(tool.id)) { tools.remove(tool.id); continue; }
+        if (!allowed.has(tool.id) && !docs.has(tool.id) && !isBrowserTool(tool.id)) { tools.remove(tool.id); continue; }
         tools.update(tool.id, (current) => {
           current.options = { ...current.options, codemode: false,
-            ...(/^playwright[._]/.test(tool.id) ? { permission: "threadsite_browser" } : {}),
+            ...(isBrowserTool(tool.id) ? { permission: "threadsite_browser" } : {}),
             ...(docs.has(tool.id) ? { permission: "threadsite_docs" } : {}) };
         });
       }
@@ -118,7 +118,7 @@ export default {
       // writable from there, so a workspace path fails the whole call with
       // EROFS/ENOENT after the browser already produced the image. Path-shaped
       // targets are dropped — the screenshot still returns as image content.
-      if (/^playwright[._].*take_screenshot$/.test(event.tool)) {
+      if (isBrowserTool(event.tool) && /take_screenshot$/.test(event.tool)) {
         if (typeof event.input.rawPath === "string" && event.input.rawPath) delete event.input.rawPath;
         if (typeof event.input.filename === "string"
           && (event.input.filename.includes("/") || event.input.filename.includes("\\") || /^[~.]/.test(event.input.filename))) {

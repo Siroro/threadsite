@@ -1,6 +1,7 @@
 import type { FormInfo, SessionMessageInfo } from "@opencode/client";
 import type { SessionMessage } from "./opencode-shared.js";
 import type { AgentQuestion } from "./progress.js";
+import { BUILDER_AGENT } from "./opencode-contract.js";
 
 /** Normalize at the application boundary; v2 wire types never escape the adapter. */
 export function applicationMessage(message: SessionMessageInfo, sessionID: string): SessionMessage {
@@ -25,7 +26,7 @@ export function applicationMessage(message: SessionMessageInfo, sessionID: strin
     return { info, parts: [{ type: "text", text: message.text }] };
   }
   if (message.type === "idle") {
-    Object.assign(info, { role: "assistant", agent: "sitebuilder",
+    Object.assign(info, { role: "assistant", agent: BUILDER_AGENT,
       finish: message.outcome === "succeeded" ? "stop" : "aborted", error: message.error,
       time: { ...message.time, completed: message.time.created } });
   }

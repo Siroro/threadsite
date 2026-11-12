@@ -1,10 +1,12 @@
+import type { PromptImage } from "./opencode-shared.js";
 import { requestDisplayText } from "./util.js";
 
-interface UpdateRequest<Image> { prompt: string; images: readonly Image[] }
+/** One queued request: prompt text with its image attachments. */
+export interface QueuedPrompt { prompt: string; images: readonly PromptImage[] }
 
 /** Split a queued batch by the actual composed prompt size, preserving FIFO order. */
-export function mergeUpdateBatch<Image, Entry extends UpdateRequest<Image>>(batch: readonly Entry[], maxPromptChars: number): {
-  prompt: string; display: string | undefined; images: Image[]; overflow: Entry[];
+export function mergeUpdateBatch<Entry extends QueuedPrompt>(batch: readonly Entry[], maxPromptChars: number): {
+  prompt: string; display: string | undefined; images: PromptImage[]; overflow: Entry[];
 } {
   if (!Number.isSafeInteger(maxPromptChars) || maxPromptChars < 1) throw new Error("Invalid prompt limit.");
   const first = batch[0];

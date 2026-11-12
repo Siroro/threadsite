@@ -13,9 +13,19 @@ import { parseProjectDescription, parseProjectChangelog } from "./project-docs.j
 import { renderGallery } from "./gallery.js";
 import { publicGalleryUrl, type GalleryProject } from "./gallery-model.js";
 import type { ProjectRecord } from "./types.js";
+import { LEADERBOARD_SITE_FILES } from "./leaderboards.js";
+import { MULTIPLAYER_SITE_FILES } from "./multiplayer.js";
+import { repairable } from "./validation.js";
 import { htmlEscape, safeChild } from "./util.js";
+import { GALLERY_DIR, SLUG_PATTERN, publishLeftoverSuffix, publishLeftoverSlug } from "./project-identity.js";
 
 const execFileAsync = promisify(execFile);
+
+// The site/-relative files the harness owns and the site/ roots they live
+// under, derived from the provisioning modules that write them. The type
+// gate mirrors them into its program and publication excludes their roots.
+const HARNESS_SITE_FILES: readonly string[] = [...MULTIPLAYER_SITE_FILES, ...LEADERBOARD_SITE_FILES];
+const HARNESS_SITE_ROOTS = new Set(HARNESS_SITE_FILES.map((file) => file.split("/")[0]!));
 
 const BLOCKED_SERVER_EXTENSIONS = new Set([
   // The generated tree is served by host Apache, not only by Docker. Keep obvious
@@ -77,12 +87,12 @@ export async function validateSite(siteDir: string): Promise<SiteStats> {
         // that no browser executes. Repairable, so it rides the type-check
         // error channel into the one-shot repair round-trip.
         if (!relative.startsWith("src/")) {
-          throw new Error(`JavaScript type-check error: TypeScript file site/${relative} is outside site/src/, and only the src/ tree is compiled. Move it below site/src/.`);
+          throw repairable(`JavaScript type-check error: TypeScript file site/${relative} is outside site/src/, and only the src/ tree is compiled. Move it below site/src/.`);
         }
         tsSources.push(absolute);
       }
       if (/\.(?:tsx|cts|jsx)$/.test(extension)) {
-        throw new Error(`JavaScript type-check error: site/${relative} uses unsupported script type '${extension}'; write plain TypeScript (.ts) under site/src/.`);
+        throw repairable(`JavaScript type-check error: site/${relative} uses unsupported script type '${extension}'; write plain TypeScript (.ts) under site/src/.`);
       }
       files += 1;
       bytes += stat.size;
@@ -93,7 +103,7 @@ export async function validateSite(siteDir: string): Promise<SiteStats> {
 
   await walk(root);
   if (!tsSources.length && scripts.some((file) => path.relative(root, file).replaceAll(path.sep, "/").startsWith("js/"))) {
-    throw new Error("JavaScript type-check error: site/js/ requires TypeScript source under site/src/.");
+    throw repairable("JavaScript type-check error: site/js/ requires TypeScript source under site/src/.");
   }
   await validateScriptSyntax(root, scripts);
   await validateInlineScripts(root);
@@ -120,7 +130,7 @@ async function checkScriptSyntax(absolute: string, label: string): Promise<void>
   }
   if (result.stderr?.trim()) {
     const first = result.stderr.split("\n").find((line) => line.includes("Error:") && !line.trim().startsWith("at ")) ?? result.stderr.split("\n")[0];
-    throw new Error(`JavaScript syntax error in ${label}: ${first.trim()}`);
+    throw repairable(`JavaScript syntax error in ${label}: ${first.trim()}`);
   }
 }
 
@@ -157,7 +167,7 @@ async function validateInlineScripts(root: string): Promise<void> {
         try {
           JSON.parse(check.body);
         } catch (error) {
-          throw new Error(`JavaScript syntax error in ${check.label}: import map is not valid JSON: ${String((error as Error).message ?? error)}`);
+          throw repairable(`JavaScript syntax error in ${check.label}: import map is not valid JSON: ${String((error as Error).message ?? error)}`);
         }
         continue;
       }
@@ -200,11 +210,11 @@ async function validateAssetReferences(root: string): Promise<void> {
       if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) continue;
       if (url.includes("${")) continue;
       if (reference.kind === "<script src>" && /\.(?:ts|mts)$/i.test(url.split("#")[0].split("?")[0])) {
-        throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" points at TypeScript source, which browsers cannot execute; reference the compiled bundle (js/<name>.js) instead.`);
+        throw repairable(`Broken local reference in ${rel}: ${reference.kind} "${url}" points at TypeScript source, which browsers cannot execute; reference the compiled bundle (js/<name>.js) instead.`);
       }
       if (url.startsWith("/")) {
         if (reference.enforceRelative) {
-          throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" is a site-root-absolute path, but the site is served under a path prefix; use a relative URL.`);
+          throw repairable(`Broken local reference in ${rel}: ${reference.kind} "${url}" is a site-root-absolute path, but the site is served under a path prefix; use a relative URL.`);
         }
         continue;
       }
@@ -214,15 +224,15 @@ async function validateAssetReferences(root: string): Promise<void> {
       try {
         decoded = decodeURIComponent(clean);
       } catch {
-        throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" is not a valid URL encoding.`);
+        throw repairable(`Broken local reference in ${rel}: ${reference.kind} "${url}" is not a valid URL encoding.`);
       }
       const resolved = path.resolve(path.dirname(html), decoded);
       if (!resolved.startsWith(`${root}${path.sep}`)) {
-        throw new Error(`Broken local reference in ${rel}: ${reference.kind} "${url}" points outside the site directory.`);
+        throw repairable(`Broken local reference in ${rel}: ${reference.kind} "${url}" points outside the site directory.`);
       }
       const exists = await fs.access(resolved).then(() => true, () => false);
       if (!exists) {
-        throw new Error(`Broken local reference in ${rel}: ${reference.kind} points at missing local file "${url}".`);
+        throw repairable(`Broken local reference in ${rel}: ${reference.kind} points at missing local file "${url}".`);
       }
     }
   }
@@ -294,12 +304,12 @@ async function validateModuleResolution(root: string): Promise<void> {
       const relative = path.relative(root, resolved).replaceAll(path.sep, "/");
       const via = path.relative(root, item.from).replaceAll(path.sep, "/") || "index.html";
       if (!resolved.startsWith(`${root}${path.sep}`)) {
-        throw new Error(
+        throw repairable(
           `Broken local reference in ${rel}: ${item.kind}, loaded from site/${via}, resolves to site/${relative}, which is outside the site directory and never published (workspace files such as node_modules/). Import the engine from site/src/ TypeScript so it is bundled, or move the referenced file under site/.`,
         );
       }
       if (!await fs.access(resolved).then(() => true, () => false)) {
-        throw new Error(
+        throw repairable(
           `Broken local reference in ${rel}: ${item.kind}, loaded from site/${via}, resolves to missing file site/${relative}. If this is a split library (an ESM wrapper re-exporting sibling builds), vendor every file it imports, or import the harness-vendored copy instead.`,
         );
       }
@@ -379,14 +389,7 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
     // Harness-owned net files stay real so authored imports resolve: the
     // client's declarations give call sites the full typed API (the .js is
     // never an input; with checkJs off nothing reports from the .js itself).
-    for (const name of [
-      "net/threadsite-net.js", "net/threadsite-net.d.ts",
-      "net/net-config.js", "net/net-config.d.ts",
-      "net/threadsite-player.js", "net/threadsite-player.d.ts",
-      "leaderboards/threadsite-leaderboards.js", "leaderboards/threadsite-leaderboards.d.ts",
-      "leaderboards/threadsite-player.js", "leaderboards/threadsite-player.d.ts",
-      "leaderboards/leaderboards-config.js", "leaderboards/leaderboards-config.d.ts",
-    ]) {
+    for (const name of HARNESS_SITE_FILES) {
       const content = await fs.readFile(safeChild(root, ...name.split("/")), "utf8").catch(() => undefined);
       if (content === undefined) continue;
       const mirrored = path.join(mirrorRoot, ...name.split("/"));
@@ -458,7 +461,7 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
       const significant = significantDiagnostics(raw)
         .replaceAll(`${mirrorPosix}/`, "")
         .replaceAll(`${mirrorRoot}${path.sep}`, "");
-      if (significant) throw new Error(`JavaScript type-check error:\n${significant}`);
+      if (significant) throw repairable(`JavaScript type-check error:\n${significant}`);
       if (processError && !raw) throw new Error(`JavaScript type-checker failed: ${String(processError)}`);
     }
   } finally {
@@ -619,7 +622,7 @@ async function validateElementIds(root: string, scripts: string[]): Promise<void
   const missing = lookups.filter(({ id }) => !knownIds.has(id));
   if (missing.length) {
     const lines = missing.map(({ file, id }) => `- ${file}: getElementById/querySelector references missing id "${id}"`);
-    throw new Error(
+    throw repairable(
       `JavaScript type-check error:\nElement ID mismatch: some DOM lookups reference ids that do not exist in the site HTML or are never created by the JS. Fix the id names in the JS or add the elements to the HTML.\n${lines.join("\n")}`,
     );
   }
@@ -657,7 +660,7 @@ function extractLiteralLookupIds(source: string): string[] {
 export async function publishSite(siteDir: string, siteSlug: string): Promise<void> {
   await fs.mkdir(config.publishRoot, { recursive: true });
   const target = safeChild(config.publishRoot, siteSlug);
-  const suffix = crypto.randomBytes(5).toString("hex");
+  const suffix = publishLeftoverSuffix();
   const staging = safeChild(config.publishRoot, `.staging-${siteSlug}-${suffix}`);
   const backup = safeChild(config.publishRoot, `.backup-${siteSlug}-${suffix}`);
 
@@ -674,7 +677,7 @@ export async function publishSite(siteDir: string, siteSlug: string): Promise<vo
         const relative = path.relative(siteDir, source);
         if (!relative) return true;
         const root = relative.split(path.sep)[0];
-        return root !== "src" && root !== "net" && root !== "leaderboards";
+        return root !== "src" && !HARNESS_SITE_ROOTS.has(root);
       },
     });
     await stampDeployVersion(staging, await workspaceCommit(siteDir));
@@ -723,8 +726,10 @@ export async function recoverPublishRoot(): Promise<void> {
   }
   const stale: Array<{ name: string; slug: string; kind: "staging" | "backup" }> = [];
   for (const name of entries) {
-    const match = /^\.(staging|backup)-(.+)-[0-9a-f]{10}$/.exec(name);
-    if (match) stale.push({ name, slug: match[2], kind: match[1] as "staging" | "backup" });
+    const match = publishLeftoverSlug(name);
+    if (match === undefined) continue;
+    const kind = /^\.(staging|backup)-/.exec(name)?.[1] as "staging" | "backup" | undefined;
+    if (kind) stale.push({ name, slug: match, kind });
   }
   let restored = 0;
   let removed = 0;
@@ -1059,11 +1064,8 @@ export function siteUrl(project: ProjectRecord): string {
   return `${config.publicSitesBaseUrl}/${encodeURIComponent(project.siteSlug)}/`;
 }
 
-/** Harness-owned gallery assets at the publish root; the leading underscores keep cleanup from reading them as site slugs. */
-const GALLERY_DIR = "__gallery";
-
 function galleryPreviewPath(slug: string): string {
-  if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug)) throw new Error(`Invalid gallery slug: ${slug}`);
+  if (!SLUG_PATTERN.test(slug)) throw new Error(`Invalid gallery slug: ${slug}`);
   return safeChild(config.publishRoot, GALLERY_DIR, `${slug}.png`);
 }
 
@@ -1103,7 +1105,7 @@ export async function publishIndex(projects: ProjectRecord[], repoUrl: (repo: st
   if (!config.publicIndexEnabled) return;
   const next = galleryPublishTail.catch(() => undefined).then(async () => {
     const candidates = await Promise.all(projects.map(async (project): Promise<GalleryProject | undefined> => {
-      if (project.pendingDeletion || !/^[a-z0-9][a-z0-9-]{0,79}$/.test(project.siteSlug)) return undefined;
+      if (project.pendingDeletion || !SLUG_PATTERN.test(project.siteSlug)) return undefined;
       const published = safeChild(config.publishRoot, project.siteSlug);
       // A failed update must not hide a working, previously published project.
       if (project.status !== "ready") {

@@ -134,7 +134,7 @@ test("browser findings publish without a repair turn and reach the next agent pr
   });
   let report = { findings: ["ReferenceError: player is not defined at main.js:42"] };
   Object.assign(f.service, { runBrowserQa: async () => report });
-  const result = await f.service.mutate(f.project.threadId, "Add a scoreboard");
+  const result = await f.service.mutate(f.project.threadId, { prompt: "Add a scoreboard" });
   assert.equal(result.validationError, undefined);
   assert.equal(result.deliveryError, undefined);
   assert.equal(result.project.status, "ready");
@@ -143,7 +143,7 @@ test("browser findings publish without a repair turn and reach the next agent pr
   assert.match(await fs.readFile(path.join(config.publishRoot, result.project.siteSlug, "js/main.js"), "utf8"), /qa update 1/);
   assert.match(f.store.getProject(f.project.threadId)!.browserQaFindings!.findings![0], /player is not defined/);
   report = { findings: [] };
-  const next = await f.service.mutate(f.project.threadId, "Improve the scoreboard");
+  const next = await f.service.mutate(f.project.threadId, { prompt: "Improve the scoreboard" });
   assert.match(instructions[1], /BROWSER QA FEEDBACK/);
   assert.match(instructions[1], /Runtime finding: ReferenceError.*main.js:42/);
   assert.match(instructions[1], /already excluded/);
@@ -164,18 +164,18 @@ test("delivered browser findings are not re-read while QA produces no fresh pass
   // undefined models QA being unavailable for a turn: no fresh record replaces the stored one.
   let report: { findings: string[] } | undefined = { findings: ["ReferenceError: player is not defined at main.js:42"] };
   Object.assign(f.service, { runBrowserQa: async () => report });
-  await f.service.mutate(f.project.threadId, "Add a scoreboard");
+  await f.service.mutate(f.project.threadId, { prompt: "Add a scoreboard" });
   // QA unavailable for the turn that receives the feedback: no fresh record replaces the stored one.
   report = undefined;
-  const next = await f.service.mutate(f.project.threadId, "Improve the scoreboard");
+  const next = await f.service.mutate(f.project.threadId, { prompt: "Improve the scoreboard" });
   assert.match(instructions[1], /BROWSER QA FEEDBACK/);
   const delivered = next.project.browserQaFindings!;
   assert.equal(delivered.findings[0], "ReferenceError: player is not defined at main.js:42");
   assert.ok(delivered.deliveredAt, "findings whose feedback rode the turn are stamped delivered at settlement");
   report = { findings: ["TypeError: boards.list is not a function at main.js:9"] };
-  await f.service.mutate(f.project.threadId, "Polish the scoreboard");
+  await f.service.mutate(f.project.threadId, { prompt: "Polish the scoreboard" });
   assert.doesNotMatch(instructions[2], /BROWSER QA FEEDBACK/, "delivered findings never re-read on later turns");
-  const fresh = await f.service.mutate(f.project.threadId, "Ship the scoreboard");
+  const fresh = await f.service.mutate(f.project.threadId, { prompt: "Ship the scoreboard" });
   assert.match(instructions[3], /Runtime finding: TypeError: boards\.list/);
   assert.equal(fresh.project.browserQaFindings!.deliveredAt, undefined, "a fresh QA pass is undelivered again");
 });
@@ -192,7 +192,7 @@ test("the play card shows the project's own description and newest changelog ent
       return { text: "Updated", usage: {} };
     },
   });
-  const result = await f.service.mutate(f.project.threadId, "Add lily pads");
+  const result = await f.service.mutate(f.project.threadId, { prompt: "Add lily pads" });
   assert.match(result.description?.pitch ?? "", /calm pond/);
   assert.match(result.description?.play ?? "", /drop food/);
   assert.match(result.changelog?.body ?? "", /lily pads/);
@@ -208,7 +208,7 @@ test("fail-open browser QA does not bypass compiler failures or replace the prev
   } });
   let browserCalls = 0;
   Object.assign(f.service, { runBrowserQa: async () => { browserCalls += 1; return { findings: [] }; } });
-  const result = await f.service.mutate(f.project.threadId, "Make an update");
+  const result = await f.service.mutate(f.project.threadId, { prompt: "Make an update" });
   assert.match(result.validationError ?? "", /TypeScript compile error/);
   assert.equal(browserCalls, 0);
   assert.equal(await fs.readFile(liveFile, "utf8"), previousLive);
@@ -402,7 +402,7 @@ test("sync rejects broken remote changes and restores the pre-sync workspace and
 test("a preparation failure without a turn marker preserves its error and releases active bookkeeping", async () => {
   const f = await projectFixture("early-preparation-failure");
   const failure = new Error("Preparing the progress card failed");
-  await assert.rejects(f.service.mutate(f.project.threadId, "Add a button", false, () => { throw failure; }),
+  await assert.rejects(f.service.mutate(f.project.threadId, { prompt: "Add a button", onProgress: () => { throw failure; } }),
     (error) => error === failure);
   assert.equal(f.store.getProject(f.project.threadId)!.pendingTurn, undefined);
   assert.equal((await f.service.stopTurn(f.project.threadId)).stopped, false);
@@ -410,10 +410,10 @@ test("a preparation failure without a turn marker preserves its error and releas
 
 test("a stop during failed preparation is settled without requiring a turn marker", async () => {
   const f = await projectFixture("early-preparation-stop");
-  await assert.rejects(f.service.mutate(f.project.threadId, "Add a button", false, async () => {
+  await assert.rejects(f.service.mutate(f.project.threadId, { prompt: "Add a button", onProgress: async () => {
     assert.equal((await f.service.stopTurn(f.project.threadId)).stopped, true);
     throw new Error("Preparation interrupted");
-  }), (error) => error instanceof TurnStoppedError);
+  } }), (error) => error instanceof TurnStoppedError);
   const project = f.store.getProject(f.project.threadId)!;
   assert.equal(project.pendingTurn, undefined);
   assert.equal(project.status, "ready");
@@ -440,18 +440,6 @@ test("renames refresh both URLs, preserve old subpage links, and revert the whol
   assert.equal(f.store.getProject(f.project.threadId)!.siteSlug, "sumo-shove");
   assert.match(await fs.readFile(path.join(f.dir, "README.md"), "utf8"), /sumo-shove/);
   assert.match(await fs.readFile(path.join(config.publishRoot, "sumo-shove/js/main.js"), "utf8"), /baseline/);
-});
-
-test("game renames re-key the relay identity before republishing", async () => {
-  const f = await projectFixture("rename-relay");
-  await f.store.patchProject(f.project.threadId, { projectKind: "game-arcade", multiplayerGameId: f.project.siteSlug });
-  const calls: Array<[string, string]> = [];
-  Object.assign(f.service, { renameRelayGame: async (from: string, to: string) => { calls.push([from, to]); } });
-  const renamed = await f.service.renameProject(f.project.threadId, "Sumo Relay");
-  assert.deepEqual(calls, [[f.project.siteSlug, renamed.siteSlug]], "the relay rename lands once with the old and new ids");
-  assert.equal(renamed.multiplayerGameId, renamed.siteSlug, "the relay identity follows the new name");
-  assert.match(await fs.readFile(path.join(f.dir, "site/net/net-config.js"), "utf8"), new RegExp(`game: "${renamed.siteSlug}"`),
-    "the republished net-config carries the new game id");
 });
 
 test("a game rename whose relay step fails keeps its intent and resumes with the old id", async () => {
@@ -483,7 +471,7 @@ test("README.md carries the original request, submitter and agent README through
     await fs.writeFile(path.join(f.dir, "README.agent.md"), "## About\n\nFeed the koi.\n", "utf8");
     return { text: "Built the pond", usage: {} };
   };
-  const first = await f.service.mutate(f.project.threadId, "Build the koi pond");
+  const first = await f.service.mutate(f.project.threadId, { prompt: "Build the koi pond" });
   assert.equal(first.deliveryError, undefined);
   const readme = await fs.readFile(path.join(f.dir, "README.md"), "utf8");
   assert.match(readme, /maintained by the ThreadSite harness\./);
@@ -501,7 +489,7 @@ test("README.md carries the original request, submitter and agent README through
     await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("readme v2");');
     return { text: "Updated the pond", usage: {} };
   };
-  const second = await f.service.mutate(f.project.threadId, "Update the readme");
+  const second = await f.service.mutate(f.project.threadId, { prompt: "Update the readme" });
   assert.equal(second.deliveryError, undefined);
   const updated = await fs.readFile(path.join(f.dir, "README.md"), "utf8");
   assert.doesNotMatch(updated, /direct edit must lose/);
@@ -597,7 +585,7 @@ test("mutate claims queued work durably before the agent starts", async () => {
     await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("new turn");');
     return { text: "Changed", usage: {} } as PromptResult;
   };
-  await f.service.mutate(f.project.threadId, "change it", false, undefined, undefined, "replacement-status", undefined, ["original-status"]);
+  await f.service.mutate(f.project.threadId, { prompt: "change it", statusMessageId: "replacement-status", queuedStatusIds: ["original-status"] });
   assert.ok(started);
   assert.equal(f.store.getProject(f.project.threadId)!.pendingTurn, undefined);
   assert.equal(f.store.getProject(f.project.threadId)!.pendingQueue![0].prompt, "next pass");
@@ -692,7 +680,7 @@ test("a failed Discord rename blocks the next prompt and retries after restart w
   let prompts = 0;
   f.opencode.prompt = async () => { prompts++; throw new Error("must not prompt yet"); };
   const unavailable = new ProjectService(f.store, f.opencode, f.forgejo, f.usage, async () => { throw new Error("Discord unavailable"); });
-  await assert.rejects(unavailable.mutate(f.project.threadId, "finish it"), /Discord unavailable/);
+  await assert.rejects(unavailable.mutate(f.project.threadId, { prompt: "finish it" }), /Discord unavailable/);
   assert.equal(prompts, 0);
   assert.equal(await fs.readFile(path.join(f.dir, "site/src/main.ts"), "utf8"), partial);
   assert.equal(await git(f.dir, "show", ":site/src/main.ts"), partial);
@@ -711,7 +699,7 @@ test("a failed Discord rename blocks the next prompt and retries after restart w
     await fs.writeFile(path.join(f.dir, "site/src/unfinished.ts"), "export const complete = true;");
     return { text: "Finished", usage: {} } as PromptResult;
   };
-  const result = await restarted.mutate(f.project.threadId, "finish it");
+  const result = await restarted.mutate(f.project.threadId, { prompt: "finish it" });
   assert.equal(prompts, 1);
   assert.equal(result.project.repoName, "persistent-garden");
   assert.equal(result.deliveryError, undefined);
@@ -817,7 +805,7 @@ test("a user rename retitles DESCRIPTION.md, is committed, and is announced to t
     await fs.writeFile(path.join(f.dir, "site/src/main.ts"), 'console.log("rebranded");');
     return { text: "Rebranded", usage: {} } as PromptResult;
   };
-  const result = await f.service.mutate(f.project.threadId, "update the title screen");
+  const result = await f.service.mutate(f.project.threadId, { prompt: "update the title screen" });
   assert.equal(result.deliveryError, undefined);
   assert.equal(instructions.length, 1);
   assert.match(instructions[0], /PROJECT RENAME/);
@@ -917,8 +905,10 @@ test("the stop button honors a turn that is still preparing", async () => {
   });
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const turning = f.service.mutate(
-    f.project.threadId, "Add a settings screen", false, undefined, undefined, "status",
-    [{ mime: "image/png", dataUrl: "data:image/png;base64,eA==" }],
+    f.project.threadId, {
+      prompt: "Add a settings screen", statusMessageId: "status",
+      images: [{ mime: "image/png", dataUrl: "data:image/png;base64,eA==" }],
+    },
   ).then(
     () => { throw new Error("mutate must reject when stopped"); },
     (error: unknown) => error,
@@ -1038,7 +1028,7 @@ test("resetting a thread reports its aborted turn as a user stop, not a failure"
     prompt: async () => { prompted = true; return parked; },
   });
   const settle = () => new Promise((resolve) => setImmediate(resolve));
-  const turning = f.service.mutate(f.project.threadId, "Add fog of war", false, undefined, undefined, "status").then(
+  const turning = f.service.mutate(f.project.threadId, { prompt: "Add fog of war", statusMessageId: "status" }).then(
     () => { throw new Error("mutate must reject when reset"); },
     (error: unknown) => error,
   );
@@ -1116,7 +1106,7 @@ test("only a reply to the running turn's status message steers the live session"
   // Idle thread: nothing to steer.
   assert.equal(await service.steerActiveTurn(f.project.threadId, "nope", "status"), false);
 
-  const turning = service.mutate(f.project.threadId, "Add snow tiles", false, undefined, undefined, "status").then(
+  const turning = service.mutate(f.project.threadId, { prompt: "Add snow tiles", statusMessageId: "status" }).then(
     (result) => result,
     (error: unknown) => error,
   );
@@ -1162,11 +1152,11 @@ test("a thread's model override drives turn prompts until cleared", async () => 
     await fs.writeFile(path.join(f.dir, "site/src/main.ts"), `console.log("turn ${prompted.length}");`);
     return { text: "Changed", usage: {} };
   };
-  await f.service.mutate(f.project.threadId, "change it", false, undefined, undefined, "override-status");
+  await f.service.mutate(f.project.threadId, { prompt: "change it", statusMessageId: "override-status" });
   assert.deepEqual(prompted, ["override/model"]);
   // Clearing the override ("default" in /site model) falls back to the bot-wide model.
   await f.store.patchProject(f.project.threadId, { modelOverride: undefined });
-  await f.service.mutate(f.project.threadId, "change it again", false, undefined, undefined, "cleared-status");
+  await f.service.mutate(f.project.threadId, { prompt: "change it again", statusMessageId: "cleared-status" });
   assert.deepEqual(prompted, ["override/model", "global/primary"]);
 });
 

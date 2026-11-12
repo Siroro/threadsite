@@ -21,6 +21,8 @@ export interface SerializedError {
 }
 
 const LEVELS: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
+// Logger is a bootstrap-level module: it owns its two env reads so that
+// everything else can import it before config validation runs.
 const configuredLevel = normalizeLevel(process.env.LOG_LEVEL);
 const logFile = path.resolve(process.env.LOG_FILE?.trim() || "/data/threadsite.log");
 const knownSecrets = Object.entries(process.env)

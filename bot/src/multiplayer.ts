@@ -5,12 +5,20 @@ import { MULTIPLAYER_PROTOCOL_VERSION, projectAgents } from "./templates.js";
 import type { MultiplayerContext, MultiplayerMode, ProjectKind } from "./types.js";
 import { removeWorkspaceInput, writeWorkspaceInput } from "./workspace-inputs.js";
 
-const PROTOCOL_VERSION = MULTIPLAYER_PROTOCOL_VERSION;
-
 const ASSETS_DIR = path.join(process.cwd(), "assets");
-const NET_CLIENT_STEM = "threadsite-net.js";
-const NET_CLIENT_TYPES_STEM = "threadsite-net.d.ts";
 const NETWORKING_GUIDE = path.join(ASSETS_DIR, "agents", "networking.md");
+
+// Files copied verbatim from bot/assets into site/net/ (the tenant config
+// files are generated per game, but share the same inventory).
+const VENDORED_NET_FILES = [
+  "net/threadsite-net.js", "net/threadsite-net.d.ts",
+  "net/threadsite-player.js", "net/threadsite-player.d.ts",
+] as const;
+
+/** Every site/-relative file ensureMultiplayerFiles maintains. */
+export const MULTIPLAYER_SITE_FILES: readonly string[] = [
+  ...VENDORED_NET_FILES, "net/net-config.js", "net/net-config.d.ts",
+];
 
 /**
  * Games are multi-tenant clients of the shared relay: the tenant key is simply
@@ -23,7 +31,7 @@ export function multiplayerContext(kind: ProjectKind, siteSlug: string, mode: Mu
   return {
     gameId: siteSlug,
     wsUrl: config.gameserverPublicUrl,
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: MULTIPLAYER_PROTOCOL_VERSION,
     mode,
   };
 }
@@ -47,12 +55,10 @@ export async function ensureMultiplayerFiles(
   kind: ProjectKind,
 ): Promise<boolean> {
   let changed = false;
-  const client = await fs.readFile(path.join(ASSETS_DIR, NET_CLIENT_STEM), "utf8");
-  changed = (await writeWorkspaceInput(workspacePath, ["site", "net", NET_CLIENT_STEM], `${client.trimEnd()}\n`)) || changed;
-  const clientTypes = await fs.readFile(path.join(ASSETS_DIR, NET_CLIENT_TYPES_STEM), "utf8");
-  changed = (await writeWorkspaceInput(workspacePath, ["site", "net", NET_CLIENT_TYPES_STEM], `${clientTypes.trimEnd()}\n`)) || changed;
-  for (const name of ["threadsite-player.js", "threadsite-player.d.ts"]) {
-    changed = (await writeWorkspaceInput(workspacePath, ["site", "net", name], await fs.readFile(path.join(ASSETS_DIR, name), "utf8"))) || changed;
+  for (const relative of VENDORED_NET_FILES) {
+    const name = relative.split("/").pop()!;
+    const content = await fs.readFile(path.join(ASSETS_DIR, name), "utf8");
+    changed = (await writeWorkspaceInput(workspacePath, ["site", ...relative.split("/")], `${content.trimEnd()}\n`)) || changed;
   }
 
   const netConfig = [
@@ -115,7 +121,7 @@ export async function multiplayerRelayStatus(): Promise<string> {
     const response = await fetch(`${config.gameserverInternalUrl}/health`, { signal: AbortSignal.timeout(2500) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = (await response.json()) as { games?: number; rooms?: number; clients?: number };
-    return `online · protocol v${PROTOCOL_VERSION} · ${body.games ?? 0} game(s) · ${body.rooms ?? 0} room(s) · ${body.clients ?? 0} player(s)`;
+    return `online · protocol v${MULTIPLAYER_PROTOCOL_VERSION} · ${body.games ?? 0} game(s) · ${body.rooms ?? 0} room(s) · ${body.clients ?? 0} player(s)`;
   } catch {
     return `unreachable at ${config.gameserverInternalUrl} (published games fall back to solo play)`;
   }

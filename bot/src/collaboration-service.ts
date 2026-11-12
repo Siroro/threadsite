@@ -5,7 +5,9 @@ import {
   StringSelectMenuBuilder, UserSelectMenuBuilder, TextDisplayBuilder, type Attachment,
 } from "discord.js";
 import { cardId, type CardRoute } from "./card-actions.js";
-import { addCardField, addCardHeader, addCardLinks, cardEdit, cardMessage, type CardMessage } from "./card-ui.js";
+import { STATUS_TONE_COLORS, addCardField, addCardHeader, addCardLinks, cardEdit, cardMessage, type CardMessage } from "./card-ui.js";
+import { isGameKind } from "./types.js";
+import { MAX_ATTACHMENTS, MAX_ATTACHMENT_TOTAL_BYTES } from "./uploads.js";
 import { contributionAccess, CollaborationError, managesProject, ownerId, requireManager, type ProjectActor } from "./collaboration.js";
 import type { CardInteraction } from "./card-interactions.js";
 import type { Store } from "./store.js";
@@ -15,12 +17,12 @@ import { UPLOAD_DIR, uploadFileName, type UploadedFile } from "./uploads.js";
 
 export const COLLABORATION_LABELS = { open: "Anyone can edit", contributors: "Selected contributors", approval: "Owner approves requests" } as const;
 export const WIPE_POLICY_LABELS = { owner: "Owner & admins", anyone: "Anyone in the thread" } as const;
-const MAX_APPROVAL_BYTES = 8 * 1024 * 1024;
+
 const PAGE_SIZE = 5;
 
 /** Capture expiring Discord URLs into private SQLite state, never into an unapproved workspace. */
 export async function captureApprovalAttachments(attachments: Attachment[]): Promise<ApprovalAttachment[]> {
-  if (attachments.length > 4 || attachments.reduce((sum, attachment) => sum + attachment.size, 0) > MAX_APPROVAL_BYTES) {
+  if (attachments.length > MAX_ATTACHMENTS || attachments.reduce((sum, attachment) => sum + attachment.size, 0) > MAX_ATTACHMENT_TOTAL_BYTES) {
     throw new CollaborationError("Approval requests accept up to 4 attachments totalling 8 MiB.");
   }
   const saved: ApprovalAttachment[] = [];
@@ -36,7 +38,7 @@ export async function captureApprovalAttachments(attachments: Attachment[]): Pro
           const { done, value } = await reader.read();
           if (done) break;
           total += value.length;
-          if (total > MAX_APPROVAL_BYTES) throw new Error("too large");
+          if (total > MAX_ATTACHMENT_TOTAL_BYTES) throw new Error("too large");
           chunks.push(value);
         }
       } finally { await reader.cancel().catch(() => undefined); }
@@ -135,7 +137,7 @@ export class CollaborationService {
   panel(project: ProjectRecord, actor: ProjectActor, page = 0): CardMessage {
     const manager = managesProject(project, actor);
     const settings = project.collaboration ?? { mode: "open", userIds: [], revision: 0 };
-    const isGame = Boolean(project.projectKind && project.projectKind !== "site");
+    const isGame = isGameKind(project.projectKind);
     const card = new ContainerBuilder().setAccentColor(0x5865f2);
     addCardHeader(card, "COLLABORATION", project.displayName, COLLABORATION_LABELS[settings.mode]);
     addCardField(card, "Who can contribute", [
@@ -177,7 +179,7 @@ export class CollaborationService {
     if (route.action === "reviewrequest") {
       const request = this.services.store.getApproval(project.threadId, route.args[0] ?? "");
       if (!request) throw new CollaborationError("That request was already handled.");
-      const card = new ContainerBuilder().setAccentColor(0xf59e0b);
+      const card = new ContainerBuilder().setAccentColor(STATUS_TONE_COLORS.warn);
       addCardHeader(card, "REVIEW REQUEST", project.displayName, `Requested by <@${request.requesterId}>`);
       addCardField(card, "Requested change", truncate(request.prompt, 2600));
       addCardLinks(card, decisionButtons(project.threadId, request.id));
@@ -214,7 +216,7 @@ function decisionButtons(threadId: string, id: string): ButtonBuilder[] {
     new ButtonBuilder().setCustomId(cardId("reject", threadId, id)).setLabel("Reject").setStyle(ButtonStyle.Danger)];
 }
 export function approvalCard(project: ProjectRecord, id: string, reviewerId = ownerId(project)): CardMessage {
-  const card = new ContainerBuilder().setAccentColor(0xf59e0b);
+  const card = new ContainerBuilder().setAccentColor(STATUS_TONE_COLORS.warn);
   addCardHeader(card, "REQUEST", project.displayName, `Waiting for ${reviewerId ? `<@${reviewerId}>` : "the thread owner"} to approve this change. No agent work has started.`);
   addCardLinks(card, decisionButtons(project.threadId, id));
   return cardMessage(card);

@@ -1,8 +1,9 @@
 import { ButtonBuilder, ButtonStyle, ContainerBuilder, TextDisplayBuilder, ThumbnailBuilder } from "discord.js";
-import { addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, KIND_COLORS, safeCardUrl, type CardMessage } from "./card-ui.js";
+import { STATUS_TONE_COLORS, addCardDivider, addCardField, addCardHeader, addCardLinks, cardLink, cardMessage, KIND_COLORS, safeCardUrl, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
 import { COLLABORATION_LABELS, WIPE_POLICY_LABELS } from "./collaboration-service.js";
-import { modelDisplayName } from "./opencode-shared.js";
+import { cacheSharePercent, modelDisplayName } from "./opencode-shared.js";
+import { isGameKind } from "./types.js";
 import type { ProjectDescription } from "./project-docs.js";
 import { projectKindLabel } from "./templates.js";
 import type { ContributionTally, ProjectRecord } from "./types.js";
@@ -99,7 +100,7 @@ export function lifetimeModelLines(usage: UsageTotal, includeCost = true): strin
     .sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens))
     .map((entry) => {
       const cached = entry.cacheTokens > 0 && entry.inputTokens > 0
-        ? ` (${Math.round(Math.min(1, entry.cacheTokens / entry.inputTokens) * 100)}%)` : "";
+        ? ` (${cacheSharePercent(entry)}%)` : "";
       const tokens = `in ${formatTokens(entry.inputTokens)}${cached} · out ${formatTokens(entry.outputTokens)}`;
       if (!includeCost) return `\`${modelDisplayName(entry.model)}\`: ${tokens}`;
       // A missing provider charge is not proof that a model was free.
@@ -152,9 +153,9 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   const { project, usage } = state;
   const kind = project.projectKind ?? "site";
   const color = project.status === "error"
-    ? 0xef4444
+    ? STATUS_TONE_COLORS.error
     : project.status === "creating"
-      ? 0xf59e0b
+      ? STATUS_TONE_COLORS.warn
       : KIND_COLORS[kind] ?? KIND_COLORS.site;
 
   const statusLine = project.status === "creating"
@@ -176,7 +177,7 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
     new ButtonBuilder().setCustomId(cardId("project", project.threadId)).setLabel("Project details").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(cardId("queue", project.threadId)).setLabel(`Queue${project.pendingQueue?.length ? ` · ${project.pendingQueue.length}` : ""}`).setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(cardId("collaboration", project.threadId)).setLabel("Collaboration").setStyle(ButtonStyle.Secondary),
-    ...(kind !== "site"
+    ...(isGameKind(kind)
       ? [new ButtonBuilder().setCustomId(cardId("wipe", project.threadId)).setLabel("Wipe state").setEmoji("🧹").setStyle(ButtonStyle.Danger)]
       : []),
   ]);
@@ -185,7 +186,7 @@ export function renderProjectCard(state: ProjectCardState): ProjectCardMessage {
   // Settings come before the long request so they are visible immediately.
   const settings = [`**Type** · ${projectKindLabel(project.projectKind)}`];
   settings.push(`**Editing** · ${COLLABORATION_LABELS[project.collaboration?.mode ?? "open"]}`);
-  if (kind !== "site") {
+  if (isGameKind(kind)) {
     settings.push(`**Engine** · ${kind === "game-3d" ? "Three.js" : "Excalibur"}`, `**Multiplayer** · ${multiplayerLine(project)}`,
       `**Reset state** · ${WIPE_POLICY_LABELS[project.collaboration?.wipePolicy ?? "owner"]}`);
   }

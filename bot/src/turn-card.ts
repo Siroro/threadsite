@@ -10,13 +10,15 @@ import {
   SeparatorBuilder,
   TextDisplayBuilder,
 } from "discord.js";
-import { addCardDivider, addCardField, addCardHeader, addCardTitle, addCardLinks, cardLink, cardMessage, cardTextLength, CARD_TEXT_LIMIT, KIND_COLORS, type CardMessage } from "./card-ui.js";
+import { STATUS_TONE_COLORS, addCardDivider, addCardField, addCardHeader, addCardTitle, addCardLinks, cardLink, cardMessage, cardTextLength, CARD_TEXT_LIMIT, KIND_COLORS, type CardMessage } from "./card-ui.js";
 import { cardId } from "./card-actions.js";
 import { subagentSummaryLines } from "./progress-view.js";
 import { turnModelSummary, type TurnUsage } from "./opencode-shared.js";
 import type { ProgressSubagent } from "./progress.js";
-import type { ProjectKind } from "./types.js";
+import { isGameKind, type ProjectKind } from "./types.js";
 import { formatShortDuration, formatTokens, stripSummaryPreamble, truncate } from "./util.js";
+import { commitWebUrl } from "./forgejo.js";
+import { COMMIT_SHORT_HASH_CHARS } from "./project-identity.js";
 
 /**
  * The final presentation of a finished turn, in two messages:
@@ -77,12 +79,12 @@ export interface TurnCardState {
 }
 
 /** Message payload shape shared by channel send and message edit. */
-export interface TurnCardMessage extends CardMessage {
+interface TurnCardMessage extends CardMessage {
   files: AttachmentBuilder[];
 }
 
 /** Full-width Components V2 card with screenshot, project text and link buttons. */
-export type PlayCardMessage = TurnCardMessage;
+type PlayCardMessage = TurnCardMessage;
 
 // The playable card's text ceilings, in characters. The documents prompt asks
 // the agent for a sentence each; these caps are the backstop that keeps an
@@ -94,7 +96,7 @@ const CHANGELOG_CHARS = 240;
 // Matches the project card's palette: blurple for sites, green for 2D games,
 // violet for 3D games. Both cards of a turn share one colour so the final
 // post reads as a single presentation.
-const UNPUBLISHED_COLOR = 0xf59e0b;
+const UNPUBLISHED_COLOR = STATUS_TONE_COLORS.warn;
 const SCREENSHOT_NAME = "preview.png";
 
 /** The colour both cards of a turn share. */
@@ -130,7 +132,7 @@ export function renderTechnicalCard(state: TurnCardState): TurnCardMessage {
 export function renderPlayCard(state: TurnCardState): PlayCardMessage {
   const files: AttachmentBuilder[] = [];
   if (state.screenshot?.length) files.push(new AttachmentBuilder(Buffer.from(state.screenshot), { name: SCREENSHOT_NAME }));
-  const isGame = state.kind !== "site";
+  const isGame = isGameKind(state.kind);
   const container = new ContainerBuilder().setAccentColor(cardColor(state));
   // The title and the screenshot lead the card. The gallery spans the
   // container's full width, so the opening frame keeps its room instead of
@@ -185,7 +187,7 @@ function technicalCard(state: TurnCardState): ContainerBuilder {
     state.published ? "Published · the new version is live" : "Not published · the live version is unchanged");
 
   const turn: string[] = [];
-  if (state.commit) turn.push(`commit \`${state.commit.slice(0, 10)}\``);
+  if (state.commit) turn.push(`commit \`${state.commit.slice(0, COMMIT_SHORT_HASH_CHARS)}\``);
   turn.push(`${state.commitFiles} file${state.commitFiles === 1 ? "" : "s"} changed (+${state.additions}/−${state.deletions})`);
   turn.push(`⏱️ ${formatShortDuration(state.durationMs)}`);
   addCardField(card, "Turn", turn.join(" · "));
@@ -235,7 +237,7 @@ function technicalCard(state: TurnCardState): ContainerBuilder {
   addCardLinks(card, [
     cardLink(state.kind === "site" ? "Open site" : "Play game", state.siteUrl),
     cardLink("Source", state.repoUrl),
-    state.commit ? cardLink("View commit", `${state.repoUrl.replace(/\/$/, "")}/commit/${encodeURIComponent(state.commit)}`) : undefined,
+    state.commit ? cardLink("View commit", commitWebUrl(state.repoUrl, state.commit)) : undefined,
   ]);
   return card;
 }

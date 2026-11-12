@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { GAME_ID_PATTERN } from "./project-identity.js";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { config } from "./config.js";
@@ -40,7 +41,9 @@ export async function deleteRelayGame(gameId: string): Promise<void> {
  */
 export async function renameRelayGame(from: string, to: string): Promise<void> {
   const source = gamePath(from);
-  gamePath(to);
+  // The relay accepts only valid game ids for a rename target; refusing
+  // malformed ones here names the mistake before any request is sent.
+  GAME_ID_PATTERN.test(to) || (() => { throw new Error(`Invalid relay game id: ${to}`); })();
   await relayRequest(`${source}/rename?to=${encodeURIComponent(to)}`, "POST", "Relay game rename");
 }
 

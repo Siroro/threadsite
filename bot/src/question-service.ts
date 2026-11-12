@@ -60,9 +60,11 @@ export class QuestionService {
       return this.finish(threadId, resource, delivery);
     } catch (error) {
       this.services.error(error);
+      // Release the claim before reconciling: reconcile refuses while the key
+      // is still in flight, and a rejected transport can have accepted the
+      // answer. Confirm it is still pending before offering a retry; never
+      // clear unanswered questions here.
       this.inFlight.delete(key);
-      // A rejected transport can have accepted the answer. Confirm it is still
-      // pending before offering a retry; never clear unanswered questions here.
       return this.reconcile(threadId, resource, revision);
     } finally { this.inFlight.delete(key); }
   }

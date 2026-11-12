@@ -6,10 +6,12 @@ import { OpenCode, type OpenCodeClient, type ModelInfo, type ModelRef, type Sess
 import { config } from "./config.js";
 import { log, serializeError } from "./logger.js";
 import { applicationMessage, formQuestion } from "./opencode-v2-messages.js";
-import { annotateCatalogCosts, annotateMarketCosts, usageFromMessages, reconcileUsage, sessionUsageFromMessages, describeTool, toolLabel, type SessionMessage, type PromptImage,
+import { describeTool, toolLabel } from "./tool-labels.js";
+import { annotateCatalogCosts, annotateMarketCosts, usageFromMessages, reconcileUsage, sessionUsageFromMessages, type SessionMessage, type PromptImage,
   type PromptResult, type TurnUsage, type QuotaBlock, type ModelRates } from "./opencode-shared.js";
 import type { ProgressCallback, ProgressUpdate, ProgressPlanItem, ProgressSubagent } from "./progress.js";
 import { TurnStepBudget, finishUpInstruction } from "./step-budget.js";
+import { BACKGROUND_AGENTS, BROWSER_PERMISSION_ACTION, BROWSER_TOOL_PATTERN, BUILDER_AGENT, PLUGIN_ID } from "./opencode-contract.js";
 import { steeringInstruction } from "./templates.js";
 import { errorText, parseModel, sleep } from "./util.js";
 
@@ -27,10 +29,25 @@ const emit = (callback: ProgressCallback | undefined, update: ProgressUpdate): v
 
 export class V2TurnError extends Error {
   mayStillBeRunning = false;
+  /** Set when the failure is the session being gone (404/unknown), per the client's own classification. */
+  sessionVanished = false;
   turnUsage?: TurnUsage;
   providerBlip?: boolean;
   quotaBlock?: QuotaBlock;
   constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "OpenCodeV2TurnError"; }
+}
+
+/** The session this operation targeted is gone from the agent service. The
+ * client's error wording is the wire contract here; the flag is set wherever
+ * the harness has already classified the failure itself. */
+export function isVanishedSessionError(error: unknown): boolean {
+  return error instanceof V2TurnError && error.sessionVanished
+    || /404|not found|unknown session/i.test(errorText(error));
+}
+
+/** The agent service refused because a turn is still running on the session. */
+export function isBusySessionError(error: unknown): boolean {
+  return /busy/i.test(errorText(error));
 }
 
 interface StepTiming { generationMs: number; timedOutputTokens: number }
@@ -90,7 +107,6 @@ Map<string, StepTiming> {
 /** Subagents that may be delegated with background: true. The bot keeps the
  * parent turn open (and billing/stop/recovery ownership) until each finishes
  * and the parent has handled its report. */
-const BACKGROUND_AGENTS = new Set(["browser-qa", "asset-forge"]);
 const isBackgroundAgent = (agent: unknown): agent is string => typeof agent === "string" && BACKGROUND_AGENTS.has(agent);
 
 function pendingBackgroundAgents(history: SessionMessageInfo[], cancelled: unknown = []): Set<string> {
@@ -270,9 +286,9 @@ export class OpenCodeV2Harness {
   }
 
   async createSession(directory: string, title: string, signal?: AbortSignal): Promise<string> {
-    const session = await this.client.session.create({ location: { directory }, title, agent: "sitebuilder",
-      permissions: [{ action: "threadsite_browser", resource: "*", effect: "deny" },
-        { action: "playwright_*", resource: "*", effect: "deny" }] },
+    const session = await this.client.session.create({ location: { directory }, title, agent: BUILDER_AGENT,
+      permissions: [{ action: BROWSER_PERMISSION_ACTION, resource: "*", effect: "deny" },
+        { action: BROWSER_TOOL_PATTERN, resource: "*", effect: "deny" }] },
     { signal: signal ?? AbortSignal.timeout(10_000) });
     return session.id;
   }
@@ -283,7 +299,7 @@ export class OpenCodeV2Harness {
     const deadline = Date.now() + 10_000;
     for (;;) {
       const { data } = await this.client.plugin.list({ location: { directory } }, requestOptions());
-      const plugin = data.find((plugin) => plugin.id === "threadsite.v2");
+      const plugin = data.find((plugin) => plugin.id === PLUGIN_ID);
       if (plugin?.state.status === "active") break;
       if (plugin?.state.status === "failed" || Date.now() >= deadline) throw new V2TurnError("The ThreadSite v2 runtime plugin is unavailable; rebuild the OpenCode service");
       await sleep(100);
@@ -300,9 +316,9 @@ export class OpenCodeV2Harness {
       && await this.modelAcceptsAttachments(selected.providerID, selected.id, directory) === true;
     // Replace only harness-owned tool rules; preserve any other session rules.
     const permissions: PermissionRuleset = (session.permissions ?? []).filter((rule) =>
-      !["threadsite_browser", "playwright_*"].includes(rule.action));
-    permissions.push({ action: "threadsite_browser", resource: "*", effect: vision ? "allow" : "deny" },
-      { action: "playwright_*", resource: "*", effect: vision ? "allow" : "deny" });
+      ![BROWSER_PERMISSION_ACTION, BROWSER_TOOL_PATTERN].includes(rule.action));
+    permissions.push({ action: BROWSER_PERMISSION_ACTION, resource: "*", effect: vision ? "allow" : "deny" },
+      { action: BROWSER_TOOL_PATTERN, resource: "*", effect: vision ? "allow" : "deny" });
     await this.client.session.update({ sessionID, permissions }, requestOptions());
     if (session.agent !== agent) await this.client.session.switchAgent({ sessionID, agent }, requestOptions());
     if (selected) await this.client.session.switchModel({ sessionID, model: selected }, requestOptions());
@@ -310,7 +326,7 @@ export class OpenCodeV2Harness {
   }
 
   async prompt(directory: string, sessionID: string, text: string, model?: string, onProgress?: ProgressCallback,
-    agent = "sitebuilder", variant?: string, images?: readonly PromptImage[]): Promise<PromptResult> {
+    agent = BUILDER_AGENT, variant?: string, images?: readonly PromptImage[]): Promise<PromptResult> {
     if (this.prompts.has(sessionID)) throw Object.assign(new V2TurnError("A prompt is already attached to this session"), { mayStillBeRunning: true });
     this.prompts.add(sessionID);
     this.stopped.delete(sessionID);
@@ -330,7 +346,7 @@ export class OpenCodeV2Harness {
       const selected = await this.configure(directory, sessionID, agent, model, variant);
       const history = await this.rawMessages(sessionID);
       baseline = new Set(history.map((message) => message.id));
-      watch = this.watch(directory, sessionID, onProgress, since, baseline, agent === "sitebuilder");
+      watch = this.watch(directory, sessionID, onProgress, since, baseline, agent === BUILDER_AGENT);
       if (selected) {
         watch.models.set("__session", selected);
         watch.contextLimit = (await this.models(directory)).find((item) => item.id === selected.id && item.providerID === selected.providerID)?.limit.context;
@@ -352,6 +368,7 @@ export class OpenCodeV2Harness {
       return { text: summary, usage: await this.finalUsage(directory, sessionID, since, baseline, watch) };
     } catch (cause) {
       const error = cause instanceof V2TurnError ? cause : new V2TurnError(errorText(cause), { cause });
+      if (this.notFound(cause)) error.sessionVanished = true;
       if (watch) {
         error.turnUsage = await this.finalUsage(directory, sessionID, since, baseline, watch);
         error.quotaBlock ??= watch.quota;
@@ -438,7 +455,11 @@ export class OpenCodeV2Harness {
         emit(callback, { kind: "heartbeat", text: busy ? "" : "Checking saved agent progress", active: busy });
       } catch (error) {
         if (error instanceof V2TurnError) throw error;
-        if (this.notFound(error)) throw new V2TurnError("The saved OpenCode session is gone (unknown session)", { cause: error });
+        if (this.notFound(error)) {
+          const vanished = new V2TurnError("The saved OpenCode session is gone (unknown session)", { cause: error });
+          vanished.sessionVanished = true;
+          throw vanished;
+        }
         lastPollError = error;
       }
       if (watch.questionIds.size) watch.lastProgress = Date.now();

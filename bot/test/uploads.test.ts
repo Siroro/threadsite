@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import type { Attachment } from "discord.js";
 import {
-  MAX_TURN_UPLOADS, MAX_UPLOAD_BYTES, UPLOAD_DIR, saveUploadAttachments, uploadFileName, uploadPromptNote,
+  MAX_ATTACHMENTS, MAX_ATTACHMENT_TOTAL_BYTES, UPLOAD_DIR, saveUploadAttachments, uploadFileName, uploadPromptNote,
 } from "../src/uploads.js";
 
 const attachment = (overrides: Partial<{ name: string; size: number; contentType: string; url: string }>): Attachment =>
@@ -55,7 +55,7 @@ test("oversized and undownloadable attachments are skipped without failing the r
   const workspacePath = await workspace();
   try {
     const saved = await saveUploadAttachments(workspacePath, [
-      attachment({ name: "huge.zip", size: MAX_UPLOAD_BYTES + 1 }),
+      attachment({ name: "huge.zip", size: MAX_ATTACHMENT_TOTAL_BYTES + 1 }),
       attachment({ name: "gone.pdf", url: "file:///definitely-not-there" }),
       attachment({ name: "kept.txt", url: "data:text/plain;base64,aGk=" }),
     ]);
@@ -84,13 +84,13 @@ test("concurrent same-name uploads retain every request's bytes", async () => {
   }
 });
 
-test("a message saves at most MAX_TURN_UPLOADS attachments", async () => {
+test("a message saves at most MAX_ATTACHMENTS attachments", async () => {
   const workspacePath = await workspace();
   try {
     const saved = await saveUploadAttachments(workspacePath,
-      Array.from({ length: MAX_TURN_UPLOADS + 2 }, (_, index) => attachment({ name: `extra-${index}.bin` })));
-    assert.equal(saved.length, MAX_TURN_UPLOADS);
-    assert.deepEqual(saved.map((file) => file.name), Array.from({ length: MAX_TURN_UPLOADS }, (_, index) => `extra-${index}.bin`));
+      Array.from({ length: MAX_ATTACHMENTS + 2 }, (_, index) => attachment({ name: `extra-${index}.bin` })));
+    assert.equal(saved.length, MAX_ATTACHMENTS);
+    assert.deepEqual(saved.map((file) => file.name), Array.from({ length: MAX_ATTACHMENTS }, (_, index) => `extra-${index}.bin`));
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }

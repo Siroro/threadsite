@@ -1,8 +1,14 @@
 import fs from "node:fs/promises";
 import { config } from "./config.js";
+import { PUSH_ACCOUNT_PATTERN, README_OWNERSHIP_MARKERS, isManagedRepoDescription } from "./project-identity.js";
 
 function joinUrl(base: string, pathname: string): string {
   return `${base.replace(/\/$/, "")}/${pathname.replace(/^\//, "")}`;
+}
+
+/** Deep link to one commit in a repository, from its public web URL. */
+export function commitWebUrl(repoUrl: string, commit: string): string {
+  return `${repoUrl.replace(/\/$/, "")}/commit/${encodeURIComponent(commit)}`;
 }
 
 export class ForgejoClient {
@@ -27,19 +33,19 @@ export class ForgejoClient {
   }
 
   async isManagedRepository(repo: { name: string; description?: string }): Promise<boolean> {
-    if (/^(?:static website|[23]D static web game) generated (?:from Discord thread .+|by ThreadSite)$/i.test(repo.description ?? "")) return true;
+    if (isManagedRepoDescription(repo.description)) return true;
     const response = await this.api(`/api/v1/repos/${encodeURIComponent(config.forgejoOwner)}/${encodeURIComponent(repo.name)}/contents/README.md`);
     if (response.status === 404) return false;
     if (!response.ok) throw new Error(`Forgejo repository ownership check failed (${response.status}): ${repo.name}`);
     const readme = await response.json() as { content?: string; encoding?: string; size?: number };
     return readme.encoding === "base64" && (readme.size ?? Infinity) <= 64 * 1024
-      && ["maintained by the ThreadSite harness.", "maintained by the ThreadSite Discord harness."].some((marker) => Buffer.from(readme.content ?? "", "base64").toString("utf8").includes(marker));
+      && README_OWNERSHIP_MARKERS.some((marker) => Buffer.from(readme.content ?? "", "base64").toString("utf8").includes(marker));
   }
 
   async listManagedPushAccounts(): Promise<string[]> {
     const users = await this.pages<{ login: string; email: string; restricted: boolean }>("/api/v1/admin/users", true);
     const domain = new URL(config.forgejoPublicUrl).hostname;
-    return users.filter((user) => user.restricted && /^push-[a-z0-9]{6}$/.test(user.login)
+    return users.filter((user) => user.restricted && PUSH_ACCOUNT_PATTERN.test(user.login)
       && user.email === `${user.login}@noreply.${domain}`).map((user) => user.login);
   }
 

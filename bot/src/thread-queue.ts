@@ -38,8 +38,14 @@ export class ThreadQueue {
     const state = this.states.get(threadId);
     if (!state) return undefined;
     const head = state.waiters.shift();
-    if (head) head.release();
-    else state.tail = Promise.resolve();
-    return { releasedWaiter: Boolean(head) };
+    if (head) {
+      head.release();
+      return { releasedWaiter: true };
+    }
+    // No waiter to release: retire the severed chain, or the settled entry
+    // would linger until the thread's next enqueue.
+    this.states.delete(threadId);
+    state.tail = Promise.resolve();
+    return { releasedWaiter: false };
   }
 }

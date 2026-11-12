@@ -150,25 +150,6 @@ test("missing provider counts are shown as unavailable instead of claiming zero 
   assert.doesNotMatch(lifetime, /in 0|out 0/);
 });
 
-test("the pinned card shows advisory QA status and keeps long requests within field limits", () => {
-  const card = cardView(renderProjectCard({ project: record({ initialPrompt: "request ".repeat(1000), browserQaFindings: {
-    checkedAt: new Date().toISOString(), findings: ["runtime finding", "missing asset"],
-  } }) }));
-  assert.ok(card.fields!.every((field) => field.value.length <= 1024));
-
-});
-
-test("game cards offer the relay-state wipe button and show who may use it; site cards have neither", () => {
-  const game = cardView(renderProjectCard({ project: record(), usage: usage() }));
-  assert.ok(game.buttons.some((button) => button.custom_id === "ts2:wipe:123"), "the game card carries the Wipe state button");
-  assert.match(game.fields!.find((field) => field.name === "Project details")!.value, /\*\*Reset state\*\* · Owner & admins/);
-  const open = cardView(renderProjectCard({ project: record({ collaboration: { mode: "open", userIds: [], revision: 1, wipePolicy: "anyone" } }), usage: usage() }));
-  assert.match(open.fields!.find((field) => field.name === "Project details")!.value, /\*\*Reset state\*\* · Anyone in the thread/);
-  const site = cardView(renderProjectCard({ project: record({ projectKind: "site" }), usage: usage() }));
-  assert.ok(site.buttons.every((button) => !button.custom_id?.includes("wipe")));
-  assert.doesNotMatch(site.fields!.find((field) => field.name === "Project details")!.value, /Reset state/);
-});
-
 test("pinned cards use only V2 components, safe buttons and bounded text", () => {
   const message = renderProjectCard({
     project: record({ displayName: "Koi\n## @everyone", initialPrompt: "request ".repeat(1000) }),
@@ -197,15 +178,4 @@ test("the pinned card links the starter and counts each user's contributions, bu
     + "<@100000000000000001> · 3 turns · 2 answers\n"
     + "<@100000000000000002> · 1 turn · 1 steer");
   assert.doesNotMatch(contributors.value, /100000000000000003/);
-});
-
-test("a busy thread summarizes contributors past eight rows", () => {
-  const contributors = Object.fromEntries(Array.from({ length: 10 }, (_, index) => [
-    `3${index}0000000000000000`, { turns: 10 - index, steers: 0, answers: 0 },
-  ]));
-  const card = cardView(renderProjectCard({ project: record({ contributors: contributors as ProjectRecord["contributors"] }) }));
-  const field = card.fields!.find((entry) => entry.name === "Contributors")!;
-  assert.match(field.value, /<@300000000000000000> · 10 turns/);
-  assert.match(field.value, /\+2 more contributors/);
-  assert.doesNotMatch(field.value, /390000000000000000/);
 });

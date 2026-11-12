@@ -4,9 +4,9 @@ import {
   type AnySelectMenuInteraction, type Attachment, type ButtonInteraction, type ModalSubmitInteraction,
 } from "discord.js";
 import { cardId, parseCardId, type CardAction, type CardRoute } from "./card-actions.js";
-import { addCardHeader, cardEdit, cardMessage, renderStatusCard, type CardMessage } from "./card-ui.js";
+import { addCardHeader, cardEdit, cardMessage, renderStatusCard, STATUS_TONE_COLORS, type CardMessage, type StatusTone } from "./card-ui.js";
 import { renderDetailPanel, renderQueuePanel, requestModal, wipeModal, type PanelSection, type PanelScope } from "./card-panels.js";
-import type { RequestFormState, StoredTurnCard } from "./card-state.js";
+import { failureVersionOf, requestFormKey, type RequestFormState, type StoredTurnCard } from "./card-state.js";
 import { elapsed, hasUsageData, modelUsageLines, sessionUsageLines, progressDetailSections, subagentDetailText, subagentHistory, usageDetailText, type ProgressSnapshot } from "./progress-view.js";
 import { costsHidden, formatCost } from "./util.js";
 import { answerModal, customAnswerModal, readAnswerForm, renderQuestionReview } from "./question-ui.js";
@@ -15,6 +15,7 @@ import type { Store } from "./store.js";
 import type { RelayResetScope } from "./relay-cleanup.js";
 import type { ProjectRecord, QueuedRequest } from "./types.js";
 import { authorizeCard, CollaborationError, interactionActor, requireWipeAccess, type ProjectActor } from "./collaboration.js";
+import { commitWebUrl } from "./forgejo.js";
 import type { CollaborationService } from "./collaboration-service.js";
 
 export type CardInteraction = ButtonInteraction | AnySelectMenuInteraction | ModalSubmitInteraction;
@@ -27,7 +28,7 @@ export interface CardInteractionServices {
   queue(threadId: string): { requests: QueuedRequest[]; preparing: number };
   cancel(threadId: string, statusId: string): Promise<string>;
   submit(interaction: ModalSubmitInteraction, project: ProjectRecord, form: RequestFormState, nonce: string, prompt: string, attachments: Attachment[]): Promise<string>;
-  stop(threadId: string, statusMessageId: string): Promise<string>;
+  stop(threadId: string, statusMessageId: string): Promise<{ text: string; tone: StatusTone }>;
   /** Clear the game's shared relay state; resolves to the reply text. */
   wipe(threadId: string, userId: string, scope: RelayResetScope): Promise<string>;
   rollback(threadId: string, expectedVersion: string, actor: ProjectActor): Promise<void>;
@@ -64,7 +65,7 @@ export class CardInteractions {
       // Service details remain in private logs. Domain errors below contain
       // only public wording; transport errors get a useful generic response.
       const message = error instanceof CardUserError || error instanceof CollaborationError ? error.message : publicMessage(error);
-      await this.respond(interaction, renderStatusCard(`⚠️ ${message}`)).catch(() => undefined);
+      await this.respond(interaction, renderStatusCard(`⚠️ ${message}`, { tone: "warn" })).catch(() => undefined);
     }
     return true;
   }
@@ -111,14 +112,14 @@ export class CardInteractions {
       if (!interaction.isButton()) throw new CardUserError("Open the request form from a button.");
       if (action === "steer" && project.pendingTurn?.statusMessageId !== resource) throw new CardUserError("That turn has finished. Use Request a change to queue a follow-up.");
       const nonce = randomBytes(8).toString("hex");
-      this.services.store.patchCardState<RequestFormState>(threadId, `request:${nonce}`, { userId: interaction.user.id, resource, steer: action === "steer", status: "ready" });
+      this.services.store.patchCardState<RequestFormState>(threadId, requestFormKey(nonce), { userId: interaction.user.id, resource, steer: action === "steer", status: "ready" });
       await interaction.showModal(requestModal(resource, nonce, action === "steer"));
       return;
     }
     if (action === "request") {
       if (!interaction.isModalSubmit()) throw new CardUserError("Submit the request form to continue.");
       const nonce = args[0];
-      const form = this.services.store.getCardState<RequestFormState>(threadId, `request:${nonce}`);
+      const form = this.services.store.getCardState<RequestFormState>(threadId, requestFormKey(nonce));
       if (!form || form.userId !== interaction.user.id || form.resource !== resource) throw new CardUserError("That request form has expired. Open a new form from the project card.");
       await this.begin(interaction, route.action);
       if (form.status !== "ready") { await this.respond(interaction, renderStatusCard(form.status === "accepted" ? "✅ This request was already saved." : "⏳ This request is already being submitted.")); return; }
@@ -126,19 +127,19 @@ export class CardInteractions {
       const attachments = [...(interaction.fields.getUploadedFiles("images")?.values() ?? [])];
       if (!prompt) throw new CardUserError("Describe the change you want before submitting.");
       const claimed: RequestFormState = { ...form, prompt, restart: form.steer && interaction.fields.getCheckbox("restart"), status: "submitting" };
-      if (!this.services.store.claimCardAction(threadId, `request:${nonce}`, claimed)) {
+      if (!this.services.store.claimCardAction(threadId, requestFormKey(nonce), claimed)) {
         await this.respond(interaction, renderStatusCard("⏳ This request is already being submitted."));
         return;
       }
       try {
         const text = await this.services.submit(interaction, project, claimed, nonce, prompt, attachments);
-        this.services.store.patchCardState<RequestFormState>(threadId, `request:${nonce}`, { status: "accepted" });
+        this.services.store.patchCardState<RequestFormState>(threadId, requestFormKey(nonce), { status: "accepted" });
         await this.respond(interaction, renderStatusCard(text));
       } catch (error) {
         // Once a public status exists, submission may have reached the durable
         // queue. Reconcile it instead of making the same form submit twice.
-        const saved = this.services.store.getCardState<RequestFormState>(threadId, `request:${nonce}`);
-        if (!saved?.statusMessageId) this.services.store.patchCardState<RequestFormState>(threadId, `request:${nonce}`, { status: "ready" });
+        const saved = this.services.store.getCardState<RequestFormState>(threadId, requestFormKey(nonce));
+        if (!saved?.statusMessageId) this.services.store.patchCardState<RequestFormState>(threadId, requestFormKey(nonce), { status: "ready" });
         throw error;
       }
       return;
@@ -146,7 +147,8 @@ export class CardInteractions {
     if (action === "stop") {
       if (project.pendingTurn?.statusMessageId !== resource) throw new CardUserError("That turn is no longer running. This control cannot stop a later turn.");
       await this.begin(interaction, route.action);
-      await this.respond(interaction, renderStatusCard(await this.services.stop(threadId, resource)));
+      const stop = await this.services.stop(threadId, resource);
+      await this.respond(interaction, renderStatusCard(stop.text, { tone: stop.tone }));
       return;
     }
     if (action === "rollback" || action === "keep" || action === "confirm") {
@@ -154,7 +156,7 @@ export class CardInteractions {
       await this.begin(interaction, route.action);
       if (action === "keep") { await this.respond(interaction, renderStatusCard("🗂️ Keeping the partial edits. The next message will build on them.")); return; }
       if (action === "rollback") {
-        const card = new ContainerBuilder().setAccentColor(0xef4444);
+        const card = new ContainerBuilder().setAccentColor(STATUS_TONE_COLORS.error);
         addCardHeader(card, "CONFIRM", "Discard partial edits?", "This restores the workspace to the last published commit. The partial edits will be discarded.");
         card.addActionRowComponents(new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder().setCustomId(cardId("confirm", resource, "rollback")).setLabel("Discard partial edits").setStyle(ButtonStyle.Danger),
@@ -279,8 +281,8 @@ export class CardInteractions {
   }
 
   private checkFailure(project: ProjectRecord, resource: string): string {
-    const card = this.services.store.getCardState<StoredTurnCard & { failureVersion?: string }>(project.threadId, resource);
-    if (project.pendingTurn || !card?.failureVersion || card.failureVersion !== `${project.lastCommit ?? ""}/${project.lastTurnAt ?? ""}`) throw new CardUserError("This outcome belongs to an older turn. Use the latest turn's controls.");
+    const card = this.services.store.getCardState<StoredTurnCard>(project.threadId, resource);
+    if (project.pendingTurn || !card?.failureVersion || card.failureVersion !== failureVersionOf(project)) throw new CardUserError("This outcome belongs to an older turn. Use the latest turn's controls.");
     return card.failureVersion;
   }
 
@@ -312,7 +314,7 @@ export function turnPanelSections(card: StoredTurnCard | undefined, snapshot: Pr
     const links = [
       result.siteUrl ? `[Live site](${result.siteUrl})` : "",
       result.repoUrl ? `[Source](${result.repoUrl})` : "",
-      result.commit && result.repoUrl ? `[View commit](${result.repoUrl.replace(/\/$/, "")}/commit/${encodeURIComponent(result.commit)})` : "",
+      result.commit && result.repoUrl ? `[View commit](${commitWebUrl(result.repoUrl, result.commit)})` : "",
     ].filter(Boolean).join(" · ");
     const description = card?.documents?.description?.trim()
       || [result.description?.pitch, result.description?.play].filter(Boolean).join("\n\n");

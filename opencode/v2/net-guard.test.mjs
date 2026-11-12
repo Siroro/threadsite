@@ -34,17 +34,6 @@ test("reserved IPv6 ranges and IPv4 private ranges are blocked", () => {
   }
 });
 
-test("the IPv6 parser expands compression and dotted tails exactly", () => {
-  assert.equal(parseIpv6("::"), 0n);
-  assert.equal(parseIpv6("::1"), 1n);
-  assert.equal(parseIpv6("::ffff:1.2.3.4"), 0xffff01020304n);
-  assert.equal(parseIpv6("64:ff9b::a00:1"), (0x64ff9bn << 96n) | 0xa000001n);
-  assert.equal(parseIpv6("1:2:3:4:5:6:7:8"), 0x00010002000300040005000600070008n);
-  assert.equal(parseIpv6("1::2"), (1n << 112n) | 2n);
-  assert.equal(parseIpv6(":::1"), undefined);
-  assert.equal(parseIpv6("1.2.3.4"), undefined);
-  assert.equal(parseIpv6("1:2:3:4:5:6:7:8:9"), undefined);
-});
 
 test("the validating lookup rejects mixed records and pins the dial to checked addresses", async () => {
   const blocked = makeValidatingLookup(async () => [

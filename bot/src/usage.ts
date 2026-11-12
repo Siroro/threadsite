@@ -222,7 +222,7 @@ export class UsageLog {
     return changed;
   }
 
-  /** Remove every revision, and ignore late billing from the aborted turn. */
+  /** Every thread id that still has ledger entries. */
   async threadIds(): Promise<string[]> {
     await this.writes;
     return this.database.threadIds();

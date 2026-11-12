@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
+import { SHARED_BUNDLE_FLAGS } from "./esbuild-options.mjs";
 
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const MAX_MANIFEST_FILES = 1000;
@@ -96,15 +97,12 @@ async function bundle(workspaceRoot, project, view) {
   }
   if (!entries.length) return { site, outputs: new Map() };
 
-  // Keep these production flags aligned with bot/src/build.ts. Only write and
-  // the containment plugin differ: previews never touch the workspace/bundles.
+  // Same flags as production (see preview/esbuild-options.mjs). Only write
+  // and the containment plugin differ: previews never touch the workspace/bundles.
   const result = await esbuild.build({
     absWorkingDir: site, entryPoints: entries, outdir: "js", outbase: "src",
-    bundle: true, format: "esm", splitting: true, target: "es2022",
-    legalComments: "eof", sourcemap: false, minify: true, metafile: true, logLevel: "silent",
-    chunkNames: "chunks/[name]-[hash]", assetNames: "assets/[name]-[hash]", write: false,
-    loader: { ".glb": "file", ".gltf": "file" },
-    preserveSymlinks: true,
+    ...SHARED_BUNDLE_FLAGS,
+    write: false,
     plugins: [{
       name: "preview-boundary",
       setup(build) {

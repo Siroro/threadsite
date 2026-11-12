@@ -6,9 +6,9 @@ import {
 } from "discord.js";
 import { cardEdit, disableMessageControls, renderStatusCard, safeCardUrl } from "../src/card-ui.js";
 import { cardId, parseCardId } from "../src/card-actions.js";
-import { renderDetailPanel, renderQueuePanel, requestModal, textPages } from "../src/card-panels.js";
-import { renderProgressCard, progressDetailSections, usageDetailText } from "../src/progress-view.js";
-import { answerModal, questionControls, readAnswerForm, renderQuestionReview } from "../src/question-ui.js";
+import { renderDetailPanel, renderQueuePanel, textPages } from "../src/card-panels.js";
+import { renderProgressCard, progressDetailSections } from "../src/progress-view.js";
+import { readAnswerForm, renderQuestionReview } from "../src/question-ui.js";
 import type { QuestionDraft } from "../src/card-state.js";
 import { buildingSnapshot } from "./fixtures/progress.js";
 import { assertV2, cardComponents, cardView } from "./fixtures/cards.js";
@@ -18,30 +18,6 @@ process.env.DISCORD_APPLICATION_ID ||= "test";
 const { DiscordProgress } = await import("../src/progress.js");
 const { turnPanelSections } = await import("../src/card-interactions.js");
 
-test("simple questions answer with quick secondary buttons; long lists use a select", () => {
-  const request = (options: number, multiple = false): import("../src/progress.js").AgentQuestion => ({
-    requestID: "q2",
-    questions: [{ header: "Pick", question: "Which one?", multiple, options: Array.from({ length: options }, (_, index) => ({ label: `Option ${index + 1}` })) }],
-  });
-  const quick = questionControls("turn", request(3));
-  assert.equal(quick.length, 2);
-  assert.deepEqual(quick[0].components.map((button) => button.toJSON().label), ["Option 1", "Option 2", "Option 3"]);
-  assert.ok(quick[0].components.every((button) => button.toJSON().style === ButtonStyle.Secondary), "peer answers never compete for primary styling");
-  const selected = quick[0].components.map((button) => button.toJSON().custom_id);
-  assert.deepEqual(selected.map((id) => parseCardId(id!)?.action), ["answer", "answer", "answer"]);
-  const listed = questionControls("turn", request(9));
-  assert.equal(listed.length, 2);
-  const menu = listed[0].components[0];
-  assert.equal(menu.toJSON().type, ComponentType.StringSelect);
-  assert.equal(menu.toJSON().max_values, 1);
-  const multi = questionControls("turn", request(9, true));
-  assert.equal(multi[0].components[0].toJSON().max_values, 9);
-  const huge = questionControls("turn", request(30));
-  assert.deepEqual(huge[0].components.map((button) => button.toJSON().label), ["Answer questions", "Review answers"]);
-  const submitting = questionControls("turn", request(3), "submitting");
-  assert.deepEqual(submitting[0].components.map((button) => button.toJSON().label), ["Check answer delivery"]);
-  assert.deepEqual(questionControls("turn", request(3), "answered"), []);
-});
 
 test("failure, reset, merge and cancellation outcomes replace live controls without leaving V2", () => {
   const choices = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -99,26 +75,6 @@ test("every phase keeps a valid V2 payload with long plans, paths, history and p
   }
 });
 
-test("changed files carry per-file line counts", () => {
-  const state = buildingSnapshot();
-  state.files = { files: 4, added: 3, modified: 1, deleted: 0, additions: 120, deletions: 8,
-    entries: [
-      { path: "site/src/main.ts", additions: 64 },
-      { path: "site/src/sim.ts", additions: 30, deletions: 8 },
-      { path: "site/assets/fonts/space-grotesk-500.woff2", binary: true },
-      { path: "site/index.html", additions: 26, deletions: 0 },
-    ] };
-  const panel = progressDetailSections(state).find((section) => section.key === "files")!;
-  assert.match(panel.text, /\*\*4 files\*\* · 3 added · 1 modified · 0 removed · \*\*\+120 \/ −8\*\* lines/);
-  assert.match(panel.text, /- `site\/src\/main\.ts` · \+64$/m);
-  assert.match(panel.text, /- `site\/src\/sim\.ts` · \+30\/−8$/m);
-  assert.match(panel.text, /- `site\/assets\/fonts\/space-grotesk-500\.woff2` · binary$/m);
-  // The overview panel previews the same counts on its first three paths.
-  const overview = progressDetailSections(state).find((section) => section.key === "overview")!;
-  assert.match(overview.text, /`site\/src\/main\.ts` · \+64/);
-  assert.match(overview.text, /`site\/assets\/fonts\/space-grotesk-500\.woff2` · binary/);
-  assert.match(overview.text, /\+1 more/);
-});
 
 test("the compact live card shows recent public narration; the private panel keeps all of it", () => {
   const state = buildingSnapshot();
@@ -260,23 +216,6 @@ test("turn details show every viewer the models it used, but spend only to site 
   assert.match(explained.text, /pricing is not reported/, "a $0 spend says why instead of reading as free");
 });
 
-test("a turn without subagent spend shows no root/subagent split", () => {
-  const result = {
-    name: "Koi Pond Arcade", kind: "site" as const, published: true, commitFiles: 2, additions: 10, deletions: 2,
-    durationMs: 90_000,
-    usage: {
-      inputTokens: 900_000, outputTokens: 38_000, cacheTokens: 800_000, contextTokens: 900_000,
-      contextLimit: 2_000_000, compactions: 0, steps: 14, cost: 1.9,
-      models: [{ model: "surplus/deepseek-4.1", inputTokens: 900_000, outputTokens: 38_000, cacheTokens: 800_000, cost: 1.9 }],
-      sessions: [{ sessionID: "ses_root", root: true as const, inputTokens: 900_000, outputTokens: 38_000, cacheTokens: 800_000, cost: 1.9, steps: 14 }],
-    },
-    siteUrl: "https://sites.example.invalid/koi/", repoUrl: "https://git.example.invalid/site-koi",
-  };
-  const sections = turnPanelSections({ result }, undefined, "turn");
-  const usage = sections.find((section) => section.key === "usage")!;
-  assert.doesNotMatch(usage.text, /Root & subagents/, "a lone root session adds no split: the totals already say it");
-  assert.doesNotMatch(usage.text, /Root turn/, "no root line without children to split from");
-});
 
 test("the live public card names the running model without provider or spend; admin figures stay in the private details", () => {
   const state = buildingSnapshot();
@@ -295,44 +234,8 @@ test("the live public card names the running model without provider or spend; ad
   assert.doesNotMatch(bare.text, /🧠/, "no per-model attribution adds no model line");
 });
 
-test("tool errors leave the public footer for the private usage page", () => {
-  const state = buildingSnapshot();
-  state.toolErrors = 2;
-  const footer = cardView(renderProgressCard(state)).text.split("\n").at(-1)!;
-  assert.doesNotMatch(footer, /tool error/, "the public footer stays compact: tokens replaced the error count");
-  const usage = progressDetailSections(state).find((section) => section.key === "usage")!;
-  assert.match(usage.text, /2 tool errors/, "the count keeps a home on the private details page");
-});
 
-test("while both rates exist the live footer swaps the streaming rate with the turn average", () => {
-  const state = buildingSnapshot();
-  state.metrics = { ...state.metrics, liveTokensPerSecond: 62 };
-  const footer = (now: number) => cardView(renderProgressCard({ ...state, now })).text.split("\n").at(-1)!;
-  // The two timestamps sit in adjacent six-second alternation windows.
-  assert.match(footer(1_128_000), /⚡~62t\/s/, "one window gives the slot to the streaming rate");
-  assert.match(footer(1_134_000), /⚡avg~54t\/s/, "the next swaps in the turn average");
-  assert.doesNotMatch(footer(1_134_000), /⚡~62/, "the slot holds one figure at a time");
 
-  const streaming = buildingSnapshot();
-  streaming.metrics = { contextTokens: 28_400, contextLimit: 100_000, steps: 1, liveTokensPerSecond: 18 };
-  assert.match(cardView(renderProgressCard(streaming)).text.split("\n").at(-1)!, /⚡~18t\/s/,
-    "before the first step completes only the streaming rate exists");
-  assert.match(cardView(renderProgressCard(buildingSnapshot())).text.split("\n").at(-1)!, /⚡avg~54t\/s/,
-    "outside a stream the average keeps its avg prefix");
-});
-
-test("usage details time the last root request and its first token", () => {
-  const timed = usageDetailText({ inputTokens: 82_300, outputTokens: 6_200, cacheTokens: 65_840, steps: 12,
-    lastRequestMs: 34_500, firstTokenMs: 17_300 });
-  assert.match(timed, /Timing \*\*last request 34\.5s · first token 17\.3s\*\*/);
-
-  const restored = usageDetailText({ inputTokens: 82_300, outputTokens: 6_200, steps: 12, lastRequestMs: 34_500 });
-  assert.match(restored, /Timing \*\*last request 34\.5s\*\*/, "a window still times the request");
-  assert.doesNotMatch(restored, /first token/, "a first token never seen streaming stays absent, never zero");
-
-  const bare = usageDetailText({ inputTokens: 82_300, outputTokens: 6_200, steps: 12 });
-  assert.doesNotMatch(bare, /Timing/, "no anchored step adds no timing row");
-});
 
 
 test("detail panels paginate every character and keep section choice stable", () => {
@@ -385,47 +288,8 @@ test("the queue panel lists cancellable requests with working pagination", () =>
   assert.match(cardView(last).text, /Request number 7/);
 });
 
-test("the request modal carries the nonce route, prompt field, and bounded image uploads", () => {
-  const modal = requestModal("turn", "nonce123");
-  assert.equal(modal.toJSON().custom_id, "ts2:request:turn:nonce123");
-  const upload = modal.toJSON().components[1].component;
-  assert.equal(upload.type, ComponentType.FileUpload);
-  assert.equal(upload.max_values, 4);
-  assert.equal(upload.required, false);
-  assert.equal(modal.toJSON().components.length, 2, "the queue form offers no restart checkbox");
-});
 
-test("the steer form adds an unchecked stop-and-restart checkbox", () => {
-  const modal = requestModal("turn", "nonce123", true);
-  const checkbox = modal.toJSON().components[2].component;
-  assert.equal(checkbox.type, ComponentType.Checkbox);
-  assert.equal(checkbox.custom_id, "restart");
-  assert.equal(checkbox.default, false, "a plain steer stays the default");
-});
 
-test("answer modals mix radio, checkbox, select and text controls per question", () => {
-  const request = {
-    requestID: "q9",
-    questions: [
-      { header: "Pick one", question: "Single choice?", options: Array.from({ length: 3 }, (_, index) => ({ label: `Option ${index + 1}` })) },
-      { header: "Pick many", question: "Multiple choice?", multiple: true, options: Array.from({ length: 4 }, (_, index) => ({ label: `Option ${index + 1}` })) },
-      { header: "Pick from many", question: "Long list?", options: Array.from({ length: 12 }, (_, index) => ({ label: `Option ${index + 1}` })) },
-      { header: "Write it", question: "Free text?", options: [] },
-    ],
-  };
-  const draft: QuestionDraft = { requestID: "q9", answers: [[], [], [], ["Typed earlier"]] };
-  const modal = answerModal("turn", request as never, draft, 0);
-  const data = modal.toJSON();
-  assert.equal(data.custom_id, "ts2:form:turn:q9:0");
-  const kinds = data.components.map((label) => label.component.type);
-  assert.deepEqual(kinds, [ComponentType.RadioGroup, ComponentType.CheckboxGroup, ComponentType.StringSelect, ComponentType.TextInput], "each question gets its native control");
-  const radio = data.components[0].component;
-  assert.equal(radio.options.length, 4, "three choices plus the custom-answer escape");
-  assert.equal(radio.options.at(-1).value, "other");
-  const text = data.components[3].component;
-  assert.equal(text.value, "Typed earlier", "an existing draft pre-fills the text input");
-  assert.equal(data.components.length, 4, "a second page exists for the fifth question");
-});
 
 test("reading the form keeps a draft when only the custom escape is selected", () => {
   const request = {

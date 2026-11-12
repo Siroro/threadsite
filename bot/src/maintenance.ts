@@ -83,12 +83,6 @@ export async function removeProjects(store: Store, selected: ProjectRecord[], mo
     if (mode === "remove") {
       await removalPaths(project);
       assertExclusiveResources(project, all);
-      for (const other of all.filter((item) => item.threadId !== project.threadId)) {
-        if (other.repoName === project.repoName || [other.siteSlug, ...(other.siteAliases ?? []), other.pendingRename?.siteSlug]
-          .some((slug) => slug && [project.siteSlug, ...(project.siteAliases ?? [])].includes(slug))) {
-          throw new Error(`Another project shares resources with ${project.threadId}; refusing removal.`);
-        }
-      }
     }
     // The agent can still be running after the bot container stops.
     if (!project.pendingDeletion && await services.busy(project)) throw new Error(`${project.repoName} still has an active agent turn; stop it before cleanup.`);

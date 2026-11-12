@@ -158,6 +158,4 @@ export const config = {
   commitBotName: env("COMMIT_BOT_NAME", "ThreadBot"),
   commitBotEmail: env("COMMIT_BOT_EMAIL") || env("FORGEJO_BOT_EMAIL") || "threadbot@localhost",
 
-  logFile: path.resolve(env("LOG_FILE", "/data/threadsite.log")),
-  logLevel: env("LOG_LEVEL", "info"),
 };

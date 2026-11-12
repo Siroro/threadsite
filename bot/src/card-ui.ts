@@ -3,17 +3,27 @@ import {
   MessageFlags, SectionBuilder, SeparatorBuilder, TextDisplayBuilder, ThumbnailBuilder,
   type APIComponentInContainer, type AttachmentBuilder, type Message, type MessageEditOptions,
 } from "discord.js";
+import { parseCardId } from "./card-actions.js";
 import type { ProjectKind } from "./types.js";
 import { truncate } from "./util.js";
 
 export const CARD_TEXT_LIMIT = 4000;
 export const KIND_COLORS: Record<ProjectKind, number> = { site: 0x5865f2, "game-2d": 0x22c55e, "game-3d": 0x8b5cf6 };
 
+/** The shared status palette: card accent colors for attention states, alongside KIND_COLORS. */
+export const STATUS_TONE_COLORS = { error: 0xef4444, warn: 0xf59e0b, neutral: 0x64748b } as const;
+export type StatusTone = keyof typeof STATUS_TONE_COLORS;
+
 export interface CardMessage {
   components: [ContainerBuilder];
   flags: typeof MessageFlags.IsComponentsV2;
   allowedMentions: { parse: [] };
   files?: AttachmentBuilder[];
+}
+
+/** Markdown-safe text for panels and question cards: escape then bound. */
+export function plain(value: string, max: number): string {
+  return escapeMarkdown(truncate(value.replace(/\s+/g, " ").trim(), max), { maskedLink: true });
 }
 
 export function cardTitle(value: string): string {
@@ -103,7 +113,7 @@ export function cardEdit(message: CardMessage): MessageEditOptions {
 /** Acknowledging a click must preserve V2 text/media, which live inside components too. */
 export function disableMessageControls(message: Pick<Message, "components">): MessageEditOptions {
   // Keep stop usable while acknowledging other controls on a live turn.
-  const keepEnabled = (customId?: string) => customId?.startsWith("ts2:stop:");
+  const keepEnabled = (customId?: string) => parseCardId(customId ?? "")?.action === "stop";
   const disable = (component: APIComponentInContainer): APIComponentInContainer => {
     if (component.type === ComponentType.ActionRow) return {
       ...component, components: component.components.map((control) => "custom_id" in control && !keepEnabled(control.custom_id) ? { ...control, disabled: true } : control),
@@ -119,11 +129,11 @@ export function disableMessageControls(message: Pick<Message, "components">): Me
   }) };
 }
 
-/** Terminal outcomes also stay V2: Discord does not allow reverting a V2 message to content. */
-export function renderStatusCard(content: string, rows: ActionRowBuilder<ButtonBuilder>[] = []): CardMessage {
-  const color = /❌|🚫|failed/i.test(content) ? 0xef4444 : /⚠️|🛑|stopped/i.test(content) ? 0xf59e0b : 0x64748b;
-  const card = new ContainerBuilder().setAccentColor(color);
+/** Terminal outcomes also stay V2: Discord does not allow reverting a V2 message to content.
+ * The accent color is the caller's decision (tone), never derived from the wording. */
+export function renderStatusCard(content: string, options: { rows?: ActionRowBuilder<ButtonBuilder>[]; tone?: StatusTone } = {}): CardMessage {
+  const card = new ContainerBuilder().setAccentColor(STATUS_TONE_COLORS[options.tone ?? "neutral"]);
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# TURN UPDATE\n${truncate(content || "Turn finished.", 3900)}`));
-  if (rows.length) { addCardDivider(card); card.addActionRowComponents(...rows); }
+  if (options.rows?.length) { addCardDivider(card); card.addActionRowComponents(...options.rows); }
   return cardMessage(card);
 }

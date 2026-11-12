@@ -38,7 +38,6 @@ const RESUME_STORAGE_PREFIX = "threadsite-resume-room-v4:";
 const encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
 export class ThreadSiteNetError extends Error {
     code;
-    net;
     constructor(message, code = "error", cause) {
         super(message, cause === undefined ? undefined : { cause });
         this.name = "ThreadSiteNetError";
@@ -222,6 +221,13 @@ export class ThreadSiteNet {
     worldIntervalMs = 0;
     lastWorldArrivalAt = null;
     lastWorldBytesValue = null;
+    // Send budget mirrors the relay's enforced limits: the welcome frame carries
+    // what this relay actually enforces (env-tunable), and the client adopts the
+    // stricter of that and its own defaults so a lowered relay limit degrades
+    // gracefully instead of churning rate_limited reconnects.
+    sendBudgetPerSecond = SEND_BUDGET_PER_SECOND;
+    sendBudgetBurst = SEND_BUDGET_BURST;
+    maxFrameBytesValue = MAX_FRAME_BYTES;
     sendTokens = SEND_BUDGET_BURST;
     sendTokensUpdatedAt = Date.now();
     lastBudgetWarnAt = 0;
@@ -304,7 +310,7 @@ export class ThreadSiteNet {
         this.resumeRequested = Boolean(this.requestedRoom && loadResumeRoom(this.game) === this.requestedRoom);
         this.opened = new Promise((resolve, reject) => {
             this.resolveOpened = resolve;
-            this.rejectOpened = (error) => { error.net = this; reject(error); };
+            this.rejectOpened = (error) => { reject(error); };
         });
         this.opened.catch(() => undefined);
         this.visibilityHandler = () => {
@@ -403,6 +409,7 @@ export class ThreadSiteNet {
      * blocked (`not_ready`) until then, so a freshly elected host can never
      * overwrite a persisted/restored world before restoring it.
      */
+    /** @internal Facades expose this as `authority.ready`; not part of the game-facing API. */
     get bootstrapped() { return this.bootstrapDone; }
     get peers() { return [...this.peersById.values()]; }
     get playerStates() {
@@ -482,8 +489,6 @@ export class ThreadSiteNet {
         }, true))
             this.lastPublishedWorld = state ?? null;
     }
-    /** @internal World requests are automatic. */
-    requestWorld() { this.sendFrame({ t: "world-req" }, true); }
     /** @internal Use transforms or presence. */
     publishPlayerState(state) { this.queuePlayerState(state ?? null, null, false); }
     /** @internal Use `transforms.publish()`. */
@@ -773,8 +778,8 @@ export class ThreadSiteNet {
             throw new ThreadSiteNetError("Frame is not JSON-serializable.", "bad_frame", error);
         }
         const size = byteLength(payload);
-        if (size > MAX_FRAME_BYTES)
-            throw new ThreadSiteNetError(`Frame is ${size} bytes; keep frames under ${MAX_FRAME_BYTES}.`, "frame_too_large");
+        if (size > this.maxFrameBytesValue)
+            throw new ThreadSiteNetError(`Frame is ${size} bytes; keep frames under ${this.maxFrameBytesValue}.`, "frame_too_large");
         if (!this.takeSendToken() && (frame.t === "pstate" || frame.t === "world")) {
             // The high-rate periodic frames pace down first; reliable events are
             // rare and must not be silently lost.
@@ -782,7 +787,7 @@ export class ThreadSiteNet {
             const now = Date.now();
             if (now - this.lastBudgetWarnAt > 5000) {
                 this.lastBudgetWarnAt = now;
-                console.warn(`[threadsite-net] send budget reached (${SEND_BUDGET_PER_SECOND}/s sustained): dropping ${frame.t} frames; reduce transformHz/publishHz or event volume`);
+                console.warn(`[threadsite-net] send budget reached (${this.sendBudgetPerSecond}/s sustained): dropping ${frame.t} frames; reduce transformHz/publishHz or event volume`);
             }
             return false;
         }
@@ -796,10 +801,27 @@ export class ThreadSiteNet {
         }
         return true;
     }
+    /** Apply the relay's advertised limits (additive protocol field; absent on
+     * older relays): never looser than the client's own defaults. */
+    adoptRelayLimits(limits) {
+        if (typeof limits !== "object" || limits === null)
+            return;
+        const { maxFrameBytes, ratePerSecond, rateBurst } = limits;
+        if (typeof maxFrameBytes === "number" && Number.isFinite(maxFrameBytes) && maxFrameBytes >= 1024) {
+            this.maxFrameBytesValue = Math.min(MAX_FRAME_BYTES, Math.floor(maxFrameBytes));
+        }
+        if (typeof ratePerSecond === "number" && Number.isFinite(ratePerSecond) && ratePerSecond >= 1) {
+            this.sendBudgetPerSecond = Math.min(SEND_BUDGET_PER_SECOND, Math.floor(ratePerSecond));
+        }
+        if (typeof rateBurst === "number" && Number.isFinite(rateBurst) && rateBurst >= 1) {
+            this.sendBudgetBurst = Math.min(SEND_BUDGET_BURST, Math.floor(rateBurst));
+            this.sendTokens = Math.min(this.sendTokens, this.sendBudgetBurst);
+        }
+    }
     /** @internal Token bucket pacing sends just under the relay's frame limiter. */
     takeSendToken() {
         const now = Date.now();
-        this.sendTokens = Math.min(SEND_BUDGET_BURST, this.sendTokens + (now - this.sendTokensUpdatedAt) * SEND_BUDGET_PER_SECOND / 1000);
+        this.sendTokens = Math.min(this.sendBudgetBurst, this.sendTokens + (now - this.sendTokensUpdatedAt) * this.sendBudgetPerSecond / 1000);
         this.sendTokensUpdatedAt = now;
         if (this.sendTokens < 1)
             return false;
@@ -912,6 +934,7 @@ export class ThreadSiteNet {
     handleFrame(frame, failTimer) {
         switch (frame.t) {
             case "welcome": {
+                this.adoptRelayLimits(frame.limits);
                 if (frame.v !== PROTOCOL_VERSION || frame.persistence?.version !== 1) {
                     clearTimeout(failTimer);
                     this.handleError({ t: "error", code: "bad_version", message: "The relay returned an unsupported protocol version." });
@@ -1232,7 +1255,10 @@ export class ThreadSiteNet {
                 this.retryEvent(frame.id);
             return;
         }
-        if (["room_not_found", "bad_version", "bad_game", "bad_room", "room_full", "too_many_rooms", "project_deleted"].includes(code)) {
+        // Every pre-welcome rejection is terminal: the relay refused this client
+        // or room specifically, so reconnecting would loop forever on the same
+        // answer. rate_limited above is the only retryable shape.
+        if (!this.hasJoined) {
             if (!this.openedSettled) {
                 this.openedSettled = true;
                 this.rejectOpened(error);

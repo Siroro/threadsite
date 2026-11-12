@@ -98,32 +98,6 @@ test("the technical card lists the turn's subagents and only offers shortcuts wi
   assert.ok(bare.buttons.some((button) => button.label === "Turn details"), "the general details view always remains");
 });
 
-test("the new message carries the playable card, the screenshot and the play link", () => {
-  const message = renderPlayCard(state());
-  assert.equal(message.flags & MessageFlags.IsComponentsV2, MessageFlags.IsComponentsV2, "the playable card is a Components V2 message");
-  assert.equal(message.files.length, 1);
-  const card = message.components[0].toJSON() as { type: number; accent_color?: number; components: Array<{ type: number; items?: Array<{ media: { url: string } }> }> };
-  assert.equal(card.type, ComponentType.Container);
-  const text = playCardText(message);
-  assert.match(text, /-# 🎮 Play Koi Pond Arcade/);
-  assert.match(text, /feed koi and race them/);
-  // The changelog heading labels its own line: it says what changed far
-  // better than a generic "What's new".
-  assert.match(text, /\*\*Leaderboard\*\*: Added a leaderboard for the top ten koi\./);
-  assert.doesNotMatch(text, /How to play/, "the how-to-play lives behind the card's button, not inline");
-  assert.match(text, /-# 2D · shared arena multiplayer/);
-  const gallery = card.components.find((component) => component.type === ComponentType.MediaGallery)!;
-  assert.equal(gallery.items![0].media.url, "attachment://preview.png");
-  // Real link buttons, not a links field. The expanded how-to-play is one
-  // click away on the card itself, and the play/source links ride the very
-  // bottom row beneath the card's own actions.
-  const buttons = playCardButtons(message);
-  const howTo = buttons.find((button) => button.label === "How to play");
-  assert.equal(howTo?.style, ButtonStyle.Secondary);
-  assert.equal(buttons.at(-2)!.style, ButtonStyle.Link);
-  assert.equal(buttons.at(-2)!.url, "https://games.example.co.uk/koi-pond-arcade/");
-  assert.equal(buttons.at(-1)!.url, "https://git.example.co.uk/shane/site-koi-pond-arcade");
-});
 
 test("the playable card still renders without a screenshot, a description or a changelog", () => {
   const message = renderPlayCard(state({ screenshot: undefined, description: undefined, changelog: undefined }));

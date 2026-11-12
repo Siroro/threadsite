@@ -11,7 +11,19 @@ export interface QuestionDelivery {
   responder?: string;
   error?: string;
 }
+/** Card-state key for one request form draft, keyed by its nonce. */
+export function requestFormKey(nonce: string): string {
+  return `request:${nonce}`;
+}
+
+/** Rollback guard for a finished turn's controls: the commit and settlement it belongs to. */
+export function failureVersionOf(project: { lastCommit?: string; lastTurnAt?: string }): string {
+  return `${project.lastCommit ?? ""}/${project.lastTurnAt ?? ""}`;
+}
+
 export interface StoredTurnCard {
+  /** Set when failure controls were attached; rollback rechecks it against the live project. */
+  failureVersion?: string;
   snapshot?: ProgressSnapshot;
   question?: AgentQuestion;
   delivery?: QuestionDelivery;

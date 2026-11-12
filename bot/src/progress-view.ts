@@ -1,5 +1,6 @@
 import { ButtonBuilder, ButtonStyle, ContainerBuilder, escapeMarkdown, TextDisplayBuilder } from "discord.js";
-import { addCardDivider, addCardField, addCardHeader, addCardLinks, addCardTitle, cardLink, cardMessage, type CardMessage } from "./card-ui.js";
+import { plain, STATUS_TONE_COLORS, addCardDivider, addCardField, addCardHeader, addCardLinks, addCardTitle, cardLink, cardMessage, type CardMessage } from "./card-ui.js";
+import { cacheSharePercent } from "./opencode-shared.js";
 import { cardId } from "./card-actions.js";
 import type { PanelSection } from "./card-panels.js";
 import type { QuestionRow } from "./question-ui.js";
@@ -126,34 +127,55 @@ export interface ProgressControls {
   resource?: string;
 }
 
-/** One live V2 panel; facts come from events rather than an invented completion estimate. */
-export function renderProgressOverview(state: ProgressSnapshot, controls: ProgressControls = {}): CardMessage {
+/** The phase rail with queued outside it: identical on the live card and the details Overview. */
+function phaseRail(phase: ProgressPhase): string {
+  const current = PHASES.indexOf(phase);
+  // "queued" is outside the rail, so it gets its own leading marker: without
+  // one every step would render as pending and read as "nothing is happening".
+  return [...(phase === "queued" ? ["**● Queued**"] : []), ...PHASES.map((label, index) =>
+    index < current ? `✓ ${LABELS[label]}` : index === current ? `**● ${LABELS[label]}**` : `○ ${LABELS[label]}`)].join("  ›  ");
+}
+
+/** Attention states both renderers agree on: a pending question, a service wait, or a stalled turn. */
+function attentionState(state: ProgressSnapshot): { stalledForMs?: number; attention: boolean } {
   // The stall warning is only meaningful while the model is expected to be
   // working: a queued thread and a pending question are both legitimately idle.
   const stalledForMs = state.phase !== "queued" && !state.questions?.length ? state.stalledForMs : undefined;
-  const attention = Boolean(state.questions?.length || state.waiting || stalledForMs);
+  return { stalledForMs, attention: Boolean(state.questions?.length || state.waiting || stalledForMs) };
+}
+
+/** The stalled-turn warning: identical wording on the live card and the details Overview. */
+function stalledLine(state: ProgressSnapshot, stalledForMs: number): string {
+  return state.agentReportedActive
+    ? `🔌 **OpenCode still reports this turn running** · no new agent event for ${elapsed(stalledForMs)}. Run \`/site stop\` to interrupt it.`
+    : `⚠️ **No progress for ${elapsed(stalledForMs)}**: run \`/site stop\` to interrupt this turn.`;
+}
+
+/** The Generating/Running/Idle age line, shown once a live turn has been
+ * quiet a while: never on queued threads, next to pending questions, or while
+ * the harness is still waiting on something. */
+function idleLine(state: ProgressSnapshot): string | undefined {
   const age = Math.max(0, state.now - state.latest.at);
-  const current = PHASES.indexOf(state.phase);
-  // "queued" is outside the rail, so it gets its own leading marker: without
-  // one every step would render as pending and read as "nothing is happening".
-  const rail = [...(state.phase === "queued" ? ["**● Queued**"] : []), ...PHASES.map((phase, index) =>
-    index < current ? `✓ ${LABELS[phase]}` : index === current ? `**● ${LABELS[phase]}**` : `○ ${LABELS[phase]}`)].join("  ›  ");
+  if (age < 15_000 || state.waiting || state.phase === "queued" || state.questions?.length) return undefined;
+  return `${state.metrics?.liveTokensPerSecond ? "Generating" : state.activeTools ? "Running" : "Idle"} · ${elapsed(age)}`;
+}
+
+/** One live V2 panel; facts come from events rather than an invented completion estimate. */
+export function renderProgressOverview(state: ProgressSnapshot, controls: ProgressControls = {}): CardMessage {
+  const { stalledForMs, attention } = attentionState(state);
+  const rail = phaseRail(state.phase);
   // No "Right now" label: the rail already names the phase, and for a queued
   // thread it would repeat the Queued marker directly above. The activity line
   // describes itself. A pending question is different — that is a state change
   // the reader must not miss, so it keeps its heading.
   const description = [rail, "", ...(state.questions?.length ? ["**Waiting for your answer**"] : []), ...activityLines(state, 300)];
-  if (stalledForMs) {
-    description.push(state.agentReportedActive
-      ? `🔌 **OpenCode still reports this turn running** · no new agent event for ${elapsed(stalledForMs)}. Run \`/site stop\` to interrupt it.`
-      : `⚠️ **No progress for ${elapsed(stalledForMs)}**: run \`/site stop\` to interrupt this turn.`);
-  } else if (state.waitingReason && !state.questions?.length) {
-    // Only the service wait needs its own line: a failed tool already headlines
-    // the activity line with ⚠️, so a second generic line would just repeat it.
-    description.push(`⚠️ **${plain(state.waitingReason, 160)}**`);
-  } else if (age >= 15_000 && !state.waiting && state.phase !== "queued" && !state.questions?.length) {
-    description.push(`${state.metrics?.liveTokensPerSecond ? "Generating" : state.activeTools ? "Running" : "Idle"} · ${elapsed(age)}`);
-  }
+  const line = stalledForMs ? stalledLine(state, stalledForMs)
+    : state.waitingReason && !state.questions?.length
+      // Only the service wait needs its own line: a failed tool already headlines
+      // the activity line with ⚠️, so a second generic line would just repeat it.
+      ? `⚠️ **${plain(state.waitingReason, 160)}**`
+      : idleLine(state);
+  if (line) description.push(line);
   // Only a merged batch repeats the request: it is the one case where the
   // thread does not already show the user what this turn is applying.
   if (state.context.request) description.push("", `**Your requests**\n${plain(state.context.request, 220)}`);
@@ -202,7 +224,7 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   const usage: string[] = [];
   if (metrics) {
     if (metrics.inputTokens || metrics.outputTokens) usage.push(`${formatTokens(metrics.inputTokens ?? 0)} in · ${formatTokens(metrics.outputTokens ?? 0)} out`);
-    if (metrics.cacheTokens && metrics.inputTokens) usage.push(`${Math.round(Math.min(1, metrics.cacheTokens / metrics.inputTokens) * 100)}% input cached`);
+    if (metrics.cacheTokens && metrics.inputTokens) usage.push(`${cacheSharePercent(metrics)}% input cached`);
     if (metrics.contextTokens && metrics.contextLimit) {
       const filled = Math.min(8, Math.floor(8 * metrics.contextTokens / metrics.contextLimit));
       const percent = Math.round(metrics.contextTokens / metrics.contextLimit * 100);
@@ -219,7 +241,7 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
   if (recent.length && !state.questions?.length) fields.push({ name: "Recent activity", value: recent.map((item) => `\`${elapsed(item.at - state.startedAt)}\` ${activity(item, 145)}`).join("\n") });
   if (state.queuedRequests > 0) fields.push({ name: "Next pass", value: `**${state.queuedRequests}** saved request${state.queuedRequests === 1 ? "" : "s"} waiting` });
   const footer = [`Elapsed ${elapsed(state.now - state.startedAt)}`, state.actions ? `${state.actions} action${state.actions === 1 ? "" : "s"}` : "", state.questions?.length ? "Waiting for your answer" : stalledForMs ? `No progress for ${elapsed(stalledForMs)}` : state.activeTools ? `${state.activeTools} running` : "", state.toolErrors ? `${state.toolErrors} tool error${state.toolErrors === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
-  const card = new ContainerBuilder().setAccentColor(attention ? 0xf59e0b : COLORS[state.phase]);
+  const card = new ContainerBuilder().setAccentColor(attention ? STATUS_TONE_COLORS.warn : COLORS[state.phase]);
   const stop = controls.stopCustomId ? new ButtonBuilder().setCustomId(controls.stopCustomId).setLabel("Stop turn").setStyle(ButtonStyle.Secondary) : undefined;
   addCardHeader(card, "LIVE TURN", state.title, state.questions?.length ? "❓ Your answer is needed" : stalledForMs ? "⚠️ Waiting for progress" : state.phase === "queued" ? "Waiting for a build slot" : undefined, stop);
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(description.join("\n")));
@@ -243,9 +265,8 @@ export function renderProgressOverview(state: ProgressSnapshot, controls: Progre
 /** The public view spends its space on current work and a useful tail of public LLM updates. */
 export function renderProgressCard(state: ProgressSnapshot, controls: ProgressControls = {}): CardMessage {
   const resource = controls.resource;
-  const stalled = state.phase !== "queued" && !state.questions?.length ? state.stalledForMs : undefined;
-  const waiting = Boolean(state.questions?.length || state.waiting || stalled);
-  const card = new ContainerBuilder().setAccentColor(waiting ? 0xf59e0b : COLORS[state.phase]);
+  const { stalledForMs: stalled, attention: waiting } = attentionState(state);
+  const card = new ContainerBuilder().setAccentColor(waiting ? STATUS_TONE_COLORS.warn : COLORS[state.phase]);
   // Turn details owns the header corner; Stop ends the turn-actions row in the
   // danger colour, and the site/source links ride the very bottom row.
   const details = resource ? new ButtonBuilder().setCustomId(cardId("details", resource)).setLabel("Turn details").setStyle(ButtonStyle.Primary) : undefined;
@@ -253,14 +274,12 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   // The model identity rides a small line above the phase rail, keeping the
   // footer metrics-only; the line has room for further turn facts beside it.
   const model = state.metrics?.models ? modelNameSummary(state.metrics.models) : "";
-  const current = PHASES.indexOf(state.phase);
-  const rail = [...(state.phase === "queued" ? ["**● Queued**"] : []), ...PHASES.map((phase, index) => index < current ? `✓ ${LABELS[phase]}` : index === current ? `**● ${LABELS[phase]}**` : `○ ${LABELS[phase]}`)].join("  ›  ");
+  const rail = phaseRail(state.phase);
   const lines = [...(model ? [`-# 🧠 ${model}`] : []), rail, "", ...activityLines(state, 260)];
-  if (stalled) lines.push(state.agentReportedActive
-    ? `🔌 **OpenCode still reports this turn running** · no new agent event for ${elapsed(stalled)}. Run \`/site stop\` to interrupt it.`
-    : `⚠️ **No progress for ${elapsed(stalled)}**: run \`/site stop\` to interrupt this turn.`);
-  else if (state.waitingReason && !state.questions?.length) lines.push(`⚠️ ${plain(state.waitingReason, 180)}`);
-  else if (!state.waiting && state.now - state.latest.at >= 15_000 && state.phase !== "queued" && !state.questions?.length) lines.push(`${state.metrics?.liveTokensPerSecond ? "Generating" : state.activeTools ? "Running" : "Idle"} · ${elapsed(state.now - state.latest.at)}`);
+  const line = stalled ? stalledLine(state, stalled)
+    : state.waitingReason && !state.questions?.length ? `⚠️ ${plain(state.waitingReason, 180)}`
+    : idleLine(state);
+  if (line) lines.push(line);
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join("\n")));
   if (state.context.request) addCardField(card, "Your requests", plain(state.context.request, 220));
   if (state.questions?.length) {
@@ -321,7 +340,8 @@ export function renderProgressCard(state: ProgressSnapshot, controls: ProgressCo
   // share, then the total output — failures already headline the activity line.
   // The triangles are text-presentation glyphs, so they render at text size
   // next to the counts instead of the subtext-shrunken emoji.
-  const cacheShare = metrics?.cacheTokens && metrics?.inputTokens ? ` (${Math.round(Math.min(1, metrics.cacheTokens / metrics.inputTokens) * 100)}%)` : "";
+  const share = metrics ? cacheSharePercent(metrics) : undefined;
+  const cacheShare = share !== undefined ? ` (${share}%)` : "";
   const tokens = metrics && (metrics.inputTokens || metrics.outputTokens) ? `▼ ${formatTokens(metrics.inputTokens ?? 0)}${cacheShare} ▲ ${formatTokens(metrics.outputTokens ?? 0)}` : "";
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(`-# ${[
     `⏱️ ${elapsed(state.now - state.startedAt)}`,
@@ -344,7 +364,7 @@ export function usageDetailText(metrics: ProgressMetrics): string {
   const tokens = [
     metrics.inputTokens ? `Input **${formatTokens(metrics.inputTokens)}**` : "",
     metrics.outputTokens ? `Output **${formatTokens(metrics.outputTokens)}**` : "",
-    metrics.cacheTokens ? `Cached **${formatTokens(metrics.cacheTokens)}**${metrics.inputTokens ? ` (${Math.round(Math.min(1, metrics.cacheTokens / metrics.inputTokens) * 100)}% of input)` : ""}` : "",
+    metrics.cacheTokens ? `Cached **${formatTokens(metrics.cacheTokens)}**${cacheSharePercent(metrics) !== undefined ? ` (${cacheSharePercent(metrics)}% of input)` : ""}` : "",
   ].filter(Boolean).join(" · ");
   let context = "";
   if (metrics.contextTokens && metrics.contextLimit) {
@@ -573,7 +593,6 @@ function clean(value: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 /** External text (user prompts, agent questions) rendered as markdown-safe prose. */
-export function plain(value: string, max: number): string { return escapeMarkdown(clean(value, max), { maskedLink: true }); }
 function cleanField(value: string): string { return value.length > 1000 ? `${value.slice(0, 999)}…` : value; }
 export function elapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));

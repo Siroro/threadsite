@@ -55,6 +55,11 @@ export interface ProgressUpdate {
   narrationId?: string;
 }
 
+/** The queue-count update every queue change emits; one builder keeps the vocabulary single. */
+export function queueUpdate(count: number): ProgressUpdate {
+  return { kind: "queue", text: "Saved requests", queuedRequests: count };
+}
+
 export type ProgressCallback = (update: ProgressUpdate) => void | Promise<void>;
 
 const MAX_SUMMARY_CHARS = 280;
@@ -272,11 +277,6 @@ export class DiscordProgress {
 
   readSnapshot(): ProgressSnapshot { return structuredClone(this.snapshot()); }
 
-  /** The stored pending question, for resolving button customIds back to labels. */
-  pendingQuestion(requestID: string): AgentQuestion | undefined {
-    return this.question?.requestID === requestID ? this.question : undefined;
-  }
-
   /** Drop the stored question once answered/rejected so flushes stop re-rendering it. */
   clearQuestion(requestID: string): void {
     if (this.question?.requestID === requestID) {
@@ -304,8 +304,8 @@ export class DiscordProgress {
   }
 
   /** Show a Stop button under the live status while the turn runs; the final outcome edit clears it. */
-  enableStopButton(customId = cardId("stop", this.message.id)): void {
-    this.stopCustomId = customId;
+  enableStopButton(): void {
+    this.stopCustomId = cardId("stop", this.message.id);
     this.schedule();
   }
 

@@ -3,10 +3,11 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { ForgejoClient } from "./forgejo.js";
-import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, generatePushCredentials, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, turnRevertTarget, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
+import { captureWorkingTreeSnapshot, commitAndPush, commitHistory, currentHead, ensureGitRepository, ensureLocalBaseline, resetToCommit, restoreWorkingTree, syncToRemote, syncWithRemote, turnRevertTarget, undoLastCommit, workingTreeClean, workingTreeStats } from "./git.js";
 import { ensureMultiplayerFiles, multiplayerContext, removeMultiplayerFiles } from "./multiplayer.js";
 import { ensureLeaderboardFiles } from "./leaderboards.js";
-import { OpenCodeV2Harness as OpenCodeHarness } from "./opencode-v2.js";
+import { OpenCodeV2Harness as OpenCodeHarness, isBusySessionError, isVanishedSessionError } from "./opencode-v2.js";
+import { BUILDER_AGENT } from "./opencode-contract.js";
 import { addUsage, errorUsage, isTerminalAssistant, reconcileUsage, usageFromMessages, type PromptImage, type PromptResult, type TurnUsage } from "./opencode-shared.js";
 import { moveGalleryPreview, publishIndex, publishSite, publishSiteRedirects, saveGalleryPreview, siteUrl, validateSite } from "./publish.js";
 import { buildSite, GENERATED_GITIGNORE } from "./build.js";
@@ -23,10 +24,12 @@ import type { ProgressCallback, ProgressPhase } from "./progress.js";
 import type { WorkingTreeStats } from "./git.js";
 import { log, logError, serializeError } from "./logger.js";
 import { errorText, formatShortDuration, parseModel, safeChild, slugify, truncate, withTimeout, sleep } from "./util.js";
+import { RepairableValidationError } from "./validation.js";
 import { browserQaFeedback, runBrowserQa as driveBrowserQa, type BrowserQaResult } from "./browser-qa.js";
 import { assertExclusiveResources, projectAccounts, projectRepos, removalPaths } from "./project-removal.js";
 import { deleteRelayGame, renameRelayGame } from "./relay-cleanup.js";
 import { pushRenameMetadata } from "./git.js";
+import { BOT_CREATED_IDENTITY, COMMIT_SHORT_HASH_CHARS, generatePushCredentials, isBotCreatedIdentity, managedRepoDescription, relayTenantId, stripBotCreatedSlug, temporaryRepoName } from "./project-identity.js";
 import { fallbackProjectName, projectName } from "./naming.js";
 
 export interface MutationResult {
@@ -75,6 +78,36 @@ export type StopTurnOutcome =
   | { stopped: boolean; delivering: false; queueFreed: false }
   | { stopped: false; delivering: true; queueFreed: false }
   | { stopped: false; delivering: false; queueFreed: true };
+
+/**
+ * One turn's request. Grouped because the harness composes it from several
+ * sources (a queued batch, a repair pass, a multiplayer swap) and every field
+ * is optional except the prompt itself.
+ */
+export interface TurnRequest {
+  /** The user's request text; ignored when `instruction` supplies the whole prompt. */
+  prompt: string;
+  /** The initial build: creates the project's first site/game. */
+  initial?: boolean;
+  /** Discord user who requested the turn; becomes the commit author. */
+  author?: CommitAuthor;
+  /** Live status message the turn renders on; restart recovery re-anchors to it. */
+  statusMessageId?: string;
+  /** Image attachments forwarded when the turn's model can see them. */
+  images?: readonly PromptImage[];
+  /** Persisted requests this turn claims from the durable queue (empty for flows with no queue admission). */
+  queuedStatusIds?: readonly string[];
+  /** Card text for the request box when the merged prompt is harness-composed. */
+  displayRequest?: string;
+  /** Discord user pinged when the agent asks a question. */
+  requesterId?: string;
+  /** Harness-composed instruction replacing the default mutation prompt (repair, multiplayer swap, naming fix). */
+  instruction?: string;
+  /** Defer the pre-turn naming barrier: the naming-fix turn exists to perform exactly that. */
+  deferNaming?: boolean;
+  /** Progress callback for the live status card. */
+  onProgress?: ProgressCallback;
+}
 
 /**
  * A turn stopped mid-flight at the user's request (the Stop button): the agent
@@ -149,7 +182,7 @@ export class ProjectService {
     if (project.pendingTurn || await this.agentBusy(threadId)) throw new Error("Recover or finish the current turn before completing the project name.");
     if (project.pendingRename) project = await this.resumeRename(threadId, onProgress);
     if (project.pendingNaming) {
-      const automatic = /^(?:site|game)-/i.test(project.displayName);
+      const automatic = isBotCreatedIdentity(project.displayName);
       let naming = project.pendingNaming ?? {
         request: project.initialPrompt || project.displayName,
         ...(automatic ? {} : { name: project.displayName }),
@@ -168,7 +201,7 @@ export class ProjectService {
         naming = { ...naming, name };
         project = await this.store.patchProject(threadId, { pendingNaming: naming });
       }
-      if (project.displayName !== name || project.repoName !== project.siteSlug || /^(?:site|game)-/.test(project.siteSlug)) {
+      if (project.displayName !== name || project.repoName !== project.siteSlug || isBotCreatedIdentity(project.siteSlug)) {
         project = await this.renameProject(threadId, name!, onProgress, true, false);
       }
     }
@@ -198,8 +231,14 @@ export class ProjectService {
   }): Promise<{ text: string; usage?: TurnUsage } | undefined> {
     emit(input.onProgress, "🏷️ The project was delivered unnamed, asking the agent to name it");
     try {
-      const result = await this.mutate(project.threadId, "Name the project", false, input.onProgress, input.author,
-        input.pendingTurn?.statusMessageId, undefined, [], undefined, undefined, namingFixInstruction(input.projectKind), true);
+      const result = await this.mutate(project.threadId, {
+        prompt: "Name the project",
+        author: input.author,
+        statusMessageId: input.pendingTurn?.statusMessageId,
+        instruction: namingFixInstruction(input.projectKind),
+        deferNaming: true,
+        onProgress: input.onProgress,
+      });
       const text = result.agentSummary.trim();
       return text && !result.validationError && !result.deliveryError
         ? { text, usage: result.usage } : undefined;
@@ -248,7 +287,7 @@ export class ProjectService {
   private async ensureHarnessBuildInputs(project: ProjectRecord): Promise<void> {
     await ensureEnginePackages(project.workspacePath, project.projectKind ?? "site");
     await this.ensureLeaderboardInputs(project);
-    const multiplayer = multiplayerContext(project.projectKind ?? "site", project.multiplayerGameId ?? project.siteSlug, project.multiplayerMode);
+    const multiplayer = multiplayerContext(project.projectKind ?? "site", relayTenantId(project) ?? project.siteSlug, project.multiplayerMode);
     if (multiplayer) await ensureMultiplayerFiles(project.workspacePath, multiplayer, project.projectKind ?? "site");
   }
 
@@ -316,11 +355,11 @@ export class ProjectService {
     // Bot-created threads carry a "site-"/"game-" prefix in their name; keep it
     // out of the temporary slug so the initial repo isn't double-prefixed.
     // The durable naming request replaces this identity after delivery.
-    const displaySource = input.renameable ? input.displayName.replace(/^(?:site|game)-/, "") : input.displayName;
+    const displaySource = input.renameable ? input.displayName.replace(BOT_CREATED_IDENTITY, "") : input.displayName;
     const baseSlug = slugify(displaySource);
     // Temporary identity uses the complete snowflake; short suffixes can collide.
     const siteSlug = `${baseSlug.slice(0, 62 - input.threadId.length)}-${input.threadId}`;
-    const repoName = `site-${siteSlug}`.slice(0, 80);
+    const repoName = temporaryRepoName(siteSlug);
     const workspacePath = safeChild(config.workspaceRoot, input.guildId, input.threadId);
     const siteDir = safeChild(workspacePath, "site");
     const projectKind = input.projectKind ?? "site";
@@ -396,7 +435,7 @@ export class ProjectService {
     await buildSite(workspacePath);
 
     emit(onProgress, "🌱 Creating/checking Forgejo repository");
-    await this.forgejo.ensureRepository(repoName, `${projectKindLabel(projectKind)} generated by ThreadSite`);
+    await this.forgejo.ensureRepository(repoName, managedRepoDescription(projectKindLabel(projectKind)));
     if (config.webhookEnabled) emit(onProgress, "🔗 Registering the Forgejo push webhook");
     await this.ensureProjectWebhook(repoName);
     emit(onProgress, "🧱 Initialising git workspace");
@@ -409,7 +448,14 @@ export class ProjectService {
     project.sessionId = sessionId;
     log("info", "project.created", { threadId: input.threadId, projectKind, repoName, siteSlug });
 
-    const result = await this.mutate(input.threadId, input.initialPrompt, true, onProgress, input.initiator, input.statusMessageId, undefined, [], undefined, input.initiatorUserId);
+    const result = await this.mutate(input.threadId, {
+      prompt: input.initialPrompt,
+      initial: true,
+      author: input.initiator,
+      statusMessageId: input.statusMessageId,
+      requesterId: input.initiatorUserId,
+      onProgress,
+    });
 
     return result;
     } catch (error) {
@@ -443,7 +489,7 @@ export class ProjectService {
       if (!clean && !allowUnfinished) throw new Error("Finish or roll back the workspace edits before renaming.");
       const source = await this.forgejo.repositoryInfo(project.repoName);
       if (!source) throw new Error("The source repository could not be found.");
-      const base = slugify(displayName, "untitled-project").replace(/^(?:(?:site|game)-)+/, "") || "untitled-project";
+      const base = stripBotCreatedSlug(slugify(displayName, "untitled-project")) || "untitled-project";
       const candidates = [base, `${base}-${threadId.slice(-6)}`, `${base.slice(0, 62 - threadId.length)}-${threadId}`];
       for (const siteSlug of candidates) {
         const repoName = siteSlug;
@@ -492,12 +538,10 @@ export class ProjectService {
     // dropped. Landed before the rebuild so the republished net-config (and
     // the project record everything else reads) carries the new game id.
     // Only games have a relay presence; siteSlug still holds the old name here.
-    if (project.projectKind?.startsWith("game-")) {
-      const fromGameId = project.multiplayerGameId ?? project.siteSlug;
-      if (fromGameId !== intent.siteSlug) {
-        await this.renameRelayGame(fromGameId, intent.siteSlug);
-        project = await this.store.patchProject(threadId, { multiplayerGameId: intent.siteSlug });
-      }
+    const fromGameId = relayTenantId(project);
+    if (fromGameId && fromGameId !== intent.siteSlug) {
+      await this.renameRelayGame(fromGameId, intent.siteSlug);
+      project = await this.store.patchProject(threadId, { multiplayerGameId: intent.siteSlug });
     }
     const renamed = { ...project, displayName: intent.displayName, siteSlug: intent.siteSlug };
     await this.writeReadme(renamed);
@@ -546,7 +590,7 @@ export class ProjectService {
     await publishSiteRedirects(aliases, intent.siteSlug);
     project = await this.store.patchProject(threadId, {
       displayName: intent.displayName, siteSlug: intent.siteSlug, repoName: intent.repoName,
-      siteAliases: aliases, lastCommit: head.slice(0, 10), lastSeenCommit: head, pendingRename: undefined,
+      siteAliases: aliases, lastCommit: head.slice(0, COMMIT_SHORT_HASH_CHARS), lastSeenCommit: head, pendingRename: undefined,
       pendingThreadName: intent.displayName,
       ...(renameNote ? { renameNote } : {}),
     });
@@ -557,7 +601,12 @@ export class ProjectService {
     } finally { this.runningOperations.set(threadId, (this.runningOperations.get(threadId) ?? 1) - 1); }
   }
 
-  async mutate(threadId: string, prompt: string, initial = false, onProgress?: ProgressCallback, author?: CommitAuthor, statusMessageId?: string, images?: readonly PromptImage[], queuedStatusIds: readonly string[] = [], displayRequest?: string, requesterId?: string, instructionOverride?: string, deferNaming = false): Promise<MutationResult> {
+  async mutate(threadId: string, request: TurnRequest): Promise<MutationResult> {
+    const { prompt, initial = false, author, statusMessageId, images, displayRequest, requesterId } = request;
+    const queuedStatusIds = request.queuedStatusIds ?? [];
+    const instructionOverride = request.instruction;
+    const deferNaming = request.deferNaming ?? false;
+    const onProgress = request.onProgress;
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site. Use /site start first.");
     if (project.pendingDeletion) throw new TurnStoppedError("Project deletion is pending.");
@@ -597,7 +646,7 @@ export class ProjectService {
       // Repair harness-owned multiplayer files (vendored client, net config,
       // multiplayer AGENTS.md section) in case a previous turn removed them.
       const multiplayerMode = project.multiplayerMode ?? "arena";
-      const multiplayer = multiplayerContext(projectKind, project.multiplayerGameId ?? project.siteSlug, multiplayerMode);
+      const multiplayer = multiplayerContext(projectKind, relayTenantId(project) ?? project.siteSlug, multiplayerMode);
       if (multiplayer) {
         emit(onProgress, "🕹️ Ensuring multiplayer client files");
         await ensureMultiplayerFiles(workspacePath, multiplayer, projectKind);
@@ -864,7 +913,7 @@ export class ProjectService {
       stats = await buildAndValidate();
     } catch (error) {
       const firstError = errorText(error);
-      if (!/JavaScript (?:syntax|type-check) error|TypeScript compile error|Broken local reference/i.test(firstError)) {
+      if (!(error instanceof RepairableValidationError)) {
         // Structural problems (missing index.html, dotfiles, blocked file
         // types, size caps) get no repair round-trip; they commit unpublished,
         // exactly like a failed repair.
@@ -881,7 +930,7 @@ export class ProjectService {
             repairInstruction(firstError),
             this.threadModel(project),
             input.onProgress,
-            "sitebuilder",
+            BUILDER_AGENT,
             this.store.getEffort(),
           );
           agentSummary = repaired.text;
@@ -969,7 +1018,9 @@ export class ProjectService {
     // other field derived from the worktree: once superseded, this turn's HEAD
     // observations describe the successor's commits, and persisting them would
     // make /site revert undo the wrong turn.
-    const ownsTurn = !this.store.getProject(threadId)?.pendingDeletion && pendingTurnMatches(this.store.getProject(threadId)?.pendingTurn, input.pendingTurn);
+    // Ownership is captured once, before the patch below clears the marker:
+    // the naming tail runs after settlement and must see the same verdict.
+    const ownsTurn = this.ownsPendingTurn(threadId, input.pendingTurn);
     if (ownsTurn) {
       project = await this.store.patchProject(threadId, {
         ...(noChanges ? {} : {
@@ -1157,7 +1208,7 @@ export class ProjectService {
         prompt: pending.prompt,
         initial: pending.initial,
         projectKind,
-        multiplayer: multiplayerContext(projectKind, project.multiplayerGameId ?? project.siteSlug, project.multiplayerMode),
+        multiplayer: multiplayerContext(projectKind, relayTenantId(project) ?? project.siteSlug, project.multiplayerMode),
         agentSummary,
         author: pending.author,
         onProgress,
@@ -1202,7 +1253,7 @@ export class ProjectService {
     requestedModel: string | undefined,
   ): Promise<PromptResult> {
     try {
-      return await this.opencode.prompt(workspacePath, sessionId, instruction, requestedModel, onProgress, "sitebuilder", this.store.getEffort(), images);
+      return await this.opencode.prompt(workspacePath, sessionId, instruction, requestedModel, onProgress, BUILDER_AGENT, this.store.getEffort(), images);
     } catch (error) {
       const retryModel = this.opencode.failoverModelForError(error, requestedModel);
       if (!retryModel) throw error;
@@ -1211,7 +1262,7 @@ export class ProjectService {
       emit(onProgress, quota
         ? `⚠️ The provider quota ran out mid-turn, retrying with \`${retryModel}\``
         : `⚠️ \`${requestedModel || "The model"}\` keeps failing upstream, retrying with \`${retryModel}\``);
-      return this.opencode.prompt(workspacePath, sessionId, instruction, retryModel, onProgress, "sitebuilder", this.store.getEffort(), images);
+      return this.opencode.prompt(workspacePath, sessionId, instruction, retryModel, onProgress, BUILDER_AGENT, this.store.getEffort(), images);
     }
   }
 
@@ -1377,7 +1428,7 @@ export class ProjectService {
     try {
       const messages = await this.opencode.listMessages(workspacePath, sessionId, 100);
       const newest = [...messages].sort((a, b) => (b.info?.time?.created ?? 0) - (a.info?.time?.created ?? 0))[0];
-      return isTerminalAssistant(newest?.info, { since, agent: "sitebuilder" })
+      return isTerminalAssistant(newest?.info, { since, agent: BUILDER_AGENT })
         // An errored message is terminal for reconcile, but not evidence of a
         // completed turn for recovery: continue the work instead.
         && !newest?.info?.error
@@ -1508,7 +1559,7 @@ export class ProjectService {
     // Mode first: the turn's own per-turn repair and the agent's AGENTS.md
     // must both describe the target architecture from here on.
     await this.store.patchProject(threadId, { multiplayerMode: mode });
-    const multiplayer = multiplayerContext(kind, project.multiplayerGameId ?? project.siteSlug, mode);
+    const multiplayer = multiplayerContext(kind, relayTenantId(project) ?? project.siteSlug, mode);
     if (multiplayer) {
       emit(onProgress, `🕹️ Rewiring the harness client for ${multiplayerModeLabel(mode)}`);
       await ensureMultiplayerFiles(project.workspacePath, multiplayer, kind);
@@ -1518,19 +1569,13 @@ export class ProjectService {
     }
     log("info", "project.multiplayer_switch", { threadId, from, to: mode });
 
-    return this.mutate(
-      threadId,
-      `Switch the multiplayer architecture to ${multiplayerModeLabel(mode)}`,
-      false,
-      onProgress,
-      undefined,
+    return this.mutate(threadId, {
+      prompt: `Switch the multiplayer architecture to ${multiplayerModeLabel(mode)}`,
       statusMessageId,
-      undefined,
-      [],
-      undefined,
       requesterId,
-      multiplayerSwapInstruction(from, mode, userNote),
-    );
+      instruction: multiplayerSwapInstruction(from, mode, userNote),
+      onProgress,
+    });
   }
 
   /**
@@ -1739,9 +1784,8 @@ export class ProjectService {
         await this.opencode.deleteSessionsInDirectory(project.workspacePath, project.sessionId);
         project = await this.store.patchProject(threadId, { pendingDeletion: { ...project.pendingDeletion!, agentsDeleted: true } });
       }
-      if (project.multiplayerGameId || project.projectKind?.startsWith("game-")) {
-        await this.deleteRelayGame(project.multiplayerGameId ?? project.siteSlug);
-      }
+      const deletedGameId = relayTenantId(project);
+      if (deletedGameId) await this.deleteRelayGame(deletedGameId);
       for (const repo of projectRepos(project)) await this.forgejo.deleteRepository(repo);
       for (const account of projectAccounts(project)) await this.forgejo.deletePushAccount(account);
       for (const target of await removalPaths(project)) await fs.rm(target, { recursive: true, force: true, maxRetries: 3 });
@@ -1965,13 +2009,6 @@ export class ProjectService {
   }
 
   /**
-   * Someone pushed to the repo's main branch from outside the bot (a push-key
-   * holder). Adopt the commit and take it live: sync the workspace to
-   * origin/main, rebuild, validate, publish. A validation failure rolls the
-   * workspace back to the previously published commit and reports; the pushed
-   * commit stays in the repo, the live site keeps the older version.
-   */
-  /**
    * The agent session vanished mid-prompt (404/not-found). Unless a deletion
    * is pending or the record's session was swapped meanwhile, create a fresh
    * session against the same files and retry the prompt through `reprompt`.
@@ -1980,7 +2017,7 @@ export class ProjectService {
     threadId: string, project: ProjectRecord, error: unknown,
     reprompt: (sessionId: string) => Promise<{ text: string; usage: TurnUsage }>,
   ): Promise<{ text: string; usage: TurnUsage; project: ProjectRecord }> {
-    if (!/404|not found|unknown session/i.test(errorText(error))) throw error;
+    if (!isVanishedSessionError(error)) throw error;
     if (this.store.getProject(threadId)?.pendingDeletion || this.store.getProject(threadId)?.sessionId !== project.sessionId) throw error;
     const sessionId = await this.opencode.createSession(project.workspacePath, `ThreadSite: ${project.displayName}`);
     project = await this.store.patchProject(threadId, { sessionId });
@@ -1993,6 +2030,18 @@ export class ProjectService {
     if (await this.opencode.isBusy(project.workspacePath, project.sessionId)) {
       throw new Error(`A model turn is currently running in this thread. Wait for it to finish before ${action}.`);
     }
+  }
+
+  /**
+   * Whether this turn still owns the persisted in-flight marker: a hard reset
+   * or a successor can swap the session and marker while this turn finishes
+   * its delivery tail, and every settlement write is gated on this. Both the
+   * success path (completeTurn) and the failure path (settleFailedTurn) go
+   * through it, always after recordTurnUsage has flushed billing.
+   */
+  private ownsPendingTurn(threadId: string, pending: ProjectRecord["pendingTurn"]): boolean {
+    const current = this.store.getProject(threadId);
+    return !!current && !current.pendingDeletion && pendingTurnMatches(current.pendingTurn, pending);
   }
 
   /**
@@ -2028,7 +2077,7 @@ export class ProjectService {
       });
     }
     const owning = this.store.getProject(threadId);
-    if (owning && !owning.pendingDeletion && pendingTurnMatches(owning.pendingTurn, pending)) {
+    if (owning && this.ownsPendingTurn(threadId, pending)) {
       await this.store.patchProject(threadId, stoppedByUser
         ? {
           ...(owning.status === "creating" ? { status: "error" as const, lastError: "Initial build stopped at the user's request" } : {}),
@@ -2068,7 +2117,7 @@ export class ProjectService {
       const updated = await this.store.patchProject(threadId, {
         status: "ready",
         lastError: undefined,
-        lastCommit: commit.slice(0, 10),
+        lastCommit: commit.slice(0, COMMIT_SHORT_HASH_CHARS),
         lastTurnBaseCommit: undefined,
         lastSeenCommit: commit,
         lastTurnAt: new Date().toISOString(),
@@ -2085,11 +2134,18 @@ export class ProjectService {
         lastError: truncate(`${options.failedLabel} failed validation: ${validationError}`, 1000),
         lastSeenCommit: commit,
       });
-      log("warn", options.logTag, { threadId, commit: commit.slice(0, 10), ...options.logExtra, error: truncate(validationError, 400) });
+      log("warn", options.logTag, { threadId, commit: commit.slice(0, COMMIT_SHORT_HASH_CHARS), ...options.logExtra, error: truncate(validationError, 400) });
       return { project, validationError };
     }
   }
 
+  /**
+   * Someone pushed to the repo's main branch from outside the bot (a push-key
+   * holder). Adopt the commit and take it live: sync the workspace to
+   * origin/main, rebuild, validate, publish. A validation failure rolls the
+   * workspace back to the previously published commit and reports; the pushed
+   * commit stays in the repo, the live site keeps the older version.
+   */
   async publishExternalPush(threadId: string): Promise<{ project: ProjectRecord; commit: string; validationError?: string }> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
@@ -2097,7 +2153,7 @@ export class ProjectService {
 
     const previousHead = await currentHead(project.workspacePath).catch(() => undefined);
     const { commit } = await syncToRemote(project.workspacePath, this.forgejo);
-    const short = commit.slice(0, 10);
+    const short = commit.slice(0, COMMIT_SHORT_HASH_CHARS);
     // The pushed code does not validate: roll the workspace back to the last
     // good commit so the next agent turn starts from the published state.
     // The pushed commit stays in the repo; the live site keeps the older version.
@@ -2121,8 +2177,8 @@ export class ProjectService {
     await this.assertIdle(project, "adopting the external push");
     const { commit } = await syncToRemote(project.workspacePath, this.forgejo);
     project = await this.store.patchProject(threadId, { lastSeenCommit: commit });
-    log("info", "project.external_push_adopted", { threadId, commit: commit.slice(0, 10) });
-    return { project, commit: commit.slice(0, 10) };
+    log("info", "project.external_push_adopted", { threadId, commit: commit.slice(0, COMMIT_SHORT_HASH_CHARS) });
+    return { project, commit: commit.slice(0, COMMIT_SHORT_HASH_CHARS) };
   }
 
   /**
@@ -2152,7 +2208,7 @@ export class ProjectService {
     emit(onProgress, "📥 Pulling the repository's main branch");
     const previousHead = await currentHead(project.workspacePath);
     const { commit, ahead, behind } = await syncWithRemote(project.workspacePath, this.forgejo);
-    const short = commit.slice(0, 10);
+    const short = commit.slice(0, COMMIT_SHORT_HASH_CHARS);
     if (behind === 0 && ahead === 0) {
       emit(onProgress, "✅ Already up to date");
     } else if (ahead > 0 && behind > 0) {
@@ -2218,7 +2274,7 @@ export class ProjectService {
       await this.opencode.revertSession(project.workspacePath, project.sessionId, messageID);
     } catch (error) {
       conversationReverted = false;
-      if (/busy/i.test(errorText(error))) throw error;
+      if (isBusySessionError(error)) throw error;
       log("warn", "project.revert_opencode_failed", { threadId, error: serializeError(error) });
     }
 

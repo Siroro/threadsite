@@ -4,10 +4,15 @@
 export function normalizeDestination(input: string): string {
   let value = input.trim().replaceAll("\\", "/");
   value = value.replace(/^\.?\/?site\/assets\//i, "").replace(/^\/?assets\//i, "");
-  if (!value || value.startsWith("/") || value.split("/").some((part) => !part || part === "." || part === ".." || part.startsWith("."))) {
-    throw new Error("Destination must be a normal relative path below site/assets with no dot/path-traversal segments");
-  }
+  validateRelativeSegments(value, "Destination must be a normal relative path below site/assets with no dot/path-traversal segments");
   return value;
+}
+
+/** The one rule every asset-tool path must satisfy: relative, no traversal, no dot segments. */
+export function validateRelativeSegments(value: string, message: string): void {
+  if (!value || value.startsWith("/") || value.split("/").some((part) => !part || part === "." || part === ".." || part.startsWith("."))) {
+    throw new Error(message);
+  }
 }
 
 export function positiveInt(raw: string | undefined, fallback: number): number {

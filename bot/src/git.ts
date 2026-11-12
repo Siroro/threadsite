@@ -6,26 +6,9 @@ import crypto from "node:crypto";
 import { config } from "./config.js";
 import type { ForgejoClient } from "./forgejo.js";
 import type { CommitAuthor } from "./types.js";
+import { COMMIT_SHORT_HASH_CHARS } from "./project-identity.js";
 
 const execFileAsync = promisify(execFile);
-
-/** Unambiguous alphabet for generated push credentials: no 0/O/1/l/I. */
-const CREDENTIAL_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
-
-function randomCredential(length: number): string {
-  const bytes = crypto.randomBytes(length);
-  let out = "";
-  for (let i = 0; i < length; i += 1) out += CREDENTIAL_ALPHABET[bytes[i] % CREDENTIAL_ALPHABET.length];
-  return out;
-}
-
-/**
- * Username/password pair for a repo push-key account. Random on every call;
- * persistence is the caller's job (the project record).
- */
-export function generatePushCredentials(): { username: string; password: string } {
-  return { username: `push-${randomCredential(6)}`, password: randomCredential(20) };
-}
 
 /**
  * A git invocation that never returns parks the thread's queue forever: the
@@ -244,8 +227,8 @@ export async function restoreWorkingTree(workspace: string): Promise<void> {
 }
 
 export async function commitHistory(workspace: string): Promise<{ current: string; previous?: string }> {
-  const current = await git(workspace, ["rev-parse", "--short=10", "HEAD"]);
-  const previous = await git(workspace, ["rev-parse", "--short=10", "HEAD~1"]).catch(() => undefined);
+  const current = await git(workspace, ["rev-parse", `--short=${COMMIT_SHORT_HASH_CHARS}`, "HEAD"]);
+  const previous = await git(workspace, ["rev-parse", `--short=${COMMIT_SHORT_HASH_CHARS}`, "HEAD~1"]).catch(() => undefined);
   return { current, previous };
 }
 
@@ -266,7 +249,7 @@ export async function undoLastCommit(
   // History is being rewritten on purpose: the undone turn's commit must leave
   // the public repository as well as the local worktree.
   await git(workspace, ["push", "--force", "origin", "main"], await pushAuthEnv(forgejo));
-  return { undone: current, kept: await git(workspace, ["rev-parse", "--short=10", "HEAD"]) };
+  return { undone: current, kept: await git(workspace, ["rev-parse", `--short=${COMMIT_SHORT_HASH_CHARS}`, "HEAD"]) };
 }
 
 /** Revert to the saved turn boundary unless the repository tip has changed. */
@@ -472,6 +455,6 @@ export async function commitAndPush(
   await fetchAndRebase(workspace, forgejo);
   await git(workspace, ["push", "-u", "origin", "main"], { ...(await pushAuthEnv(forgejo)), ...identity });
   // The rebase may have rewritten the commit; read the hash the push actually published.
-  const pushed = await git(workspace, ["rev-parse", "--short=10", "HEAD"]);
+  const pushed = await git(workspace, ["rev-parse", `--short=${COMMIT_SHORT_HASH_CHARS}`, "HEAD"]);
   return { commit: pushed, files, additions, deletions };
 }

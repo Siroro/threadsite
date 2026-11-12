@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import * as esbuild from "esbuild";
 import { log } from "./logger.js";
+import { repairable } from "./validation.js";
 import { ensureGitignoreLines, safeChild } from "./util.js";
 
 /**
@@ -91,6 +92,27 @@ export async function buildSite(workspacePath: string): Promise<BuildResult> {
   return { skipped: false, emitted: outputs.size, pruned };
 }
 
+/** The esbuild flags production bundling runs with; preview/esbuild-options.mjs
+ * mirrors them and bot/test/esbuild-parity.test.ts fails when the two drift. */
+export const SHARED_BUNDLE_FLAGS = {
+  bundle: true,
+  format: "esm",
+  splitting: true,
+  target: "es2022",
+  // Vendored libraries carry MIT banners; keep them in the output.
+  legalComments: "eof",
+  sourcemap: false,
+  minify: true,
+  metafile: true,
+  logLevel: "silent",
+  chunkNames: "chunks/[name]-[hash]",
+  assetNames: "assets/[name]-[hash]",
+  // Models join the other media imports: importing a .glb/.gltf binds the
+  // emitted, hashed asset URL, so glTF loading needs no hand-built paths.
+  loader: { ".glb": "file", ".gltf": "file" },
+  preserveSymlinks: true,
+} as const;
+
 /** Run the bundler and return the site-relative outputs it wrote (js/…). */
 async function bundle(siteDir: string, entries: string[]): Promise<Set<string>> {
   let result: Awaited<ReturnType<typeof esbuild.build>>;
@@ -100,23 +122,8 @@ async function bundle(siteDir: string, entries: string[]): Promise<Set<string>> 
       entryPoints: entries,
       outdir: "js",
       outbase: "src",
-      bundle: true,
-      format: "esm",
-      splitting: true,
-      target: "es2022",
-      // Vendored libraries carry MIT banners; keep them in the output.
-      legalComments: "eof",
-      sourcemap: false,
-      minify: true,
-      metafile: true,
-      logLevel: "silent",
-      chunkNames: "chunks/[name]-[hash]",
-      assetNames: "assets/[name]-[hash]",
-      // Models join the other media imports: importing a .glb/.gltf binds the
-      // emitted, hashed asset URL, so glTF loading needs no hand-built paths.
-      loader: { ".glb": "file", ".gltf": "file" },
+      ...SHARED_BUNDLE_FLAGS,
       write: false,
-      preserveSymlinks: true,
       plugins: [buildBoundary(path.dirname(siteDir), siteDir)],
       // Entries imported only for types still emit an (empty) module so the
       // HTML's js/<name>.js reference always resolves.
@@ -126,24 +133,24 @@ async function bundle(siteDir: string, entries: string[]): Promise<Set<string>> 
     // messages, so format them with code frames just like the result path.
     const messages = (error as { errors?: esbuild.Message[] }).errors;
     if (messages?.length) {
-      throw new Error(await formatBundlerErrors(messages));
+      throw repairable(await formatBundlerErrors(messages));
     }
     // Genuine usage/IO failures; shape them like a compile error anyway.
-    throw new Error(`TypeScript compile error: the bundler could not run: ${String((error as Error).message ?? error)}`);
+    throw repairable(`TypeScript compile error: the bundler could not run: ${String((error as Error).message ?? error)}`);
   }
 
   if (result.warnings.length) {
     log("info", "build.esbuild_warnings", { count: result.warnings.length, first: result.warnings[0]?.text });
   }
   if (result.errors.length) {
-    throw new Error(await formatBundlerErrors(result.errors));
+    throw repairable(await formatBundlerErrors(result.errors));
   }
 
   // Check every output ancestor before writing anything, including chunks/ and
   // assets/ links inside js/. The bundler itself never writes to the filesystem.
   const workspace = path.dirname(siteDir);
   for (const output of result.outputFiles ?? []) {
-    if (!inside(path.join(siteDir, "js"), output.path)) throw new Error("TypeScript compile error: output escaped site/js/.");
+    if (!inside(path.join(siteDir, "js"), output.path)) throw repairable("TypeScript compile error: output escaped site/js/.");
     await checkBuildPath(workspace, path.relative(workspace, output.path), true);
   }
   for (const output of result.outputFiles ?? []) {
@@ -155,7 +162,7 @@ async function bundle(siteDir: string, entries: string[]): Promise<Set<string>> 
   for (const file of Object.keys(result.metafile?.outputs ?? {})) {
     if (/^js\//.test(file) && !file.endsWith(".map")) outputs.add(file);
   }
-  if (!outputs.size) throw new Error("TypeScript compile error: the bundler produced no output.");
+  if (!outputs.size) throw repairable("TypeScript compile error: the bundler produced no output.");
   return outputs;
 }
 
@@ -202,7 +209,7 @@ async function checkBuildPath(workspace: string, relative: string, allowMissing 
       throw error;
     });
     if (!stat) return;
-    if (stat.isSymbolicLink()) throw new Error("TypeScript compile error: build paths must not contain symlinks.");
+    if (stat.isSymbolicLink()) throw repairable("TypeScript compile error: build paths must not contain symlinks.");
   }
 }
 

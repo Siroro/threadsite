@@ -238,7 +238,6 @@ export interface ThreadSiteNetOptions {
 export declare class ThreadSiteNetError extends Error {
     readonly code: string;
     cause?: unknown;
-    net?: ThreadSiteNet;
     constructor(message: string, code?: string, cause?: unknown);
 }
 export declare class ThreadSiteNet {
@@ -284,6 +283,9 @@ export declare class ThreadSiteNet {
     private worldIntervalMs;
     private lastWorldArrivalAt;
     private lastWorldBytesValue;
+    private sendBudgetPerSecond;
+    private sendBudgetBurst;
+    private maxFrameBytesValue;
     private sendTokens;
     private sendTokensUpdatedAt;
     private lastBudgetWarnAt;
@@ -339,13 +341,6 @@ export declare class ThreadSiteNet {
      * can be triaged at a glance.
      */
     get stats(): NetLinkStats;
-    /**
-     * True once the relay welcome has been fully processed, including its cached
-     * world snapshot and initial authority. Authoritative publishing stays
-     * blocked (`not_ready`) until then, so a freshly elected host can never
-     * overwrite a persisted/restored world before restoring it.
-     */
-    get bootstrapped(): boolean;
     get peers(): NetPeer[];
     get playerStates(): NetPlayerStateEntry[];
     get queued(): number;
@@ -376,6 +371,9 @@ export declare class ThreadSiteNet {
     private emitEvent;
     private queuePlayerState;
     private sendReliable;
+    /** Apply the relay's advertised limits (additive protocol field; absent on
+     * older relays): never looser than the client's own defaults. */
+    private adoptRelayLimits;
     private connectSocket;
     private handleFrame;
     private acceptWelcomePeer;

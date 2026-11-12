@@ -1,7 +1,7 @@
 import { tool, type ToolResultPart } from "../v2/tool-definition.js";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { positiveInt } from "../lib/asset-inputs.js";
+import { positiveInt, validateRelativeSegments } from "../lib/asset-inputs.js";
 
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
 // SVG/glTF are text: return their source instead of an image part, capped for context.
@@ -30,9 +30,7 @@ export default tool({
     // Accept the asset tools' destination convention (with or without the
     // site/assets/ prefix); scratch/ paths are previewed where they are.
     if (!normalized.startsWith("scratch/")) normalized = normalized.replace(/^\.?\/?site\/assets\//i, "");
-    if (!normalized || normalized.startsWith("/") || normalized.split("/").some((part) => !part || part === "." || part === ".." || part.startsWith("."))) {
-      throw new Error("File must be a normal relative path under site/assets or scratch with no dot/path-traversal segments");
-    }
+    validateRelativeSegments(normalized, "File must be a normal relative path under site/assets or scratch with no dot/path-traversal segments");
     const target = path.resolve(root, normalized.startsWith("scratch/")
       ? normalized
       : path.join("site", "assets", normalized));

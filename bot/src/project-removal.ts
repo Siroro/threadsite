@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { config } from "./config.js";
 import type { ProjectRecord } from "./types.js";
+import { GALLERY_DIR, PUSH_ACCOUNT_RECORD_PATTERN, REPO_NAME_PATTERN, SLUG_PATTERN, isPublishLeftoverOf, relayTenantId } from "./project-identity.js";
 
 /** Validate every ancestor before recursive removal; never follow a link outside a configured root. */
 export async function checkedRemovalPath(root: string, target: string): Promise<string> {
@@ -31,17 +32,17 @@ export async function removalPaths(project: ProjectRecord): Promise<string[]> {
   const paths = [await checkedRemovalPath(config.workspaceRoot, expected)];
   const slugs = projectSlugs(project);
   for (const slug of slugs) {
-    if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug)) throw new Error(`Invalid site slug: ${slug}`);
+    if (!SLUG_PATTERN.test(slug)) throw new Error(`Invalid site slug: ${slug}`);
     paths.push(await checkedRemovalPath(config.publishRoot, path.join(config.publishRoot, slug)));
     // The project's gallery card image lives beside the sites, not inside one.
-    paths.push(await checkedRemovalPath(config.publishRoot, path.join(config.publishRoot, "__gallery", `${slug}.png`)));
+    paths.push(await checkedRemovalPath(config.publishRoot, path.join(config.publishRoot, GALLERY_DIR, `${slug}.png`)));
   }
   // Include only this project's atomic-publish leftovers, never a prefix
   // match that could consume another project's longer slug.
   for (const name of await fs.readdir(config.publishRoot).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return []; throw error;
   })) {
-    if (slugs.some((slug) => new RegExp(`^\\.(?:staging|backup)-${slug}-[a-f0-9]{10}$`).test(name))) {
+    if (slugs.some((slug) => isPublishLeftoverOf(name, slug))) {
       paths.push(await checkedRemovalPath(config.publishRoot, path.join(config.publishRoot, name)));
     }
   }
@@ -56,26 +57,26 @@ export function projectSlugs(project: ProjectRecord): string[] {
 export function projectRepos(project: ProjectRecord): string[] {
   const repos = [...new Set([project.repoName,
     ...(project.pendingRename ? [project.pendingRename.repoName, project.pendingRename.fromRepoName] : [])])];
-  if (repos.some((repo) => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/.test(repo))) throw new Error("Invalid project repository name.");
+  if (repos.some((repo) => !REPO_NAME_PATTERN.test(repo))) throw new Error("Invalid project repository name.");
   return repos;
 }
 
 export function projectAccounts(project: ProjectRecord): string[] {
   const accounts = [...new Set([...(project.pushAccountNames ?? []), ...(project.pushKey ? [project.pushKey.username] : [])])];
-  if (accounts.some((name) => !/^push-[a-zA-Z0-9_-]+$/.test(name))) throw new Error("Invalid project push account name.");
+  if (accounts.some((name) => !PUSH_ACCOUNT_RECORD_PATTERN.test(name))) throw new Error("Invalid project push account name.");
   return accounts;
 }
 
 export function assertExclusiveResources(project: ProjectRecord, all: ProjectRecord[]): void {
   const slugs = projectSlugs(project);
   const repos = projectRepos(project);
-  const game = project.multiplayerGameId ?? (project.projectKind?.startsWith("game-") ? project.siteSlug : undefined);
+  const game = relayTenantId(project);
   for (const other of all.filter((item) => item.threadId !== project.threadId)) {
     if (projectRepos(other).some((repo) => repos.includes(repo)) || projectSlugs(other).some((slug) => slugs.includes(slug))
       || path.resolve(other.workspacePath) === path.resolve(project.workspacePath)
       || (project.sessionId && other.sessionId === project.sessionId)
       || projectAccounts(project).some((account) => projectAccounts(other).includes(account))
-      || (game && game === (other.multiplayerGameId ?? (other.projectKind?.startsWith("game-") ? other.siteSlug : undefined)))) {
+      || (game && game === relayTenantId(other))) {
       throw new Error(`Another project shares resources with ${project.threadId}; refusing removal.`);
     }
   }

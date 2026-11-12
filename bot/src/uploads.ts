@@ -12,8 +12,9 @@ import { formatBytes, safeChild } from "./util.js";
  * gitignored, never-published directory the agent can read from and clean up —
  * and the prompt names the saved paths.
  */
-export const MAX_TURN_UPLOADS = 4;
-export const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+/** Attachment rules shared by live-turn images, saved uploads and approval requests. */
+export const MAX_ATTACHMENTS = 4;
+export const MAX_ATTACHMENT_TOTAL_BYTES = 8 * 1024 * 1024;
 export const UPLOAD_DIR = "scratch/uploads";
 
 export interface UploadedFile {
@@ -40,8 +41,8 @@ export function uploadFileName(raw: string | undefined): string {
  */
 export async function saveUploadAttachments(workspacePath: string, attachments: Attachment[]): Promise<UploadedFile[]> {
   const saved: UploadedFile[] = [];
-  for (const attachment of attachments.slice(0, MAX_TURN_UPLOADS)) {
-    if (attachment.size > MAX_UPLOAD_BYTES) {
+  for (const attachment of attachments.slice(0, MAX_ATTACHMENTS)) {
+    if (attachment.size > MAX_ATTACHMENT_TOTAL_BYTES) {
       logError("discord.upload_too_large", new Error(`attachment is ${attachment.size} bytes`), { threadWorkspace: workspacePath });
       continue;
     }

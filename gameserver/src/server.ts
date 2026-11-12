@@ -41,6 +41,9 @@ const MAX_MESSAGE_BYTES = intEnv("GAMESERVER_MAX_MESSAGE_BYTES", 264 * 1024);
 const MAX_BUFFERED_BYTES = intEnv("GAMESERVER_MAX_BUFFERED_BYTES", 1024 * 1024);
 const RATE_PER_SECOND = intEnv("GAMESERVER_RATE_PER_SECOND", 60);
 const RATE_BURST = intEnv("GAMESERVER_RATE_BURST", 120);
+// Persistence (saves + scores) allows its own small budget on top of the frame limiter.
+const STORAGE_RATE_PER_SECOND = 5;
+const STORAGE_RATE_BURST = 10;
 const ROOM_TTL_MS = intEnv("GAMESERVER_ROOM_TTL_MS", 10 * 60 * 1000);
 const JOIN_TIMEOUT_MS = intEnv("GAMESERVER_JOIN_TIMEOUT_MS", 10_000);
 // A host that publishes nothing for this long while another peer waits is
@@ -120,7 +123,7 @@ function handleLeaderboard(peer: Peer, msg: Frame): void {
   if (msg.op !== "board.list" && msg.op !== "board.submit") { fail("bad_operation", "Score-only requests support board.list and board.submit."); return; }
   if (typeof msg.playerToken !== "string" || !/^[a-f0-9]{64}$/.test(msg.playerToken)) { fail("identity_unavailable", "A private player token is required."); return; }
   if (msg.op === "board.submit" && (typeof msg.name !== "string" || !msg.name.replace(/[\u0000-\u001f\u007f]/g, "").trim())) { fail("name_required", "A player name is required."); return; }
-  const player = crypto.createHash("sha256").update(`${game}:${msg.playerToken}`).digest("hex");
+  const player = publicPlayerId(game, msg.playerToken);
   const key = `${game}:${player}`;
   let budget = leaderboardLimits.get(key);
   if (!budget) {
@@ -286,6 +289,11 @@ function errorFrame(code: string, message: string, extra: Record<string, unknown
 function cleanName(raw: unknown): string {
   return String(raw ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 32) || "player";
 }
+/** The game-scoped public player id: leaderboard identity and save identity share one derivation. */
+function publicPlayerId(game: string, playerToken: string): string {
+  return crypto.createHash("sha256").update(`${game}:${playerToken}`).digest("hex");
+}
+
 function cleanCid(raw: unknown): string | null {
   const value = String(raw ?? "").trim();
   return CID_PATTERN.test(value) ? value : null;
@@ -296,7 +304,14 @@ function makeRoomCode(rooms: Map<string, Room>): string {
     for (let index = 0; index < 5; index += 1) code += ROOM_ALPHABET[Math.floor(Math.random() * ROOM_ALPHABET.length)];
     if (!rooms.has(code)) return code;
   }
-  return `Z${Date.now().toString(36).toUpperCase().slice(-6)}`;
+  // 31^5 ≈ 28M codes make 50 collisions astronomically unlikely; if it ever
+  // happens, a longer code from the same alphabet is still joinable.
+  let code = "";
+  do {
+    code = "";
+    for (let index = 0; index < 12; index += 1) code += ROOM_ALPHABET[Math.floor(Math.random() * ROOM_ALPHABET.length)];
+  } while (rooms.has(code));
+  return code;
 }
 function worldFrame(world: WorldState | null): Frame | null {
   return world ? { t: "world", ...world } : null;
@@ -314,6 +329,15 @@ function setAuthority(room: Room, hostId: string | null): void {
   room.authorityGrantedAt = Date.now();
   room.touch();
 }
+/** Re-insert a peer at the back of the room's iteration order so repeated
+ * yields (or watchdog demotions) rotate authority fairly. */
+function rotateToBack(room: Room, peerId: string): void {
+  const peer = room.peers.get(peerId);
+  if (!peer) return;
+  room.peers.delete(peerId);
+  room.peers.set(peerId, peer);
+}
+
 function chooseNextHost(room: Room, excluding: string): string | null {
   for (const id of room.peers.keys()) if (id !== excluding) return id;
   return null;
@@ -373,7 +397,7 @@ function handleJoin(peer: Peer, msg: Frame): void {
   // Public cid/peer IDs are never credentials. The secret is game-scoped and
   // stays on this connection; only its one-way identifier may enter a board.
   peer.playerId = typeof msg.playerToken === "string" && /^[a-f0-9]{64}$/.test(msg.playerToken)
-    ? crypto.createHash("sha256").update(`${gameId}:${msg.playerToken}`).digest("hex") : null;
+    ? publicPlayerId(gameId, msg.playerToken) : null;
   room.peers.set(peer.id, peer);
   room.touch();
   if (room.hostId === null) setAuthority(room, peer.id);
@@ -381,6 +405,7 @@ function handleJoin(peer: Peer, msg: Frame): void {
 
   send(peer, {
     t: "welcome", v: PROTOCOL_VERSION, you: peer.id, cid: peer.cid,
+    limits: { maxFrameBytes: MAX_MESSAGE_BYTES, ratePerSecond: RATE_PER_SECOND, rateBurst: RATE_BURST },
     mode, room: room.publicCode, created, host: room.hostId,
     generation: room.generation, epoch: room.authorityEpoch,
     peers: [...room.peers.values()].filter((other) => other.id !== peer.id).map((other) => ({
@@ -512,9 +537,7 @@ function handleFrame(peer: Peer, msg: Frame): void {
       }
       const nextHost = chooseNextHost(room, peer.id);
       if (!nextHost) return;
-      // Put the yielding peer at the back so repeated yields rotate fairly.
-      room.peers.delete(peer.id);
-      room.peers.set(peer.id, peer);
+      rotateToBack(room, peer.id);
       setAuthority(room, nextHost);
       broadcast(room, authorityFrame(room));
       return;
@@ -729,7 +752,7 @@ wss.on("connection", (socket: LiveSocket) => {
   const peer: Peer = {
     id: `p-${++nextPeerSeq}`, cid: null, ws: socket, name: "player", game: null, room: null,
     limiter: new RateLimiter(RATE_PER_SECOND, RATE_BURST),
-    storageLimiter: new RateLimiter(5, 10), playerId: null,
+    storageLimiter: new RateLimiter(STORAGE_RATE_PER_SECOND, STORAGE_RATE_BURST), playerId: null,
   };
   const joinTimer = setTimeout(() => { if (!peer.room) socket.close(4000, "join timeout"); }, JOIN_TIMEOUT_MS);
   socket.on("pong", () => { socket.isAlive = true; });
@@ -815,13 +838,7 @@ const hostWatchdog = setInterval(() => {
       if (now - lastProgress < HOST_STALL_MS) continue;
       const nextHost = chooseNextHost(room, hostId);
       if (!nextHost) continue;
-      // Rotate the stalled host behind its successor so repeated stalls spread
-      // authority fairly instead of ping-ponging between two frozen tabs.
-      const stalled = room.peers.get(hostId);
-      if (stalled) {
-        room.peers.delete(hostId);
-        room.peers.set(hostId, stalled);
-      }
+      rotateToBack(room, hostId);
       setAuthority(room, nextHost);
       broadcast(room, authorityFrame(room));
       console.warn(`[threadsite-gameserver] host_stalled game=${gameId} room=${room.key} peer=${hostId} silent=${now - lastProgress}ms authority->${nextHost}`);

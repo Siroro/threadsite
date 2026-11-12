@@ -3,8 +3,8 @@ import {
   ModalBuilder, StringSelectMenuBuilder, TextDisplayBuilder, TextInputBuilder, TextInputStyle,
 } from "discord.js";
 import { cardId } from "./card-actions.js";
-import { addCardDivider, addCardHeader, cardMessage, type CardMessage } from "./card-ui.js";
-import { plain } from "./progress-view.js";
+import { STATUS_TONE_COLORS, addCardDivider, addCardHeader, cardMessage, type CardMessage } from "./card-ui.js";
+import { plain } from "./card-ui.js";
 import type { QueuedRequest } from "./types.js";
 
 export interface PanelSection { key: string; label: string; text: string }
@@ -98,7 +98,7 @@ export function wipeModal(resource: string, singleplayer = false): ModalBuilder 
 export function renderQueuePanel(resource: string, queue: QueuedRequest[], preparing: number, page = 0): CardMessage {
   const pageCount = Math.max(1, Math.ceil(queue.length / 5));
   page = Math.max(0, Math.min(pageCount - 1, Number.isSafeInteger(page) ? page : 0));
-  const card = new ContainerBuilder().setAccentColor(0x64748b);
+  const card = new ContainerBuilder().setAccentColor(STATUS_TONE_COLORS.neutral);
   addCardHeader(card, "QUEUE", "Next update pass", `${queue.length} saved request${queue.length === 1 ? "" : "s"} · ${preparing} already being prepared`);
   const listed = queue.slice(page * 5, page * 5 + 5);
   if (!listed.length) card.addTextDisplayComponents(new TextDisplayBuilder().setContent("Nothing else is queued. Requests already being prepared can be interrupted with Stop."));

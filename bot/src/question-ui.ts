@@ -4,10 +4,10 @@ import {
   type MessageActionRowComponentBuilder, type ModalSubmitInteraction,
 } from "discord.js";
 import { cardId } from "./card-actions.js";
-import { addCardDivider, addCardHeader, cardMessage, type CardMessage } from "./card-ui.js";
+import { STATUS_TONE_COLORS, addCardDivider, addCardHeader, cardMessage, type CardMessage } from "./card-ui.js";
 import type { QuestionDelivery, QuestionDraft, QuestionStatus } from "./card-state.js";
 import type { AgentQuestion } from "./progress.js";
-import { plain } from "./progress-view.js";
+import { plain } from "./card-ui.js";
 import { truncate } from "./util.js";
 
 export type QuestionRow = ActionRowBuilder<MessageActionRowComponentBuilder>;
@@ -107,7 +107,7 @@ export function renderQuestionReview(resource: string, request: AgentQuestion, d
   index = Math.max(0, Math.min(request.questions.length - 1, index));
   const question = request.questions[index];
   const complete = draft.answers.filter((answer, i) => answer?.length && !draft.custom?.includes(i)).length;
-  const card = new ContainerBuilder().setAccentColor(delivery?.status === "retry" ? 0xef4444 : 0xf59e0b);
+  const card = new ContainerBuilder().setAccentColor(delivery?.status === "retry" ? STATUS_TONE_COLORS.error : STATUS_TONE_COLORS.warn);
   addCardHeader(card, "ANSWERS", question.header || "Your answers", `${complete}/${request.questions.length} answered · question ${index + 1}/${request.questions.length}`);
   card.addTextDisplayComponents(new TextDisplayBuilder().setContent(plain(question.question, 1600)));
   const selected = draft.answers[index]?.length ? draft.answers[index].join(" · ") : "Not answered yet";
