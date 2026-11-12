@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { cardId } from "./card-actions.js";
 import { renderStatusCard } from "./card-ui.js";
 import { COMMIT_SHORT_HASH_CHARS } from "./project-identity.js";
+import { ThreadQueue } from "./thread-queue.js";
 import type { ForgejoClient } from "./forgejo.js";
 import { log, logError, serializeError } from "./logger.js";
 import type { ProjectService } from "./project.js";
@@ -36,11 +37,10 @@ export interface ExternalPushMonitor {
 export function createExternalPushMonitor(services: ExternalPushServices): ExternalPushMonitor {
   const { store, forgejo, projects, client } = services;
 
-  // lastSeenCommit is written only after a successful send, so two deliveries
-  // arriving together (a webhook plus the poller, or a retried hook with a new
-  // delivery id) would otherwise both reach the thread. The key is
-  // thread+commit: a later commit still gets its own prompt.
-  const inFlight = new Set<string>();
+  // Serialize notification decisions per thread, including their asynchronous
+  // status and channel lookups. Every decision re-reads durable project state
+  // so a delayed check cannot replay an already delivered notification.
+  const notifications = new ThreadQueue();
   let pollTimer: NodeJS.Timeout | undefined;
 
   function externalPushRow(): ActionRowBuilder<ButtonBuilder> {
@@ -56,7 +56,9 @@ export function createExternalPushMonitor(services: ExternalPushServices): Exter
     pollTimer = setInterval(() => {
       if (scanning) return;
       scanning = true;
-      void scanForExternalPushes().finally(() => { scanning = false; });
+      void scanForExternalPushes()
+        .catch((error) => logError("project.external_push_scan_failed", error, {}))
+        .finally(() => { scanning = false; });
     }, config.externalPushPollMs);
     pollTimer.unref();
   }
@@ -70,9 +72,7 @@ export function createExternalPushMonitor(services: ExternalPushServices): Exter
     const candidates = store.listProjects().filter((project) => project.status === "ready" && !project.pendingDeletion);
     for (const project of candidates) {
       try {
-        const sha = await forgejo.mainCommitSha(project.repoName);
-        if (!sha) continue;
-        await notifyExternalPushIfNeeded(project, sha, "poll");
+        await notifyExternalPushIfNeeded(project, "poll");
       } catch (error) {
         logError("project.external_push_scan_failed", error, { threadId: project.threadId });
       }
@@ -87,26 +87,41 @@ export function createExternalPushMonitor(services: ExternalPushServices): Exter
    * lastCommit so the thread never gets a bogus "external push" for its own
    * turn. Only a genuinely foreign, fully idle push prompts the thread.
    */
-  async function notifyExternalPushIfNeeded(project: ProjectRecord, sha: string, source: "webhook" | "poll" | "recheck"): Promise<void> {
-    if (sha === project.lastSeenCommit) return;
-    if (project.pendingDeletion || project.pendingTurn || project.pendingRename) return;
-    if (await projects.agentBusy(project.threadId).catch(() => true)) return;
-    if (project.lastCommit && sha.startsWith(project.lastCommit)) {
-      await store.patchProject(project.threadId, { lastSeenCommit: sha });
-      return;
-    }
-    const key = `${project.threadId}:${sha}`;
-    if (inFlight.has(key)) return;
-    inFlight.add(key);
-    try {
-      await deliverExternalPushPrompt(project, sha, source);
-    } finally {
-      inFlight.delete(key);
-    }
+  async function notifyExternalPushIfNeeded(project: ProjectRecord, source: "webhook" | "poll" | "recheck"): Promise<void> {
+    await notifications.enqueue(project.threadId, async () => {
+      if (!notificationProject(project)) return;
+      // Keep branch lookups in the same queue as delivery: an older HTTP
+      // response must not arrive after a newer notification and undo its marker.
+      const sha = await forgejo.mainCommitSha(project.repoName);
+      if (!sha) return;
+      if (!notificationProject(project, sha)) return;
+      if (await projects.agentBusy(project.threadId).catch(() => true)) return;
+      const current = notificationProject(project, sha);
+      if (!current) return;
+      if (current.lastCommit && sha.startsWith(current.lastCommit)) {
+        await store.patchProject(current.threadId, { lastSeenCommit: sha });
+        return;
+      }
+      await deliverExternalPushPrompt(current, sha, source);
+    });
+  }
+
+  function notificationProject(project: ProjectRecord, sha?: string): ProjectRecord | undefined {
+    const current = store.getProject(project.threadId);
+    if (!current || current.repoName !== project.repoName || current.status === "creating"
+      || current.pendingDeletion || current.pendingTurn || current.pendingRename || (sha !== undefined && current.lastSeenCommit === sha)) return undefined;
+    return current;
   }
 
   async function deliverExternalPushPrompt(project: ProjectRecord, sha: string, source: "webhook" | "poll" | "recheck"): Promise<void> {
     const channel = await client.channels.fetch(project.threadId).catch(() => undefined);
+    const current = notificationProject(project, sha);
+    if (!current) return;
+    if (current.lastCommit && sha.startsWith(current.lastCommit)) {
+      await store.patchProject(current.threadId, { lastSeenCommit: sha });
+      return;
+    }
+    project = current;
     const thread = channel?.isTextBased() && "send" in channel ? channel : undefined;
     // Mark the commit seen only after the prompt is actually delivered. Patching
     // first meant a failed send (thread deleted, permissions revoked) suppressed
@@ -126,7 +141,12 @@ export function createExternalPushMonitor(services: ExternalPushServices): Exter
       logError("project.external_push_notify_failed", error, { source, threadId: project.threadId, commit: sha.slice(0, COMMIT_SHORT_HASH_CHARS) });
       return;
     }
-    await store.patchProject(project.threadId, { lastSeenCommit: sha });
+    // A bot turn or publication may finish while Discord accepts the send.
+    // Never replace a newer marker with this older observation.
+    const latest = notificationProject(project, sha);
+    if (latest && latest.lastSeenCommit === project.lastSeenCommit && latest.lastCommit === project.lastCommit) {
+      await store.patchProject(project.threadId, { lastSeenCommit: sha });
+    }
     log("info", "project.external_push_detected", { source, threadId: project.threadId, commit: sha.slice(0, COMMIT_SHORT_HASH_CHARS) });
   }
 
@@ -137,7 +157,9 @@ export function createExternalPushMonitor(services: ExternalPushServices): Exter
     if (!repoName) return;
     const project = store.listProjects().find((candidate) => candidate.repoName === repoName && candidate.status !== "creating");
     if (!project) return;
-    await notifyExternalPushIfNeeded(project, event.after, "webhook");
+    // Deliveries can arrive late or out of order, including a branch-deletion
+    // event. Treat them as a doorbell and inspect main's current tip.
+    await notifyExternalPushIfNeeded(project, "webhook");
   }
 
   /**
@@ -150,8 +172,7 @@ export function createExternalPushMonitor(services: ExternalPushServices): Exter
     const project = store.getProject(threadId);
     if (!project || project.pendingDeletion || project.pendingTurn || project.pendingRename) return;
     try {
-      const sha = await forgejo.mainCommitSha(project.repoName);
-      if (sha) await notifyExternalPushIfNeeded(project, sha, "recheck");
+      await notifyExternalPushIfNeeded(project, "recheck");
     } catch (error) {
       logError("project.external_push_recheck_failed", error, { threadId });
     }

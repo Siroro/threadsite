@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   readProjectTitle, readProjectDescription, readProjectChangelog,
   readProjectReadmeSection, readProjectCardDocument, setProjectTitle,
+  parseProjectDescription, parseProjectChangelog,
 } from "../src/project-docs.js";
 
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
@@ -69,4 +70,24 @@ test("regular and missing project documents remain readable", async (t) => {
   assert.deepEqual(await readProjectChangelog(workspace), { title: "New mode", body: "Racing added." });
   assert.equal(await readProjectReadmeSection(workspace), "## Controls\nArrows.");
   assert.equal(await readProjectCardDocument(workspace, "changelog"), "# Changelog\n\n## New mode\nRacing added.");
+});
+
+for (const [heading, newline] of [["#", "\n"], ["# \t ", "\r\n"]]) {
+  test(`an empty ${JSON.stringify(heading)} title cannot consume the description during rename`, async (t) => {
+    const { workspace } = await fixture(t);
+    const body = `${newline}${newline}A public pitch.${newline}${newline}## How to play${newline}Use arrows.${newline}`;
+    const target = path.join(workspace, "DESCRIPTION.md");
+    await fs.writeFile(target, `${heading}${body}`);
+    assert.equal(await readProjectTitle(workspace), undefined);
+    assert.deepEqual(await readProjectDescription(workspace), { pitch: "A public pitch.", play: "Use arrows." });
+    assert.equal(await setProjectTitle(workspace, "New title"), true);
+    assert.equal(await fs.readFile(target, "utf8"), `# New title${body}`);
+  });
+}
+
+test("bare markdown section markers never turn the following body line into a heading", () => {
+  assert.deepEqual(parseProjectChangelog("# Changelog\n\n##\n\nAdded checkpoints.\n"), { body: "Added checkpoints." });
+  assert.deepEqual(parseProjectDescription("# Name\n\nPitch.\n\n##\nControls\nKeep this paragraph.\n"), {
+    pitch: "Pitch.\n\n##\nControls\nKeep this paragraph.",
+  });
 });

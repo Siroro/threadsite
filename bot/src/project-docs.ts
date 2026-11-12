@@ -23,6 +23,7 @@ export const README_AGENT_FILE = "README.agent.md";
 export const README_MAX_BYTES = 63 * 1024;
 /** Keep the generated README well below Forgejo's 64 KiB ownership-detection limit. */
 export const README_SECTION_MAX_BYTES = 24 * 1024;
+const TITLE_HEADING = /^#(?:[ \t]+[^\r\n]*)?$/m;
 
 /** The description as the play card shows it: the pitch and how to play. */
 export interface ProjectDescription {
@@ -104,7 +105,7 @@ export async function ensureProjectDocuments(workspacePath: string, name: string
 export async function readProjectTitle(workspacePath: string): Promise<string | undefined> {
   const raw = await readDocument(path.join(workspacePath, DESCRIPTION_FILE));
   if (!raw) return undefined;
-  return /^#\s+(.+)$/m.exec(raw)?.[1]?.trim() || undefined;
+  return /^#[ \t]+([^\r\n]*)$/m.exec(raw)?.[1]?.trim() || undefined;
 }
 
 /**
@@ -119,9 +120,9 @@ export async function setProjectTitle(workspacePath: string, name: string): Prom
   const stat = await fs.lstat(file).catch(() => undefined);
   if (!stat?.isFile() || stat.isSymbolicLink() || stat.nlink > 1) return false;
   const raw = await fs.readFile(file, "utf8");
-  const reheading = raw.replace(/^#\s+.*$/m, () => `# ${name}`);
-  const next = reheading === raw && !/^#\s/m.test(raw)
-    ? `# ${name}\n\n${raw.replace(/^[^\S\n]+/, "")}` : reheading;
+  const next = TITLE_HEADING.test(raw)
+    ? raw.replace(TITLE_HEADING, () => `# ${name}`)
+    : `# ${name}\n\n${raw.replace(/^[^\S\n]+/, "")}`;
   if (next === raw) return false;
   await fs.writeFile(file, next, "utf8");
   return true;
@@ -135,9 +136,9 @@ export async function readProjectDescription(workspacePath: string): Promise<Pro
 
 export function parseProjectDescription(raw: string | undefined): ProjectDescription | undefined {
   if (!raw) return undefined;
-  const text = cleanDocument(raw).replace(/^#\s+.*$/m, "").trim();
+  const text = cleanDocument(raw).replace(TITLE_HEADING, "").trim();
   if (!text) return undefined;
-  const sections = text.split(/^##\s+(?:how to play|the goal|controls?|how it works)\s*$/im);
+  const sections = text.split(/^##[ \t]+(?:how to play|the goal|controls?|how it works)[ \t]*\r?$/im);
   const pitch = sections[0].trim();
   const play = sections.slice(1).join("\n").trim();
   // An untouched template carries placeholders only: it says nothing.
@@ -179,7 +180,7 @@ export async function readProjectReadmeSection(workspacePath: string, maxBytes =
 export function parseProjectChangelog(raw: string | undefined): ProjectChangelog | undefined {
   if (!raw) return undefined;
   const text = cleanDocument(raw);
-  const sections = text.split(/^##\s+/m);
+  const sections = text.split(/^##(?:[ \t]+|$)/m);
   // The first chunk is the document title; the next one is the newest entry.
   const entry = sections[1];
   if (!entry) return undefined;
