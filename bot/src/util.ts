@@ -201,7 +201,10 @@ export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | und
         clearTimeout(timer);
         resolve(value);
       },
-      () => resolve(undefined),
+      () => {
+        clearTimeout(timer);
+        resolve(undefined);
+      },
     );
   });
 }

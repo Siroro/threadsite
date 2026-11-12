@@ -70,6 +70,13 @@ function cleanDocument(text: string): string {
     .trim();
 }
 
+/** Agent-owned documents must not expose files linked from outside the workspace. */
+async function readDocument(file: string): Promise<string | undefined> {
+  const stat = await fs.lstat(file).catch(() => undefined);
+  if (!stat?.isFile() || stat.isSymbolicLink() || stat.nlink > 1) return undefined;
+  return fs.readFile(file, "utf8").catch(() => undefined);
+}
+
 /**
  * Create the three project documents when they are missing. Existing content is
  * never touched: the agent owns them from then on.
@@ -95,7 +102,7 @@ export async function ensureProjectDocuments(workspacePath: string, name: string
  * public identity once the first turn is delivered.
  */
 export async function readProjectTitle(workspacePath: string): Promise<string | undefined> {
-  const raw = await fs.readFile(path.join(workspacePath, DESCRIPTION_FILE), "utf8").catch(() => undefined);
+  const raw = await readDocument(path.join(workspacePath, DESCRIPTION_FILE));
   if (!raw) return undefined;
   return /^#\s+(.+)$/m.exec(raw)?.[1]?.trim() || undefined;
 }
@@ -110,9 +117,9 @@ export async function readProjectTitle(workspacePath: string): Promise<string | 
 export async function setProjectTitle(workspacePath: string, name: string): Promise<boolean> {
   const file = path.join(workspacePath, DESCRIPTION_FILE);
   const stat = await fs.lstat(file).catch(() => undefined);
-  if (!stat?.isFile() || stat.isSymbolicLink()) return false;
+  if (!stat?.isFile() || stat.isSymbolicLink() || stat.nlink > 1) return false;
   const raw = await fs.readFile(file, "utf8");
-  const reheading = raw.replace(/^#\s+.*$/m, `# ${name}`);
+  const reheading = raw.replace(/^#\s+.*$/m, () => `# ${name}`);
   const next = reheading === raw && !/^#\s/m.test(raw)
     ? `# ${name}\n\n${raw.replace(/^[^\S\n]+/, "")}` : reheading;
   if (next === raw) return false;
@@ -122,7 +129,7 @@ export async function setProjectTitle(workspacePath: string, name: string): Prom
 
 /** Read the project's own description: the pitch above the "How to play" heading, and the play section below it. */
 export async function readProjectDescription(workspacePath: string): Promise<ProjectDescription | undefined> {
-  const raw = await fs.readFile(path.join(workspacePath, DESCRIPTION_FILE), "utf8").catch(() => undefined);
+  const raw = await readDocument(path.join(workspacePath, DESCRIPTION_FILE));
   return parseProjectDescription(raw);
 }
 
@@ -143,7 +150,7 @@ export function parseProjectDescription(raw: string | undefined): ProjectDescrip
 
 /** Read the newest changelog entry: the first section below the title. */
 export async function readProjectChangelog(workspacePath: string): Promise<ProjectChangelog | undefined> {
-  const raw = await fs.readFile(path.join(workspacePath, CHANGELOG_FILE), "utf8").catch(() => undefined);
+  const raw = await readDocument(path.join(workspacePath, CHANGELOG_FILE));
   return parseProjectChangelog(raw);
 }
 
@@ -154,9 +161,7 @@ export async function readProjectChangelog(workspacePath: string): Promise<Proje
  */
 export async function readProjectReadmeSection(workspacePath: string, maxBytes = README_SECTION_MAX_BYTES): Promise<string | undefined> {
   const file = path.join(workspacePath, README_AGENT_FILE);
-  const stat = await fs.lstat(file).catch(() => undefined);
-  if (!stat?.isFile() || stat.isSymbolicLink()) return undefined;
-  const raw = await fs.readFile(file, "utf8").catch(() => undefined);
+  const raw = await readDocument(file);
   const text = raw ? cleanDocument(raw) : "";
   if (!text) return undefined;
   const bytes = Buffer.from(text, "utf8");
@@ -188,8 +193,6 @@ export function parseProjectChangelog(raw: string | undefined): ProjectChangelog
 /** Only author-owned, regular project documents can be exposed in a card panel. */
 export async function readProjectCardDocument(workspacePath: string, kind: "description" | "changelog"): Promise<string | undefined> {
   const file = path.join(workspacePath, kind === "description" ? DESCRIPTION_FILE : CHANGELOG_FILE);
-  const stat = await fs.lstat(file).catch(() => undefined);
-  if (!stat?.isFile() || stat.isSymbolicLink()) return undefined;
-  const text = await fs.readFile(file, "utf8").catch(() => undefined);
+  const text = await readDocument(file);
   return text ? cleanDocument(text) || undefined : undefined;
 }
