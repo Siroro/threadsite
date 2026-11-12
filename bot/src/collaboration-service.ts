@@ -12,8 +12,9 @@ import { contributionAccess, CollaborationError, managesProject, ownerId, requir
 import type { CardInteraction } from "./card-interactions.js";
 import type { Store } from "./store.js";
 import type { ApprovalAttachment, CollaborationMode, CommitAuthor, ProjectApproval, ProjectRecord, QueuedRequest, WipePolicy } from "./types.js";
-import { safeChild, truncate } from "./util.js";
-import { UPLOAD_DIR, uploadFileName, type UploadedFile } from "./uploads.js";
+import { truncate } from "./util.js";
+import { ensureWorkspaceDirectory } from "./workspace-inputs.js";
+import { UPLOAD_DIR, attachmentBudget, downloadAttachment, uploadFileName, type UploadedFile } from "./uploads.js";
 
 export const COLLABORATION_LABELS = { open: "Anyone can edit", contributors: "Selected contributors", approval: "Owner approves requests" } as const;
 export const WIPE_POLICY_LABELS = { owner: "Owner & admins", anyone: "Anyone in the thread" } as const;
@@ -26,24 +27,12 @@ export async function captureApprovalAttachments(attachments: Attachment[]): Pro
     throw new CollaborationError("Approval requests accept up to 4 attachments totalling 8 MiB.");
   }
   const saved: ApprovalAttachment[] = [];
-  let total = 0;
+  const budget = attachmentBudget();
   for (const attachment of attachments) {
     try {
-      const response = await fetch(attachment.url, { signal: AbortSignal.timeout(15_000) });
-      if (!response.ok || !response.body) throw new Error("download failed");
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          total += value.length;
-          if (total > MAX_ATTACHMENT_TOTAL_BYTES) throw new Error("too large");
-          chunks.push(value);
-        }
-      } finally { await reader.cancel().catch(() => undefined); }
+      const bytes = await downloadAttachment(attachment, budget);
       const mime = attachment.contentType ?? "application/octet-stream";
-      saved.push({ name: uploadFileName(attachment.name), mime, dataUrl: `data:${mime};base64,${Buffer.concat(chunks).toString("base64")}` });
+      saved.push({ name: uploadFileName(attachment.name), mime, dataUrl: `data:${mime};base64,${bytes.toString("base64")}` });
     } catch { throw new CollaborationError("An attachment could not be saved for approval. No request was accepted; attach the files again."); }
   }
   return saved;
@@ -57,12 +46,13 @@ export async function installApprovedUploads(workspace: string, request: Project
     if (attachment.mime.startsWith("image/")) continue;
     const bytes = Buffer.from(attachment.dataUrl.slice(attachment.dataUrl.indexOf(",") + 1), "base64");
     const name = `approval-${request.id}-${index}-${uploadFileName(attachment.name)}`;
-    const dir = safeChild(workspace, UPLOAD_DIR);
-    await fs.mkdir(dir, { recursive: true });
+    const dir = await ensureWorkspaceDirectory(workspace, UPLOAD_DIR.split("/"));
     const target = path.join(dir, name);
     try { await fs.writeFile(target, bytes, { flag: "wx" }); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !(await fs.readFile(target)).equals(bytes)) throw error;
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const stat = await fs.lstat(target);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink > 1 || !(await fs.readFile(target)).equals(bytes)) throw error;
     }
     files.push({ name, path: `${UPLOAD_DIR}/${name}`, bytes: bytes.length, mime: attachment.mime });
   }

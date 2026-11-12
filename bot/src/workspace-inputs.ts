@@ -10,21 +10,33 @@ async function statIfPresent(file: string) {
   }
 }
 
-async function inputPath(workspace: string, parts: readonly string[], createParents: boolean): Promise<string | undefined> {
+async function workspaceDirectory(workspace: string, parts: readonly string[], create: boolean): Promise<string | undefined> {
   const target = safeChild(workspace, ...parts);
   const relative = path.relative(path.resolve(workspace), target);
-  if (!relative) throw new Error("A harness input cannot replace the workspace root.");
   let directory = path.resolve(workspace);
-  for (const part of ["", ...relative.split(path.sep).slice(0, -1)]) {
+  for (const part of ["", ...relative.split(path.sep).filter(Boolean)]) {
     directory = path.join(directory, part);
     const stat = await statIfPresent(directory);
     if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) throw new Error("Harness inputs must stay in regular workspace directories.");
     if (!stat) {
-      if (!createParents) return undefined;
+      if (!create) return undefined;
       await fs.mkdir(directory, { recursive: true });
     }
   }
   return target;
+}
+
+/** Create a directory without following agent-authored links in its ancestry. */
+export async function ensureWorkspaceDirectory(workspace: string, parts: readonly string[]): Promise<string> {
+  return (await workspaceDirectory(workspace, parts, true))!;
+}
+
+async function inputPath(workspace: string, parts: readonly string[], createParents: boolean): Promise<string | undefined> {
+  const target = safeChild(workspace, ...parts);
+  const relative = path.relative(path.resolve(workspace), target);
+  if (!relative) throw new Error("A harness input cannot replace the workspace root.");
+  const directory = await workspaceDirectory(workspace, relative.split(path.sep).slice(0, -1), createParents);
+  return directory ? target : undefined;
 }
 
 /** Harness inputs must never follow agent-authored directory or file links. */

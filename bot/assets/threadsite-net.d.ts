@@ -325,6 +325,8 @@ export declare class ThreadSiteNet {
     private readonly onlineHandler;
     private resumeRequested;
     private hasJoined;
+    private socketWelcomed;
+    private connectTimer;
     private yieldPending;
     private hiddenYieldDone;
     private metronome;

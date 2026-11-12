@@ -44,6 +44,29 @@ function pending(id = "555555"): ProjectApproval {
   return { id, requesterId: guest.userId, author: { name: "Guest", email: "guest@example.test" }, prompt: "Add a checkpoint", createdAt: new Date().toISOString(), attachmentCount: 0, attachments: [] };
 }
 
+test("approved uploads reject linked directories and linked retry files", async () => {
+  const project = path.join(root, "linked-upload-project");
+  const outside = path.join(root, "linked-upload-outside");
+  await fs.mkdir(project);
+  await fs.mkdir(outside);
+  const request = { ...pending(), attachments: [{ name: "reference.txt", mime: "text/plain", dataUrl: "data:text/plain;base64,aGk=" }] };
+  const scratch = path.join(project, "scratch");
+  await fs.symlink(outside, scratch, process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(installApprovedUploads(project, request));
+  assert.deepEqual(await fs.readdir(outside), []);
+  await fs.unlink(scratch);
+  const [file] = await installApprovedUploads(project, request);
+  assert.equal(await fs.readFile(path.join(project, file.path), "utf8"), "hi");
+  assert.deepEqual(await installApprovedUploads(project, request), [file]);
+  const target = path.join(project, file.path);
+  const shared = path.join(outside, "reference.txt");
+  await fs.writeFile(shared, "hi");
+  await fs.unlink(target);
+  await fs.link(shared, target);
+  await assert.rejects(installApprovedUploads(project, request));
+  assert.equal(await fs.readFile(shared, "utf8"), "hi");
+});
+
 test("project deletion rolls back card and approval cleanup if the final delete fails", async () => {
   const { store, project, file } = await fixture();
   store.patchCardState(project.threadId, "card", { value: "preserved" });

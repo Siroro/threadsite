@@ -11,6 +11,19 @@ export interface ForgejoPushEvent {
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
+function isPushEvent(value: unknown): value is ForgejoPushEvent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const event = value as Record<string, unknown>;
+  if (event.ref !== undefined && typeof event.ref !== "string") return false;
+  if (event.after !== undefined && typeof event.after !== "string") return false;
+  if (event.repository !== undefined) {
+    if (!event.repository || typeof event.repository !== "object" || Array.isArray(event.repository)) return false;
+    const name = (event.repository as Record<string, unknown>).name;
+    if (name !== undefined && typeof name !== "string") return false;
+  }
+  return true;
+}
+
 // Forgejo (like Gitea) signs webhook bodies with hex HMAC-SHA256 of the raw
 // body under the hook secret; both header spellings are accepted.
 function verifySignature(raw: Buffer, secret: string, headers: IncomingMessage["headers"]): boolean {
@@ -96,8 +109,9 @@ export function startWebhookServer(options: {
     void (async () => {
       const urlPath = (request.url ?? "").split("?")[0];
       if (request.method === "GET" && urlPath === "/healthz") {
+        const body = JSON.stringify({ ok: true, ...options.health() });
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ ok: true, ...options.health() }));
+        response.end(body);
         return;
       }
       if (request.method === "POST" && urlPath === "/hooks/forgejo") {
@@ -128,7 +142,9 @@ export function startWebhookServer(options: {
         }
         let event: ForgejoPushEvent;
         try {
-          event = JSON.parse(raw.toString("utf8")) as ForgejoPushEvent;
+          const parsed: unknown = JSON.parse(raw.toString("utf8"));
+          if (!isPushEvent(parsed)) throw new Error("Invalid push payload.");
+          event = parsed;
         } catch {
           log("warn", "webhook.body_unparseable", { path: urlPath });
           response.writeHead(400);
@@ -153,7 +169,13 @@ export function startWebhookServer(options: {
       }
       response.writeHead(404);
       response.end();
-    })();
+    })().catch((error) => {
+      logError("webhook.request_failed", error, {});
+      if (response.destroyed || response.writableEnded) return;
+      if (response.headersSent) { response.destroy(); return; }
+      response.writeHead(500);
+      response.end("internal server error");
+    });
   });
   let markListening: (port: number) => void = () => undefined;
   let markListenFailed: (error: Error) => void = () => undefined;

@@ -429,6 +429,8 @@ export class ThreadSiteNet {
   private readonly onlineHandler: () => void;
   private resumeRequested = false;
   private hasJoined = false;
+  private socketWelcomed = false;
+  private connectTimer: Timer | null = null;
   private yieldPending = false;
   private hiddenYieldDone = false;
   private metronome: Metronome | null = null;
@@ -811,6 +813,7 @@ export class ThreadSiteNet {
   /** Stop owning timers, page listeners and the metronome worker; shared by
    * close() and terminal relay rejections so a dead client leaks neither. */
   private detachEventSources(): void {
+    if (this.connectTimer) { clearTimeout(this.connectTimer); this.connectTimer = null; }
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
     if (this.playerStateTimer) { clearInterval(this.playerStateTimer); this.playerStateTimer = null; }
@@ -937,12 +940,15 @@ export class ThreadSiteNet {
       try { previous.close(4000, "superseded"); } catch { /* already closing */ }
     }
     this.socket = socket;
+    this.socketWelcomed = false;
+    if (this.connectTimer) clearTimeout(this.connectTimer);
     const failTimer = setTimeout(() => {
-      if (socket.readyState !== WebSocket.OPEN) {
+      if (this.socket === socket && !this.socketWelcomed && !this.manuallyClosed) {
         try { socket.close(); } catch { /* ignored */ }
         this.failOrRetry(new ThreadSiteNetError(`Relay at ${this.url} did not answer in time.`, "connect_timeout"));
       }
     }, this.connectTimeoutMs);
+    this.connectTimer = failTimer;
     socket.onopen = () => this.sendFrame({
       t: "join", v: PROTOCOL_VERSION, game: this.game, mode: this.mode,
       room: this.requestedRoom || null,
@@ -978,7 +984,13 @@ export class ThreadSiteNet {
       if (lostAuthorityEpoch !== null) this.onAuthorityLost?.(lostAuthorityEpoch);
       if (this.manuallyClosed) { this.setStatus(NET_STATUS.CLOSED, null); return; }
       if (!wasOnline) this.failOrRetry(new ThreadSiteNetError(`Relay at ${this.url} refused the connection (${event.code}).`, "connect_failed"));
-      else { this.setStatus(NET_STATUS.RECONNECTING, event.code); this.scheduleReconnect(); }
+      else if (this.autoReconnect) { this.setStatus(NET_STATUS.RECONNECTING, event.code); this.scheduleReconnect(); }
+      else {
+        this.manuallyClosed = true;
+        this.detachEventSources();
+        this.worldSync?.dispose();
+        this.setStatus(NET_STATUS.CLOSED, event.code);
+      }
     };
     socket.onerror = () => undefined;
   }
@@ -993,6 +1005,7 @@ export class ThreadSiteNet {
           return;
         }
         this.storagePlayerId = typeof frame.persistence.playerId === "string" ? frame.persistence.playerId : null;
+        this.socketWelcomed = true;
         this.id = String(frame.you); this.cid = typeof frame.cid === "string" ? frame.cid : this.cid;
         this.mode = frame.mode === "single" ? "single" : "rooms";
         this.room = this.mode === "rooms" && typeof frame.room === "string" ? frame.room : null;
@@ -1204,10 +1217,12 @@ export class ThreadSiteNet {
     // Every pre-welcome rejection is terminal: the relay refused this client
     // or room specifically, so reconnecting would loop forever on the same
     // answer. rate_limited above is the only retryable shape.
-    if (!this.hasJoined) {
+    if (!this.socketWelcomed || ["room_not_found", "bad_version", "bad_game", "bad_room", "room_full", "too_many_rooms", "project_deleted"].includes(code)) {
       if (!this.openedSettled) { this.openedSettled = true; this.rejectOpened(error); }
       this.manuallyClosed = true;
+      this.rejectStorageRequests();
       this.detachEventSources();
+      this.worldSync?.dispose();
       try { this.socket?.close(4000, code); } catch { /* ignored */ }
       this.setStatus(NET_STATUS.CLOSED, code); return;
     }
@@ -1235,7 +1250,12 @@ export class ThreadSiteNet {
     if (!this.openedSettled) { this.openedSettled = true; this.rejectOpened(error); }
     if (this.manuallyClosed) return;
     if (this.autoReconnect) { this.setStatus(NET_STATUS.RECONNECTING, error.code); this.scheduleReconnect(); }
-    else this.setStatus(NET_STATUS.CLOSED, error.code);
+    else {
+      this.manuallyClosed = true;
+      this.detachEventSources();
+      this.worldSync?.dispose();
+      this.setStatus(NET_STATUS.CLOSED, error.code);
+    }
   }
   private scheduleReconnect(): void {
     if (this.manuallyClosed || this.reconnectTimer) return;

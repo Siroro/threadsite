@@ -49,7 +49,7 @@ import { Store, pendingTurnMatches } from "./store.js";
 import { COMMIT_SHORT_HASH_CHARS, isBotCreatedIdentity, relayTenantId, temporaryRepoName } from "./project-identity.js";
 import { multiplayerModeLabel, projectKindLabel, restartInstruction } from "./templates.js";
 import { isGameKind, type CommitAuthor, type MultiplayerMode, type ProjectKind, type ProjectRecord } from "./types.js";
-import { MAX_ATTACHMENTS, MAX_ATTACHMENT_TOTAL_BYTES, saveUploadAttachments, uploadPromptNote, type UploadedFile } from "./uploads.js";
+import { attachmentBudget, downloadImageAttachments, saveUploadAttachments, uploadPromptNote, type UploadedFile } from "./uploads.js";
 import { UsageLog, type UsageTotal } from "./usage.js";
 import { startWebhookServer } from "./webhook.js";
 import { renderPlayCard, renderTechnicalCard, type TurnCardState } from "./turn-card.js";
@@ -650,13 +650,14 @@ client.on(Events.MessageCreate, async (message) => {
   // verified vision-capable; anything else drops them, and an image-only
   // message says so in the thread instead of vanishing silently.
   let images: PromptImage[] = [];
+  const budget = attachmentBudget();
   if (imageAttachments.length) {
     const accepts = await withTimeout(
       projects.modelAcceptsImages(message.channel.id).catch(() => undefined),
       3000,
     );
     if (accepts === true) {
-      images = await downloadImageAttachments(imageAttachments);
+      images = await downloadImageAttachments(imageAttachments, budget);
       log("info", "discord.images_forwarded", { threadId: message.channel.id, requested: imageAttachments.length, downloaded: images.length });
       if (!images.length && !content && !uploadAttachments.length) {
         await status.edit("🚫 The image could not be downloaded, so there was nothing to send. Please try attaching it again.").catch(() => undefined);
@@ -678,7 +679,7 @@ client.on(Events.MessageCreate, async (message) => {
   // this path.
   let uploads: UploadedFile[] = [];
   if (uploadAttachments.length) {
-    uploads = await saveUploadAttachments(project.workspacePath, uploadAttachments);
+    uploads = await saveUploadAttachments(project.workspacePath, uploadAttachments, budget);
     log("info", "discord.uploads_saved", { threadId: message.channel.id, requested: uploadAttachments.length, saved: uploads.length });
     if (!uploads.length && !content && !images.length) {
       await status.edit("🚫 The attachment could not be downloaded, so there was nothing to send. Please try attaching it again.").catch(() => undefined);
@@ -761,15 +762,16 @@ async function submitCardRequest(interaction: ModalSubmitInteraction, project: P
   const imageAttachments = attachments.filter((attachment) => (attachment.contentType ?? "").startsWith("image/"));
   const uploadAttachments = attachments.filter((attachment) => !(attachment.contentType ?? "").startsWith("image/"));
   let images: PromptImage[] = [];
+  const budget = attachmentBudget();
   if (imageAttachments.length) {
     const accepts = await withTimeout(projects.modelAcceptsImages(project.threadId).catch(() => undefined), 3000);
     if (accepts !== true) throw new CardUserError("This project's model cannot currently accept reference images. Remove the images, or try again after changing the model.");
-    images = await downloadImageAttachments(imageAttachments);
+    images = await downloadImageAttachments(imageAttachments, budget);
     if (images.length !== imageAttachments.length) throw new CardUserError("Some reference images could not be downloaded. Your request was not queued; please attach them again.");
   }
   let uploads: UploadedFile[] = [];
   if (uploadAttachments.length) {
-    uploads = await saveUploadAttachments(project.workspacePath, uploadAttachments);
+    uploads = await saveUploadAttachments(project.workspacePath, uploadAttachments, budget);
     if (uploads.length !== uploadAttachments.length) throw new CardUserError("Some attachments could not be saved into the project. Your request was not queued; please attach them again.");
   }
   const fullPrompt = [prompt, uploadPromptNote(uploads)].filter(Boolean).join("\n\n");
@@ -2328,31 +2330,6 @@ async function reportFailure(  error: unknown,
   });
   const notified = quotaDmSent ? false : await adminReporter.notify(incident);
   return { id: incident.id, notified };
-}
-
-// Discord CDN attachment URLs expire, so image bytes are downloaded at message
-// receipt — before the turn waits behind the project queue — and embedded as
-// data URIs that travel with the prompt request itself.
-
-
-async function downloadImageAttachments(attachments: Attachment[]): Promise<PromptImage[]> {
-  const images: PromptImage[] = [];
-  for (const attachment of attachments.slice(0, MAX_ATTACHMENTS)) {
-    if (attachment.size > MAX_ATTACHMENT_TOTAL_BYTES) {
-      log("warn", "discord.image_attachment_too_large", { bytes: attachment.size });
-      continue;
-    }
-    try {
-      const response = await fetch(attachment.url);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const mime = attachment.contentType ?? "image/png";
-      const base64 = Buffer.from(await response.arrayBuffer()).toString("base64");
-      images.push({ mime, filename: attachment.name ?? undefined, dataUrl: `data:${mime};base64,${base64}` });
-    } catch (error) {
-      logError("discord.image_download_failed", error, { url: attachment.url });
-    }
-  }
-  return images;
 }
 
 // Graceful shutdown: docker stop sends SIGTERM with ~10s before SIGKILL.
