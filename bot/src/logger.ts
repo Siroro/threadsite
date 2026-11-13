@@ -66,6 +66,10 @@ function isPrimitive(value: unknown): boolean {
 // content-only redactText, so blank them outright; objects keep recursing so
 // their non-sensitive siblings survive.
 function sanitizeKeyed(key: string, child: unknown, depth: number): unknown {
+  if (isSensitiveKey(key) && Array.isArray(child)) {
+    if (depth > 7) return "[MAX_DEPTH]";
+    return child.slice(0, 50).map((item) => sanitizeKeyed(key, item, depth + 1));
+  }
   return isSensitiveKey(key) && isPrimitive(child) ? "[REDACTED]" : sanitize(child, depth + 1);
 }
 
@@ -103,7 +107,8 @@ export function serializeError(error: unknown, depth = 0): SerializedError {
       details: Object.keys(details).length ? details : undefined,
     };
   }
-  return { message: redactText(typeof error === "string" ? error : JSON.stringify(sanitize(error, depth + 1))) };
+  const message = typeof error === "string" ? error : JSON.stringify(sanitize(error, depth + 1));
+  return { message: redactText(message ?? String(error)) };
 }
 
 function append(record: Record<string, unknown>): void {

@@ -59,6 +59,86 @@ function setPending(h: Harness, entries: Array<{ id: string }>): void {
   h.pendingList.splice(0, h.pendingList.length, ...entries);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+for (const outcome of ["pending", "error"]) {
+  test(`a delayed ${outcome} reconciliation cannot make an answered question retryable again`, async () => {
+    const h = await harness();
+    const peer = trackStore(await Store.open(h.store.file));
+    const pending = deferred<Array<{ id: string }>>();
+    h.store.patchCardState("thread-1", "question:status-1:req-1", {
+      requestID: "req-1", status: "submitting", operation: "answer", answers: [["Bold"]], responder: "Shane",
+    });
+    const stale = new QuestionService({
+      store: peer, progress: () => undefined, pending: async () => pending.promise,
+      answer: async () => assert.fail("reconciliation must not send answers"), skip: async () => {}, error: () => {},
+    });
+    const check = stale.reconcile("thread-1", "status-1", "req-1");
+    setPending(h, [{ id: "req-1" }]);
+    assert.equal((await h.service.reconcile("thread-1", "status-1", "req-1")).status, "retry");
+    assert.equal((await h.service.submit("thread-1", "status-1", "req-1", "Shane", [["Bold"]])).status, "answered");
+    if (outcome === "pending") pending.resolve([{ id: "req-1" }]);
+    else pending.reject(new Error("Status lookup unavailable"));
+    assert.equal((await check).status, "answered");
+    assert.equal(h.service.delivery("thread-1", "status-1", "req-1").status, "answered");
+    await h.service.submit("thread-1", "status-1", "req-1", "Shane", [["Bold"]]);
+    assert.equal(h.answers.length, 1);
+  });
+}
+
+test("a stale empty pending list cannot finish a newer submission of the same answers", async () => {
+  const h = await harness();
+  const peer = trackStore(await Store.open(h.store.file));
+  const pending = deferred<Array<{ id: string }>>();
+  const accepted = deferred<void>();
+  h.store.patchCardState("thread-1", "question:status-1:req-1", {
+    requestID: "req-1", status: "submitting", operation: "answer", answers: [["Bold"]], responder: "Shane",
+  });
+  const stale = new QuestionService({
+    store: peer, progress: () => undefined, pending: async () => pending.promise,
+    answer: async () => {}, skip: async () => {}, error: () => {},
+  });
+  const check = stale.reconcile("thread-1", "status-1", "req-1");
+  setPending(h, [{ id: "req-1" }]);
+  await h.service.reconcile("thread-1", "status-1", "req-1");
+  const retry = new QuestionService({
+    store: h.store, progress: () => undefined, pending: async () => [],
+    answer: async () => accepted.promise, skip: async () => {}, error: () => {},
+  });
+  const submission = retry.submit("thread-1", "status-1", "req-1", "Shane", [["Bold"]]);
+  pending.resolve([]);
+  try {
+    assert.equal((await check).status, "submitting");
+    assert.equal(retry.delivery("thread-1", "status-1", "req-1").status, "submitting");
+  } finally { accepted.resolve(); }
+  assert.equal((await submission).status, "answered");
+});
+
+test("overlapping reconciliation completes a delivery and records its responder once", async () => {
+  const h = await harness();
+  h.store.patchCardState("thread-1", "question:status-1:req-1", {
+    requestID: "req-1", status: "submitting", operation: "answer", answers: [["Bold"]], responder: "Shane",
+  });
+  const pending = deferred<Array<{ id: string }>>();
+  let recorded = 0;
+  const services = {
+    store: h.store,
+    progress: () => ({ recordAnswer: () => { recorded++; }, clearQuestion: () => {}, setQuestionStatus: () => {} }) as never,
+    pending: async () => pending.promise, answer: async () => {}, skip: async () => {}, error: () => {},
+  };
+  const first = new QuestionService(services).reconcile("thread-1", "status-1", "req-1");
+  const peer = trackStore(await Store.open(h.store.file));
+  const second = new QuestionService({ ...services, store: peer }).reconcile("thread-1", "status-1", "req-1");
+  pending.resolve([]);
+  assert.deepEqual((await Promise.all([first, second])).map((delivery) => delivery.status), ["answered", "answered"]);
+  assert.equal(recorded, 1);
+});
+
 test("answers are claimed once, delivered, and idempotent on repeat clicks", async () => {
   const h = await harness();
   const first = await h.service.submit("thread-1", "status-1", "req-1", "Shane", [["Bold"]]);

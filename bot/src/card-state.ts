@@ -5,6 +5,8 @@ import type { TurnCardState } from "./turn-card.js";
 export type QuestionStatus = "ready" | "submitting" | "answered" | "skipped" | "retry";
 export interface QuestionDelivery {
   requestID: string;
+  /** Unique delivery attempt; absent on records saved before attempt tracking. */
+  attemptID?: string;
   status: QuestionStatus;
   operation?: "answer" | "skip";
   answers?: string[][];

@@ -172,6 +172,16 @@ export class Store {
     return Number(result.changes) === 1;
   }
 
+  /** A delayed network result may transition only the attempt it observed. */
+  transitionCardAction<T extends { status: string; attemptID?: string }>(threadId: string, key: string, expected: T, record: T): boolean {
+    const project = this.getProject(threadId);
+    if (!project || project.pendingDeletion) return false;
+    const result = this.db.prepare(`UPDATE card_state SET record = ? WHERE thread_id = ? AND card_key = ?
+      AND json_extract(record, '$.status') = ? AND json_extract(record, '$.attemptID') IS ?`)
+      .run(JSON.stringify(record), threadId, key, expected.status, expected.attemptID ?? null);
+    return Number(result.changes) === 1;
+  }
+
   close(): void {
     this.db.close();
   }
