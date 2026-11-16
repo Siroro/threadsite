@@ -6,6 +6,8 @@ The adapter implements session ownership, native inbox submission, persisted exe
 
 The service uses HTTP Basic authentication with username `opencode`. `OPENCODE_SERVER_PASSWORD` is supplied to the bot and mapped to the server's `OPENCODE_PASSWORD`. The Docker healthcheck calls `/api/info`, and each project turn verifies that the ThreadSite native plugin loaded before submitting work.
 
+The local plugin directory includes `v2/server.mjs`, the entry file OpenCode discovers for local directories. Package exports alone do not enable local discovery. With `OPENCODE_V2_BINARY` pointing to the pinned CLI executable, `npm test` in `opencode/` also checks native plugin activation from both an absolute directory path and a file URL, using isolated temporary state and no provider calls.
+
 Agent state is stored in `/opencode-data/v2`. Workspaces, repositories, static publications and the bot's usage ledger retain their configured locations.
 
 ## V2 runtime and commands

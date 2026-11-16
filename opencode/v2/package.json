@@ -2,5 +2,5 @@
   "name": "threadsite-opencode-v2-plugin",
   "private": true,
   "type": "module",
-  "exports": { "./server": "./plugin.mjs" }
+  "exports": { "./server": "./server.mjs" }
 }
