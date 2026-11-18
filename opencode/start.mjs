@@ -34,6 +34,8 @@ const child = spawn("opencode", ["--print-logs", "--log-level", logLevel, "serve
   env: { ...process.env,
     ...serverCredentials,
     XDG_DATA_HOME: `${process.env.XDG_DATA_HOME || "/opencode-data"}/v2`,
+    // Load the generated policy even when OpenCode's config directory is overridden.
+    OPENCODE_CONFIG: outputPath,
     OPENCODE_PASSWORD: process.env.OPENCODE_SERVER_PASSWORD,
   },
 });

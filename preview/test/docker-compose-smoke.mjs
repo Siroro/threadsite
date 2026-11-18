@@ -25,6 +25,7 @@ await fs.writeFile(path.join(hostConfig, "providers.json"), JSON.stringify({ pro
 } }, catalogs: { surplus: {} }, contextCaps: { surplus: 100000 } }));
 const opencodeEnv = {
   XDG_DATA_HOME: "/opencode-data", OPENCODE_SERVER_PASSWORD: "fixture-only",
+  XDG_CONFIG_HOME: "/tmp/threadsite-config",
   OPENCODE_MAX_STEPS: "50",
   OPENCODE_LOG_LEVEL: "INFO", OPENCODE_WEBSEARCH_PROVIDER: "off",
 };

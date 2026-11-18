@@ -534,8 +534,12 @@ test("persisted finish-up receipts prevent repeat steering after a restart, even
 
 test("a failed native runtime plugin prevents every prompt and mutation", async () => {
   const f = fixture();
-  f.client.plugin.list = async () => ({ data: [{ id: "threadsite.v2", state: { status: "failed", error: "bad plugin" } }] });
-  await assert.rejects(f.harness.prompt("/w", "ses_root", "Build", "test/text"), /runtime plugin is unavailable/);
+  // A failed import can be reported by its installation path before its ID is known.
+  f.client.plugin.list = async () => ({
+    data: [{ source: { type: "local", path: "/opt/threadsite/v2" }, state: { status: "failed", error: "bad plugin" } }],
+  });
+  await assert.rejects(f.harness.prompt("/w", "ses_root", "Build", "test/text"), (error: unknown) =>
+    error instanceof Error && error.cause instanceof Error && error.cause.message === "bad plugin");
   assert.deepEqual(f.calls, []);
 });
 

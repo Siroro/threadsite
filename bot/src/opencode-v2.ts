@@ -301,7 +301,18 @@ export class OpenCodeV2Harness {
       const { data } = await this.client.plugin.list({ location: { directory } }, requestOptions());
       const plugin = data.find((plugin) => plugin.id === PLUGIN_ID);
       if (plugin?.state.status === "active") break;
-      if (plugin?.state.status === "failed" || Date.now() >= deadline) throw new V2TurnError("The ThreadSite v2 runtime plugin is unavailable; rebuild the OpenCode service");
+      const failed = plugin?.state.status === "failed" ? plugin : data.find((entry) =>
+        entry.state.status === "failed" && entry.source.type === "local" && entry.source.path === "/opt/threadsite/v2");
+      if (failed?.state.status === "failed") {
+        throw new V2TurnError("The ThreadSite v2 runtime plugin is unavailable because it failed to load", {
+          cause: new Error(failed.state.error),
+        });
+      }
+      if (Date.now() >= deadline) {
+        throw new V2TurnError("The ThreadSite v2 runtime plugin is unavailable for this workspace", {
+          cause: new Error(`Plugin inventory contained ${data.length} entries without an active ThreadSite runtime`),
+        });
+      }
       await sleep(100);
     }
     const session = await this.session(directory, sessionID);

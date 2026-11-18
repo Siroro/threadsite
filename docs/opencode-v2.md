@@ -4,7 +4,7 @@ ThreadSite runs OpenCode 2.3.2 with the pinned `@opencode/client` 2.3.2. The bot
 
 The adapter implements session ownership, native inbox submission, persisted execution outcomes, live and saved usage, finish-up steering, provider failover, titles, compaction, conversation revert, stop/reset and project deletion. Persisted messages and live billing overlap and are reconciled rather than added.
 
-The service uses HTTP Basic authentication with username `opencode`. `OPENCODE_SERVER_PASSWORD` is supplied to the bot and mapped to the server's `OPENCODE_PASSWORD`. The Docker healthcheck calls `/api/info`, and each project turn verifies that the ThreadSite native plugin loaded before submitting work.
+The service uses HTTP Basic authentication with username `opencode`. `OPENCODE_SERVER_PASSWORD` is supplied to the bot and mapped to the server's `OPENCODE_PASSWORD`. The service passes the generated policy to OpenCode via `OPENCODE_CONFIG` so config-directory overrides still load it. Docker health requires both the v2 API and an active ThreadSite server plugin. Each project turn also checks its own workspace before submitting work.
 
 The local plugin directory includes `v2/server.mjs`, the entry file OpenCode discovers for local directories. Package exports alone do not enable local discovery. With `OPENCODE_V2_BINARY` pointing to the pinned CLI executable, `npm test` in `opencode/` also checks native plugin activation from both an absolute directory path and a file URL, using isolated temporary state and no provider calls.
 
