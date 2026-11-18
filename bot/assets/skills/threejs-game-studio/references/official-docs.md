@@ -2,8 +2,8 @@
 
 # Installed API references
 
-ThreadSite supplies three.js 0.186.1, @dimforge/rapier3d-compat 0.21.0 and
-three-mesh-bvh 0.9.16. The harness owns their versions, declarations and build.
+ThreadSite supplies three.js 0.187.0, @dimforge/rapier3d-compat 0.21.0 and
+three-mesh-bvh 0.9.18. The harness owns their versions, declarations and build.
 Read root AGENTS.md and use the installed packages directly.
 
 ## Verify an API

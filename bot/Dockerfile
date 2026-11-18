@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim AS build
+FROM node:26-bookworm-slim AS build
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --no-audit --no-fund
@@ -8,7 +8,7 @@ COPY networking ./networking
 COPY assets ./assets
 RUN npm run build && npm run stage:engines
 
-FROM node:24-bookworm-slim
+FROM node:26-bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*

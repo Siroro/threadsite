@@ -85,7 +85,7 @@ GitHub Actions runs on pushes to `main`, pull requests, and manual dispatch:
 - [CI](../.github/workflows/ci.yml) builds the bot and OpenCode tools, runs the bot/OpenCode/preview test suites, checks the gallery in Chromium, and checks Caddy's WebSocket routing and cache headers in Docker.
 - [Multiplayer](../.github/workflows/multiplayer.yml) builds the networking client and relay, then checks relay/client behavior, restarts, durability, stalled hosts, deletion, player storage, saves, and leaderboards.
 
-Both workflows use Node 24 and need no Discord or model credentials. Relay checks use temporary state. Docker preview integration and the opt-in real-language-server check remain separate checks described below and in [OpenCode](opencode-v2.md).
+Both workflows use Node 26 and need no Discord or model credentials. Relay checks use temporary state. Docker preview integration and the opt-in real-language-server check remain separate checks described below and in [OpenCode](opencode-v2.md).
 
 From `bot/`:
 

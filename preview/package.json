@@ -14,11 +14,11 @@
     "build:viewer": "node build-viewer.mjs"
   },
   "dependencies": {
-    "@playwright/mcp": "0.0.83",
+    "@playwright/mcp": "0.0.85",
     "esbuild": "0.28.2"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.27.1",
-    "three": "0.181.0"
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "three": "0.187.0"
   }
 }

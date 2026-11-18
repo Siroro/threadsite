@@ -45,7 +45,7 @@ server.listen(8090, '0.0.0.0');
   createdNetwork = true;
   containers.push(await docker("run", "-d", "--rm", "--network", network, "--network-alias", "gameserver",
     "--mount", `type=bind,source=${path.join(root, "relay.mjs")},target=/relay.mjs,readonly`,
-    "node:24-bookworm-slim", "node", "/relay.mjs"));
+    "node:26-bookworm-slim", "node", "/relay.mjs"));
   containers.push(await docker("run", "-d", "--rm", "--network", network,
     "-p", "127.0.0.1::8080", "-p", "127.0.0.1::8081", "-e", "SITES_DOMAIN=:8080",
     "--mount", `type=bind,source=${fileURLToPath(new URL("./Caddyfile", import.meta.url))},target=/etc/caddy/Caddyfile,readonly`,

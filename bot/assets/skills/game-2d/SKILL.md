@@ -5,7 +5,7 @@ description: Structure ThreadSite 2D games with Excalibur, responsive controls, 
 
 # ThreadSite 2D game architecture
 
-Project boundaries, build rules and the **ThreadSite-relay-only** multiplayer contract live in root `AGENTS.md`. Load the `excalibur` skill for engine APIs. Excalibur 0.32.0 is the engine for action/arcade/sprite-heavy 2D games; DOM/SVG is fine when the experience is primarily cards, boards, forms or UI.
+Project boundaries, build rules and the **ThreadSite-relay-only** multiplayer contract live in root `AGENTS.md`. Load the `excalibur` skill for engine APIs. Use Excalibur 1.0.1 for action, arcade, and sprite-heavy games. DOM/SVG suits games built around cards, boards, forms, or UI.
 
 ## Start from game structure, not renderer plumbing
 

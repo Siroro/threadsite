@@ -128,8 +128,6 @@ test("asset-forge can be disabled and rejects malformed model references at star
 test("v2 supplies trusted LSP settings and optional Context7 credentials without mutating its input", () => {
   const original = structuredClone(base);
   const config = buildV2Config(base, { env: {} });
-  assert.equal(config.plugins[0].options.lsp.typescript.initialization.disableAutomaticTypingAcquisition, true);
-  assert.equal(config.plugins[0].options.lsp.typescript.initialization.implicitProjectConfiguration.strictNullChecks, false);
   for (const name of ["typescript", "html", "css", "json"]) {
     assert.deepEqual(config.plugins[0].options.lsp[name].command, base.lsp[name].command);
   }

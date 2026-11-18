@@ -26,6 +26,6 @@ Gallery refreshes are serialized and the completed HTML replaces the index throu
 
 ## Checks
 
-Use Node 24. From `bot/`, `npm test` exercises discovery state, URL round-trips, storage recovery, public-data isolation, document limits, renames and publication failure/recovery. `npm run build` checks the browser and server TypeScript together.
+Use Node 26. From `bot/`, `npm test` exercises discovery state, URL round-trips, storage recovery, public-data isolation, document limits, renames and publication failure/recovery. `npm run build` checks the browser and server TypeScript together.
 
 For real-browser checks, install the existing `preview/` dependencies and provide its Playwright Chromium browser. From `bot/`, run `npm run test:gallery`. The test launches an isolated local server with clearly labelled sample projects, exercises desktop/mobile interactions and never reads live workspaces or published sites. If Chromium is already installed elsewhere, set `GALLERY_BROWSER_EXECUTABLE_PATH` to its executable. Optional `GALLERY_SCREENSHOT_DIR` saves desktop, mobile and detail-view PNGs. These are development-only test settings, not production configuration.

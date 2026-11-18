@@ -32,7 +32,7 @@ test("real language servers navigate and diagnose config-free project files with
   const options = buildV2Config(base, { env: {} }).plugins[0].options;
   const serverRoot = process.env.THREADSITE_LSP_SERVER_ROOT;
   if (serverRoot) {
-    options.lsp.typescript.command = [process.execPath, path.join(serverRoot, "typescript-language-server/lib/cli.mjs"), "--stdio"];
+    options.lsp.typescript.command = [process.execPath, path.join(serverRoot, "typescript/bin/tsc"), "--lsp", "--stdio"];
     for (const id of ["html", "css", "json"]) {
       options.lsp[id].command = [process.execPath, path.join(serverRoot, `vscode-langservers-extracted/bin/vscode-${id}-language-server`), "--stdio"];
     }

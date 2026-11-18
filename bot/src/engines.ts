@@ -46,10 +46,10 @@ interface EnginePackage {
 
 const THREE_PACKAGE: EnginePackage = {
   name: "three",
-  version: "0.186.1",
+  version: "0.187.0",
   manifest: JSON.stringify({
     name: "three",
-    version: "0.186.1",
+    version: "0.187.0",
     description: "three.js browser ESM build (harness-seeded, curated manifest)",
     type: "module",
     license: "MIT",
@@ -151,10 +151,10 @@ const RAPIER_PACKAGE: EnginePackage = {
  */
 const THREE_MESH_BVH_PACKAGE: EnginePackage = {
   name: "three-mesh-bvh",
-  version: "0.9.16",
+  version: "0.9.18",
   manifest: JSON.stringify({
     name: "three-mesh-bvh",
-    version: "0.9.16",
+    version: "0.9.18",
     description: "three-mesh-bvh BVH acceleration for three.js raycasts and spatial queries (harness-seeded, curated manifest)",
     type: "module",
     license: "MIT",
@@ -175,19 +175,19 @@ const THREE_MESH_BVH_PACKAGE: EnginePackage = {
 
 const EXCALIBUR_PACKAGE: EnginePackage = {
   name: "excalibur",
-  version: "0.32.0",
+  version: "1.0.1",
   manifest: JSON.stringify({
     name: "excalibur",
-    version: "0.32.0",
+    version: "1.0.1",
     description: "Excalibur browser ESM build (harness-seeded, curated manifest)",
     type: "module",
     license: "BSD-2-Clause",
     sideEffects: false,
     main: "./build/esm/excalibur.js",
-    types: "./build/dist/excalibur.d.ts",
+    types: "./build/esm/src/engine/excalibur.d.ts",
     exports: {
       ".": {
-        types: "./build/dist/excalibur.d.ts",
+        types: "./build/esm/src/engine/excalibur.d.ts",
         import: "./build/esm/excalibur.js",
         default: "./build/esm/excalibur.js",
       },
@@ -195,13 +195,11 @@ const EXCALIBUR_PACKAGE: EnginePackage = {
   }, null, 2) + "\n",
   files: [
     { from: "excalibur/build/esm/excalibur.js", to: "build/esm/excalibur.js" },
-    { from: "excalibur/build/dist/excalibur.d.ts", to: "build/dist/excalibur.d.ts" },
     { from: "excalibur/LICENSE.md", to: "LICENSE.md" },
   ],
-  // The declaration graph shares dist/ with large UMD/development builds.
-  // Seed all declarations, including nested imports, without those runtimes.
-  dirs: [{ from: "excalibur/build/dist", to: "build/dist", declarationsOnly: true }],
-  typesEntry: "excalibur/build/dist/excalibur.d.ts",
+  // Excalibur 1.x publishes the declaration graph beside its ESM bundles.
+  dirs: [{ from: "excalibur/build/esm/src", to: "build/esm/src", declarationsOnly: true }],
+  typesEntry: "excalibur/build/esm/src/engine/excalibur.d.ts",
 };
 
 /** The engine packages a project kind depends on; sites get none. */
@@ -214,10 +212,10 @@ const EXCALIBUR_PACKAGE: EnginePackage = {
  */
 const MESHOPT_TYPES_PACKAGE: EnginePackage = {
   name: "meshoptimizer",
-  version: "1.1.1",
+  version: "1.3.0",
   manifest: JSON.stringify({
     name: "meshoptimizer",
-    version: "1.1.1",
+    version: "1.3.0",
     description: "meshoptimizer (harness-seeded, declarations for three/addons decoder imports)",
     type: "module",
     license: "MIT",

@@ -39,8 +39,8 @@ Projects are authored in TypeScript under `site/src/`. The model never runs a bu
 
 Game repos get engines installed the way a dependency manager would, in a harness-managed `node_modules/` at the workspace root (gitignored, never published, re-seeded on drift):
 
-- **3D**: three.js 0.186.1, `@dimforge/rapier3d-compat` 0.21.0 for physics, `three-mesh-bvh` 0.9.16 for accelerated spatial queries.
-- **2D**: Excalibur 0.32.0, seeded from its official browser ESM distribution and complete TypeScript declaration graph.
+- **3D**: three.js 0.187.0, `@dimforge/rapier3d-compat` 0.21.0 for physics, `three-mesh-bvh` 0.9.18 for accelerated spatial queries.
+- **2D**: Excalibur 1.0.1, seeded from its official browser ESM distribution and complete TypeScript declaration graph.
 
 2D games render at their displayed canvas size by default (`FillContainer` or `FillScreen`), with automatic HiDPI backing resolution. Instructions avoid stretching a fixed low-resolution framebuffer; resize changes framing/layout instead. Pixel art uses nearest-neighbor filtering, pixel snapping and integer zoom rather than blended or fractional scaling.
 

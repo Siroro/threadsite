@@ -1,12 +1,12 @@
-FROM node:24-bookworm-slim
+FROM node:26-bookworm-slim
 
-ARG OPENCODE_VERSION=2.1.4
+ARG OPENCODE_VERSION=2.3.2
 RUN npm install -g "@opencode/cli@${OPENCODE_VERSION}" \
     && mkdir -p /opencode-data /workspace /opt/threadsite
 
 # LSP servers and formatter used by the opencode.json lsp/formatter sections.
 # Installed globally with the TypeScript compiler used by the validation gate.
-RUN npm install -g typescript-language-server "typescript@5.9.3" \
+RUN npm install -g "typescript@7.0.2" \
     vscode-langservers-extracted prettier
 
 # unzip for extracting downloaded asset archives (tar/gzip ship with the base image).

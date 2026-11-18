@@ -83,6 +83,7 @@ async function checkTypeScript(file: string, root: string): Promise<string> {
   try {
     result = await execFileAsync("node", [
       TSC_PATH,
+      "--ignoreConfig",
       "--noEmit",
       "--skipLibCheck",
       "--allowJs", "false",
@@ -90,7 +91,7 @@ async function checkTypeScript(file: string, root: string): Promise<string> {
       "--module", "ESNext",
       "--moduleResolution", "Bundler",
       "--lib", "ES2022,DOM,DOM.Iterable",
-      "--noImplicitAny", "false",
+      "--strict", "false",
       file,
     ], { timeout: 30_000, cwd: root });
     return "";

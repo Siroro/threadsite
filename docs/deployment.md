@@ -9,7 +9,7 @@ For a new server, use the [Caddy quickstart](#caddy-quickstart). If you already 
 - A Discord bot token (the installer discovers the application ID)
 - Docker and Docker Compose (the quickstart can install these)
 
-You only need Node 24 on the host for local development. The containers include it.
+You only need Node 26 on the host for local development. The containers include it.
 
 ## Caddy quickstart
 
@@ -385,7 +385,7 @@ docker compose build --pull opencode bot
 docker compose up -d opencode bot
 ```
 
-The multiplayer relay pins `ws` in `gameserver/package.json`; rebuild it with `docker compose build --pull gameserver` when bumping. Forgejo is pinned to the `15-rootless` LTS major tag by default; override `FORGEJO_IMAGE` to follow the current short-lived stable line.
+The multiplayer relay pins `ws` in `gameserver/package.json`. Rebuild it with `docker compose build --pull gameserver` when bumping. Forgejo defaults to the `17-rootless` stable major tag. Set `FORGEJO_IMAGE` to select a different rootless release.
 
 For a bot-only change with dependencies already running: `docker compose up -d --build --no-deps bot`. Rebuild other affected services when shared configuration or dependencies change. Preserve `data/`, secrets, persistent volumes, and live project workspaces. Never use volume deletion or destructive resets as routine troubleshooting.
 

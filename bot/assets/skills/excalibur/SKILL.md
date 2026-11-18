@@ -1,11 +1,13 @@
 ---
 name: excalibur
-description: Build and revise ThreadSite 2D browser games using the installed Excalibur 0.32.0 APIs, including startup, Actors, graphics, collision, input, cameras and resource loading. Use alongside game-2d for Excalibur implementation.
+description: Build and revise ThreadSite 2D browser games using the installed Excalibur 1.0.1 APIs, including startup, Actors, graphics, collision, input, cameras and resource loading. Use alongside game-2d for Excalibur implementation.
 ---
 
-# Excalibur 0.32.0
+# Excalibur 1.0.1
 
 Read root `AGENTS.md` for workspace/build boundaries and the selected multiplayer contract. Import `excalibur` directly; the harness owns installation, bundling and the real declaration graph. Do not add npm/Vite/CDN setup. Use the installed `.d.ts` files to check unfamiliar signatures; official references are at https://excaliburjs.com/docs/ and https://excaliburjs.com/api/.
+
+When revising a pre-1.0 game, check the installed declarations for renamed members. For example, `actor.isKilled` and `sound.isPlaying` are getters, and sound positions and durations use milliseconds.
 
 ## Startup and lifecycle
 
@@ -33,8 +35,7 @@ class Player extends ex.Actor {
     const keys = engine.input.keyboard;
     const x = Number(keys.isHeld(ex.Keys.Right)) - Number(keys.isHeld(ex.Keys.Left));
     const y = Number(keys.isHeld(ex.Keys.Down)) - Number(keys.isHeld(ex.Keys.Up));
-    const direction = ex.vec(x, y);
-    this.vel = direction.size > 0 ? direction.normalize().scale(220) : ex.vec(0, 0);
+    this.vel = x || y ? ex.vec(x, y).normalize().scale(220) : ex.vec(0, 0);
   }
 }
 

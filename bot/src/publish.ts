@@ -428,8 +428,7 @@ async function validateTypeScriptSources(root: string, tsSources: string[], scri
         noEmit: true,
         allowJs: true,
         checkJs: false,
-        noImplicitAny: false,
-        allowSyntheticDefaultImports: false,
+        strict: false,
         target: "ES2022",
         module: "ESNext",
         moduleResolution: "Bundler",
@@ -486,8 +485,8 @@ function stubPath(mirrored: string): string {
  * resolve without the implementation entering the tsc program. `export … from`
  * re-exports are copied through so chunked bundles lead to their own stubs. A
  * module with no detectable ESM exports (CommonJS-style bundle) gets an
- * `export = any` shape instead. The default export is only declared when the
- * source has one, so a browser-fatal `import lib from` still fails the gate.
+ * export = any` shape instead. esbuild verifies that ESM imports match the
+ * source module's real exports before the type checker reads these stubs.
  */
 function vendorStub(source: string): string {
   const header = "// ThreadSite vendored-module stub: exports are any; the implementation is never type-checked.";

@@ -89,6 +89,6 @@ Published projects appear in a shared gallery. Search, filter by game type, save
 - [Maintenance](docs/maintenance.md): updates, cleanup and tests
 - [Architecture](docs/architecture.md) and [OpenCode](docs/opencode-v2.md): how it works
 
-For local development, use Node 24 and run the [checks](docs/maintenance.md#local-regression-checks) in the component you're changing. GitHub Actions runs the main checks on pushes and pull requests.
+For local development, use Node 26 and run the [checks](docs/maintenance.md#local-regression-checks) in the component you're changing. GitHub Actions runs the main checks on pushes and pull requests.
 
 ThreadSite is [MIT licensed](LICENSE).

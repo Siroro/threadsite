@@ -1,6 +1,6 @@
 ---
 name: game-3d
-description: three.js playbook for this repository's 3D games — renderer and scene bootstrap, frame-loop discipline, physically-based lighting, materials and geometry budgets, GLB/GLTF asset loading, addon vendoring, disposal, picking, Rapier physics, BVH spatial queries, and performance patterns for the pinned three 0.186 engine package. Load before building or substantially revising 3D rendering, scenes, cameras, models, physics, or effects.
+description: three.js playbook for this repository's 3D games — renderer and scene bootstrap, frame-loop discipline, physically-based lighting, materials and geometry budgets, GLB/GLTF asset loading, addon vendoring, disposal, picking, Rapier physics, BVH spatial queries, and performance patterns for the pinned three 0.187 engine package. Load before building or substantially revising 3D rendering, scenes, cameras, models, physics, or effects.
 ---
 
 # three.js playbook (game-3d)
@@ -140,7 +140,7 @@ renderer.setAnimationLoop((time) => update(time));              // one loop, sta
   const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
   // Draco only — the decoder must be local (preview blocks external origins):
   // asset_download the pinned files from
-  // https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/libs/draco/ into
+  // https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/libs/draco/ into
   // site/assets/draco/ once, then:
   // loader.setDRACOLoader(new DRACOLoader().setDecoderPath("assets/draco/"));
   // Uncompressed or meshopt-only GLB needs none of this.

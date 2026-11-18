@@ -1,6 +1,6 @@
 ## 2D
 
-Use installed **Excalibur 0.32.0**: `import * as ex from "excalibur"`. Read the `game-2d` and `excalibur` skills for engine APIs and examples. DOM/SVG is suitable for card/board/UI-heavy games.
+Use installed **Excalibur 1.0.1**. Import it with `import * as ex from "excalibur"` and consult the `game-2d` and `excalibur` skills for current APIs and examples. DOM/SVG suits card, board, and UI-heavy games.
 
 - Use Excalibur lifecycle, rendering and collision primitives. Derive map art and colliders from the same data; include a collider debug toggle.
 - Large swarms/projectiles use lightweight movement and spatial queries rather than mutually colliding bodies.

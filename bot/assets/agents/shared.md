@@ -41,7 +41,7 @@ Each top-level `site/src/*.ts` becomes `site/js/<name>.js`; nested files are imp
 Before finishing, run the same full TypeScript check as the harness and fix its errors:
 
 ```sh
-node /usr/local/lib/node_modules/typescript/bin/tsc --noEmit --allowJs --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM,DOM.Iterable --skipLibCheck site/src/*.ts
+node /usr/local/lib/node_modules/typescript/bin/tsc --ignoreConfig --noEmit --allowJs --strict false --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM,DOM.Iterable --skipLibCheck site/src/*.ts
 ```
 
 The harness bundles after your reply. Build/type/static errors block publication and get one repair attempt; fix source under `site/src/`, not generated output.

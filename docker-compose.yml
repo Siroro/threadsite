@@ -2,7 +2,7 @@ name: threadsite
 
 services:
   forgejo:
-    image: ${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo:15-rootless}
+    image: ${FORGEJO_IMAGE:-codeberg.org/forgejo/forgejo:17-rootless}
     restart: unless-stopped
     user: "1000:1000"
     environment:

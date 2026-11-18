@@ -37,7 +37,7 @@ Discord threads become static sites and browser games. This repo runs the bot, O
 
 ## Checks
 
-Use Node 24 and run commands in the component directory; there is no root npm package.
+Use Node 26 and run commands in the component directory; there is no root npm package.
 
 | Change | Checks |
 | --- | --- |

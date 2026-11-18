@@ -1,6 +1,6 @@
 # OpenCode runtime
 
-ThreadSite runs OpenCode 2.1.4 with the pinned `@opencode/client` 2.1.4. The bot adapter is `bot/src/opencode-v2.ts`; the service policy is `opencode/opencode.json`.
+ThreadSite runs OpenCode 2.3.2 with the pinned `@opencode/client` 2.3.2. The bot adapter is `bot/src/opencode-v2.ts`; the service policy is `opencode/opencode.json`.
 
 The adapter implements session ownership, native inbox submission, persisted execution outcomes, live and saved usage, finish-up steering, provider failover, titles, compaction, conversation revert, stop/reset and project deletion. Persisted messages and live billing overlap and are reconciled rather than added.
 
@@ -132,15 +132,16 @@ Malformed model references fail service startup.
 Native v2 accepts `lsp` configuration but does not run servers itself. ThreadSite
 restores the `lsp` navigation tool and diagnostics after edits using the MIT-licensed
 [LSP bridge](https://github.com/christensenjairus/opencode-v2-lsp-support), vendored
-at commit `4a17bc8379e572ab104ec26b55f92ee9b51dce37`. It is composed into the native
+at commit `e055c985c4aeef9a557093832bf2c36fbe99a549`. It is composed into the native
 ThreadSite plugin; no runtime download or separate plugin installation is needed.
 TypeScript, HTML, CSS and JSON servers are already installed in the image and start
 lazily per project. Only harness-supplied settings select commands; generated
 project configuration is never consulted by the bridge. Navigation rejects paths
 and symlinks outside the current project, and servers shut down when the plugin
-unloads. TypeScript uses lenient ES2022 inferred-project settings without creating
-a `tsconfig.json` or downloading additional types. LSP diagnostics are advisory;
-the mandatory compiler/build/static gates remain authoritative.
+unloads. The native TypeScript server uses inferred projects without a
+`tsconfig.json`. It runs with an empty executable search path to prevent npm
+downloads for automatic type acquisition. LSP diagnostics are advisory. The
+mandatory compiler, build, and static checks determine whether a site can publish.
 
 [Context7](https://github.com/upstash/context7) is enabled for v2 as a remote,
 read-only documentation MCP at `https://mcp.context7.com/mcp`. Only its
@@ -171,7 +172,7 @@ Native synthetic steering uses `delivery: "steer", resume: false`, preserving th
 
 ## Verification
 
-Use Node 24:
+Use Node 26:
 
 ```bash
 cd opencode
@@ -187,7 +188,7 @@ npm run build
 The opt-in real-server check launches an isolated OpenCode executable, temporary workspaces/state and a local scripted model provider. It requires no paid provider or production credentials:
 
 ```bash
-# Install @opencode/cli@2.1.4 separately, then provide its executable path.
+# Install @opencode/cli@2.3.2 separately, then provide its executable path.
 OPENCODE_V2_BINARY=/absolute/path/to/opencode npm run test:opencode-v2
 ```
 
@@ -211,7 +212,7 @@ in the printed temporary directory.
 The smoke test uses an isolated Context7-compatible server to verify that both
 documentation tools survive the native tool filters and permissions, while an
 unexpected tool is removed. Set `OPENCODE_LSP_SMOKE_COMMAND` to a JSON command
-array (for example `["typescript-language-server","--stdio"]`) to also check
+array with an absolute executable path, followed by `--lsp` and `--stdio`, to also check
 post-edit TypeScript errors and hover results through the real v2 agent loop.
 Set `OPENCODE_DOCS_SMOKE_OFFLINE=1` to check that an unavailable documentation
 service leaves ordinary builder work operational.
@@ -229,7 +230,7 @@ The upstream test assertions use POSIX path separators; run that suite in Linux.
 
 ## Live free-model end-to-end check
 
-Run `npm --prefix preview run test:free-models` under Node 24 with Docker running.
+Run `npm --prefix preview run test:free-models` under Node 26 with Docker running.
 This opt-in check sends synthetic test prompts to real anonymous OpenCode free
 models; it does not log into Discord or use deployment credentials. It verifies
 the live catalog's zero-cost tiers before selecting MiMo-V2.6-Flash Free and

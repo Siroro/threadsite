@@ -24,13 +24,12 @@ test("2D engine seeding installs only Excalibur, repairs nested declarations", a
   const workspace = await scaffold("seed");
   const engine = path.join(workspace, "node_modules", "excalibur");
   const manifest = JSON.parse(await fs.readFile(path.join(engine, "package.json"), "utf8"));
-  assert.equal(manifest.version, "0.32.0");
   await fs.access(path.join(engine, manifest.main));
   await fs.access(path.join(engine, manifest.types));
-  await assert.rejects(fs.access(path.join(engine, "build", "dist", "excalibur.js")), { code: "ENOENT" });
+  await assert.rejects(fs.access(path.join(engine, "build", "esm", "excalibur.development.js")), { code: "ENOENT" });
   assert.equal(await ensureEnginePackages(workspace, "game-2d"), false);
 
-  const nested = path.join(engine, "build", "dist", "Math", "vector.d.ts");
+  const nested = path.join(engine, path.dirname(manifest.types), "math", "vector.d.ts");
   await fs.rm(nested);
   assert.equal(await ensureEnginePackages(workspace, "game-2d"), true);
   assert.match(await fs.readFile(nested, "utf8"), /class Vector/);

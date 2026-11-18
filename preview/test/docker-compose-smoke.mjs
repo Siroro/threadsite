@@ -37,7 +37,7 @@ const botEnv = {
 };
 await fs.writeFile(override, `services:
   fixture:
-    image: node:24-bookworm-slim
+    image: node:26-bookworm-slim
     command: ["node", "/fixtures/provider.mjs"]
     volumes: ${JSON.stringify([mount(tests, "/fixtures", true)])}
     healthcheck:
