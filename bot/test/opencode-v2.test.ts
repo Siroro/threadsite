@@ -781,13 +781,14 @@ test("reattachment keeps the subagent roster and step counts within the current 
 
 test("reattachment reconciles active descendants and clears stale counts on status polls and detach", async () => {
   const f = fixture();
-  const child = { ...f.session, id: "ses_child", parentID: "ses_root", time: { created: Date.now(), updated: Date.now() } };
+  const startedAt = Date.now() - 1000;
+  const child = { ...f.session, id: "ses_child", parentID: "ses_root", time: { created: startedAt + 500, updated: startedAt + 500 } };
   f.client.session.list = async () => ({ data: [f.session, child,
     { ...child, id: "ses_foreign", location: { directory: "/other" } }], cursor: {} });
   let active: Record<string, unknown> = { ses_child: {}, ses_foreign: {} };
   f.client.session.active = async () => active;
   const updates: any[] = [];
-  const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); });
+  const stop = await f.harness.watchExistingTurn("/w", "ses_root", (update) => { updates.push(update); }, startedAt);
   try {
     for (let i = 0; i < 50 && !updates.some((update) => update.activeSubagents === 1); i++) await new Promise((resolve) => setImmediate(resolve));
     assert.equal(updates.filter((update) => update.activeSubagents !== undefined).at(-1)?.activeSubagents, 1);

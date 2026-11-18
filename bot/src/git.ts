@@ -133,7 +133,7 @@ export async function fetchAndRebase(workspace: string, forgejo: ForgejoClient):
  * rather than at each caller: a turn whose commit failed deliberately leaves
  * the agent's work in the tree, and adopting an external push must not eat it.
  */
-export async function syncToRemote(workspace: string, forgejo: ForgejoClient): Promise<{ commit: string }> {
+export async function syncToRemote(workspace: string, forgejo: ForgejoClient, expectedCommit?: string): Promise<{ commit: string }> {
   if (!(await workingTreeClean(workspace))) {
     throw new Error(
       "The workspace has uncommitted changes (a previous turn's edits are still pending), so adopting the external push would discard them. Publish or revert that work first.",
@@ -146,13 +146,17 @@ export async function syncToRemote(workspace: string, forgejo: ForgejoClient): P
     // No main on the remote means nothing was ever pushed; the local workspace
     // is the only history, so adopting is a no-op on the current HEAD.
     if (/couldn't find remote ref/i.test(String(error))) {
+      if (expectedCommit) throw new Error("The repository no longer has a main branch.");
       return { commit: await currentHead(workspace) };
     }
     throw error;
   }
-  await git(workspace, ["reset", "--hard", "origin/main"]);
-  await git(workspace, ["clean", "-fd"]);
-  return { commit: await currentHead(workspace) };
+  const commit = await git(workspace, ["rev-parse", "FETCH_HEAD"]);
+  if (expectedCommit && commit !== expectedCommit) {
+    throw new Error("A different commit is now on main. Use the latest push prompt or /site sync.");
+  }
+  await resetToCommit(workspace, commit);
+  return { commit };
 }
 
 /** Reset the working tree to a specific commit (kept as-is otherwise). */

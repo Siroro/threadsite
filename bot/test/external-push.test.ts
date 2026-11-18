@@ -190,3 +190,25 @@ test("the poller recovers after a transient project inventory failure", async (t
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(sent.length, 1);
 });
+
+test("polling picks up a repaired external push after validation failed", async (t) => {
+  const { project, store, monitor, control, sent } = await fixture();
+  const failed = "b".repeat(40);
+  await store.patchProject(project.threadId, { status: "error", lastSeenCommit: failed });
+  control.sha = failed;
+  let tick!: () => void;
+  t.mock.method(globalThis, "setInterval", (callback: () => void) => {
+    tick = callback;
+    return { unref() {} } as ReturnType<typeof setInterval>;
+  });
+  monitor.startPoller();
+  t.after(() => monitor.stopPoller());
+  tick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 0);
+  control.sha = "c".repeat(40);
+  tick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 1);
+  assert.equal(store.getProject(project.threadId)?.lastSeenCommit, control.sha);
+});

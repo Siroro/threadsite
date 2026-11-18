@@ -7,6 +7,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { ThreadSiteNet } from "../bot/assets/threadsite-net.js";
 
 const PORT = 8092;
@@ -25,23 +26,25 @@ async function waitFor(predicate, label, timeoutMs = 15_000) {
   throw new Error(`timeout waiting for ${label}`);
 }
 
-async function startRelay() {
-  const child = spawn(process.execPath, ["dist/server.js"], {
+async function startRelay(persistInterval = "1") {
+  const windows = process.platform === "win32";
+  // ChildProcess.kill() on Windows terminates the process without running
+  // signal handlers. Invoke the same shutdown handler via test-only IPC.
+  const shutdownHook = "process.once('message', () => { process.disconnect(); process.emit('SIGTERM'); });";
+  const args = windows ? ["--import", `data:text/javascript,${encodeURIComponent(shutdownHook)}`, "dist/server.js"] : ["dist/server.js"];
+  const child = spawn(process.execPath, args, {
     cwd: import.meta.dirname,
     env: {
       ...process.env,
       GAMESERVER_HOST: "127.0.0.1", GAMESERVER_PORT: String(PORT),
-      GAMESERVER_STATE_DIR: STATE_DIR, GAMESERVER_PERSIST_INTERVAL_MS: "1",
-      // The 1 ms flush interval plus six publishers keeps a deep write queue;
-      // shutdown must be allowed to drain it instead of abandoning the newest
-      // snapshot on a loaded machine.
+      GAMESERVER_STATE_DIR: STATE_DIR, GAMESERVER_PERSIST_INTERVAL_MS: persistInterval,
       GAMESERVER_SHUTDOWN_FLUSH_TIMEOUT_MS: "10000",
     },
-    stdio: ["ignore", "ignore", "inherit"],
+    stdio: windows ? ["ignore", "ignore", "inherit", "ipc"] : ["ignore", "ignore", "inherit"],
   });
   // Windows reports signal-killed children with exitCode null forever, so
   // liveness is tracked with one shared exit promise instead of exitCode.
-  const exited = new Promise((resolve) => child.once("exit", () => resolve(true)));
+  const exited = new Promise((resolve) => child.once("exit", (code) => resolve(code)));
   await waitFor(async () => {
     try { return (await fetch(HEALTH)).ok; } catch { return false; }
   }, "relay health");
@@ -51,13 +54,17 @@ async function startRelay() {
 async function stopRelay(relay) {
   if (relay.stopped) return;
   relay.stopped = true;
-  relay.child.kill("SIGTERM");
+  if (relay.child.connected) relay.child.send("shutdown", () => {});
+  else relay.child.kill("SIGTERM");
   // Grace: the configured shutdown drain (10s) plus the exit fallback (1.5s).
   // Anything slower gets terminated so the suite can never hang on a stubborn
   // relay.
-  const graceful = await Promise.race([relay.exited, sleep(15_000).then(() => false)]);
-  if (graceful !== true) relay.child.kill("SIGKILL");
-  await relay.exited;
+  const code = await Promise.race([relay.exited, delay(15_000, "timeout", { ref: false })]);
+  if (code === "timeout") {
+    relay.child.kill("SIGKILL");
+    await relay.exited;
+  }
+  assert.equal(code, 0, "relay completed graceful shutdown");
 }
 
 function arenaLifecycle(state) {
@@ -107,7 +114,7 @@ try {
 
   // Phase 2: full relay restart wipes RAM rooms; disk must survive.
   await stopRelay(relay);
-  relay = await startRelay();
+  relay = await startRelay("60000");
   const health = await (await fetch(HEALTH)).json();
   assert.equal(health.durableWorlds, 1, "startup scan loads the persisted arena world");
 
@@ -125,7 +132,7 @@ try {
   assert.equal(returnState.bossHp, 9, "the resumed arena carries the saved boss state");
   await waitFor(() => returnState.tick > 1, "restored host republishes the arena");
 
-  // Phase 4: updated state is flushed again and survives another restart.
+  // Phase 4: an acknowledged world survives shutdown before the next interval flush.
   returnState.bossHp = 2;
   await waitFor(() => returned.world.snapshot?.state?.state?.bossHp === 2, "updated arena world acknowledged");
   await stopRelay(relay);
@@ -139,10 +146,8 @@ try {
   await waitFor(() => lateState.bossHp === 2, "post-restart arena resumes from the latest persisted world");
   late.close();
 
-  // Phase 5: bursty updates while writes are still in flight must never lose
-  // the final state. The 1 ms flush interval makes every flush overlap an
-  // in-flight write; closing the host hands the last world to the last-leave
-  // flush, and the graceful shutdown drains the queued chain.
+  // Phase 5: frequent updates and interval flushes must preserve the final
+  // state even when each host leaves just before the relay shuts down.
   const BURSTS = 6;
   const burstIds = [];
   for (let i = 0; i < BURSTS; i += 1) {

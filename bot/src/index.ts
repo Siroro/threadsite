@@ -2170,6 +2170,8 @@ async function offerEditsChoice(project: ProjectRecord | undefined, error: unkno
   }
 }
 
+const externalPushDecisions = new Set<string>();
+
 // Publish/Dismiss on an external-push prompt. Publish adopts the pushed commit
 // and takes it live through the normal build/validate/publish path; Dismiss
 // adopts it into git history only. Both must go through the project queue so
@@ -2178,18 +2180,34 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
   if (!interaction.inGuild() || !interaction.channel?.isThread()) {
     throw new Error("This button only works inside a project thread.");
   }
-  const action = parseCardId(interaction.customId)?.action;
-  const publish = action === "extpublish" || interaction.customId === "threadsite:extpub";
+  const route = parseCardId(interaction.customId);
+  const publish = route?.action === "extpublish";
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const commit = route?.resource;
+  if (!commit || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) {
+    throw new Error("This older push prompt has expired. Use /site sync to publish the current branch.");
+  }
   if (shuttingDown) throw new Error("The bot is restarting: try again in a moment.");
   if (await projects.agentBusy(interaction.channel.id)) {
     throw new Error("An agent turn is currently running in this thread. Wait for it to finish before deciding.");
   }
-  // One decision per prompt: disable the buttons before the queued work runs.
-  await interaction.message.edit(disableMessageControls(interaction.message)).catch(() => undefined);
+  const threadId = interaction.channel.id;
+  const actor = interactionActor(interaction, config.adminUserIds.has(interaction.user.id));
+  requireCurrentContributor(threadId, actor);
+  const messageId = interaction.message.id;
+  if (externalPushDecisions.has(messageId)) throw new Error("A decision on this push prompt is already running.");
+  externalPushDecisions.add(messageId);
+  let result: { project: ProjectRecord; commit: string; validationError?: string };
+  try {
+    result = await enqueueContributorAction(threadId, actor, () => publish
+      ? projects.publishExternalPush(threadId, commit)
+      : projects.adoptExternalCommit(threadId, commit));
+    await interaction.message.edit(disableMessageControls(interaction.message)).catch(() => undefined);
+  } finally {
+    externalPushDecisions.delete(messageId);
+  }
 
   if (publish) {
-    const result = await enqueueContributorAction(interaction.channel.id, interactionActor(interaction, config.adminUserIds.has(interaction.user.id)), () => projects.publishExternalPush(interaction.channel!.id));
     if (result.validationError) {
       await interaction.editReply(
         `⚠️ The pushed commit \`${result.commit}\` failed validation and was **not** published: the live site keeps the previous version.\n` +
@@ -2202,12 +2220,11 @@ async function handleExternalPushButton(interaction: ButtonInteraction): Promise
       );
     }
   } else {
-    const result = await enqueueContributorAction(interaction.channel.id, interactionActor(interaction, config.adminUserIds.has(interaction.user.id)), () => projects.adoptExternalCommit(interaction.channel!.id));
     await interaction.editReply(
       `🗂️ Adopted external commit \`${result.commit}\` into the workspace without publishing. The next message in this thread builds on it.`,
     );
   }
-  log("info", "discord.external_push_button_used", { action: publish ? "publish" : "dismiss", threadId: interaction.channel.id, userId: interaction.user.id });
+  log("info", "discord.external_push_button_used", { action: publish ? "publish" : "dismiss", threadId, userId: interaction.user.id });
 }
 
 /** Clear a game's shared relay state; shared by `/site wipe` and the pinned

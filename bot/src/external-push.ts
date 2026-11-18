@@ -43,10 +43,10 @@ export function createExternalPushMonitor(services: ExternalPushServices): Exter
   const notifications = new ThreadQueue();
   let pollTimer: NodeJS.Timeout | undefined;
 
-  function externalPushRow(): ActionRowBuilder<ButtonBuilder> {
+  function externalPushRow(sha: string): ActionRowBuilder<ButtonBuilder> {
     return new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder().setCustomId(cardId("extpublish", "external-push")).setLabel("Publish").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(cardId("extdismiss", "external-push")).setLabel("Dismiss").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(cardId("extpublish", sha)).setLabel("Publish").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(cardId("extdismiss", sha)).setLabel("Dismiss").setStyle(ButtonStyle.Secondary),
     );
   }
 
@@ -69,7 +69,7 @@ export function createExternalPushMonitor(services: ExternalPushServices): Exter
   }
 
   async function scanForExternalPushes(): Promise<void> {
-    const candidates = store.listProjects().filter((project) => project.status === "ready" && !project.pendingDeletion);
+    const candidates = store.listProjects().filter((project) => project.status !== "creating" && !project.pendingDeletion);
     for (const project of candidates) {
       try {
         await notifyExternalPushIfNeeded(project, "poll");
@@ -135,7 +135,7 @@ export function createExternalPushMonitor(services: ExternalPushServices): Exter
       await thread.send(renderStatusCard(
         `📥 **External push detected** on \`${project.repoName}\` · commit \`${sha.slice(0, COMMIT_SHORT_HASH_CHARS)}\` · pushed with a repo push key.\n` +
         "Publish it to the live site, or dismiss it (the commit stays in git history either way).",
-        { rows: [externalPushRow()] },
+        { rows: [externalPushRow(sha)] },
       ));
     } catch (error) {
       logError("project.external_push_notify_failed", error, { source, threadId: project.threadId, commit: sha.slice(0, COMMIT_SHORT_HASH_CHARS) });

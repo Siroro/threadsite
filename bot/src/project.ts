@@ -2146,13 +2146,13 @@ export class ProjectService {
    * workspace back to the previously published commit and reports; the pushed
    * commit stays in the repo, the live site keeps the older version.
    */
-  async publishExternalPush(threadId: string): Promise<{ project: ProjectRecord; commit: string; validationError?: string }> {
-    let project = this.store.getProject(threadId);
+  async publishExternalPush(threadId: string, expectedCommit: string): Promise<{ project: ProjectRecord; commit: string; validationError?: string }> {
+    const project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
     await this.assertIdle(project, "publishing the external push");
 
     const previousHead = await currentHead(project.workspacePath).catch(() => undefined);
-    const { commit } = await syncToRemote(project.workspacePath, this.forgejo);
+    const { commit } = await syncToRemote(project.workspacePath, this.forgejo, expectedCommit);
     const short = commit.slice(0, COMMIT_SHORT_HASH_CHARS);
     // The pushed code does not validate: roll the workspace back to the last
     // good commit so the next agent turn starts from the published state.
@@ -2171,11 +2171,11 @@ export class ProjectService {
    * history (so the bot's next turn builds on it and its own push does not
    * collide), but leave the published site exactly as it was.
    */
-  async adoptExternalCommit(threadId: string): Promise<{ project: ProjectRecord; commit: string }> {
+  async adoptExternalCommit(threadId: string, expectedCommit: string): Promise<{ project: ProjectRecord; commit: string }> {
     let project = this.store.getProject(threadId);
     if (!project) throw new Error("This thread is not attached to a site.");
     await this.assertIdle(project, "adopting the external push");
-    const { commit } = await syncToRemote(project.workspacePath, this.forgejo);
+    const { commit } = await syncToRemote(project.workspacePath, this.forgejo, expectedCommit);
     project = await this.store.patchProject(threadId, { lastSeenCommit: commit });
     log("info", "project.external_push_adopted", { threadId, commit: commit.slice(0, COMMIT_SHORT_HASH_CHARS) });
     return { project, commit: commit.slice(0, COMMIT_SHORT_HASH_CHARS) };

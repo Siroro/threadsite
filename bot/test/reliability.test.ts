@@ -367,6 +367,39 @@ async function projectFixture(id: string, forgejo = new LocalForgejo()) {
   return { dir, project, store, service, forgejo, opencode, usage, base };
 }
 
+test("push decisions affect only the commit shown in the prompt", async () => {
+  const f = await projectFixture("push-decision");
+  const previousHead = await currentHead(f.dir);
+  const liveFile = path.join(config.publishRoot, f.project.siteSlug, "js/main.js");
+  const previousLive = await fs.readFile(liveFile, "utf8");
+  const external = path.join(root, "push-decision-external");
+  await fs.mkdir(external);
+  await ensureGitRepository(external, f.project.repoName, f.forgejo);
+  await syncToRemote(external, f.forgejo);
+
+  const push = async (change: string) => {
+    await fs.writeFile(path.join(external, "site/src/main.ts"), `console.log(${JSON.stringify(change)});`);
+    await commitAndPush(external, change, f.forgejo);
+    return currentHead(external);
+  };
+  const prompted = await push("first external change");
+  const latest = await push("second external change");
+  await assert.rejects(f.service.publishExternalPush(f.project.threadId, prompted), /different commit/);
+  await assert.rejects(f.service.adoptExternalCommit(f.project.threadId, prompted), /different commit/);
+  assert.equal(await currentHead(f.dir), previousHead);
+  assert.equal(f.store.getProject(f.project.threadId)?.lastSeenCommit, previousHead);
+  assert.equal(await fs.readFile(liveFile, "utf8"), previousLive);
+
+  await f.service.adoptExternalCommit(f.project.threadId, latest);
+  assert.equal(await currentHead(f.dir), latest);
+  assert.equal(await fs.readFile(liveFile, "utf8"), previousLive);
+  const publishable = await push("third external change");
+  const published = await f.service.publishExternalPush(f.project.threadId, publishable);
+  assert.equal(published.validationError, undefined);
+  assert.equal(await currentHead(f.dir), publishable);
+  assert.match(await fs.readFile(liveFile, "utf8"), /third external change/);
+});
+
 test("sync rejects broken remote changes and restores the pre-sync workspace and live site", async () => {
   const f = await projectFixture("sync-rollback");
   const acceptedHead = await currentHead(f.dir);
